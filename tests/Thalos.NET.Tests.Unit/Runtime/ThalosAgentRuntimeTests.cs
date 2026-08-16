@@ -92,10 +92,38 @@ public sealed class ThalosAgentRuntimeTests
 
         r.IsFailure.Should().BeTrue();
         r.Error.Code.Should().Be(AgentErrorCode.ProviderError);
-        r.Error.Detail.Should().Contain("503");
+        r.Error.Detail.Should().Be("HttpRequestException", "the raw provider message is logged, never copied into the error");
         (await f.Store.GetAsync(s, default)).Value.State.Should().Be(SessionState.Idle);
         (await f.Store.LoadMessagesAsync(s, default)).Value.Should().BeEmpty();
         f.Publisher.Of<TurnFailedNotification>().Should().ContainSingle(n => n.Error.Code == AgentErrorCode.ProviderError);
+    }
+
+    [Fact]
+    public async Task Provider_failure_after_a_tool_round_trip_reports_the_completed_round_trips_usage()
+    {
+        var f = new RuntimeFixture().WithTool(AIFunctionFactory.Create((string text) => "echo:" + text, "echo")).Build();
+        f.Client.ThenToolCall("t__echo", new { text = "x" }, input: 10, output: 5).ThenThrow(new HttpRequestException("503"));
+        var s = (await f.Runtime.CreateSessionAsync(f.Agent.Id, RuntimeFixture.User(), default)).Value;
+
+        var events = await f.Runtime.RunTurnStreamingAsync(new AgentTurnRequest(s, "go", RuntimeFixture.User()), default).ToListAsync();
+
+        var failed = events.OfType<TurnFailedEvent>().Single();
+        failed.Error.Code.Should().Be(AgentErrorCode.ProviderError);
+        failed.Usage.Should().Be(new TurnUsage(10, 5, "m1"));
+        events.OfType<UsageEvent>().Should().BeEmpty("a failed turn carries its usage on the terminal event only");
+        f.Publisher.Of<TurnFailedNotification>().Should().ContainSingle().Which.Usage.Should().Be(new TurnUsage(10, 5, "m1"));
+        (await f.Store.GetAsync(s, default)).Value.State.Should().Be(SessionState.Idle);
+    }
+
+    [Fact]
+    public async Task Pre_claim_failure_reports_zero_usage()
+    {
+        var f = new RuntimeFixture().Build();
+        var s = (await f.Runtime.CreateSessionAsync(f.Agent.Id, RuntimeFixture.User(), default)).Value;
+
+        await f.Runtime.RunTurnAsync(new AgentTurnRequest(s, "  ", RuntimeFixture.User()), default);
+
+        f.Publisher.Of<TurnFailedNotification>().Should().ContainSingle().Which.Usage.Should().Be(default(TurnUsage));
     }
 
     [Fact]
@@ -120,6 +148,50 @@ public sealed class ThalosAgentRuntimeTests
 
         var r = await f.Runtime.RunTurnAsync(new AgentTurnRequest(s, "hi", RuntimeFixture.User()), default);
         r.Error.Code.Should().Be(AgentErrorCode.SessionBusy);
+    }
+
+    /// <summary>Two real turns race for one session: the CAS claim lets exactly one through; the loser is SessionBusy.</summary>
+    [Fact]
+    public async Task Two_concurrent_turns_on_one_session_yield_exactly_one_SessionBusy()
+    {
+        var toolStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gate = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var blocking = AIFunctionFactory.Create(async (CancellationToken ct) => { toolStarted.TrySetResult(); return await gate.Task.WaitAsync(ct); }, "block");
+        var f = new RuntimeFixture().WithTool(blocking).Build();
+        f.Client.ThenToolCall("t__block", new { }).ThenText("first done");
+        var s = (await f.Runtime.CreateSessionAsync(f.Agent.Id, RuntimeFixture.User(), default)).Value;
+
+        var first = f.Runtime.RunTurnAsync(new AgentTurnRequest(s, "one", RuntimeFixture.User()), default).AsTask();
+        await toolStarted.Task; // the first turn holds the claim and is parked inside its tool
+        var second = await f.Runtime.RunTurnAsync(new AgentTurnRequest(s, "two", RuntimeFixture.User()), default);
+        gate.SetResult("released");
+        var firstResult = await first;
+
+        second.Error.Code.Should().Be(AgentErrorCode.SessionBusy);
+        firstResult.IsSuccess.Should().BeTrue();
+        firstResult.Value.Text.Should().Be("first done");
+        f.Publisher.Of<TurnFailedNotification>().Should().ContainSingle(n => n.Error.Code == AgentErrorCode.SessionBusy);
+        (await f.Store.GetAsync(s, default)).Value.State.Should().Be(SessionState.Idle);
+    }
+
+    [Fact]
+    public async Task Close_while_a_turn_holds_the_session_is_SessionBusy()
+    {
+        var toolStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gate = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var blocking = AIFunctionFactory.Create(async (CancellationToken ct) => { toolStarted.TrySetResult(); return await gate.Task.WaitAsync(ct); }, "block");
+        var f = new RuntimeFixture().WithTool(blocking).Build();
+        f.Client.ThenToolCall("t__block", new { }).ThenText("done");
+        var s = (await f.Runtime.CreateSessionAsync(f.Agent.Id, RuntimeFixture.User(), default)).Value;
+
+        var turn = f.Runtime.RunTurnAsync(new AgentTurnRequest(s, "one", RuntimeFixture.User()), default).AsTask();
+        await toolStarted.Task;
+        var close = await f.Runtime.CloseSessionAsync(s, RuntimeFixture.User(), default);
+        gate.SetResult("released");
+        (await turn).IsSuccess.Should().BeTrue();
+
+        close.Error.Code.Should().Be(AgentErrorCode.SessionBusy);
+        (await f.Runtime.CloseSessionAsync(s, RuntimeFixture.User(), default)).IsSuccess.Should().BeTrue();
     }
 
     [Fact]
@@ -185,7 +257,7 @@ public sealed class ThalosAgentRuntimeTests
         var r = await f.Runtime.RunTurnAsync(new AgentTurnRequest(s, "hi", RuntimeFixture.User()), default);
 
         r.Error.Code.Should().Be(AgentErrorCode.ProviderError);
-        r.Error.Detail.Should().Contain("Timeout");
+        r.Error.Detail.Should().Be("TaskCanceledException");
         (await f.Store.GetAsync(s, default)).Value.State.Should().Be(SessionState.Idle);
     }
 }

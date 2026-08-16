@@ -94,6 +94,8 @@ internal sealed class FaultingSessionStore(IAgentSessionStore inner) : IAgentSes
 
     public ValueTask<UnitResult<AgentError>> UpdateStateAsync(SessionId id, SessionState state, CancellationToken ct) =>
         OnUpdateState is { } hook ? new ValueTask<UnitResult<AgentError>>(hook(state)) : inner.UpdateStateAsync(id, state, ct);
+
+    public ValueTask<Result<bool, AgentError>> TryTransitionAsync(SessionId id, SessionState from, SessionState target, CancellationToken ct) => inner.TryTransitionAsync(id, from, target, ct);
 }
 
 /// <summary>Publisher decorator that throws for notifications of <typeparamref name="TThrowOn"/> and delegates the rest.</summary>

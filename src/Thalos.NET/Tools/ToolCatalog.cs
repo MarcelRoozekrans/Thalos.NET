@@ -8,9 +8,16 @@ namespace Thalos.Tools;
 
 /// <summary>Aggregates all <see cref="IToolSource"/>s, qualifies names, filters by the agent's allow-list, wraps for authorization.</summary>
 /// <remarks>
-/// A source whose <see cref="IToolSource.Name"/> fails <see cref="ToolSourceName.IsValid"/> (<c>^[a-zA-Z0-9_-]+$</c>, no <c>__</c>) is skipped, as is a
-/// source whose <see cref="IToolSource.GetToolsAsync"/> fails; non-<see cref="AIFunction"/> tools, duplicate qualified names
-/// (first wins) and qualified names longer than 64 characters (provider limit) are dropped. All of these are logged, none is fatal.
+/// <para>
+/// Configuration problems are skipped with a warning: a source whose <see cref="IToolSource.Name"/> fails
+/// <see cref="ToolSourceName.IsValid"/> (<c>^[a-zA-Z0-9_-]+$</c>, no <c>__</c>), non-<see cref="AIFunction"/> tools, duplicate qualified
+/// names (first wins) and qualified names longer than 64 characters (provider limit).
+/// </para>
+/// <para>
+/// A source whose <see cref="IToolSource.GetToolsAsync"/> <em>fails</em> (MCP server down, transport error) is transient and therefore
+/// fatal for the resolve: it returns <see cref="AgentErrorCode.ProviderError"/> so the agent factory does not cache an agent
+/// missing that source's tools; the next turn retries the build.
+/// </para>
 /// </remarks>
 [Singleton(As = typeof(IToolCatalog))] // interface only (the default would also register the concrete type as a second instance)
 public sealed partial class ToolCatalog : IToolCatalog
@@ -60,8 +67,10 @@ public sealed partial class ToolCatalog : IToolCatalog
             var tools = await source.GetToolsAsync(ct).ConfigureAwait(false);
             if (tools.IsFailure)
             {
+                // transient (server down, transport error): fail the resolve so no agent is cached without these tools
                 LogSourceFailed(_logger, source.Name, tools.Error.ToString());
-                continue;
+                return Result<IReadOnlyList<AITool>, AgentError>.Failure(
+                    AgentError.ProviderError($"Tool source '{source.Name}' is unavailable.", tools.Error.Detail ?? tools.Error.Message));
             }
 
             foreach (var tool in tools.Value)
@@ -112,7 +121,7 @@ public sealed partial class ToolCatalog : IToolCatalog
         return false;
     }
 
-    [LoggerMessage(EventId = 100, Level = LogLevel.Warning, Message = "Tool source '{Source}' failed and was skipped: {Error}")]
+    [LoggerMessage(EventId = 100, Level = LogLevel.Warning, Message = "Tool source '{Source}' failed; tool resolution aborted (retried on the next turn): {Error}")]
     private static partial void LogSourceFailed(ILogger logger, string source, string error);
 
     [LoggerMessage(EventId = 101, Level = LogLevel.Warning, Message = "Duplicate tool '{Tool}' ignored (first registration wins)")]

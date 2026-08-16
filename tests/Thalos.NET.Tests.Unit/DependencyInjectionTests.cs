@@ -191,6 +191,7 @@ public sealed class DependencyInjectionTests
         public ValueTask<UnitResult<AgentError>> AppendMessagesAsync(SessionId id, IReadOnlyList<ChatMessage> messages, CancellationToken ct) => _inner.AppendMessagesAsync(id, messages, ct);
         public ValueTask<UnitResult<AgentError>> RecordTurnAsync(SessionId id, TurnUsage usage, CancellationToken ct) => _inner.RecordTurnAsync(id, usage, ct);
         public ValueTask<UnitResult<AgentError>> UpdateStateAsync(SessionId id, SessionState state, CancellationToken ct) => _inner.UpdateStateAsync(id, state, ct);
+        public ValueTask<Result<bool, AgentError>> TryTransitionAsync(SessionId id, SessionState from, SessionState target, CancellationToken ct) => _inner.TryTransitionAsync(id, from, target, ct);
     }
 
     private sealed class EmptySource : IToolSource

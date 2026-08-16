@@ -19,8 +19,12 @@ public readonly record struct TurnStartedNotification(SessionId SessionId, TurnI
 /// <summary>A turn finished successfully with the summed <paramref name="Usage"/> and wall-clock <paramref name="Elapsed"/>.</summary>
 public readonly record struct TurnCompletedNotification(SessionId SessionId, TurnId TurnId, TurnUsage Usage, TimeSpan Elapsed, DateTimeOffset At) : INotification;
 
-/// <summary>A turn failed with <paramref name="Error"/>; the session returns to Idle and the turn is discarded.</summary>
-public readonly record struct TurnFailedNotification(SessionId SessionId, TurnId TurnId, AgentError Error, DateTimeOffset At) : INotification;
+/// <summary>
+/// A turn failed with <paramref name="Error"/>; the session returns to Idle and the turn is discarded. <paramref name="Usage"/> is
+/// the token usage of the model round-trips that completed before the failure (zero when the failure preceded the first
+/// round-trip — e.g. validation, authorization, quarantine of the request itself), so hosts can bill failed/quarantined turns.
+/// </summary>
+public readonly record struct TurnFailedNotification(SessionId SessionId, TurnId TurnId, AgentError Error, DateTimeOffset At, TurnUsage Usage = default) : INotification;
 
 /// <summary>The model requested a tool call on behalf of <paramref name="CallerId"/> (published before authorization).</summary>
 public readonly record struct ToolCallRequestedNotification(SessionId SessionId, TurnId TurnId, ToolCallId CallId, string ToolName, string ArgumentsJson, string CallerId, DateTimeOffset At) : INotification;

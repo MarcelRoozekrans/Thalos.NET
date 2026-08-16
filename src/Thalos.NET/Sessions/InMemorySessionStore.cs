@@ -90,6 +90,28 @@ public sealed class InMemorySessionStore(TimeProvider clock) : IAgentSessionStor
     public ValueTask<UnitResult<AgentError>> UpdateStateAsync(SessionId id, SessionState state, CancellationToken ct) =>
         Mutate(id, r => r with { State = state, LastActivityAt = clock.GetUtcNow() });
 
+    /// <inheritdoc/>
+    public ValueTask<Result<bool, AgentError>> TryTransitionAsync(SessionId id, SessionState from, SessionState target, CancellationToken ct)
+    {
+        if (!_sessions.TryGetValue(id, out var e))
+        {
+            return new(Result<bool, AgentError>.Failure(AgentError.SessionNotFound(id)));
+        }
+
+        lock (e.Gate)
+        {
+            // compare-and-swap under the per-entry gate: concurrent claimants serialize here and only the first sees `from`
+            if (e.Record.State != from)
+            {
+                return new(Result<bool, AgentError>.Success(false));
+            }
+
+            e.Record = e.Record with { State = target, LastActivityAt = clock.GetUtcNow() };
+        }
+
+        return new(Result<bool, AgentError>.Success(true));
+    }
+
     private ValueTask<UnitResult<AgentError>> Mutate(SessionId id, Func<AgentSessionRecord, AgentSessionRecord> update)
     {
         if (!_sessions.TryGetValue(id, out var e))

@@ -146,9 +146,36 @@ public sealed class AgentFactoryTests
 
         var first = await h.Factory.GetOrCreateAsync(def, default);
         first.Error.Code.Should().Be(AgentErrorCode.ProviderError);
-        first.Error.Detail.Should().Be("catalog exploded");
+        first.Error.Detail.Should().Be("InvalidOperationException", "the raw message is logged, never copied into the error");
 
         (await h.Factory.GetOrCreateAsync(def, default)).IsSuccess.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Tool_source_failure_is_not_cached_and_the_next_call_builds()
+    {
+        // real ToolCatalog over a source that is down once, then healthy
+        var h = Build();
+        var calls = 0;
+        var source = Substitute.For<IToolSource>();
+        source.Name.Returns("mcp");
+        source.GetToolsAsync(Arg.Any<CancellationToken>()).Returns(_ => ++calls == 1
+            ? Result<IReadOnlyList<AITool>, AgentError>.Failure(AgentError.ProviderError("MCP server 'mcp' is unavailable.", "connection refused"))
+            : Result<IReadOnlyList<AITool>, AgentError>.Success([AIFunctionFactory.Create(() => "ok", "t")]));
+        var catalog = new ToolCatalog([source], Substitute.For<IToolAuthorizer>(), new RecordingPublisher(), TimeProvider.System);
+        var factory = new AgentFactory(h.Provider, [], catalog, new SessionStoreChatHistoryProvider(new InMemorySessionStore(TimeProvider.System)), new ServiceCollection().BuildServiceProvider(), loggerFactory: null);
+        var def = Def();
+
+        var first = await factory.GetOrCreateAsync(def, default);
+        first.Error.Code.Should().Be(AgentErrorCode.ProviderError);
+        first.Error.Message.Should().Be("Tool source 'mcp' is unavailable.");
+
+        var second = await factory.GetOrCreateAsync(def, default);
+        second.IsSuccess.Should().BeTrue("the failed build was not cached");
+        calls.Should().Be(2);
+        h.Client.ThenText("x");
+        await ((ChatClientAgent)second.Value).RunAsync("q");
+        h.Client.Requests.Single().Options!.Tools.Should().ContainSingle(t => t.Name == "mcp__t");
     }
 
     [Fact]
@@ -188,7 +215,7 @@ public sealed class AgentFactoryTests
 
         result.IsFailure.Should().BeTrue();
         result.Error.Code.Should().Be(AgentErrorCode.ProviderError);
-        result.Error.Detail.Should().Be("decorator broke");
+        result.Error.Detail.Should().Be("InvalidOperationException");
         h.Tracked.Disposed.Should().BeTrue("the partially built pipeline is released");
     }
 

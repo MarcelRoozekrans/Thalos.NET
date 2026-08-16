@@ -11,6 +11,21 @@ namespace Thalos;
 /// so tool-call/result content round-trips.
 /// The contract documented on each member is enforced by the reusable store contract tests in <c>Thalos.NET.Testing</c>.
 /// </summary>
+/// <remarks>
+/// <para>
+/// <b>Claiming a session.</b> The runtime claims a session for a turn with <see cref="TryTransitionAsync"/> (Idle → Running),
+/// which durable stores must implement as an atomic compare-and-swap — a single conditional write such as
+/// <c>UPDATE sessions SET state = @to, last_activity_at = @now WHERE id = @id AND state = @from</c> — so that two hosts (or two
+/// requests on one host) can never both claim the same session. <see cref="UpdateStateAsync"/> is unconditional and is used
+/// only to release (→ Idle) a session the caller already holds.
+/// </para>
+/// <para>
+/// <b>Crash recovery.</b> A host that dies mid-turn leaves the session in <see cref="SessionState.Running"/> and every later
+/// claim fails with <see cref="AgentErrorCode.SessionBusy"/>. Hosts should reset stale <c>Running</c> sessions to <c>Idle</c>
+/// at startup (e.g. <c>UPDATE … SET state = 'Idle' WHERE state = 'Running'</c> when a single host owns the store). A lease /
+/// <c>LastActivityAt</c>-based expiry policy for multi-host deployments is a follow-up.
+/// </para>
+/// </remarks>
 [Instrument("thalos", PublicProxy = true)]
 public interface IAgentSessionStore
 {
@@ -51,9 +66,18 @@ public interface IAgentSessionStore
     ValueTask<UnitResult<AgentError>> RecordTurnAsync(SessionId id, TurnUsage usage, CancellationToken ct);
 
     /// <summary>
-    /// Sets the session state (no transition validation — that is the runtime's job) and bumps <c>LastActivityAt</c>.
-    /// Unknown id → <see cref="AgentErrorCode.SessionNotFound"/>.
+    /// Sets the session state unconditionally (no transition validation — that is the runtime's job) and bumps <c>LastActivityAt</c>.
+    /// Unknown id → <see cref="AgentErrorCode.SessionNotFound"/>. Use <see cref="TryTransitionAsync"/> to claim a session.
     /// </summary>
     [Trace("thalos.session.state.update")]
     ValueTask<UnitResult<AgentError>> UpdateStateAsync(SessionId id, SessionState state, CancellationToken ct);
+
+    /// <summary>
+    /// Atomically sets the state to <paramref name="target"/> if and only if the current state equals <paramref name="from"/>
+    /// (compare-and-swap). Returns <c>true</c> when the transition was applied (and <c>LastActivityAt</c> bumped),
+    /// <c>false</c> when the current state differed (nothing changed). Unknown id → <see cref="AgentErrorCode.SessionNotFound"/>.
+    /// Concurrent calls with the same <paramref name="from"/> on one session must yield exactly one <c>true</c>.
+    /// </summary>
+    [Trace("thalos.session.state.transition")]
+    ValueTask<Result<bool, AgentError>> TryTransitionAsync(SessionId id, SessionState from, SessionState target, CancellationToken ct); // "target" not "to": CA1716 (VB keyword)
 }

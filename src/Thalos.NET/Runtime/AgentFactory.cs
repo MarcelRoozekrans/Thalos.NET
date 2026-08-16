@@ -210,7 +210,9 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
                 DisposeClient(client, definition.Name, _logger);
             }
 
-            return Result<Entry, AgentError>.Failure(AgentError.ProviderError($"Failed to build agent '{definition.Name}'.", ex.Message));
+            // the raw message (may contain provider/config details) goes to the log; the error carries only the exception type
+            LogBuildFailed(_logger, definition.Name, ex.Message, ex);
+            return Result<Entry, AgentError>.Failure(AgentError.ProviderError($"Failed to build agent '{definition.Name}'.", ex.GetType().Name));
         }
     }
 
@@ -254,4 +256,7 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
 
     [LoggerMessage(EventId = 121, Level = LogLevel.Warning, Message = "Disposing the chat-client pipeline for agent '{Agent}' failed: {Error}")]
     private static partial void LogPipelineDisposeFailed(ILogger logger, string agent, string error, Exception exception);
+
+    [LoggerMessage(EventId = 122, Level = LogLevel.Warning, Message = "Building agent '{Agent}' failed: {Error}")]
+    private static partial void LogBuildFailed(ILogger logger, string agent, string error, Exception exception);
 }

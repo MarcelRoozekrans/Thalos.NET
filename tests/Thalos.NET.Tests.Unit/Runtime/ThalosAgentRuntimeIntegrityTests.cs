@@ -70,7 +70,7 @@ public sealed class ThalosAgentRuntimeIntegrityTests
         var r = await f.Runtime.RunTurnAsync(new AgentTurnRequest(s, "hi", RuntimeFixture.User()), default);
 
         r.Error.Code.Should().Be(AgentErrorCode.StoreError);
-        r.Error.Detail.Should().Be("db down");
+        r.Error.Detail.Should().Be("InvalidOperationException", "the raw store message is logged, never copied into the error");
         (await f.Store.GetAsync(s, default)).Value.State.Should().Be(SessionState.Idle);
         f.Publisher.Of<TurnCompletedNotification>().Should().BeEmpty();
     }
@@ -101,7 +101,7 @@ public sealed class ThalosAgentRuntimeIntegrityTests
 
         var failed = events.Should().ContainSingle().Which.Should().BeOfType<TurnFailedEvent>().Which;
         failed.Error.Code.Should().Be(AgentErrorCode.ProviderError);
-        failed.Error.Detail.Should().Be("no api key");
+        failed.Error.Detail.Should().Be("InvalidOperationException");
         (await f.Store.GetAsync(s, default)).Value.State.Should().Be(SessionState.Idle);
     }
 

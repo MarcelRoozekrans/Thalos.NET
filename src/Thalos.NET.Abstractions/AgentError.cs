@@ -44,6 +44,12 @@ public enum AgentErrorCode
 /// Error value used with <c>Result&lt;T, AgentError&gt;</c>. Never throw this — return it.
 /// Record equality includes <see cref="Detail"/>: two errors with the same code and message but different detail are not equal.
 /// </summary>
+/// <param name="Code">Stable error code; see <see cref="AgentErrorCode"/> for the suggested HTTP mapping.</param>
+/// <param name="Message">Human-readable, safe to show to the caller.</param>
+/// <param name="Detail">
+/// Diagnostic addendum (exception type name, detector id, tool source name); contains no untrusted content by policy —
+/// raw provider/tool exception messages are logged, never copied here — so it is safe to forward to clients.
+/// </param>
 public readonly record struct AgentError(AgentErrorCode Code, string Message, string? Detail = null)
 {
     public static AgentError Validation(string message) => new(AgentErrorCode.Validation, message);

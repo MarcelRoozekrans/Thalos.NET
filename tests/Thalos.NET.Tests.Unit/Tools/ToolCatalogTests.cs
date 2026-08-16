@@ -43,16 +43,31 @@ public sealed class ToolCatalogTests
     }
 
     [Fact]
-    public async Task Failing_source_is_skipped_not_fatal()
+    public async Task Failing_source_fails_the_resolve()
+    {
+        var bad = Substitute.For<IToolSource>();
+        bad.Name.Returns("bad");
+        bad.GetToolsAsync(Arg.Any<CancellationToken>()).Returns(Result<IReadOnlyList<AITool>, AgentError>.Failure(AgentError.ProviderError("MCP server 'bad' is unavailable.", "connection refused")));
+
+        var catalog = Catalog(bad, Source("ok", "t"));
+        var r = await catalog.ResolveAsync(Agent(), default);
+
+        r.IsFailure.Should().BeTrue("a transient source failure must not be baked into a cached agent");
+        r.Error.Code.Should().Be(AgentErrorCode.ProviderError);
+        r.Error.Message.Should().Be("Tool source 'bad' is unavailable.");
+        r.Error.Detail.Should().Be("connection refused");
+    }
+
+    [Fact]
+    public async Task Failing_source_without_detail_uses_its_message_as_detail()
     {
         var bad = Substitute.For<IToolSource>();
         bad.Name.Returns("bad");
         bad.GetToolsAsync(Arg.Any<CancellationToken>()).Returns(Result<IReadOnlyList<AITool>, AgentError>.Failure(AgentError.ProviderError("down")));
 
-        var catalog = Catalog(bad, Source("ok", "t"));
-        var r = await catalog.ResolveAsync(Agent(), default);
-        r.IsSuccess.Should().BeTrue();
-        r.Value.Select(t => t.Name).Should().Equal("ok__t");
+        var r = await Catalog(bad).ResolveAsync(Agent(), default);
+
+        r.Error.Detail.Should().Be("down");
     }
 
     [Fact]

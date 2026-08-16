@@ -73,6 +73,9 @@ public sealed record UsageEvent(SessionId SessionId, TurnId TurnId, TurnUsage Us
 public sealed record TurnCompletedEvent(SessionId SessionId, TurnId TurnId, AgentTurnResult Result) : AgentEvent(SessionId, TurnId)
 { public override string Kind => AgentEventKinds.Done; }
 
-/// <summary>Terminal event of a failed turn.</summary>
-public sealed record TurnFailedEvent(SessionId SessionId, TurnId TurnId, AgentError Error) : AgentEvent(SessionId, TurnId)
+/// <summary>
+/// Terminal event of a failed turn. <paramref name="Usage"/> is the token usage of the model round-trips that completed before the
+/// failure (zero for pre-claim failures), so hosts can bill failed/quarantined turns; no <see cref="UsageEvent"/> is emitted for a failed turn.
+/// </summary>
+public sealed record TurnFailedEvent(SessionId SessionId, TurnId TurnId, AgentError Error, TurnUsage Usage = default) : AgentEvent(SessionId, TurnId)
 { public override string Kind => AgentEventKinds.Error; }

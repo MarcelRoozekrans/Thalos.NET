@@ -17,7 +17,8 @@ namespace Thalos.Testing;
 /// Timestamps are compared with a 1 ms tolerance: stores must persist <c>CreatedAt</c>/<c>LastActivityAt</c> with at
 /// least millisecond precision. Messages must round-trip <see cref="FunctionCallContent"/>/<see cref="FunctionResultContent"/>
 /// (serialize with <c>AIJsonUtilities.DefaultOptions</c>). Concurrent appends and turn records on the same session must
-/// not lose writes.
+/// not lose writes, and concurrent <see cref="IAgentSessionStore.TryTransitionAsync"/> claims must succeed exactly once
+/// (implement it as an atomic conditional write).
 /// </remarks>
 public abstract class SessionStoreContractTests
 {
@@ -167,6 +168,67 @@ public abstract class SessionStoreContractTests
     }
 
     [Fact]
+    public async Task TryTransition_from_matching_state_applies_and_bumps_LastActivityAt()
+    {
+        var clock = NewClock();
+        var store = await CreateStoreAsync(clock);
+        var created = (await store.CreateAsync(Agent, "o", CancellationToken.None)).Value;
+
+        clock.Advance(TimeSpan.FromSeconds(1));
+        var r = await store.TryTransitionAsync(created.Id, SessionState.Idle, SessionState.Running, CancellationToken.None);
+
+        r.IsSuccess.Should().BeTrue();
+        r.Value.Should().BeTrue();
+        var got = (await store.GetAsync(created.Id, CancellationToken.None)).Value;
+        got.State.Should().Be(SessionState.Running);
+        got.LastActivityAt.Should().BeCloseTo(clock.GetUtcNow(), Tolerance);
+        got.LastActivityAt.Should().BeAfter(created.LastActivityAt);
+    }
+
+    [Fact]
+    public async Task TryTransition_from_non_matching_state_returns_false_and_changes_nothing()
+    {
+        var clock = NewClock();
+        var store = await CreateStoreAsync(clock);
+        var created = (await store.CreateAsync(Agent, "o", CancellationToken.None)).Value;
+        (await store.UpdateStateAsync(created.Id, SessionState.Closed, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        var before = (await store.GetAsync(created.Id, CancellationToken.None)).Value;
+
+        clock.Advance(TimeSpan.FromSeconds(1));
+        var r = await store.TryTransitionAsync(created.Id, SessionState.Idle, SessionState.Running, CancellationToken.None);
+
+        r.IsSuccess.Should().BeTrue();
+        r.Value.Should().BeFalse();
+        var got = (await store.GetAsync(created.Id, CancellationToken.None)).Value;
+        got.State.Should().Be(SessionState.Closed);
+        got.LastActivityAt.Should().BeCloseTo(before.LastActivityAt, Tolerance);
+    }
+
+    [Fact]
+    public async Task TryTransition_on_unknown_session_returns_SessionNotFound()
+    {
+        var store = await CreateStoreAsync(NewClock());
+        var r = await store.TryTransitionAsync(SessionId.New(), SessionState.Idle, SessionState.Running, CancellationToken.None);
+        r.IsFailure.Should().BeTrue();
+        r.Error.Code.Should().Be(AgentErrorCode.SessionNotFound);
+    }
+
+    [Fact]
+    public async Task Concurrent_TryTransition_claims_on_one_session_succeed_exactly_once()
+    {
+        var store = await CreateStoreAsync(NewClock());
+        var id = (await store.CreateAsync(Agent, "o", CancellationToken.None)).Value.Id;
+
+        const int n = 20;
+        var results = await Task.WhenAll(Enumerable.Range(0, n).Select(_ => Task.Run(async () =>
+            await store.TryTransitionAsync(id, SessionState.Idle, SessionState.Running, CancellationToken.None).ConfigureAwait(false))));
+
+        results.Should().AllSatisfy(r => r.IsSuccess.Should().BeTrue());
+        results.Count(r => r.Value).Should().Be(1);
+        (await store.GetAsync(id, CancellationToken.None)).Value.State.Should().Be(SessionState.Running);
+    }
+
+    [Fact]
     public async Task List_filters_by_owner_and_pages_newest_first()
     {
         var clock = NewClock();
@@ -234,5 +296,6 @@ public abstract class SessionStoreContractTests
         (await store.AppendMessagesAsync(id, [new ChatMessage(ChatRole.User, "x")], CancellationToken.None)).Error.Code.Should().Be(AgentErrorCode.SessionNotFound);
         (await store.RecordTurnAsync(id, TurnUsage.Empty("m"), CancellationToken.None)).Error.Code.Should().Be(AgentErrorCode.SessionNotFound);
         (await store.UpdateStateAsync(id, SessionState.Closed, CancellationToken.None)).Error.Code.Should().Be(AgentErrorCode.SessionNotFound);
+        (await store.TryTransitionAsync(id, SessionState.Idle, SessionState.Running, CancellationToken.None)).Error.Code.Should().Be(AgentErrorCode.SessionNotFound);
     }
 }

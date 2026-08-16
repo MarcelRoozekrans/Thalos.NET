@@ -69,10 +69,16 @@ public sealed partial class ThalosAgentRuntime(
                 : AgentError.SessionBusy(sessionId));
         }
 
-        var updated = await store.UpdateStateAsync(sessionId, machine.Current, ct).ConfigureAwait(false);
-        if (updated.IsFailure)
+        // CAS from the state we validated against: if a turn claimed the session in between, the close loses and reports busy
+        var closed = await store.TryTransitionAsync(sessionId, loaded.Value.State, machine.Current, ct).ConfigureAwait(false);
+        if (closed.IsFailure)
         {
-            return updated;
+            return UnitResult<AgentError>.Failure(closed.Error);
+        }
+
+        if (!closed.Value)
+        {
+            return UnitResult<AgentError>.Failure(AgentError.SessionBusy(sessionId));
         }
 
         // the close is persisted; a failing notification must not report the session as still open
@@ -142,7 +148,7 @@ public sealed partial class ThalosAgentRuntime(
         if (start.IsFailure)
         {
             // audited via the publisher, returned to the caller, deliberately NOT published to the hub (see remarks)
-            yield return await FailAsync(sessionId, turnId, start.Error, releaseState: false).ConfigureAwait(false);
+            yield return await FailAsync(sessionId, turnId, start.Error, usage: default, releaseState: false).ConfigureAwait(false);
             yield break;
         }
 
@@ -188,7 +194,8 @@ public sealed partial class ThalosAgentRuntime(
         activity?.SetTag("thalos.agent", definition.Name).SetTag("thalos.session", sessionId.ToString()).SetTag("thalos.turn", turnId.ToString());
         var startedAt = Stopwatch.GetTimestamp();
         var text = new StringBuilder();
-        var usage = TurnUsage.Empty(definition.Model ?? string.Empty);
+        // boxed so a round-trip that completed before the provider failed is still billed on the failed turn
+        var usage = new StrongBox<TurnUsage>(TurnUsage.Empty(definition.Model ?? string.Empty));
         AgentError? failure = null;
 
         try
@@ -204,29 +211,31 @@ public sealed partial class ThalosAgentRuntime(
             }
             else
             {
-                usage = await RunModelLoopAsync(scope, agent.Value, request.Text, text, usage, ct).ConfigureAwait(false);
+                await RunModelLoopAsync(scope, agent.Value, request.Text, text, usage, ct).ConfigureAwait(false);
             }
         }
         catch (Exception ex)
         {
             failure = MapException(ex, ct);
+            LogTurnException(_logger, turnId, ex.Message, ex); // the raw message stays in the log; AgentError.Detail carries only the type name
         }
 
         try
         {
-            await FinishTurnAsync(scope, activity, failure, text.ToString(), usage, Stopwatch.GetElapsedTime(startedAt)).ConfigureAwait(false);
+            await FinishTurnAsync(scope, activity, failure, text.ToString(), usage.Value, Stopwatch.GetElapsedTime(startedAt)).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             // last resort: never let the producer fault silently — the drain would hang. Release the session best-effort,
             // then report the original failure if there was one, else what went wrong while finishing.
             await ReleaseBestEffortAsync(sessionId).ConfigureAwait(false);
-            var error = failure ?? (ex is OperationCanceledException ? AgentError.Cancelled() : AgentError.StoreError("Failed to finish turn.", ex.Message));
+            LogTurnException(_logger, turnId, ex.Message, ex);
+            var error = failure ?? (ex is OperationCanceledException ? AgentError.Cancelled() : AgentError.StoreError("Failed to finish turn.", ex.GetType().Name));
             activity?.SetStatus(ActivityStatusCode.Error, error.Message);
             ThalosTelemetry.TurnFailures.Add(1, new KeyValuePair<string, object?>("thalos.error", error.Code.ToString()));
-            await PublishPostPersistAsync(new TurnFailedNotification(sessionId, turnId, error, clock.GetUtcNow()), sessionId, CancellationToken.None).ConfigureAwait(false);
+            await PublishPostPersistAsync(new TurnFailedNotification(sessionId, turnId, error, clock.GetUtcNow(), usage.Value), sessionId, CancellationToken.None).ConfigureAwait(false);
             LogTurnFailed(_logger, turnId, sessionId, error.ToString());
-            await scope.PublishAsync(new TurnFailedEvent(sessionId, turnId, error), CancellationToken.None).ConfigureAwait(false);
+            await scope.PublishAsync(new TurnFailedEvent(sessionId, turnId, error, usage.Value), CancellationToken.None).ConfigureAwait(false);
         }
         finally
         {
@@ -242,7 +251,7 @@ public sealed partial class ThalosAgentRuntime(
         if (failure is { } err)
         {
             activity?.SetStatus(ActivityStatusCode.Error, err.Message);
-            await scope.PublishAsync(await FailAsync(sessionId, turnId, err, releaseState: true).ConfigureAwait(false), CancellationToken.None).ConfigureAwait(false);
+            await scope.PublishAsync(await FailAsync(sessionId, turnId, err, usage, releaseState: true).ConfigureAwait(false), CancellationToken.None).ConfigureAwait(false);
             return;
         }
 
@@ -251,7 +260,7 @@ public sealed partial class ThalosAgentRuntime(
         if (completed.IsFailure)
         {
             activity?.SetStatus(ActivityStatusCode.Error, completed.Error.Message);
-            await scope.PublishAsync(await FailAsync(sessionId, turnId, completed.Error, releaseState: true).ConfigureAwait(false), CancellationToken.None).ConfigureAwait(false);
+            await scope.PublishAsync(await FailAsync(sessionId, turnId, completed.Error, usage, releaseState: true).ConfigureAwait(false), CancellationToken.None).ConfigureAwait(false);
             return;
         }
 
@@ -262,16 +271,17 @@ public sealed partial class ThalosAgentRuntime(
 
     /// <summary>
     /// Streams one MAF run: appends text deltas to <paramref name="text"/> (publishing each), sums <see cref="UsageContent"/>
-    /// into the returned usage and adopts the provider-reported model id when the definition did not pin one.
+    /// into <paramref name="usage"/> as it arrives (so a failure mid-turn keeps the completed round-trips' tokens) and adopts
+    /// the provider-reported model id when the definition did not pin one.
     /// </summary>
-    private async Task<TurnUsage> RunModelLoopAsync(TurnScope scope, AIAgent agent, string prompt, StringBuilder text, TurnUsage usage, CancellationToken ct)
+    private async Task RunModelLoopAsync(TurnScope scope, AIAgent agent, string prompt, StringBuilder text, StrongBox<TurnUsage> usage, CancellationToken ct)
     {
         var mafSession = await historyProvider.CreateBoundSessionAsync(agent, scope.SessionId, ct).ConfigureAwait(false);
         await foreach (var update in agent.RunStreamingAsync(prompt, mafSession, cancellationToken: ct).ConfigureAwait(false))
         {
-            if (string.IsNullOrEmpty(usage.ModelId) && update.AsChatResponseUpdate().ModelId is { Length: > 0 } modelId)
+            if (string.IsNullOrEmpty(usage.Value.ModelId) && update.AsChatResponseUpdate().ModelId is { Length: > 0 } modelId)
             {
-                usage = usage with { ModelId = modelId };
+                usage.Value = usage.Value with { ModelId = modelId };
             }
 
             foreach (var content in update.Contents)
@@ -283,13 +293,11 @@ public sealed partial class ThalosAgentRuntime(
                         await scope.PublishAsync(new TextDeltaEvent(scope.SessionId, scope.TurnId, tc.Text), CancellationToken.None).ConfigureAwait(false);
                         break;
                     case UsageContent uc:
-                        usage += new TurnUsage((int)(uc.Details.InputTokenCount ?? 0), (int)(uc.Details.OutputTokenCount ?? 0), usage.ModelId);
+                        usage.Value += new TurnUsage((int)(uc.Details.InputTokenCount ?? 0), (int)(uc.Details.OutputTokenCount ?? 0), usage.Value.ModelId);
                         break;
                 }
             }
         }
-
-        return usage;
     }
 
     // ---------- helpers ----------
@@ -318,16 +326,30 @@ public sealed partial class ThalosAgentRuntime(
         var machine = new AgentSessionMachine(session.State);
         if (!machine.TryFire(SessionTrigger.Start))
         {
-            return Result<AgentDefinition, AgentError>.Failure(session.State == SessionState.Closed
-                ? AgentError.SessionClosed(session.Id)
-                : AgentError.SessionBusy(session.Id));
+            return Result<AgentDefinition, AgentError>.Failure(StartRejected(session.Id, session.State));
         }
 
-        var claimed = await store.UpdateStateAsync(session.Id, machine.Current, ct).ConfigureAwait(false);
-        return claimed.IsFailure
-            ? Result<AgentDefinition, AgentError>.Failure(claimed.Error)
-            : Result<AgentDefinition, AgentError>.Success(definition);
+        // Start is only valid from Idle, so this is the CAS Idle → Running; a concurrent claimant that got there first makes it return false
+        var claimed = await store.TryTransitionAsync(session.Id, session.State, machine.Current, ct).ConfigureAwait(false);
+        if (claimed.IsFailure)
+        {
+            return Result<AgentDefinition, AgentError>.Failure(claimed.Error);
+        }
+
+        if (claimed.Value)
+        {
+            return Result<AgentDefinition, AgentError>.Success(definition);
+        }
+
+        // lost the race: re-read to report the state that beat us (Closed → SessionClosed, anything else → SessionBusy)
+        var current = await store.GetAsync(session.Id, ct).ConfigureAwait(false);
+        return Result<AgentDefinition, AgentError>.Failure(current.IsFailure
+            ? current.Error
+            : StartRejected(session.Id, current.Value.State));
     }
+
+    private static AgentError StartRejected(SessionId sessionId, SessionState state) =>
+        state == SessionState.Closed ? AgentError.SessionClosed(sessionId) : AgentError.SessionBusy(sessionId);
 
     private async ValueTask<Result<AgentTurnResult, AgentError>> CompleteTurnAsync(SessionId sessionId, TurnId turnId, string text, TurnUsage usage, IReadOnlyList<ToolCallSummary> toolCalls, TimeSpan elapsed, CancellationToken ct)
     {
@@ -354,7 +376,12 @@ public sealed partial class ThalosAgentRuntime(
         return Result<AgentTurnResult, AgentError>.Success(new AgentTurnResult(turnId, sessionId, text, usage, toolCalls, elapsed));
     }
 
-    private async ValueTask<TurnFailedEvent> FailAsync(SessionId sessionId, TurnId turnId, AgentError error, bool releaseState)
+    /// <summary>
+    /// Records a failed turn: optionally releases the session (→ Idle), counts the failure, publishes <see cref="TurnFailedNotification"/>
+    /// and returns the terminal event. <c>usage</c> is the token usage of the round-trips that completed before the failure — reported so
+    /// hosts can bill failed/quarantined turns (default for pre-claim failures).
+    /// </summary>
+    private async ValueTask<TurnFailedEvent> FailAsync(SessionId sessionId, TurnId turnId, AgentError error, TurnUsage usage, bool releaseState)
     {
         if (releaseState)
         {
@@ -368,9 +395,9 @@ public sealed partial class ThalosAgentRuntime(
 
         ThalosTelemetry.TurnFailures.Add(1, new KeyValuePair<string, object?>("thalos.error", error.Code.ToString()));
         // the outcome is decided (and, if claimed, the release persisted); a failing audit notification must not mask the real error
-        await PublishPostPersistAsync(new TurnFailedNotification(sessionId, turnId, error, clock.GetUtcNow()), sessionId, CancellationToken.None).ConfigureAwait(false);
+        await PublishPostPersistAsync(new TurnFailedNotification(sessionId, turnId, error, clock.GetUtcNow(), usage), sessionId, CancellationToken.None).ConfigureAwait(false);
         LogTurnFailed(_logger, turnId, sessionId, error.ToString());
-        return new TurnFailedEvent(sessionId, turnId, error);
+        return new TurnFailedEvent(sessionId, turnId, error, usage);
     }
 
     /// <summary>
@@ -426,16 +453,18 @@ public sealed partial class ThalosAgentRuntime(
     /// Maps an exception from the model loop to an <see cref="AgentError"/>. Only a cancellation that stems from the turn's own
     /// token is <see cref="AgentErrorCode.Cancelled"/>; any other <see cref="OperationCanceledException"/> (provider HTTP timeout,
     /// tool-internal timeout) is the provider's failure. MAF/FunctionInvokingChatClient may wrap the cause one level deep.
+    /// <see cref="AgentError.Detail"/> carries only the exception type name — provider/tool messages can echo untrusted content
+    /// (prompt text, credential fragments) and are logged instead (event 207).
     /// </summary>
     private static AgentError MapException(Exception ex, CancellationToken ct) => ex switch
     {
         AgentTurnException ate => ate.Error,
         OperationCanceledException when ct.IsCancellationRequested => AgentError.Cancelled(),
-        OperationCanceledException => AgentError.ProviderError("The model provider timed out or was cancelled internally.", ex.Message),
+        OperationCanceledException => AgentError.ProviderError("The model provider timed out or was cancelled internally.", ex.GetType().Name),
         { InnerException: AgentTurnException inner } => inner.Error,
         { InnerException: OperationCanceledException } when ct.IsCancellationRequested => AgentError.Cancelled(),
-        { InnerException: OperationCanceledException inner } => AgentError.ProviderError("The model provider timed out or was cancelled internally.", inner.Message),
-        _ => AgentError.ProviderError("The model provider failed.", ex.Message),
+        { InnerException: OperationCanceledException inner } => AgentError.ProviderError("The model provider timed out or was cancelled internally.", inner.GetType().Name),
+        _ => AgentError.ProviderError("The model provider failed.", ex.GetType().Name),
     };
 
     [LoggerMessage(EventId = 200, Level = LogLevel.Information, Message = "Session {SessionId} created for agent {AgentId} by {Caller}")]
@@ -458,4 +487,7 @@ public sealed partial class ThalosAgentRuntime(
 
     [LoggerMessage(EventId = 206, Level = LogLevel.Warning, Message = "Failed to publish {Notification} for session {SessionId}: {Error}")]
     private static partial void LogNotificationFailed(ILogger logger, string notification, SessionId sessionId, string error, Exception exception);
+
+    [LoggerMessage(EventId = 207, Level = LogLevel.Warning, Message = "Turn {TurnId} provider/tool failure: {Error}")]
+    private static partial void LogTurnException(ILogger logger, TurnId turnId, string error, Exception exception);
 }
