@@ -6,6 +6,8 @@
     <PackageTags>agents;testing;zeroalloc</PackageTags>
     <!-- xunit.core.props sets IsTestProject=true; this is a library, not a test host -->
     <IsTestProject>false</IsTestProject>
+    <!-- CA1707: this package ships xUnit contract-test classes whose [Fact] methods use the repo's underscore test-naming style -->
+    <NoWarn>$(NoWarn);CA1707</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />

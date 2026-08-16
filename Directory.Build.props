@@ -7,8 +7,9 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
     <!-- CS1591: missing XML doc; MA0048: file name must match type name — small related types (ids, events, notifications) are deliberately grouped per file;
-         ZSM0003: ZeroAlloc.StateMachine "trigger appears in only one transition — typo?" heuristic; the session lifecycle deliberately has single-use triggers -->
-    <NoWarn>$(NoWarn);CS1591;MA0048;ZSM0003</NoWarn>
+         ZSM0003: ZeroAlloc.StateMachine "trigger appears in only one transition — typo?" heuristic; the session lifecycle deliberately has single-use triggers;
+         MA0158: "use System.Threading.Lock" — libraries multi-target net8.0, which has no Lock type, so plain object gates are used -->
+    <NoWarn>$(NoWarn);CS1591;MA0048;ZSM0003;MA0158</NoWarn>
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisLevel>latest-recommended</AnalysisLevel>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
