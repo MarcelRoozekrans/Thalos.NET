@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Thalos.Testing</RootNamespace>
+    <PackageId>Thalos.NET.Testing</PackageId>
+    <Description>Test doubles and contract tests for Thalos.NET: ScriptedChatClient, IAgentSessionStore contract tests, in-memory notification collector.</Description>
+    <PackageTags>agents;testing;zeroalloc</PackageTags>
+    <!-- xunit.core.props sets IsTestProject=true; this is a library, not a test host -->
+    <IsTestProject>false</IsTestProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />
+    <PackageReference Include="xunit" />
+    <PackageReference Include="AwesomeAssertions" />
+  </ItemGroup>
+</Project>

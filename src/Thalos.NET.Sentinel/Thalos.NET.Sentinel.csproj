@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Thalos.Sentinel</RootNamespace>
+    <PackageId>Thalos.NET.Sentinel</PackageId>
+    <Description>AI.Sentinel security middleware at the model boundary for Thalos.NET agents.</Description>
+    <PackageTags>agents;security;ai-sentinel;prompt-injection</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />
+    <PackageReference Include="AI.Sentinel" />
+  </ItemGroup>
+</Project>

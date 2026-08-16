@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Thalos.Mcp</RootNamespace>
+    <PackageId>Thalos.NET.Mcp</PackageId>
+    <Description>Model Context Protocol servers (stdio, http) as Thalos.NET tool sources. Loads Claude Code-style .mcp.json.</Description>
+    <PackageTags>agents;mcp;model-context-protocol;tools</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />
+    <PackageReference Include="ModelContextProtocol" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Json" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Mcp" />
+  </ItemGroup>
+</Project>

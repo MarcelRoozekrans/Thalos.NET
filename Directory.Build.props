@@ -11,7 +11,8 @@
     <AnalysisLevel>latest-recommended</AnalysisLevel>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
-    <CompilerGeneratedFilesOutputPath>$(BaseIntermediateOutputPath)generated</CompilerGeneratedFilesOutputPath>
+    <!-- $(BaseIntermediateOutputPath) is not yet defined when Directory.Build.props is imported, so spell out obj\ -->
+    <CompilerGeneratedFilesOutputPath>$(MSBuildProjectDirectory)\obj\generated</CompilerGeneratedFilesOutputPath>
   </PropertyGroup>
 
   <!-- Shared NuGet metadata; each package csproj sets PackageId/Description/PackageTags -->

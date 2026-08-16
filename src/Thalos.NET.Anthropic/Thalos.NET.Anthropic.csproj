@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Thalos.Anthropic</RootNamespace>
+    <PackageId>Thalos.NET.Anthropic</PackageId>
+    <Description>Anthropic Claude chat-client provider for Thalos.NET.</Description>
+    <PackageTags>agents;anthropic;claude</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />
+    <PackageReference Include="Anthropic" />
+  </ItemGroup>
+</Project>

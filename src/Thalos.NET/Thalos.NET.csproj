@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Thalos</RootNamespace>
+    <PackageId>Thalos.NET</PackageId>
+    <Description>Thalos.NET agent runtime on Microsoft Agent Framework: agent factory, tool catalog with authorization, session state machine, in-memory session store.</Description>
+    <PackageTags>agents;ai;llm;microsoft-agent-framework;zeroalloc</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Thalos.NET.Abstractions\Thalos.NET.Abstractions.csproj" />
+    <PackageReference Include="Microsoft.Agents.AI" />
+    <PackageReference Include="Microsoft.Extensions.AI" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+    <PackageReference Include="ZeroAlloc.StateMachine" />
+    <PackageReference Include="ZeroAlloc.Inject" />
+    <PackageReference Include="ZeroAlloc.Inject.Generator" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Unit" />
+    <InternalsVisibleTo Include="Thalos.NET.Testing" />
+  </ItemGroup>
+</Project>

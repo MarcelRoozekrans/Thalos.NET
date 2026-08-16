@@ -1,0 +1,20 @@
+<Solution>
+  <Folder Name="/samples/">
+    <Project Path="samples/Thalos.Sample.Console/Thalos.Sample.Console.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/Thalos.NET.Abstractions/Thalos.NET.Abstractions.csproj" />
+    <Project Path="src/Thalos.NET.Anthropic/Thalos.NET.Anthropic.csproj" />
+    <Project Path="src/Thalos.NET.Mcp/Thalos.NET.Mcp.csproj" />
+    <Project Path="src/Thalos.NET.Sentinel/Thalos.NET.Sentinel.csproj" />
+    <Project Path="src/Thalos.NET.Testing/Thalos.NET.Testing.csproj" />
+    <Project Path="src/Thalos.NET/Thalos.NET.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Thalos.NET.Tests.Architecture/Thalos.NET.Tests.Architecture.csproj" />
+    <Project Path="tests/Thalos.NET.Tests.Mcp/Thalos.NET.Tests.Mcp.csproj" />
+    <Project Path="tests/Thalos.NET.Tests.McpServer/Thalos.NET.Tests.McpServer.csproj" />
+    <Project Path="tests/Thalos.NET.Tests.Sentinel/Thalos.NET.Tests.Sentinel.csproj" />
+    <Project Path="tests/Thalos.NET.Tests.Unit/Thalos.NET.Tests.Unit.csproj" />
+  </Folder>
+</Solution>

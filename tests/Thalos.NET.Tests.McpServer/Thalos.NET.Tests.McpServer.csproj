@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <IsTestProject>false</IsTestProject>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- tests/Directory.Build.props adds test packages; remove them for this exe -->
+    <PackageReference Remove="Microsoft.NET.Test.Sdk" />
+    <PackageReference Remove="xunit" />
+    <PackageReference Remove="xunit.runner.visualstudio" />
+    <PackageReference Remove="coverlet.collector" />
+    <PackageReference Remove="NSubstitute" />
+    <PackageReference Remove="AwesomeAssertions" />
+    <Using Remove="Xunit" />
+    <Using Remove="FluentAssertions" />
+  </ItemGroup>
+</Project>

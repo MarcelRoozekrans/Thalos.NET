@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net10.0</TargetFrameworks>
+    <IsPackable>false</IsPackable>
+    <UserSecretsId>thalos-sample-console</UserSecretsId>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Thalos.NET\Thalos.NET.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Mcp\Thalos.NET.Mcp.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Anthropic\Thalos.NET.Anthropic.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Sentinel\Thalos.NET.Sentinel.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Update=".mcp.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
