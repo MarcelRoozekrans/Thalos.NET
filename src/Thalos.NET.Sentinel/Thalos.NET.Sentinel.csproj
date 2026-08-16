@@ -9,4 +9,7 @@
     <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />
     <PackageReference Include="AI.Sentinel" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Sentinel" />
+  </ItemGroup>
 </Project>
