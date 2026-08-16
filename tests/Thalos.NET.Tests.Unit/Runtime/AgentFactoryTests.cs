@@ -162,7 +162,7 @@ public sealed class AgentFactoryTests
         source.GetToolsAsync(Arg.Any<CancellationToken>()).Returns(_ => ++calls == 1
             ? Result<IReadOnlyList<AITool>, AgentError>.Failure(AgentError.ProviderError("MCP server 'mcp' is unavailable.", "connection refused"))
             : Result<IReadOnlyList<AITool>, AgentError>.Success([AIFunctionFactory.Create(() => "ok", "t")]));
-        var catalog = new ToolCatalog([source], Substitute.For<IToolAuthorizer>(), new RecordingPublisher(), TimeProvider.System);
+        var catalog = new ToolCatalog([source], Substitute.For<IToolAuthorizer>(), new RecordingNotificationPublisher(), TimeProvider.System);
         var factory = new AgentFactory(h.Provider, [], catalog, new SessionStoreChatHistoryProvider(new InMemorySessionStore(TimeProvider.System)), new ServiceCollection().BuildServiceProvider(), loggerFactory: null);
         var def = Def();
 

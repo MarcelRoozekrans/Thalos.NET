@@ -1,5 +1,6 @@
 using Microsoft.Extensions.AI;
 using NSubstitute;
+using Thalos.Testing;
 using Thalos.Tools;
 using ZeroAlloc.Results;
 
@@ -22,7 +23,7 @@ public sealed class ToolCatalogTests
     };
 
     private static ToolCatalog Catalog(params IToolSource[] sources) =>
-        new(sources, Substitute.For<IToolAuthorizer>(), new RecordingPublisher(), TimeProvider.System);
+        new(sources, Substitute.For<IToolAuthorizer>(), new RecordingNotificationPublisher(), TimeProvider.System);
 
     [Fact]
     public async Task Qualifies_names_with_source_prefix_and_wraps_in_AuthorizingAIFunction()

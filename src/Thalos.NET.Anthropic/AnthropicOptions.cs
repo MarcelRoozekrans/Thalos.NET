@@ -10,10 +10,10 @@ public sealed class AnthropicOptions
     public string? ApiKey { get; set; }
 
     /// <summary>
-    /// Model used when <see cref="AgentDefinition.Model"/> is null. The built-in default is a snapshot of the model line current
-    /// when this package was written; hosts should set the model id they actually want (Anthropic retires and renames models).
+    /// Model used when <see cref="AgentDefinition.Model"/> is null. The built-in default is the Sonnet alias current when this
+    /// package was written (<c>claude-sonnet-5</c>); hosts should set the model id they actually want (Anthropic retires and renames models).
     /// </summary>
-    public string DefaultModel { get; set; } = "claude-sonnet-4-5";
+    public string DefaultModel { get; set; } = "claude-sonnet-5";
 
     /// <summary>Max output tokens used when <see cref="AgentDefinition.MaxOutputTokens"/> is null.</summary>
     public int DefaultMaxOutputTokens { get; set; } = 8192;

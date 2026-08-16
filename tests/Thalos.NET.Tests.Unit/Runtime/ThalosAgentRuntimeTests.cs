@@ -194,6 +194,7 @@ public sealed class ThalosAgentRuntimeTests
         (await f.Runtime.CloseSessionAsync(s, RuntimeFixture.User(), default)).IsSuccess.Should().BeTrue();
     }
 
+    /// <summary>A foreign session answers 404 (SessionNotFound), not 403: a stranger must not learn that the id exists.</summary>
     [Fact]
     public async Task Other_user_cannot_use_session_unless_admin()
     {
@@ -201,7 +202,8 @@ public sealed class ThalosAgentRuntimeTests
         f.Client.ThenText("ok");
         var s = (await f.Runtime.CreateSessionAsync(f.Agent.Id, RuntimeFixture.User("alice"), default)).Value;
 
-        (await f.Runtime.RunTurnAsync(new AgentTurnRequest(s, "hi", RuntimeFixture.User("bob")), default)).Error.Code.Should().Be(AgentErrorCode.Unauthorized);
+        (await f.Runtime.RunTurnAsync(new AgentTurnRequest(s, "hi", RuntimeFixture.User("bob")), default)).Error.Code.Should().Be(AgentErrorCode.SessionNotFound);
+        (await f.Runtime.CloseSessionAsync(s, RuntimeFixture.User("bob"), default)).Error.Code.Should().Be(AgentErrorCode.SessionNotFound);
         (await f.Runtime.RunTurnAsync(new AgentTurnRequest(s, "hi", RuntimeFixture.User("root", "admin")), default)).IsSuccess.Should().BeTrue();
     }
 

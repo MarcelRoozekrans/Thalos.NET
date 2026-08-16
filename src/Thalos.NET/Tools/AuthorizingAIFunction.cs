@@ -159,6 +159,6 @@ public sealed partial class AuthorizingAIFunction(
     [LoggerMessage(EventId = 112, Level = LogLevel.Warning, Message = "Tool {Tool} failed: {Error}")]
     private static partial void LogToolFailed(ILogger logger, string tool, string error, Exception exception);
 
-    [LoggerMessage(EventId = 113, Level = LogLevel.Debug, Message = "Tool {Tool} invoked outside a turn scope; caller is anonymous")]
+    [LoggerMessage(EventId = 113, Level = LogLevel.Warning, Message = "Tool {Tool} invoked outside a turn scope; caller is anonymous and no tool events are recorded")]
     private static partial void LogOutsideTurnScope(ILogger logger, string tool);
 }

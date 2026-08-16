@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.Extensions.AI;
 using NSubstitute;
 using Thalos.Runtime;
+using Thalos.Testing;
 using Thalos.Tools;
 using ZeroAlloc.Authorization;
 using ZeroAlloc.Mediator;
@@ -21,12 +22,12 @@ public sealed class AuthorizingAIFunctionTests
         return auth;
     }
 
-    private static (AuthorizingAIFunction fn, IToolAuthorizer auth, RecordingPublisher pub) Build(bool allow)
+    private static (AuthorizingAIFunction fn, IToolAuthorizer auth, RecordingNotificationPublisher pub) Build(bool allow)
     {
         var auth = Substitute.For<IToolAuthorizer>();
         auth.AuthorizeAsync(Arg.Any<ISecurityContext>(), Arg.Any<string>(), Arg.Any<JsonElement>(), Arg.Any<CancellationToken>())
             .Returns(allow ? ToolAuthorizationDecision.Allow() : ToolAuthorizationDecision.Deny("nope"));
-        var pub = new RecordingPublisher();
+        var pub = new RecordingNotificationPublisher();
         return (new AuthorizingAIFunction(Echo(), "test__echo", auth, pub, TimeProvider.System), auth, pub);
     }
 
@@ -90,7 +91,7 @@ public sealed class AuthorizingAIFunctionTests
         var auth = Substitute.For<IToolAuthorizer>();
         auth.AuthorizeAsync(default!, default!, default, default)
             .ReturnsForAnyArgs<ToolAuthorizationDecision>(_ => throw new InvalidOperationException("policy store down"));
-        var pub = new RecordingPublisher();
+        var pub = new RecordingNotificationPublisher();
         var fn = new AuthorizingAIFunction(tool, "x__t", auth, pub, TimeProvider.System);
         using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), AnonymousSecurityContext.Instance);
 
@@ -120,7 +121,7 @@ public sealed class AuthorizingAIFunctionTests
     public async Task Inner_exception_is_reported_as_failed_call_and_rethrown()
     {
         var boom = AIFunctionFactory.Create(new Func<string>(() => throw new InvalidOperationException("boom")), "boom");
-        var pub = new RecordingPublisher();
+        var pub = new RecordingNotificationPublisher();
         var fn = new AuthorizingAIFunction(boom, "t__boom", Allowing(), pub, TimeProvider.System);
         using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), AnonymousSecurityContext.Instance);
 
@@ -134,7 +135,7 @@ public sealed class AuthorizingAIFunctionTests
     public async Task Tool_internal_cancellation_is_audited_and_rethrown()
     {
         var timeout = AIFunctionFactory.Create(new Func<string>(() => throw new OperationCanceledException("tool timeout")), "slow");
-        var pub = new RecordingPublisher();
+        var pub = new RecordingNotificationPublisher();
         var fn = new AuthorizingAIFunction(timeout, "t__slow", Allowing(), pub, TimeProvider.System);
         using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), AnonymousSecurityContext.Instance);
 
@@ -154,7 +155,7 @@ public sealed class AuthorizingAIFunctionTests
             cts.Cancel(); // ambient token is cancelled while the tool runs, then the tool fails for its own reason
             throw new InvalidOperationException("boom");
         }), "t");
-        var pub = new RecordingPublisher();
+        var pub = new RecordingNotificationPublisher();
         var fn = new AuthorizingAIFunction(tool, "x__t", Allowing(), pub, TimeProvider.System);
         using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), AnonymousSecurityContext.Instance);
 
@@ -177,7 +178,7 @@ public sealed class AuthorizingAIFunctionTests
             cts.Cancel();
             throw new OperationCanceledException(cts.Token);
         }), "t");
-        var pub = new RecordingPublisher();
+        var pub = new RecordingNotificationPublisher();
         var fn = new AuthorizingAIFunction(tool, "x__t", Allowing(), pub, TimeProvider.System);
 
         var act = () => fn.InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal), cts.Token).AsTask();
@@ -203,7 +204,7 @@ public sealed class AuthorizingAIFunctionTests
     public async Task Object_result_previews_as_its_json()
     {
         var tool = AIFunctionFactory.Create(() => new { ok = true }, "obj");
-        var fn = new AuthorizingAIFunction(tool, "t__obj", Allowing(), new RecordingPublisher(), TimeProvider.System);
+        var fn = new AuthorizingAIFunction(tool, "t__obj", Allowing(), new RecordingNotificationPublisher(), TimeProvider.System);
         using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), AnonymousSecurityContext.Instance);
 
         await fn.InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal));
@@ -218,7 +219,7 @@ public sealed class AuthorizingAIFunctionTests
     {
         var payload = new string('x', 250);
         var tool = AIFunctionFactory.Create(() => payload, "big");
-        var pub = new RecordingPublisher();
+        var pub = new RecordingNotificationPublisher();
         var fn = new AuthorizingAIFunction(tool, "t__big", Allowing(), pub, TimeProvider.System);
         using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), AnonymousSecurityContext.Instance);
 

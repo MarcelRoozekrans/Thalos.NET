@@ -48,6 +48,16 @@ public sealed class McpBuilderTests
     }
 
     [Fact]
+    public void AddMcpServer_resolves_without_logging_registered()
+    {
+        var services = new ServiceCollection(); // no AddLogging()
+        services.AddThalos(t => t.AddMcpServer("echo", McpServerFixture.Definition()));
+        using var sp = services.BuildServiceProvider();
+
+        sp.GetServices<IToolSource>().Should().ContainSingle().Which.Should().BeOfType<McpToolSource>();
+    }
+
+    [Fact]
     public void AddMcpServer_rejects_invalid_source_name_at_composition()
     {
         var services = new ServiceCollection();

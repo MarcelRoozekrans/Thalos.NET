@@ -7,14 +7,15 @@ namespace Thalos.Mcp;
 
 /// <summary>
 /// One MCP server as a tool source. Connects lazily on the first <see cref="GetToolsAsync"/>, caches the client + tool list,
-/// owns the stdio process, and retries the connection on the next call after a failure. Register as a singleton; disposed with the host.
+/// owns the stdio process, and retries the connection on the next call after a failure. Register as a singleton; disposed with the host
+/// (<see cref="IAsyncDisposable"/> preferred; <see cref="IDisposable"/> blocks on the same path for synchronous container disposal).
 /// </summary>
 /// <remarks>
 /// The tool list is cached for the lifetime of the source (no <c>tools/list_changed</c> handling). A server that dies mid-life is
 /// <em>not</em> auto-reconnected in 0.1: cached <see cref="AIFunction"/>s keep pointing at the dead session and their invocations
 /// fail; restart the host (or replace the source) to reconnect.
 /// </remarks>
-public sealed partial class McpToolSource : IToolSource, IAsyncDisposable
+public sealed partial class McpToolSource : IToolSource, IAsyncDisposable, IDisposable
 {
     private readonly McpServerDefinition _definition;
     private readonly ILoggerFactory _loggerFactory;
@@ -179,6 +180,15 @@ public sealed partial class McpToolSource : IToolSource, IAsyncDisposable
         _gate.Dispose();
         _disposeCts.Dispose();
     }
+
+    /// <summary>
+    /// Synchronous <see cref="DisposeAsync"/> for hosts that tear the container down with a plain <c>ServiceProvider.Dispose()</c>
+    /// (which does not await <see cref="IAsyncDisposable"/>s). Blocks for up to <see cref="McpServerDefinition.ShutdownTimeout"/> per stdio server.
+    /// </summary>
+    public void Dispose() =>
+        // Blocking on the async path is deliberate here: the alternative (not implementing IDisposable) leaks the stdio process
+        // when a synchronous container disposal is used. Prefer DisposeAsync / ServiceProvider.DisposeAsync() where possible.
+        DisposeAsync().AsTask().GetAwaiter().GetResult();
 
     [LoggerMessage(EventId = 300, Level = LogLevel.Information, Message = "Connecting to MCP server '{Server}' ({Type})")]
     private static partial void LogConnecting(ILogger logger, string server, string type);

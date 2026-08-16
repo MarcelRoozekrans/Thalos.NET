@@ -2,7 +2,7 @@
   <PropertyGroup>
     <RootNamespace>Thalos</RootNamespace>
     <PackageId>Thalos.NET.Abstractions</PackageId>
-    <Description>Ports and models for the Thalos.NET agent framework. No framework dependencies.</Description>
+    <Description>Ports and models for Thalos.NET. Depends only on ZeroAlloc primitives and Microsoft.Extensions.AI.Abstractions.</Description>
     <PackageTags>agents;ai;llm;abstractions;zeroalloc</PackageTags>
   </PropertyGroup>
   <ItemGroup>
@@ -10,7 +10,6 @@
     <PackageReference Include="ZeroAlloc.ValueObjects" />
     <PackageReference Include="ZeroAlloc.Mediator" />
     <PackageReference Include="ZeroAlloc.Authorization" />
-    <PackageReference Include="ZeroAlloc.AsyncEvents" />
     <PackageReference Include="ZeroAlloc.Validation" />
     <PackageReference Include="ZeroAlloc.Validation.Generator" PrivateAssets="all" />
     <PackageReference Include="ZeroAlloc.Telemetry" />

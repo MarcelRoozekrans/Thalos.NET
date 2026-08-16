@@ -27,6 +27,6 @@ public sealed class McpConfigFileTests
         servers["legacy"].EffectiveType.Should().Be("stdio", "type defaults to stdio when a command is present");
         servers["legacy"].Timeout.Should().Be(TimeSpan.FromMinutes(1));
         servers["legacy"].ShutdownTimeout.Should().Be(TimeSpan.FromSeconds(1));
-        servers["roslyn"].ShutdownTimeout.Should().Be(TimeSpan.FromSeconds(5), "SDK default when not specified");
+        servers["roslyn"].ShutdownTimeout.Should().Be(TimeSpan.FromSeconds(2), "Thalos default when not specified (the SDK waits the full timeout on dispose)");
     }
 }

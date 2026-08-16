@@ -29,10 +29,11 @@ public sealed class McpServerDefinition
 
     /// <summary>
     /// stdio only: how long to wait for the child process to exit after its stdin is closed on dispose before it is killed.
-    /// Default 5 seconds (the SDK default). In <c>.mcp.json</c> this is the <c>shutdownTimeout</c> property as a
-    /// <c>hh:mm:ss</c> string (e.g. <c>"00:00:01"</c>).
+    /// Default 2 seconds (the SDK default is 5 s): well-behaved servers exit as soon as stdin closes, and the MCP SDK waits the
+    /// <em>full</em> timeout on dispose either way, so a long value only slows host shutdown. In <c>.mcp.json</c> this is the
+    /// <c>shutdownTimeout</c> property as a <c>hh:mm:ss</c> string (e.g. <c>"00:00:01"</c>).
     /// </summary>
-    public TimeSpan ShutdownTimeout { get; set; } = TimeSpan.FromSeconds(5);
+    public TimeSpan ShutdownTimeout { get; set; } = TimeSpan.FromSeconds(2);
 
     /// <summary><see cref="Type"/> lower-cased, or the default inferred from <see cref="Command"/>.</summary>
     public string EffectiveType => (Type ?? (Command is not null ? "stdio" : "http")).ToLowerInvariant();

@@ -11,7 +11,12 @@ namespace Thalos.Runtime;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Scopes are LIFO: <see cref="Begin"/> captures the previous scope and <see cref="Dispose"/> restores it, so a scope
+/// Only the runtime begins, feeds and disposes scopes (those members are internal); the public surface is read-only:
+/// <see cref="Current"/>, <see cref="SessionId"/>, <see cref="TurnId"/>, <see cref="Caller"/>, <see cref="Events"/>, <see cref="ToolCalls"/>.
+/// Tools and decorators may read <see cref="Current"/> to learn who is calling; they must never dispose it.
+/// </para>
+/// <para>
+/// Scopes are LIFO: <c>Begin</c> captures the previous scope and <c>Dispose</c> restores it, so a scope
 /// must be disposed on the same async flow that began it (use <c>using</c>).
 /// </para>
 /// <para>
@@ -59,7 +64,7 @@ public sealed class TurnScope : IDisposable
     public IReadOnlyCollection<ToolCallSummary> ToolCalls => _toolCalls;
 
     /// <summary>Begins a scope on the current async flow and makes it <see cref="Current"/>; dispose to restore the previous scope.</summary>
-    public static TurnScope Begin(SessionId sessionId, TurnId turnId, ISecurityContext caller)
+    internal static TurnScope Begin(SessionId sessionId, TurnId turnId, ISecurityContext caller)
     {
         var scope = new TurnScope(sessionId, turnId, caller, _current.Value);
         _current.Value = scope;
@@ -70,7 +75,7 @@ public sealed class TurnScope : IDisposable
     /// Queues an event for the runtime. Never throws once the scope is disposed: events published after the consumer
     /// abandoned the stream (e.g. a tool still running after cancellation) are dropped silently.
     /// </summary>
-    public ValueTask PublishAsync(AgentEvent agentEvent, CancellationToken ct)
+    internal ValueTask PublishAsync(AgentEvent agentEvent, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         _events.Writer.TryWrite(agentEvent);
@@ -78,10 +83,13 @@ public sealed class TurnScope : IDisposable
     }
 
     /// <summary>Records the outcome of one tool call for the turn result.</summary>
-    public void RecordToolCall(ToolCallSummary summary) => _toolCalls.Enqueue(summary);
+    internal void RecordToolCall(ToolCallSummary summary) => _toolCalls.Enqueue(summary);
 
     /// <summary>Completes <see cref="Events"/> and restores the previous scope as <see cref="Current"/>.</summary>
-    public void Dispose()
+    void IDisposable.Dispose() => Dispose();
+
+    /// <summary>Completes <see cref="Events"/> and restores the previous scope as <see cref="Current"/>.</summary>
+    internal void Dispose()
     {
         _events.Writer.TryComplete();
         _current.Value = _previous;

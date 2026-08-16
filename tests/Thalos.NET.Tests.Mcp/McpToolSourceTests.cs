@@ -55,6 +55,22 @@ public sealed class McpToolSourceTests(McpServerFixture fixture) : IClassFixture
     }
 
     [Fact]
+    public async Task Synchronous_Dispose_shuts_the_source_down_and_further_calls_throw()
+    {
+        // plain ServiceProvider.Dispose() only sees IDisposable — the source must not leak the stdio process on that path
+        var source = new McpToolSource("sync", McpServerFixture.Definition(), NullLoggerFactory.Instance);
+        (await source.GetToolsAsync(default)).IsSuccess.Should().BeTrue();
+
+        var sw = Stopwatch.StartNew();
+        source.Dispose();
+        source.Dispose(); // idempotent
+        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(10));
+
+        var act = async () => await source.GetToolsAsync(default);
+        await act.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Fact]
     public async Task Unreachable_server_returns_ProviderError_not_exception()
     {
         await using var bad = new McpToolSource("bad", new McpServerDefinition { Type = "stdio", Command = "definitely-not-a-command-xyz", Timeout = TimeSpan.FromSeconds(5) }, NullLoggerFactory.Instance);

@@ -13,23 +13,23 @@ public sealed class AnthropicProviderTests
     public void UseAnthropic_registers_provider_with_defaults()
     {
         var services = new ServiceCollection().AddLogging();
-        services.AddThalos(t => t.UseAnthropic(o => { o.ApiKey = "sk-test"; o.DefaultModel = "claude-sonnet-4-5"; }).UseInMemorySessionStore());
+        services.AddThalos(t => t.UseAnthropic(o => { o.ApiKey = "sk-test"; o.DefaultModel = "claude-sonnet-5"; }).UseInMemorySessionStore());
         using var sp = services.BuildServiceProvider();
 
         var provider = sp.GetRequiredService<IChatClientProvider>();
         provider.Should().BeOfType<AnthropicChatClientProvider>();
         provider.Name.Should().Be("anthropic");
-        provider.DefaultModel.Should().Be("claude-sonnet-4-5");
+        provider.DefaultModel.Should().Be("claude-sonnet-5");
     }
 
     [Fact]
     public void CreateChatClient_returns_a_client_and_honours_agent_model()
     {
         using var provider = new AnthropicChatClientProvider(Options.Create(new AnthropicOptions { ApiKey = "sk-test", DefaultModel = "d", DefaultMaxOutputTokens = 1024 }));
-        var client = provider.CreateChatClient(Agent("claude-opus-4-1"));
+        var client = provider.CreateChatClient(Agent("claude-opus-5"));
         client.Should().NotBeNull();
         var meta = client.GetService<ChatClientMetadata>();
-        meta!.DefaultModelId.Should().Be("claude-opus-4-1");
+        meta!.DefaultModelId.Should().Be("claude-opus-5");
     }
 
     [Fact]

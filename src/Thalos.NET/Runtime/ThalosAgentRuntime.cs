@@ -13,8 +13,9 @@ namespace Thalos.Runtime;
 
 /// <summary>Default <see cref="IAgentRuntime"/>: session lifecycle + MAF agent execution + events.</summary>
 /// <remarks>
-/// Session ownership: the creator owns the session; other callers are rejected with <see cref="AgentErrorCode.Unauthorized"/>
-/// unless they carry the <c>"admin"</c> role. The role name is hardcoded in 0.1 and becomes configurable in a later phase.
+/// Session ownership: the creator owns the session; other callers are rejected with <see cref="AgentErrorCode.SessionNotFound"/>
+/// (404 rather than 403, so session ids cannot be probed — the attempt is logged, event 208) unless they carry the <c>"admin"</c>
+/// role. The role name is hardcoded in 0.1 and becomes configurable in a later phase.
 /// </remarks>
 public sealed partial class ThalosAgentRuntime(
     IAgentCatalog agents,
@@ -124,7 +125,7 @@ public sealed partial class ThalosAgentRuntime(
     /// would NOT survive <c>yield return</c> inside an async iterator (verified), so the scope must never live in the iterator.
     /// </para>
     /// <para>
-    /// Pre-claim failures (validation, unknown session/agent, unauthorized caller, busy or closed session) are returned to the
+    /// Pre-claim failures (validation, unknown or foreign session, unknown agent, busy or closed session) are returned to the
     /// caller as the single <see cref="TurnFailedEvent"/> and audited through <see cref="IAgentNotificationPublisher"/>, but are
     /// <em>not</em> fanned out to the hub: channel adapters filter hub events by session, and a stranger's rejected attempt must
     /// not surface in the owner's channel. Every event of a claimed turn — including its terminal event — reaches the hub.
@@ -444,9 +445,14 @@ public sealed partial class ThalosAgentRuntime(
         }
 
         var isOwner = string.Equals(loaded.Value.OwnerId, caller.Id, StringComparison.Ordinal);
-        return isOwner || caller.Roles.Contains(AdminRole)
-            ? loaded
-            : Result<AgentSessionRecord, AgentError>.Failure(AgentError.Unauthorized($"Caller '{caller.Id}' does not own session '{sessionId}'."));
+        if (isOwner || caller.Roles.Contains(AdminRole))
+        {
+            return loaded;
+        }
+
+        // 404, not 403: a stranger must not learn that the session exists. The attempt is still audited here.
+        LogForeignSessionAccess(_logger, caller.Id, sessionId);
+        return Result<AgentSessionRecord, AgentError>.Failure(AgentError.SessionNotFound(sessionId));
     }
 
     /// <summary>
@@ -490,4 +496,7 @@ public sealed partial class ThalosAgentRuntime(
 
     [LoggerMessage(EventId = 207, Level = LogLevel.Warning, Message = "Turn {TurnId} provider/tool failure: {Error}")]
     private static partial void LogTurnException(ILogger logger, TurnId turnId, string error, Exception exception);
+
+    [LoggerMessage(EventId = 208, Level = LogLevel.Warning, Message = "Caller {Caller} attempted to use session {SessionId} it does not own; answered SessionNotFound")]
+    private static partial void LogForeignSessionAccess(ILogger logger, string caller, SessionId sessionId);
 }

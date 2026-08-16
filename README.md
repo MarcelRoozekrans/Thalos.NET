@@ -14,7 +14,7 @@ A Hermes-style, ZeroAlloc-native agent framework for .NET, built on
 |---|---|---|
 | `Thalos.NET.Abstractions` | Ports (`IAgentRuntime`, `IAgentSessionStore`, `IToolSource`, `IChatClientProvider`, …), models, typed ids, `AgentError` | ZeroAlloc.*, `Microsoft.Extensions.AI.Abstractions` |
 | `Thalos.NET` | Runtime: agent factory, tool catalog + authorization, session state machine, in-memory store, `AddThalos(...)` | Abstractions, `Microsoft.Agents.AI` |
-| `Thalos.NET.Testing` | `ScriptedChatClient`, reusable `IAgentSessionStore` contract tests (ships xunit + AwesomeAssertions references by design) | Thalos.NET |
+| `Thalos.NET.Testing` | `ScriptedChatClient`, `RecordingNotificationPublisher`, reusable `IAgentSessionStore` contract tests (ships xunit + AwesomeAssertions references by design) | Thalos.NET |
 | `Thalos.NET.Mcp` | MCP servers (stdio / http / sse, Claude Code-style `.mcp.json`) as tool sources | Thalos.NET, `ModelContextProtocol` |
 | `Thalos.NET.Anthropic` | Anthropic Claude chat-client provider | Thalos.NET, `Anthropic` |
 | `Thalos.NET.Sentinel` | AI.Sentinel scanning at the model boundary, quarantine → `AgentError` | Thalos.NET, `AI.Sentinel` |

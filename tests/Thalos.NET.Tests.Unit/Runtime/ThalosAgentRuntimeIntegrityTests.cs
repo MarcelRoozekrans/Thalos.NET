@@ -137,9 +137,9 @@ public sealed class ThalosAgentRuntimeIntegrityTests
 
         var events = await f.Runtime.RunTurnStreamingAsync(new AgentTurnRequest(s, "hi", RuntimeFixture.User("mallory")), default).ToListAsync();
 
-        events.Should().ContainSingle().Which.Should().BeOfType<TurnFailedEvent>().Which.Error.Code.Should().Be(AgentErrorCode.Unauthorized);
+        events.Should().ContainSingle().Which.Should().BeOfType<TurnFailedEvent>().Which.Error.Code.Should().Be(AgentErrorCode.SessionNotFound);
         seen.Should().BeEmpty();
-        f.Publisher.Of<TurnFailedNotification>().Should().ContainSingle(n => n.Error.Code == AgentErrorCode.Unauthorized);
+        f.Publisher.Of<TurnFailedNotification>().Should().ContainSingle(n => n.Error.Code == AgentErrorCode.SessionNotFound);
         (await f.Store.GetAsync(s, default)).Value.State.Should().Be(SessionState.Idle);
     }
 

@@ -16,7 +16,7 @@ internal sealed class RuntimeFixture
 {
     public ScriptedChatClient Client { get; } = new();
     public InMemorySessionStore Store { get; } = new(TimeProvider.System);
-    public RecordingPublisher Publisher { get; } = new();
+    public RecordingNotificationPublisher Publisher { get; } = new();
     public AgentEventHub Hub { get; } = new();
     public List<AITool> Tools { get; } = [];
     public IToolAuthorizer Authorizer { get; set; }

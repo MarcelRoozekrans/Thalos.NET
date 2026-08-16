@@ -8,5 +8,11 @@ namespace Thalos;
 /// </summary>
 public interface IAgentNotificationPublisher
 {
+    /// <summary>
+    /// Publishes one lifecycle/audit notification (session created/closed, turn started/completed/failed, tool call
+    /// requested/denied/completed). Called inline on the hot path — implementations must be non-blocking (queue and return)
+    /// and thread-safe. Exceptions thrown before a turn is persisted fail the turn; exceptions thrown for post-persist
+    /// notifications are logged and swallowed by the runtime.
+    /// </summary>
     ValueTask PublishAsync<TNotification>(TNotification notification, CancellationToken ct) where TNotification : INotification;
 }

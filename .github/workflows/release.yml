@@ -5,11 +5,18 @@ on:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # requires the "nuget" environment (holds NUGET_API_KEY; configure required reviewers there for a manual gate)
+    environment: nuget
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@v4
         with: { fetch-depth: 0 }
+      # only publish tags whose commit is reachable from main — a tag on a stray branch must not become a release
+      - name: Verify the tagged commit is on main
+        run: |
+          git fetch origin main --depth=0
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || { echo "::error::Tag $GITHUB_REF_NAME ($GITHUB_SHA) is not an ancestor of origin/main; refusing to publish."; exit 1; }
       - uses: actions/setup-dotnet@v4
         with: { dotnet-version: 10.0.x }
       # version comes from the tag: v0.1.0-alpha.1 → 0.1.0-alpha.1

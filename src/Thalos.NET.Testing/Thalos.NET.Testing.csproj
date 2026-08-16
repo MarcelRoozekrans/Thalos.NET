@@ -2,7 +2,7 @@
   <PropertyGroup>
     <RootNamespace>Thalos.Testing</RootNamespace>
     <PackageId>Thalos.NET.Testing</PackageId>
-    <Description>Test doubles and contract tests for Thalos.NET: ScriptedChatClient, IAgentSessionStore contract tests, in-memory notification collector.</Description>
+    <Description>Test doubles and contract tests for Thalos.NET: ScriptedChatClient (scripted IChatClient), RecordingNotificationPublisher (in-memory IAgentNotificationPublisher), reusable IAgentSessionStore contract tests (xUnit + AwesomeAssertions).</Description>
     <PackageTags>agents;testing;zeroalloc</PackageTags>
     <!-- xunit.core.props sets IsTestProject=true; this is a library, not a test host -->
     <IsTestProject>false</IsTestProject>

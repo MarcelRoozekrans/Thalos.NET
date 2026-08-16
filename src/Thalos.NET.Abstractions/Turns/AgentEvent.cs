@@ -65,7 +65,7 @@ public sealed record ToolCallStartedEvent(SessionId SessionId, TurnId TurnId, To
 public sealed record ToolCallFinishedEvent(SessionId SessionId, TurnId TurnId, ToolCallId CallId, string ToolName, bool Succeeded, string? ResultPreview, TimeSpan Elapsed) : AgentEvent(SessionId, TurnId)
 { public override string Kind => AgentEventKinds.ToolResult; }
 
-/// <summary>Token usage for one model round-trip.</summary>
+/// <summary>Token usage of the turn: one summed usage event per turn (all model round-trips), emitted just before <see cref="TurnCompletedEvent"/>.</summary>
 public sealed record UsageEvent(SessionId SessionId, TurnId TurnId, TurnUsage Usage) : AgentEvent(SessionId, TurnId)
 { public override string Kind => AgentEventKinds.Usage; }
 

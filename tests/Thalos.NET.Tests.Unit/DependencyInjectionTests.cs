@@ -72,8 +72,8 @@ public sealed class DependencyInjectionTests
         sp.GetRequiredService<IToolAuthorizer>().Should().BeOfType<DefaultToolAuthorizer>();
         sp.GetRequiredService<AgentEventHub>().Should().NotBeNull();
 
-        using var sp2 = Build(t => t.Services.AddSingleton<IAgentNotificationPublisher, RecordingPublisher>());
-        sp2.GetRequiredService<IAgentNotificationPublisher>().Should().BeOfType<RecordingPublisher>();
+        using var sp2 = Build(t => t.Services.AddSingleton<IAgentNotificationPublisher, RecordingNotificationPublisher>());
+        sp2.GetRequiredService<IAgentNotificationPublisher>().Should().BeOfType<RecordingNotificationPublisher>();
     }
 
     [Fact]

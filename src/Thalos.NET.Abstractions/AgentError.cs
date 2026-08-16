@@ -9,7 +9,10 @@ public enum AgentErrorCode
     /// <summary>No agent definition is registered under the given id. HTTP 404.</summary>
     AgentNotFound,
 
-    /// <summary>The session id is unknown to the store. HTTP 404.</summary>
+    /// <summary>
+    /// The session id is unknown to the store — or exists but belongs to another owner and the caller lacks the admin role
+    /// (the runtime deliberately answers 404, not 403, so session ids cannot be probed). HTTP 404.
+    /// </summary>
     SessionNotFound,
 
     /// <summary>The session is already running a turn; retry after it completes. HTTP 409.</summary>
@@ -18,13 +21,19 @@ public enum AgentErrorCode
     /// <summary>The session was closed and accepts no more turns. HTTP 409.</summary>
     SessionClosed,
 
-    /// <summary>The caller may not access this agent or session. HTTP 403.</summary>
+    /// <summary>
+    /// The caller may not perform this operation. HTTP 403. The 0.1 runtime does not produce it: a foreign session answers
+    /// <see cref="SessionNotFound"/> (404) instead; the code is available for host/channel-level checks.
+    /// </summary>
     Unauthorized,
 
-    /// <summary>The tool authorizer refused a tool call the model requested; <see cref="AgentError.Detail"/> carries the reason. HTTP 422.</summary>
+    /// <summary>
+    /// Reserved (not produced in 0.1): the tool authorizer refused a tool call. In 0.1 a denial is returned to the model as a
+    /// <c>"Tool call denied: …"</c> tool result and surfaces as <c>ToolCallFinishedEvent</c> / <c>ToolCallDeniedNotification</c>; the turn continues. HTTP 422.
+    /// </summary>
     ToolDenied,
 
-    /// <summary>The model requested a tool that is not in the agent's tool set. HTTP 404.</summary>
+    /// <summary>Reserved (not produced in 0.1): the model requested a tool outside the agent's tool set; MAF returns an error result to the model instead. HTTP 404.</summary>
     ToolNotFound,
 
     /// <summary>A safety layer (e.g. AI.Sentinel) quarantined the turn. HTTP 422.</summary>
@@ -52,17 +61,40 @@ public enum AgentErrorCode
 /// </param>
 public readonly record struct AgentError(AgentErrorCode Code, string Message, string? Detail = null)
 {
+    /// <summary><see cref="AgentErrorCode.Validation"/> with the given message (e.g. <c>"Text is required."</c>).</summary>
     public static AgentError Validation(string message) => new(AgentErrorCode.Validation, message);
+
+    /// <summary><see cref="AgentErrorCode.AgentNotFound"/> for <paramref name="id"/>.</summary>
     public static AgentError AgentNotFound(AgentId id) => new(AgentErrorCode.AgentNotFound, $"Agent '{id}' is not registered.");
+
+    /// <summary><see cref="AgentErrorCode.SessionNotFound"/> for <paramref name="id"/> (also used for sessions the caller may not see).</summary>
     public static AgentError SessionNotFound(SessionId id) => new(AgentErrorCode.SessionNotFound, $"Session '{id}' was not found.");
+
+    /// <summary><see cref="AgentErrorCode.SessionBusy"/>: <paramref name="id"/> is already running a turn.</summary>
     public static AgentError SessionBusy(SessionId id) => new(AgentErrorCode.SessionBusy, $"Session '{id}' is already running a turn.");
+
+    /// <summary><see cref="AgentErrorCode.SessionClosed"/>: <paramref name="id"/> accepts no more turns.</summary>
     public static AgentError SessionClosed(SessionId id) => new(AgentErrorCode.SessionClosed, $"Session '{id}' is closed.");
+
+    /// <summary><see cref="AgentErrorCode.Unauthorized"/> with <paramref name="reason"/> as the message.</summary>
     public static AgentError Unauthorized(string reason) => new(AgentErrorCode.Unauthorized, reason);
+
+    /// <summary>Reserved: <see cref="AgentErrorCode.ToolDenied"/> for <paramref name="toolName"/>, <paramref name="reason"/> in <see cref="Detail"/>.</summary>
     public static AgentError ToolDenied(string toolName, string reason) => new(AgentErrorCode.ToolDenied, $"Tool '{toolName}' was denied.", reason);
+
+    /// <summary>Reserved: <see cref="AgentErrorCode.ToolNotFound"/> for <paramref name="toolName"/>.</summary>
     public static AgentError ToolNotFound(string toolName) => new(AgentErrorCode.ToolNotFound, $"Tool '{toolName}' is not available.");
+
+    /// <summary><see cref="AgentErrorCode.Quarantined"/>; <paramref name="detail"/> is <c>"&lt;Severity&gt;: &lt;DetectorId&gt;"</c> when raised by Thalos.NET.Sentinel.</summary>
     public static AgentError Quarantined(string message, string? detail = null) => new(AgentErrorCode.Quarantined, message, detail);
+
+    /// <summary><see cref="AgentErrorCode.ProviderError"/>; <paramref name="detail"/> is a diagnostic such as the exception type name or the failing tool source.</summary>
     public static AgentError ProviderError(string message, string? detail = null) => new(AgentErrorCode.ProviderError, message, detail);
+
+    /// <summary><see cref="AgentErrorCode.StoreError"/>; <paramref name="detail"/> is a diagnostic such as the exception type name.</summary>
     public static AgentError StoreError(string message, string? detail = null) => new(AgentErrorCode.StoreError, message, detail);
+
+    /// <summary><see cref="AgentErrorCode.Cancelled"/>: the caller's token was cancelled after the session was claimed.</summary>
     public static AgentError Cancelled() => new(AgentErrorCode.Cancelled, "The operation was cancelled.");
 
     /// <summary><c>"{Code}: {Message}"</c>, with <c>" — {Detail}"</c> appended when <see cref="Detail"/> is set.</summary>

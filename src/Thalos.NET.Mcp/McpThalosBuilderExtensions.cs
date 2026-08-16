@@ -1,5 +1,6 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace Thalos.Mcp;
 
@@ -14,7 +15,8 @@ public static class McpThalosBuilderExtensions
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ToolSourceName.ThrowIfInvalid(name, nameof(name));
         ArgumentNullException.ThrowIfNull(definition);
-        return builder.AddToolSource(sp => new McpToolSource(name, definition, sp.GetRequiredService<ILoggerFactory>()));
+        // works without AddLogging(): the MCP SDK and the source itself only need a factory, not a configured one
+        return builder.AddToolSource(sp => new McpToolSource(name, definition, sp.GetService<ILoggerFactory>() ?? NullLoggerFactory.Instance));
     }
 
     /// <summary>Adds every server in <paramref name="servers"/> (key = source name).</summary>
