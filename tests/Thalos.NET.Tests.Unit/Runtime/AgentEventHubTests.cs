@@ -58,6 +58,22 @@ public sealed class AgentEventHubTests
     }
 
     [Fact]
+    public async Task Subscriber_cancelled_by_its_own_token_is_isolated_like_any_other_failure()
+    {
+        var hub = new AgentEventHub();
+        var seen = new List<string>();
+        using var own = new CancellationTokenSource();
+        await own.CancelAsync();
+        using var _ = hub.Subscribe((_, _) => throw new OperationCanceledException(own.Token));
+        using var __ = hub.Subscribe((e, _) => { seen.Add(((TextDeltaEvent)e).Text); return default; });
+
+        var publish = async () => await hub.PublishAsync(Delta("a"), CancellationToken.None);
+
+        await publish.Should().NotThrowAsync();
+        seen.Should().Equal("a");
+    }
+
+    [Fact]
     public async Task Unsubscribing_a_throwing_subscriber_removes_it()
     {
         var hub = new AgentEventHub();

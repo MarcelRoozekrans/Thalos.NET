@@ -27,8 +27,10 @@ public sealed class SessionStoreChatHistoryProvider(IAgentSessionStore store) : 
     /// <summary>State-bag key under which the bound Thalos <see cref="SessionId"/> (ULID string) is stored in a MAF <see cref="AgentSession"/>.</summary>
     public const string StateKey = "thalos.session_id";
 
+    private static readonly string[] Keys = [StateKey];
+
     /// <inheritdoc />
-    public override IReadOnlyList<string> StateKeys => [StateKey];
+    public override IReadOnlyList<string> StateKeys => Keys;
 
     /// <summary>Creates a fresh MAF session for <paramref name="agent"/> bound to Thalos session <paramref name="sessionId"/>.</summary>
     [SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "Instance API by design: binding a MAF session to a Thalos session is a capability of the provider that owns the state key.")]

@@ -106,7 +106,21 @@ public sealed class AgentFactoryTests
     }
 
     [Fact]
-    public async Task Different_definition_instance_for_a_cached_id_rebuilds_and_disposes_the_old_pipeline()
+    public async Task Value_equal_definition_instance_reuses_the_cached_agent()
+    {
+        var h = Build();
+        var def = Def();
+        var a = (await h.Factory.GetOrCreateAsync(def, default)).Value;
+
+        var b = (await h.Factory.GetOrCreateAsync(def with { }, default)).Value;
+
+        b.Should().BeSameAs(a);
+        h.Tracked.Disposed.Should().BeFalse();
+        h.Provider.Received(1).CreateChatClient(Arg.Any<AgentDefinition>());
+    }
+
+    [Fact]
+    public async Task Changed_definition_for_a_cached_id_rebuilds_and_disposes_the_old_pipeline()
     {
         var h = Build();
         var def = Def();
@@ -117,6 +131,24 @@ public sealed class AgentFactoryTests
         b.Should().NotBeSameAs(a);
         h.Tracked.Disposed.Should().BeTrue();
         h.Provider.Received(2).CreateChatClient(Arg.Any<AgentDefinition>());
+    }
+
+    [Fact]
+    public async Task Throwing_catalog_yields_ProviderError_and_the_next_call_retries()
+    {
+        var h = Build();
+        var calls = 0;
+        h.Catalog.ResolveAsync(Arg.Any<AgentDefinition>(), Arg.Any<CancellationToken>())
+            .Returns(_ => ++calls == 1
+                ? throw new InvalidOperationException("catalog exploded")
+                : Result<IReadOnlyList<AITool>, AgentError>.Success([]));
+        var def = Def();
+
+        var first = await h.Factory.GetOrCreateAsync(def, default);
+        first.Error.Code.Should().Be(AgentErrorCode.ProviderError);
+        first.Error.Detail.Should().Be("catalog exploded");
+
+        (await h.Factory.GetOrCreateAsync(def, default)).IsSuccess.Should().BeTrue();
     }
 
     [Fact]

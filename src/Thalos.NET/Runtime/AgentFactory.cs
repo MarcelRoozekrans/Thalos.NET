@@ -24,6 +24,15 @@ namespace Thalos.Runtime;
 /// Builds are single-flight per <see cref="AgentId"/>: N concurrent first calls result in one
 /// <see cref="IChatClientProvider.CreateChatClient"/> call and reference-equal agents. Failed builds are not cached.
 /// </para>
+/// <para>
+/// A cached agent is reused while the supplied <see cref="AgentDefinition"/> is equal by value (id, name, description,
+/// instructions, model, max output tokens, tool globs); a changed definition rebuilds and disposes the old pipeline.
+/// </para>
+/// <para>
+/// <see cref="Invalidate"/> (and replacement by a changed definition) disposes the pipeline immediately and is <em>not</em>
+/// turn-safe: turns in flight on that agent may fail. Drive invalidation from configuration reload while the agent is
+/// quiescent; ref-counted leases are a follow-up.
+/// </para>
 /// </remarks>
 public sealed partial class AgentFactory : IAgentFactory, IDisposable
 {
@@ -57,6 +66,7 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
     /// <inheritdoc />
     public async ValueTask<Result<AIAgent, AgentError>> GetOrCreateAsync(AgentDefinition definition, CancellationToken ct)
     {
+        var retriedStaleFailure = false;
         while (true)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
@@ -64,25 +74,38 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
             var lazy = _cache.GetOrAdd(definition.Id, static (_, state) =>
                 new Lazy<Task<Result<Entry, AgentError>>>(() => state.self.BuildAsync(state.definition), LazyThreadSafetyMode.ExecutionAndPublication),
                 (self: this, definition));
+            var wasCompleted = lazy.IsValueCreated && lazy.Value.IsCompleted;
 
-            // The shared build is not cancelled by any single caller; each caller waits with its own token.
-            var built = await lazy.Value.WaitAsync(ct).ConfigureAwait(false);
+            var built = await AwaitBuildAsync(definition.Id, lazy, ct).ConfigureAwait(false);
             if (built.IsFailure)
             {
                 _cache.TryRemove(KeyValuePair.Create(definition.Id, lazy)); // don't cache failures; next call retries
+                if (wasCompleted && !retriedStaleFailure)
+                {
+                    retriedStaleFailure = true; // a failure left behind by an earlier caller — retry once rather than report it
+                    continue;
+                }
+
                 return Result<AIAgent, AgentError>.Failure(built.Error);
             }
 
             var entry = built.Value;
+            if (_disposed)
+            {
+                _cache.TryRemove(KeyValuePair.Create(definition.Id, lazy));
+                entry.Dispose(_logger); // completed after Dispose() swept the cache
+                ObjectDisposedException.ThrowIf(_disposed, this);
+            }
+
             if (!_cache.TryGetValue(definition.Id, out var current) || !ReferenceEquals(current, lazy))
             {
                 entry.Dispose(_logger); // invalidated while building — rebuild
                 continue;
             }
 
-            if (!ReferenceEquals(entry.Definition, definition))
+            if (!SameDefinition(entry.Definition, definition))
             {
-                // A different definition instance for a cached id: treat as invalidated and rebuild with the new one.
+                // The definition changed for a cached id: treat as invalidated and rebuild with the new one.
                 if (_cache.TryRemove(KeyValuePair.Create(definition.Id, lazy)))
                 {
                     entry.Dispose(_logger);
@@ -96,6 +119,10 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Not turn-safe: the pipeline is disposed immediately, so turns in flight on that agent may fail. Drive invalidation
+    /// from configuration reload while the agent is quiescent; ref-counted leases are a follow-up.
+    /// </remarks>
     public void Invalidate(AgentId agentId)
     {
         if (_cache.TryRemove(agentId, out var lazy))
@@ -108,24 +135,49 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
     public void Dispose()
     {
         _disposed = true;
-        var ids = _cache.Keys.ToArray(); // snapshot; ConcurrentDictionary.Keys is already a copy but be explicit
-        foreach (var id in ids)
+        while (!_cache.IsEmpty)
         {
-            Invalidate(id);
+            foreach (var id in _cache.Keys)
+            {
+                Invalidate(id);
+            }
         }
     }
 
+    /// <summary>Waits for a shared build with the caller's own token (the build itself is not cancelled by any single caller); a build that threw is evicted so it doesn't poison the cache.</summary>
+    private async Task<Result<Entry, AgentError>> AwaitBuildAsync(AgentId id, Lazy<Task<Result<Entry, AgentError>>> lazy, CancellationToken ct)
+    {
+        try
+        {
+            return await lazy.Value.WaitAsync(ct).ConfigureAwait(false);
+        }
+        catch (Exception) when (lazy.Value.IsCompleted && !lazy.Value.IsCompletedSuccessfully)
+        {
+            _cache.TryRemove(KeyValuePair.Create(id, lazy));
+            throw;
+        }
+    }
+
+    private static bool SameDefinition(AgentDefinition a, AgentDefinition b) =>
+        a.Id == b.Id
+        && string.Equals(a.Name, b.Name, StringComparison.Ordinal)
+        && string.Equals(a.Description, b.Description, StringComparison.Ordinal)
+        && string.Equals(a.Instructions, b.Instructions, StringComparison.Ordinal)
+        && string.Equals(a.Model, b.Model, StringComparison.Ordinal)
+        && a.MaxOutputTokens == b.MaxOutputTokens
+        && a.Tools.SequenceEqual(b.Tools, StringComparer.Ordinal);
+
     private async Task<Result<Entry, AgentError>> BuildAsync(AgentDefinition definition)
     {
-        var tools = await _toolCatalog.ResolveAsync(definition, CancellationToken.None).ConfigureAwait(false);
-        if (tools.IsFailure)
-        {
-            return Result<Entry, AgentError>.Failure(tools.Error);
-        }
-
         IChatClient? client = null;
         try
         {
+            var tools = await _toolCatalog.ResolveAsync(definition, CancellationToken.None).ConfigureAwait(false);
+            if (tools.IsFailure)
+            {
+                return Result<Entry, AgentError>.Failure(tools.Error);
+            }
+
             client = _provider.CreateChatClient(definition);
             foreach (var decorator in _decorators)
             {
@@ -156,7 +208,7 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
                 DisposeClient(client, definition.Name, _logger);
             }
 
-            return Result<Entry, AgentError>.Failure(AgentError.ProviderError($"Failed to build chat client for agent '{definition.Name}'.", ex.Message));
+            return Result<Entry, AgentError>.Failure(AgentError.ProviderError($"Failed to build agent '{definition.Name}'.", ex.Message));
         }
     }
 

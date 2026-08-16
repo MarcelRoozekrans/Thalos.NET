@@ -7,6 +7,8 @@ namespace Thalos.Runtime;
 /// <summary>
 /// In-process fan-out of <see cref="AgentEvent"/>s (channel adapters subscribe here). Handlers run in parallel and are
 /// isolated from each other: a handler that throws is logged and does not affect other subscribers or the publisher.
+/// Only the publisher's own cancellation (the token passed to <see cref="PublishAsync"/>) propagates; a subscriber's
+/// foreign <see cref="OperationCanceledException"/> is treated like any other failure.
 /// Thread-safe without locks — <see cref="AsyncEventHandler{TArgs}"/> registers with CAS over immutable arrays and
 /// invokes over a snapshot.
 /// </summary>
@@ -32,7 +34,7 @@ public sealed partial class AgentEventHub(ILogger<AgentEventHub>? logger = null)
             {
                 await handler(e, ct).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 LogSubscriberFailed(_logger, e.Kind, ex.Message, ex);
             }
