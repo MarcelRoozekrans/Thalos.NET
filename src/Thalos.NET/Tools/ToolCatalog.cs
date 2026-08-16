@@ -8,7 +8,7 @@ namespace Thalos.Tools;
 
 /// <summary>Aggregates all <see cref="IToolSource"/>s, qualifies names, filters by the agent's allow-list, wraps for authorization.</summary>
 /// <remarks>
-/// A source whose <see cref="IToolSource.Name"/> is not <c>^[a-zA-Z0-9_-]+$</c> or contains <c>__</c> is skipped, as is a
+/// A source whose <see cref="IToolSource.Name"/> fails <see cref="ToolSourceName.IsValid"/> (<c>^[a-zA-Z0-9_-]+$</c>, no <c>__</c>) is skipped, as is a
 /// source whose <see cref="IToolSource.GetToolsAsync"/> fails; non-<see cref="AIFunction"/> tools, duplicate qualified names
 /// (first wins) and qualified names longer than 64 characters (provider limit) are dropped. All of these are logged, none is fatal.
 /// </remarks>
@@ -51,7 +51,7 @@ public sealed partial class ToolCatalog : IToolCatalog
 
         foreach (var source in _sources)
         {
-            if (!IsValidSourceName(source.Name))
+            if (!ToolSourceName.IsValid(source.Name))
             {
                 LogInvalidSourceName(_logger, source.Name);
                 continue;
@@ -110,34 +110,6 @@ public sealed partial class ToolCatalog : IToolCatalog
         }
 
         return false;
-    }
-
-    // ^[a-zA-Z0-9_-]+$ without "__" (the source/tool separator) — hand-rolled to avoid Regex on the resolve path.
-    private static bool IsValidSourceName(string? name)
-    {
-        if (string.IsNullOrEmpty(name))
-        {
-            return false;
-        }
-
-        var previousUnderscore = false;
-        foreach (var c in name)
-        {
-            var underscore = c == '_';
-            if (underscore && previousUnderscore)
-            {
-                return false;
-            }
-
-            if (!underscore && c != '-' && !char.IsAsciiLetterOrDigit(c))
-            {
-                return false;
-            }
-
-            previousUnderscore = underscore;
-        }
-
-        return true;
     }
 
     [LoggerMessage(EventId = 100, Level = LogLevel.Warning, Message = "Tool source '{Source}' failed and was skipped: {Error}")]

@@ -14,4 +14,7 @@ public static class EchoTools
 
     [McpServerTool(Name = "fail"), Description("Always fails")]
     public static string Fail() => throw new InvalidOperationException("boom");
+
+    [McpServerTool(Name = "env"), Description("Returns the value of an environment variable of the server process")]
+    public static string Env([Description("Variable name")] string name) => Environment.GetEnvironmentVariable(name) ?? "<unset>";
 }

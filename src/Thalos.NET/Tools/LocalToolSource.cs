@@ -25,6 +25,7 @@ public sealed class LocalToolSource : IToolSource
     public LocalToolSource(string name, IServiceProvider services, IReadOnlyList<Type> toolTypes)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ToolSourceName.ThrowIfInvalid(name, nameof(name));
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(toolTypes);
         foreach (var type in toolTypes)

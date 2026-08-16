@@ -3,7 +3,11 @@ using System.Text.Json.Serialization;
 
 namespace Thalos.Mcp;
 
-/// <summary>Reads Claude Code-compatible <c>.mcp.json</c> (<c>{ "mcpServers": { name: {...} } }</c>).</summary>
+/// <summary>
+/// Reads Claude Code-compatible <c>.mcp.json</c> (<c>{ "mcpServers": { name: {...} } }</c>). Property names are case-insensitive;
+/// comments and trailing commas are allowed. Beyond the Claude Code keys (<c>type, command, args, env, cwd, url, headers</c>) the
+/// Thalos-specific <c>timeout</c> and <c>shutdownTimeout</c> are accepted as <c>hh:mm:ss</c> strings.
+/// </summary>
 public static class McpConfigFile
 {
     private static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web) { ReadCommentHandling = JsonCommentHandling.Skip, AllowTrailingCommas = true };

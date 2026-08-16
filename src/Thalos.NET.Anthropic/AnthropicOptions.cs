@@ -9,7 +9,10 @@ public sealed class AnthropicOptions
     /// <summary>Falls back to the ANTHROPIC_API_KEY environment variable when empty.</summary>
     public string? ApiKey { get; set; }
 
-    /// <summary>Model used when <see cref="AgentDefinition.Model"/> is null.</summary>
+    /// <summary>
+    /// Model used when <see cref="AgentDefinition.Model"/> is null. The built-in default is a snapshot of the model line current
+    /// when this package was written; hosts should set the model id they actually want (Anthropic retires and renames models).
+    /// </summary>
     public string DefaultModel { get; set; } = "claude-sonnet-4-5";
 
     /// <summary>Max output tokens used when <see cref="AgentDefinition.MaxOutputTokens"/> is null.</summary>

@@ -6,48 +6,86 @@ using ZeroAlloc.Results;
 namespace Thalos.Mcp;
 
 /// <summary>
-/// One MCP server as a tool source. Connects lazily, caches the client + tool list, owns the stdio process,
-/// reconnects on the next call after a failure. Register as a singleton; disposed with the host.
+/// One MCP server as a tool source. Connects lazily on the first <see cref="GetToolsAsync"/>, caches the client + tool list,
+/// owns the stdio process, and retries the connection on the next call after a failure. Register as a singleton; disposed with the host.
 /// </summary>
-public sealed partial class McpToolSource(string name, McpServerDefinition definition, ILoggerFactory loggerFactory) : IToolSource, IAsyncDisposable
+/// <remarks>
+/// The tool list is cached for the lifetime of the source (no <c>tools/list_changed</c> handling). A server that dies mid-life is
+/// <em>not</em> auto-reconnected in 0.1: cached <see cref="AIFunction"/>s keep pointing at the dead session and their invocations
+/// fail; restart the host (or replace the source) to reconnect.
+/// </remarks>
+public sealed partial class McpToolSource : IToolSource, IAsyncDisposable
 {
+    private readonly McpServerDefinition _definition;
+    private readonly ILoggerFactory _loggerFactory;
+    private readonly ILogger<McpToolSource> _logger;
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private readonly ILogger<McpToolSource> _logger = loggerFactory.CreateLogger<McpToolSource>();
+    private readonly CancellationTokenSource _disposeCts = new();
+    private readonly string _type;
     private McpClient? _client;
     private AITool[]? _tools;
-    private readonly string _type = Validate(definition);
+    private bool _disposed;
+
+    /// <summary>Creates a source named <paramref name="name"/> for <paramref name="definition"/>.</summary>
+    /// <exception cref="ArgumentException"><paramref name="name"/> violates <see cref="ToolSourceName"/> or <paramref name="definition"/> is incomplete/unsupported.</exception>
+    public McpToolSource(string name, McpServerDefinition definition, ILoggerFactory loggerFactory)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+        ToolSourceName.ThrowIfInvalid(name, nameof(name));
+        ArgumentNullException.ThrowIfNull(definition);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
+
+        Name = name;
+        _definition = definition;
+        _loggerFactory = loggerFactory;
+        _logger = loggerFactory.CreateLogger<McpToolSource>();
+        _type = Validate(definition);
+    }
 
     /// <inheritdoc />
-    public string Name { get; } = name;
+    public string Name { get; }
 
     /// <inheritdoc />
     /// <remarks>Connection/transport failures are returned as <see cref="AgentErrorCode.ProviderError"/>; the next call retries.</remarks>
+    /// <exception cref="ObjectDisposedException">The source has been disposed.</exception>
     public async ValueTask<Result<IReadOnlyList<AITool>, AgentError>> GetToolsAsync(CancellationToken ct)
     {
-        if (_tools is not null)
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (Volatile.Read(ref _tools) is { } cached)
         {
-            return Result<IReadOnlyList<AITool>, AgentError>.Success(_tools);
+            return Result<IReadOnlyList<AITool>, AgentError>.Success(cached);
         }
 
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             if (_tools is not null)
             {
                 return Result<IReadOnlyList<AITool>, AgentError>.Success(_tools);
             }
 
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(definition.Timeout);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposeCts.Token);
+            timeout.CancelAfter(_definition.Timeout);
 
             LogConnecting(_logger, Name, _type);
-            var client = await McpClient.CreateAsync(CreateTransport(), clientOptions: null, loggerFactory, timeout.Token).ConfigureAwait(false);
-            var tools = await client.ListToolsAsync(cancellationToken: timeout.Token).ConfigureAwait(false);
+            var client = await McpClient.CreateAsync(CreateTransport(), clientOptions: null, _loggerFactory, timeout.Token).ConfigureAwait(false);
+            IList<McpClientTool> tools;
+            try
+            {
+                tools = await client.ListToolsAsync(cancellationToken: timeout.Token).ConfigureAwait(false);
+            }
+            catch
+            {
+                await client.DisposeAsync().ConfigureAwait(false);
+                throw;
+            }
 
             _client = client;
-            _tools = tools.Cast<AITool>().ToArray();
-            LogConnected(_logger, Name, _tools.Length);
-            return Result<IReadOnlyList<AITool>, AgentError>.Success(_tools);
+            var snapshot = tools.Cast<AITool>().ToArray();
+            Volatile.Write(ref _tools, snapshot);
+            LogConnected(_logger, Name, snapshot.Length);
+            return Result<IReadOnlyList<AITool>, AgentError>.Success(snapshot);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -69,23 +107,24 @@ public sealed partial class McpToolSource(string name, McpServerDefinition defin
         "stdio" => new StdioClientTransport(new StdioClientTransportOptions
         {
             Name = Name,
-            Command = definition.Command!,
-            Arguments = definition.Args?.ToList(),
-            EnvironmentVariables = definition.Env?.ToDictionary(kv => kv.Key, kv => (string?)kv.Value, StringComparer.Ordinal),
-            WorkingDirectory = definition.Cwd,
-        }, loggerFactory),
+            Command = _definition.Command!,
+            Arguments = _definition.Args?.ToList(),
+            EnvironmentVariables = _definition.Env?.ToDictionary(kv => kv.Key, kv => (string?)kv.Value, StringComparer.Ordinal),
+            WorkingDirectory = _definition.Cwd,
+            ShutdownTimeout = _definition.ShutdownTimeout,
+        }, _loggerFactory),
         _ => new HttpClientTransport(new HttpClientTransportOptions
         {
             Name = Name,
-            Endpoint = new Uri(definition.Url!),
-            AdditionalHeaders = definition.Headers?.ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal),
-            ConnectionTimeout = definition.Timeout,
-        }, loggerFactory),
+            Endpoint = new Uri(_definition.Url!),
+            TransportMode = string.Equals(_type, "sse", StringComparison.Ordinal) ? HttpTransportMode.Sse : HttpTransportMode.StreamableHttp,
+            AdditionalHeaders = _definition.Headers?.ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.Ordinal),
+            ConnectionTimeout = _definition.Timeout,
+        }, _loggerFactory),
     };
 
     private static string Validate(McpServerDefinition definition)
     {
-        ArgumentNullException.ThrowIfNull(definition);
         var type = definition.EffectiveType;
         return type switch
         {
@@ -97,22 +136,48 @@ public sealed partial class McpToolSource(string name, McpServerDefinition defin
         };
     }
 
-    /// <summary>Disposes the MCP client (and, for stdio, shuts the server process down).</summary>
+    /// <summary>
+    /// Disposes the MCP client (and, for stdio, shuts the server process down — waiting up to <see cref="McpServerDefinition.ShutdownTimeout"/>).
+    /// Aborts an in-flight <see cref="GetToolsAsync"/> connection attempt (it returns <see cref="AgentErrorCode.ProviderError"/>) and waits
+    /// for it to finish first; later calls throw <see cref="ObjectDisposedException"/>.
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
-        if (_client is { } c)
+        if (_disposed)
         {
-            try
+            return;
+        }
+
+        await _disposeCts.CancelAsync().ConfigureAwait(false);
+        await _gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (_disposed)
             {
-                await c.DisposeAsync().ConfigureAwait(false);
+                return;
             }
-            catch (Exception ex)
+
+            _disposed = true;
+            if (_client is { } c)
             {
-                LogDisposeFailed(_logger, ex, Name);
+                _client = null;
+                try
+                {
+                    await c.DisposeAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    LogDisposeFailed(_logger, ex, Name);
+                }
             }
+        }
+        finally
+        {
+            _gate.Release();
         }
 
         _gate.Dispose();
+        _disposeCts.Dispose();
     }
 
     [LoggerMessage(EventId = 300, Level = LogLevel.Information, Message = "Connecting to MCP server '{Server}' ({Type})")]

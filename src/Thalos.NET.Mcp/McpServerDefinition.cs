@@ -27,6 +27,13 @@ public sealed class McpServerDefinition
     /// <summary>Connect + list-tools timeout. Default 30 seconds.</summary>
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>
+    /// stdio only: how long to wait for the child process to exit after its stdin is closed on dispose before it is killed.
+    /// Default 5 seconds (the SDK default). In <c>.mcp.json</c> this is the <c>shutdownTimeout</c> property as a
+    /// <c>hh:mm:ss</c> string (e.g. <c>"00:00:01"</c>).
+    /// </summary>
+    public TimeSpan ShutdownTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
     /// <summary><see cref="Type"/> lower-cased, or the default inferred from <see cref="Command"/>.</summary>
     public string EffectiveType => (Type ?? (Command is not null ? "stdio" : "http")).ToLowerInvariant();
 }

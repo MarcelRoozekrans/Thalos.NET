@@ -7,6 +7,8 @@ namespace Thalos.Tests.Unit.Anthropic;
 
 public sealed class AnthropicProviderTests
 {
+    private static AgentDefinition Agent(string? model = null) => new() { Id = AgentId.New(), Name = "a", Instructions = "i", Model = model };
+
     [Fact]
     public void UseAnthropic_registers_provider_with_defaults()
     {
@@ -23,8 +25,8 @@ public sealed class AnthropicProviderTests
     [Fact]
     public void CreateChatClient_returns_a_client_and_honours_agent_model()
     {
-        var provider = new AnthropicChatClientProvider(Options.Create(new AnthropicOptions { ApiKey = "sk-test", DefaultModel = "d", DefaultMaxOutputTokens = 1024 }));
-        var client = provider.CreateChatClient(new AgentDefinition { Id = AgentId.New(), Name = "a", Instructions = "i", Model = "claude-opus-4-1" });
+        using var provider = new AnthropicChatClientProvider(Options.Create(new AnthropicOptions { ApiKey = "sk-test", DefaultModel = "d", DefaultMaxOutputTokens = 1024 }));
+        var client = provider.CreateChatClient(Agent("claude-opus-4-1"));
         client.Should().NotBeNull();
         var meta = client.GetService<ChatClientMetadata>();
         meta!.DefaultModelId.Should().Be("claude-opus-4-1");
@@ -33,8 +35,37 @@ public sealed class AnthropicProviderTests
     [Fact]
     public void Missing_api_key_throws_on_first_use()
     {
-        var provider = new AnthropicChatClientProvider(Options.Create(new AnthropicOptions { ApiKey = "" }));
-        var act = () => provider.CreateChatClient(new AgentDefinition { Id = AgentId.New(), Name = "a", Instructions = "i" });
+        using var provider = new AnthropicChatClientProvider(Options.Create(new AnthropicOptions { ApiKey = "" }), _ => null);
+        var act = () => provider.CreateChatClient(Agent());
         act.Should().Throw<InvalidOperationException>().WithMessage("*ANTHROPIC_API_KEY*");
+        provider.IsClientCreated.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Falls_back_to_environment_variable_when_ApiKey_is_empty()
+    {
+        string? requested = null;
+        using var provider = new AnthropicChatClientProvider(Options.Create(new AnthropicOptions { ApiKey = " " }), name => { requested = name; return "sk-env"; });
+        var act = () => provider.CreateChatClient(Agent());
+        act.Should().NotThrow();
+        requested.Should().Be("ANTHROPIC_API_KEY");
+    }
+
+    [Fact]
+    public void Shares_one_transport_across_agents_and_disposes_it()
+    {
+        var provider = new AnthropicChatClientProvider(Options.Create(new AnthropicOptions { ApiKey = "sk-test" }));
+        provider.IsClientCreated.Should().BeFalse("the SDK client is created lazily");
+
+        using var first = provider.CreateChatClient(Agent("m1"));
+        using var second = provider.CreateChatClient(Agent("m2"));
+
+        provider.IsClientCreated.Should().BeTrue();
+        first.Should().NotBeSameAs(second);
+        first.GetService<ChatClientMetadata>()!.DefaultModelId.Should().Be("m1");
+        second.GetService<ChatClientMetadata>()!.DefaultModelId.Should().Be("m2");
+
+        var dispose = () => provider.Dispose();
+        dispose.Should().NotThrow();
     }
 }
