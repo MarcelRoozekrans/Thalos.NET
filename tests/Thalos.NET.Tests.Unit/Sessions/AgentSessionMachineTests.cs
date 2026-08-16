@@ -35,8 +35,13 @@ public sealed class AgentSessionMachineTests
     [InlineData(SessionState.AwaitingApproval, SessionTrigger.Complete, false, SessionState.AwaitingApproval)]
     [InlineData(SessionState.AwaitingApproval, SessionTrigger.Fail, false, SessionState.AwaitingApproval)]
     [InlineData(SessionState.AwaitingApproval, SessionTrigger.AwaitApproval, false, SessionState.AwaitingApproval)]
-    // from Closed (terminal)
+    // from Closed (terminal) — every trigger is rejected
     [InlineData(SessionState.Closed, SessionTrigger.Start, false, SessionState.Closed)]
+    [InlineData(SessionState.Closed, SessionTrigger.Complete, false, SessionState.Closed)]
+    [InlineData(SessionState.Closed, SessionTrigger.Fail, false, SessionState.Closed)]
+    [InlineData(SessionState.Closed, SessionTrigger.AwaitApproval, false, SessionState.Closed)]
+    [InlineData(SessionState.Closed, SessionTrigger.Approve, false, SessionState.Closed)]
+    [InlineData(SessionState.Closed, SessionTrigger.Deny, false, SessionState.Closed)]
     [InlineData(SessionState.Closed, SessionTrigger.Close, false, SessionState.Closed)]
     public void Transitions(SessionState from, SessionTrigger trigger, bool accepted, SessionState expected)
     {

@@ -29,6 +29,19 @@ public sealed class TurnScopeTests
     }
 
     [Fact]
+    public void Nested_scopes_are_LIFO_and_disposing_the_inner_restores_the_outer()
+    {
+        using var outer = TurnScope.Begin(SessionId.New(), TurnId.New(), AnonymousSecurityContext.Instance);
+
+        using (var inner = TurnScope.Begin(SessionId.New(), TurnId.New(), AnonymousSecurityContext.Instance))
+        {
+            TurnScope.Current.Should().BeSameAs(inner);
+        }
+
+        TurnScope.Current.Should().BeSameAs(outer);
+    }
+
+    [Fact]
     public async Task Tool_events_are_queued_and_summaries_collected()
     {
         using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), AnonymousSecurityContext.Instance);
@@ -37,8 +50,47 @@ public sealed class TurnScopeTests
         await scope.PublishAsync(new ToolCallStartedEvent(scope.SessionId, scope.TurnId, call, "x__y", "{}"), CancellationToken.None);
         scope.RecordToolCall(new ToolCallSummary(call, "x__y", "{}", true, "ok", TimeSpan.Zero));
 
-        scope.Events.Reader.TryRead(out var e).Should().BeTrue();
+        scope.Events.TryRead(out var e).Should().BeTrue();
         e.Should().BeOfType<ToolCallStartedEvent>();
         scope.ToolCalls.Should().ContainSingle(c => c.Id == call);
+    }
+
+    [Fact]
+    public async Task Publish_after_dispose_does_not_throw_and_the_channel_is_completed()
+    {
+        var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), AnonymousSecurityContext.Instance);
+        scope.Dispose();
+
+        var act = () => scope.PublishAsync(new TextDeltaEvent(scope.SessionId, scope.TurnId, "late"), CancellationToken.None).AsTask();
+
+        await act.Should().NotThrowAsync();
+        scope.Events.Completion.IsCompleted.Should().BeTrue();
+        scope.Events.TryRead(out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Scope_does_not_survive_yield_return_in_an_async_iterator()
+    {
+        // Pins the behaviour the runtime design relies on: the AsyncLocal is reset on each resumption of an async
+        // iterator, so the runtime must own the scope in a producer Task and drain events through the channel.
+        TurnScope? captured = null;
+
+        async IAsyncEnumerable<int> Produce()
+        {
+            using var s = TurnScope.Begin(SessionId.New(), TurnId.New(), AnonymousSecurityContext.Instance);
+            yield return 1;
+            captured = TurnScope.Current;
+            yield return 2;
+        }
+
+        var items = new List<int>();
+        await foreach (var i in Produce())
+        {
+            items.Add(i);
+        }
+
+        items.Should().Equal(1, 2);
+        captured.Should().BeNull();
+        TurnScope.Current.Should().BeNull();
     }
 }

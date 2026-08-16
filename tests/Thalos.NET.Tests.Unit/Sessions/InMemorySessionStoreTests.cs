@@ -5,6 +5,6 @@ namespace Thalos.Tests.Unit.Sessions;
 
 public sealed class InMemorySessionStoreTests : SessionStoreContractTests
 {
-    protected override ValueTask<IAgentSessionStore> CreateStoreAsync() =>
-        new(new InMemorySessionStore(TimeProvider.System));
+    protected override ValueTask<IAgentSessionStore> CreateStoreAsync(TimeProvider clock) =>
+        new(new InMemorySessionStore(clock));
 }

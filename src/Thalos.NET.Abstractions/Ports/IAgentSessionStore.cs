@@ -50,7 +50,10 @@ public interface IAgentSessionStore
     [Trace("thalos.session.turn.record")]
     ValueTask<UnitResult<AgentError>> RecordTurnAsync(SessionId id, TurnUsage usage, CancellationToken ct);
 
-    /// <summary>Sets the session state (no transition validation — that is the runtime's job). Unknown id → <see cref="AgentErrorCode.SessionNotFound"/>.</summary>
+    /// <summary>
+    /// Sets the session state (no transition validation — that is the runtime's job) and bumps <c>LastActivityAt</c>.
+    /// Unknown id → <see cref="AgentErrorCode.SessionNotFound"/>.
+    /// </summary>
     [Trace("thalos.session.state.update")]
     ValueTask<UnitResult<AgentError>> UpdateStateAsync(SessionId id, SessionState state, CancellationToken ct);
 }

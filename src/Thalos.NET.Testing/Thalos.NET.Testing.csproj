@@ -13,5 +13,6 @@
     <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />
     <PackageReference Include="xunit" />
     <PackageReference Include="AwesomeAssertions" />
+    <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
   </ItemGroup>
 </Project>

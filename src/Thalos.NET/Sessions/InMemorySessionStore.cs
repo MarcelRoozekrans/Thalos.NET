@@ -9,26 +9,30 @@ public sealed class InMemorySessionStore(TimeProvider clock) : IAgentSessionStor
 {
     private sealed class Entry
     {
-        public required AgentSessionRecord Record;
+        public required volatile AgentSessionRecord Record;
         public readonly List<ChatMessage> Messages = [];
         public readonly object Gate = new();
     }
 
     private readonly ConcurrentDictionary<SessionId, Entry> _sessions = new();
 
+    /// <inheritdoc/>
     public ValueTask<Result<AgentSessionRecord, AgentError>> CreateAsync(AgentId agentId, string ownerId, CancellationToken ct)
     {
         var now = clock.GetUtcNow();
         var record = new AgentSessionRecord(SessionId.New(), agentId, ownerId, SessionState.Idle, now, now, 0, 0, 0);
-        _sessions[record.Id] = new Entry { Record = record };
-        return new(Result<AgentSessionRecord, AgentError>.Success(record));
+        return new(_sessions.TryAdd(record.Id, new Entry { Record = record })
+            ? Result<AgentSessionRecord, AgentError>.Success(record)
+            : Result<AgentSessionRecord, AgentError>.Failure(AgentError.StoreError("Duplicate session id")));
     }
 
+    /// <inheritdoc/>
     public ValueTask<Result<AgentSessionRecord, AgentError>> GetAsync(SessionId id, CancellationToken ct) =>
         new(_sessions.TryGetValue(id, out var e)
             ? Result<AgentSessionRecord, AgentError>.Success(e.Record)
             : Result<AgentSessionRecord, AgentError>.Failure(AgentError.SessionNotFound(id)));
 
+    /// <inheritdoc/>
     public ValueTask<Result<IReadOnlyList<AgentSessionRecord>, AgentError>> ListAsync(string ownerId, int skip, int take, CancellationToken ct)
     {
         IReadOnlyList<AgentSessionRecord> page = _sessions.Values
@@ -40,6 +44,7 @@ public sealed class InMemorySessionStore(TimeProvider clock) : IAgentSessionStor
         return new(Result<IReadOnlyList<AgentSessionRecord>, AgentError>.Success(page));
     }
 
+    /// <inheritdoc/>
     public ValueTask<Result<IReadOnlyList<ChatMessage>, AgentError>> LoadMessagesAsync(SessionId id, CancellationToken ct)
     {
         if (!_sessions.TryGetValue(id, out var e))
@@ -55,6 +60,7 @@ public sealed class InMemorySessionStore(TimeProvider clock) : IAgentSessionStor
         }
     }
 
+    /// <inheritdoc/>
     public ValueTask<UnitResult<AgentError>> AppendMessagesAsync(SessionId id, IReadOnlyList<ChatMessage> messages, CancellationToken ct)
     {
         if (!_sessions.TryGetValue(id, out var e))
@@ -70,6 +76,7 @@ public sealed class InMemorySessionStore(TimeProvider clock) : IAgentSessionStor
         return new(UnitResult<AgentError>.Success());
     }
 
+    /// <inheritdoc/>
     public ValueTask<UnitResult<AgentError>> RecordTurnAsync(SessionId id, TurnUsage usage, CancellationToken ct) =>
         Mutate(id, r => r with
         {
@@ -79,6 +86,7 @@ public sealed class InMemorySessionStore(TimeProvider clock) : IAgentSessionStor
             LastActivityAt = clock.GetUtcNow(),
         });
 
+    /// <inheritdoc/>
     public ValueTask<UnitResult<AgentError>> UpdateStateAsync(SessionId id, SessionState state, CancellationToken ct) =>
         Mutate(id, r => r with { State = state, LastActivityAt = clock.GetUtcNow() });
 

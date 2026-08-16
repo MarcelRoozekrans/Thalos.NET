@@ -4,7 +4,15 @@ using Microsoft.Extensions.AI;
 
 namespace Thalos.Testing;
 
-/// <summary>Deterministic <see cref="IChatClient"/> replaying a script of steps. Not thread-safe (tests are sequential).</summary>
+/// <summary>
+/// Deterministic <see cref="IChatClient"/> that replays a script of steps — text replies, tool-call requests and
+/// thrown exceptions — one step per request, and records every request it receives. Use it wherever a runtime test
+/// would otherwise need a model; no network is involved.
+/// </summary>
+/// <remarks>
+/// Not thread-safe: tests drive it sequentially. <see cref="Requests"/> is a shallow snapshot — the message list is
+/// copied per request, but the <see cref="ChatMessage"/> instances and <see cref="ChatOptions"/> are the caller's.
+/// </remarks>
 public sealed class ScriptedChatClient : IChatClient
 {
     private abstract record Step;
@@ -14,19 +22,28 @@ public sealed class ScriptedChatClient : IChatClient
 
     private readonly Queue<Step> _script = new();
     private readonly List<(IReadOnlyList<ChatMessage> Messages, ChatOptions? Options)> _requests = [];
+    private int _nextCallId;
 
+    /// <summary>Model id stamped on every response and update; also reported through <see cref="ChatClientMetadata"/>.</summary>
     public string ModelId { get; init; } = "scripted-model";
 
-    /// <summary>Every request received, in order (messages are snapshotted).</summary>
+    /// <summary>Every request received, in order (message lists are snapshotted; instances are shared).</summary>
     public IReadOnlyList<(IReadOnlyList<ChatMessage> Messages, ChatOptions? Options)> Requests => _requests;
 
+    /// <summary>Appends a step that replies with assistant <paramref name="text"/> and the given usage.</summary>
     public ScriptedChatClient ThenText(string text, int input = 1, int output = 1)
     { _script.Enqueue(new TextStep(text, input, output)); return this; }
 
+    /// <summary>
+    /// Appends a step that requests a tool call. <paramref name="args"/> is serialized with
+    /// <see cref="AIJsonUtilities.DefaultOptions"/> (camelCase); primitive values become CLR primitives, objects and
+    /// arrays stay <see cref="JsonElement"/>s. <paramref name="callId"/> defaults to <c>call-1</c>, <c>call-2</c>, …
+    /// </summary>
     public ScriptedChatClient ThenToolCall(string name, object args, string? callId = null, int input = 1, int output = 1)
     {
-        var dict = JsonSerializer.Deserialize<Dictionary<string, object?>>(JsonSerializer.Serialize(args)) ?? [];
-        // JsonElement values → plain values so tests can compare
+        var json = JsonSerializer.Serialize(args, AIJsonUtilities.DefaultOptions);
+        var dict = JsonSerializer.Deserialize<Dictionary<string, object?>>(json, AIJsonUtilities.DefaultOptions) ?? [];
+        // JsonElement primitives → plain values so tests can compare; objects/arrays stay JsonElement (cloned off the document)
         var keys = dict.Keys.ToArray();
         foreach (var k in keys)
         {
@@ -39,17 +56,19 @@ public sealed class ScriptedChatClient : IChatClient
                     JsonValueKind.True => true,
                     JsonValueKind.False => false,
                     JsonValueKind.Null => null,
-                    _ => je.GetRawText(),
+                    _ => je.Clone(),
                 };
             }
         }
-        _script.Enqueue(new ToolCallStep(name, dict, callId ?? $"call-{_script.Count + 1}", input, output));
+        _script.Enqueue(new ToolCallStep(name, dict, callId ?? $"call-{++_nextCallId}", input, output));
         return this;
     }
 
+    /// <summary>Appends a step that throws <paramref name="exception"/> when reached.</summary>
     public ScriptedChatClient ThenThrow(Exception exception)
     { _script.Enqueue(new ThrowStep(exception)); return this; }
 
+    /// <summary>Records the request and replays the next step; throws <see cref="InvalidOperationException"/> when the script is exhausted.</summary>
     public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -71,6 +90,10 @@ public sealed class ScriptedChatClient : IChatClient
         });
     }
 
+    /// <summary>
+    /// Same as <see cref="GetResponseAsync"/> but streamed: text is split into word-sized deltas, tool calls are yielded
+    /// whole, and a final update carries <see cref="UsageContent"/> with <see cref="ChatFinishReason.Stop"/>.
+    /// </summary>
     public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         var response = await GetResponseAsync(messages, options, cancellationToken).ConfigureAwait(false);
@@ -106,8 +129,22 @@ public sealed class ScriptedChatClient : IChatClient
         };
     }
 
-    public object? GetService(Type serviceType, object? serviceKey = null) =>
-        serviceKey is null && serviceType.IsInstanceOfType(this) ? this : null;
+    /// <summary>Returns <see cref="ChatClientMetadata"/> (provider <c>scripted</c>, default model <see cref="ModelId"/>) or this instance; null otherwise.</summary>
+    public object? GetService(Type serviceType, object? serviceKey = null)
+    {
+        if (serviceKey is not null)
+        {
+            return null;
+        }
 
+        if (serviceType == typeof(ChatClientMetadata))
+        {
+            return new ChatClientMetadata("scripted", defaultModelId: ModelId);
+        }
+
+        return serviceType.IsInstanceOfType(this) ? this : null;
+    }
+
+    /// <summary>No-op.</summary>
     public void Dispose() { }
 }
