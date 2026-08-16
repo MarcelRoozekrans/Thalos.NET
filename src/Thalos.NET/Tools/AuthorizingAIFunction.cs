@@ -132,7 +132,13 @@ public sealed partial class AuthorizingAIFunction(
             return null;
         }
 
-        var text = result is JsonElement je ? je.GetRawText() : result.ToString();
+        // AIFunctionFactory marshals return values to JsonElement; show a string result as the string itself, not its JSON-encoded form
+        var text = result switch
+        {
+            JsonElement { ValueKind: JsonValueKind.String } s => s.GetString(),
+            JsonElement je => je.GetRawText(),
+            _ => result.ToString(),
+        };
         if (text is null || text.Length <= PreviewLength)
         {
             return text;
