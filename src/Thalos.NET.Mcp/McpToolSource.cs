@@ -95,7 +95,7 @@ public sealed partial class McpToolSource : IToolSource, IAsyncDisposable, IDisp
         catch (Exception ex)
         {
             LogConnectFailed(_logger, ex, Name, ex.Message);
-            return Result<IReadOnlyList<AITool>, AgentError>.Failure(AgentError.ProviderError($"MCP server '{Name}' is unavailable.", ex.Message));
+            return Result<IReadOnlyList<AITool>, AgentError>.Failure(AgentError.ProviderError($"MCP server '{Name}' is unavailable.", ex.GetType().Name)); // message is logged (302); Detail carries no raw exception text by policy
         }
         finally
         {
