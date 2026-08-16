@@ -1,7 +1,9 @@
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
+using NSubstitute;
 using Thalos.Sessions;
 using Thalos.Testing;
+using ZeroAlloc.Results;
 
 namespace Thalos.Tests.Unit.Sessions;
 
@@ -65,5 +67,42 @@ public sealed class SessionStoreChatHistoryProviderTests
         response.Text.Should().Be("x");
         // nothing was created in the store
         (await store.ListAsync("o", 0, 10, default)).Value.Should().BeEmpty();
+    }
+
+    [Fact]
+    public void StateKeys_exposes_the_binding_key()
+    {
+        new SessionStoreChatHistoryProvider(new InMemorySessionStore(TimeProvider.System)).StateKeys.Should().Equal(SessionStoreChatHistoryProvider.StateKey);
+    }
+
+    [Fact]
+    public async Task Corrupt_session_binding_fails_the_turn_instead_of_running_unbound()
+    {
+        var (agent, _, _) = Build(new ScriptedChatClient().ThenText("x"));
+        var session = await agent.CreateSessionAsync();
+        session.StateBag.SetValue(SessionStoreChatHistoryProvider.StateKey, "not-a-session-id");
+
+        var run = async () => await agent.RunAsync("hi", session);
+
+        var ex = (await run.Should().ThrowAsync<AgentTurnException>()).Which;
+        ex.Error.Code.Should().Be(AgentErrorCode.StoreError);
+        ex.Error.Detail.Should().Be("not-a-session-id");
+    }
+
+    [Fact]
+    public async Task Store_load_failure_surfaces_from_RunAsync_as_AgentTurnException()
+    {
+        var store = Substitute.For<IAgentSessionStore>();
+        store.LoadMessagesAsync(Arg.Any<SessionId>(), Arg.Any<CancellationToken>())
+            .Returns(Result<IReadOnlyList<ChatMessage>, AgentError>.Failure(AgentError.StoreError("db down")));
+        var provider = new SessionStoreChatHistoryProvider(store);
+        var agent = new ChatClientAgent(new ScriptedChatClient().ThenText("x"), new ChatClientAgentOptions { Name = "t", ChatHistoryProvider = provider });
+        var session = await provider.CreateBoundSessionAsync(agent, SessionId.New(), default);
+
+        var run = async () => await agent.RunAsync("hi", session);
+
+        var ex = (await run.Should().ThrowAsync<AgentTurnException>()).Which;
+        ex.Error.Code.Should().Be(AgentErrorCode.StoreError);
+        ex.Error.Message.Should().Be("db down");
     }
 }

@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Thalos.Sessions;
 using Thalos.Tools;
 using ZeroAlloc.Results;
@@ -12,61 +13,191 @@ namespace Thalos.Runtime;
 /// Builds <c>provider → decorators (ascending Order) → ChatClientAgent</c>. MAF adds function invocation
 /// outermost, so every decorator (e.g. AI.Sentinel) sees each model round-trip including tool results.
 /// </summary>
-public sealed class AgentFactory(
-    IChatClientProvider provider,
-    IEnumerable<IChatClientDecorator> decorators,
-    IToolCatalog toolCatalog,
-    SessionStoreChatHistoryProvider historyProvider,
-    IServiceProvider services,
-    ILoggerFactory? loggerFactory) : IAgentFactory
+/// <remarks>
+/// <para>
+/// The factory <em>owns</em> the chat-client pipelines it builds: the outermost decorated <see cref="IChatClient"/> is kept
+/// with each cached agent and disposed on <see cref="Invalidate"/>, on replacement by a newer definition instance, and on
+/// <see cref="Dispose"/>. Providers that want to share a transport across agents must do so internally (see
+/// <see cref="IChatClientProvider.CreateChatClient"/>).
+/// </para>
+/// <para>
+/// Builds are single-flight per <see cref="AgentId"/>: N concurrent first calls result in one
+/// <see cref="IChatClientProvider.CreateChatClient"/> call and reference-equal agents. Failed builds are not cached.
+/// </para>
+/// </remarks>
+public sealed partial class AgentFactory : IAgentFactory, IDisposable
 {
-    private readonly IReadOnlyList<IChatClientDecorator> _decorators = decorators.OrderBy(d => d.Order).ToList();
-    private readonly ConcurrentDictionary<AgentId, AIAgent> _cache = new();
+    private readonly IChatClientProvider _provider;
+    private readonly IReadOnlyList<IChatClientDecorator> _decorators;
+    private readonly IToolCatalog _toolCatalog;
+    private readonly SessionStoreChatHistoryProvider _historyProvider;
+    private readonly IServiceProvider _services;
+    private readonly ILoggerFactory? _loggerFactory;
+    private readonly ILogger _logger;
+    private readonly ConcurrentDictionary<AgentId, Lazy<Task<Result<Entry, AgentError>>>> _cache = new();
+    private volatile bool _disposed;
 
+    public AgentFactory(
+        IChatClientProvider provider,
+        IEnumerable<IChatClientDecorator> decorators,
+        IToolCatalog toolCatalog,
+        SessionStoreChatHistoryProvider historyProvider,
+        IServiceProvider services,
+        ILoggerFactory? loggerFactory)
+    {
+        _provider = provider;
+        _decorators = decorators.OrderBy(d => d.Order).ToList();
+        _toolCatalog = toolCatalog;
+        _historyProvider = historyProvider;
+        _services = services;
+        _loggerFactory = loggerFactory;
+        _logger = loggerFactory?.CreateLogger<AgentFactory>() ?? NullLogger<AgentFactory>.Instance;
+    }
+
+    /// <inheritdoc />
     public async ValueTask<Result<AIAgent, AgentError>> GetOrCreateAsync(AgentDefinition definition, CancellationToken ct)
     {
-        if (_cache.TryGetValue(definition.Id, out var cached))
+        while (true)
         {
-            return Result<AIAgent, AgentError>.Success(cached);
-        }
+            ObjectDisposedException.ThrowIf(_disposed, this);
 
-        var tools = await toolCatalog.ResolveAsync(definition, ct).ConfigureAwait(false);
+            var lazy = _cache.GetOrAdd(definition.Id, static (_, state) =>
+                new Lazy<Task<Result<Entry, AgentError>>>(() => state.self.BuildAsync(state.definition), LazyThreadSafetyMode.ExecutionAndPublication),
+                (self: this, definition));
+
+            // The shared build is not cancelled by any single caller; each caller waits with its own token.
+            var built = await lazy.Value.WaitAsync(ct).ConfigureAwait(false);
+            if (built.IsFailure)
+            {
+                _cache.TryRemove(KeyValuePair.Create(definition.Id, lazy)); // don't cache failures; next call retries
+                return Result<AIAgent, AgentError>.Failure(built.Error);
+            }
+
+            var entry = built.Value;
+            if (!_cache.TryGetValue(definition.Id, out var current) || !ReferenceEquals(current, lazy))
+            {
+                entry.Dispose(_logger); // invalidated while building — rebuild
+                continue;
+            }
+
+            if (!ReferenceEquals(entry.Definition, definition))
+            {
+                // A different definition instance for a cached id: treat as invalidated and rebuild with the new one.
+                if (_cache.TryRemove(KeyValuePair.Create(definition.Id, lazy)))
+                {
+                    entry.Dispose(_logger);
+                }
+
+                continue;
+            }
+
+            return Result<AIAgent, AgentError>.Success(entry.Agent);
+        }
+    }
+
+    /// <inheritdoc />
+    public void Invalidate(AgentId agentId)
+    {
+        if (_cache.TryRemove(agentId, out var lazy))
+        {
+            DisposeCompleted(lazy);
+        }
+    }
+
+    /// <summary>Disposes every cached chat-client pipeline. Subsequent <see cref="GetOrCreateAsync"/> calls throw <see cref="ObjectDisposedException"/>.</summary>
+    public void Dispose()
+    {
+        _disposed = true;
+        var ids = _cache.Keys.ToArray(); // snapshot; ConcurrentDictionary.Keys is already a copy but be explicit
+        foreach (var id in ids)
+        {
+            Invalidate(id);
+        }
+    }
+
+    private async Task<Result<Entry, AgentError>> BuildAsync(AgentDefinition definition)
+    {
+        var tools = await _toolCatalog.ResolveAsync(definition, CancellationToken.None).ConfigureAwait(false);
         if (tools.IsFailure)
         {
-            return Result<AIAgent, AgentError>.Failure(tools.Error);
+            return Result<Entry, AgentError>.Failure(tools.Error);
         }
 
-        IChatClient client;
+        IChatClient? client = null;
         try
         {
-            client = provider.CreateChatClient(definition);
+            client = _provider.CreateChatClient(definition);
             foreach (var decorator in _decorators)
             {
-                client = decorator.Decorate(client, definition, services);
+                client = decorator.Decorate(client, definition, _services);
             }
+
+            var agent = new ChatClientAgent(client, new ChatClientAgentOptions
+            {
+                Id = definition.Id.ToString(),
+                Name = definition.Name,
+                Description = string.IsNullOrEmpty(definition.Description) ? null : definition.Description,
+                ChatHistoryProvider = _historyProvider,
+                ChatOptions = new ChatOptions
+                {
+                    Instructions = definition.Instructions,
+                    ModelId = definition.Model ?? _provider.DefaultModel,
+                    MaxOutputTokens = definition.MaxOutputTokens,
+                    Tools = tools.Value.Count == 0 ? null : tools.Value.ToList(),
+                },
+            }, _loggerFactory, _services);
+
+            return Result<Entry, AgentError>.Success(new Entry(definition, agent, client));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return Result<AIAgent, AgentError>.Failure(AgentError.ProviderError($"Failed to build chat client for agent '{definition.Name}'.", ex.Message));
-        }
-
-        var agent = new ChatClientAgent(client, new ChatClientAgentOptions
-        {
-            Id = definition.Id.ToString(),
-            Name = definition.Name,
-            Description = definition.Description,
-            ChatHistoryProvider = historyProvider,
-            ChatOptions = new ChatOptions
+            if (client is not null)
             {
-                Instructions = definition.Instructions,
-                ModelId = definition.Model ?? provider.DefaultModel,
-                MaxOutputTokens = definition.MaxOutputTokens,
-                Tools = tools.Value.Count == 0 ? null : tools.Value.ToList(),
-            },
-        }, loggerFactory, services);
+                DisposeClient(client, definition.Name, _logger);
+            }
 
-        return Result<AIAgent, AgentError>.Success(_cache.GetOrAdd(definition.Id, agent));
+            return Result<Entry, AgentError>.Failure(AgentError.ProviderError($"Failed to build chat client for agent '{definition.Name}'.", ex.Message));
+        }
     }
 
-    public void Invalidate(AgentId agentId) => _cache.TryRemove(agentId, out _);
+    private static void DisposeClient(IChatClient client, string agentName, ILogger logger)
+    {
+        try
+        {
+            client.Dispose();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogPipelineDisposeFailed(logger, agentName, ex.Message, ex);
+        }
+    }
+
+    /// <summary>Disposes the pipeline of a removed cache entry if its build already completed successfully (an in-flight build disposes itself when it observes it was invalidated).</summary>
+    private void DisposeCompleted(Lazy<Task<Result<Entry, AgentError>>> lazy)
+    {
+        if (lazy.IsValueCreated && lazy.Value.IsCompletedSuccessfully && lazy.Value.Result.IsSuccess)
+        {
+            lazy.Value.Result.Value.Dispose(_logger);
+        }
+    }
+
+    /// <summary>A cached agent together with the pipeline the factory owns for it. Disposal is idempotent.</summary>
+    private sealed class Entry(AgentDefinition definition, AIAgent agent, IChatClient client)
+    {
+        private int _disposed;
+
+        public AgentDefinition Definition { get; } = definition;
+        public AIAgent Agent { get; } = agent;
+
+        public void Dispose(ILogger logger)
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+            {
+                DisposeClient(client, Definition.Name, logger);
+            }
+        }
+    }
+
+    [LoggerMessage(EventId = 121, Level = LogLevel.Warning, Message = "Disposing the chat-client pipeline for agent '{Agent}' failed: {Error}")]
+    private static partial void LogPipelineDisposeFailed(ILogger logger, string agent, string error, Exception exception);
 }

@@ -8,9 +8,27 @@ namespace Thalos.Sessions;
 /// MAF chat-history provider backed by <see cref="IAgentSessionStore"/>. One instance serves all sessions;
 /// the Thalos <see cref="SessionId"/> is stored in the MAF session's state bag under <see cref="StateKey"/>.
 /// </summary>
+/// <remarks>
+/// <para>
+/// The runtime creates a fresh MAF <see cref="AgentSession"/> per turn (bound via <see cref="CreateBoundSessionAsync"/>),
+/// so nothing else in the MAF state bag survives a turn — in particular, service-managed conversation ids are not persisted.
+/// Chat-client providers must therefore not return <see cref="ChatResponse.ConversationId"/>: MAF's
+/// <c>ChatClientAgentOptions.ThrowOnChatHistoryProviderConflict</c> (default <see langword="true"/>) throws when the service
+/// claims to manage history while a <see cref="ChatHistoryProvider"/> is configured.
+/// </para>
+/// <para>
+/// A MAF session without <see cref="StateKey"/> is <em>unbound</em>: history is empty and nothing is stored (stateless
+/// one-shot run). A session whose <see cref="StateKey"/> value is present but not a valid <see cref="SessionId"/> is treated
+/// as a corrupt binding and fails the turn with <see cref="AgentTurnException"/> (<see cref="AgentErrorCode.StoreError"/>).
+/// </para>
+/// </remarks>
 public sealed class SessionStoreChatHistoryProvider(IAgentSessionStore store) : ChatHistoryProvider
 {
+    /// <summary>State-bag key under which the bound Thalos <see cref="SessionId"/> (ULID string) is stored in a MAF <see cref="AgentSession"/>.</summary>
     public const string StateKey = "thalos.session_id";
+
+    /// <inheritdoc />
+    public override IReadOnlyList<string> StateKeys => [StateKey];
 
     /// <summary>Creates a fresh MAF session for <paramref name="agent"/> bound to Thalos session <paramref name="sessionId"/>.</summary>
     [SuppressMessage("Performance", "CA1822:Mark members as static", Justification = "Instance API by design: binding a MAF session to a Thalos session is a capability of the provider that owns the state key.")]
@@ -22,8 +40,21 @@ public sealed class SessionStoreChatHistoryProvider(IAgentSessionStore store) : 
     }
 
     /// <summary>The bound Thalos session, or null for an unbound (stateless, one-shot) MAF session.</summary>
-    public static SessionId? GetBoundSessionId(AgentSession session) =>
-        session.StateBag.TryGetValue<string>(StateKey, out var raw) && SessionId.TryParse(raw, null, out var id) ? id : null;
+    /// <exception cref="AgentTurnException"><see cref="StateKey"/> is present but its value is not a valid <see cref="SessionId"/>.</exception>
+    public static SessionId? GetBoundSessionId(AgentSession session)
+    {
+        if (!session.StateBag.TryGetValue<string>(StateKey, out var raw))
+        {
+            return null;
+        }
+
+        if (SessionId.TryParse(raw, null, out var id))
+        {
+            return id;
+        }
+
+        throw new AgentTurnException(AgentError.StoreError("Corrupt session binding.", raw));
+    }
 
     protected override async ValueTask<IEnumerable<ChatMessage>> ProvideChatHistoryAsync(InvokingContext context, CancellationToken cancellationToken = default)
     {
