@@ -1,6 +1,7 @@
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using ZeroAlloc.Inject;
 using ZeroAlloc.Results;
 
 namespace Thalos.Tools;
@@ -11,6 +12,7 @@ namespace Thalos.Tools;
 /// source whose <see cref="IToolSource.GetToolsAsync"/> fails; non-<see cref="AIFunction"/> tools, duplicate qualified names
 /// (first wins) and qualified names longer than 64 characters (provider limit) are dropped. All of these are logged, none is fatal.
 /// </remarks>
+[Singleton(As = typeof(IToolCatalog))] // interface only (the default would also register the concrete type as a second instance)
 public sealed partial class ToolCatalog : IToolCatalog
 {
     private const int MaxQualifiedNameLength = 64;

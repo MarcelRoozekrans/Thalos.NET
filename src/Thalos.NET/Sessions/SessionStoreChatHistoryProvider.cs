@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
+using ZeroAlloc.Inject;
 
 namespace Thalos.Sessions;
 
@@ -22,6 +23,7 @@ namespace Thalos.Sessions;
 /// as a corrupt binding and fails the turn with <see cref="AgentTurnException"/> (<see cref="AgentErrorCode.StoreError"/>).
 /// </para>
 /// </remarks>
+[Singleton(As = typeof(SessionStoreChatHistoryProvider))] // registered as itself: the runtime and AgentFactory depend on the concrete type
 public sealed class SessionStoreChatHistoryProvider(IAgentSessionStore store) : ChatHistoryProvider
 {
     /// <summary>State-bag key under which the bound Thalos <see cref="SessionId"/> (ULID string) is stored in a MAF <see cref="AgentSession"/>.</summary>

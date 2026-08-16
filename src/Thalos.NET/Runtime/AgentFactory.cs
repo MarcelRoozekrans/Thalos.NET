@@ -5,6 +5,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Thalos.Sessions;
 using Thalos.Tools;
+using ZeroAlloc.Inject;
 using ZeroAlloc.Results;
 
 namespace Thalos.Runtime;
@@ -34,6 +35,7 @@ namespace Thalos.Runtime;
 /// quiescent; ref-counted leases are a follow-up.
 /// </para>
 /// </remarks>
+[Singleton(As = typeof(IAgentFactory))] // interface only: one instance owns all pipelines (the default As=all would also register the concrete type separately)
 public sealed partial class AgentFactory : IAgentFactory, IDisposable
 {
     private readonly IChatClientProvider _provider;
@@ -52,7 +54,7 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
         IToolCatalog toolCatalog,
         SessionStoreChatHistoryProvider historyProvider,
         IServiceProvider services,
-        ILoggerFactory? loggerFactory)
+        ILoggerFactory? loggerFactory = null)
     {
         _provider = provider;
         _decorators = decorators.OrderBy(d => d.Order).ToList();

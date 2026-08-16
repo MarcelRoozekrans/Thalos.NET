@@ -1,6 +1,7 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ZeroAlloc.AsyncEvents;
+using ZeroAlloc.Inject;
 
 namespace Thalos.Runtime;
 
@@ -12,6 +13,7 @@ namespace Thalos.Runtime;
 /// Thread-safe without locks — <see cref="AsyncEventHandler{TArgs}"/> registers with CAS over immutable arrays and
 /// invokes over a snapshot.
 /// </summary>
+[Singleton(As = typeof(AgentEventHub))] // registered as itself: subscribers and the runtime take the concrete hub
 public sealed partial class AgentEventHub(ILogger<AgentEventHub>? logger = null)
 {
     private readonly ILogger _logger = logger ?? NullLogger<AgentEventHub>.Instance;
