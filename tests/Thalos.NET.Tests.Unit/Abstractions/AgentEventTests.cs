@@ -26,6 +26,36 @@ public sealed class AgentEventTests
         AgentEvent.KindOf(type).Should().Be(kind);
     }
 
+    public static TheoryData<AgentEvent> AllEvents()
+    {
+        var s = SessionId.New();
+        var t = TurnId.New();
+        var c = ToolCallId.New();
+        return new TheoryData<AgentEvent>
+        {
+            new TextDeltaEvent(s, t, "hi"),
+            new ToolCallStartedEvent(s, t, c, "tool", "{}"),
+            new ToolCallFinishedEvent(s, t, c, "tool", true, null, TimeSpan.Zero),
+            new UsageEvent(s, t, TurnUsage.Empty("m")),
+            new TurnCompletedEvent(s, t, new AgentTurnResult(t, s, "", TurnUsage.Empty("m"), [], TimeSpan.Zero)),
+            new TurnFailedEvent(s, t, AgentError.Cancelled()),
+        };
+    }
+
+    [Theory]
+    [MemberData(nameof(AllEvents))]
+    public void Instance_kind_matches_KindOf_its_type(AgentEvent e)
+    {
+        e.Kind.Should().Be(AgentEvent.KindOf(e.GetType()));
+    }
+
+    [Fact]
+    public void KindOf_rejects_non_event_types()
+    {
+        var act = () => AgentEvent.KindOf(typeof(string));
+        act.Should().Throw<ArgumentOutOfRangeException>();
+    }
+
     [Fact]
     public void Request_requires_text()
     {

@@ -8,6 +8,9 @@ namespace Thalos;
 /// </summary>
 public interface IChatClientDecorator
 {
+    /// <summary>Sort key: lower = closer to the provider (innermost); ties keep registration order.</summary>
     int Order { get; }
+
+    /// <summary>Returns a client that wraps <paramref name="inner"/> for <paramref name="agent"/>; may resolve dependencies from <paramref name="services"/>.</summary>
     IChatClient Decorate(IChatClient inner, AgentDefinition agent, IServiceProvider services);
 }

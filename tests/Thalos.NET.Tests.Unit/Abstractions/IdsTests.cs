@@ -15,10 +15,19 @@ public sealed class IdsTests
     }
 
     [Fact]
-    public void Ids_are_distinct_types()
+    public void All_id_types_roundtrip_through_json_inside_a_record()
     {
-        typeof(AgentId).Should().NotBe<SessionId>();
-        typeof(TurnId).Should().NotBe<ToolCallId>();
+        var record = new AgentSessionRecord(
+            SessionId.New(), AgentId.New(), "owner", SessionState.Idle,
+            DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, 0, 0, 0);
+        var call = new ToolCallSummary(ToolCallId.New(), "t", "{}", true, null, TimeSpan.Zero);
+        var result = new AgentTurnResult(TurnId.New(), record.Id, "hi", TurnUsage.Empty("m"), [call], TimeSpan.Zero);
+
+        JsonSerializer.Deserialize<AgentSessionRecord>(JsonSerializer.Serialize(record)).Should().Be(record);
+        var back = JsonSerializer.Deserialize<AgentTurnResult>(JsonSerializer.Serialize(result))!;
+        back.TurnId.Should().Be(result.TurnId);
+        back.SessionId.Should().Be(result.SessionId);
+        back.ToolCalls.Should().ContainSingle().Which.Should().Be(call);
     }
 
     [Fact]

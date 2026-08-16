@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using ZeroAlloc.Mediator;
 
 namespace Thalos.Tests.Unit.Abstractions;
@@ -26,7 +27,15 @@ public sealed class PortsShapeTests
         notifications.Should().AllSatisfy(t =>
         {
             t.IsValueType.Should().BeTrue();
+            t.IsDefined(typeof(IsReadOnlyAttribute), inherit: false).Should().BeTrue("{0} must be a readonly struct", t.Name);
             t.IsAssignableTo(typeof(INotification)).Should().BeTrue();
         });
+    }
+
+    [Fact]
+    public void Generated_session_store_telemetry_proxy_is_public()
+    {
+        typeof(AgentSessionStoreInstrumented).IsPublic.Should().BeTrue();
+        typeof(AgentSessionStoreInstrumented).Should().Implement<IAgentSessionStore>();
     }
 }

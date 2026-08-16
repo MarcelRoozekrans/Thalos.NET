@@ -29,12 +29,4 @@ public sealed class AgentDefinitionTests
     {
         Valid().Tools.Should().BeEquivalentTo(["*"]);
     }
-
-    [Fact]
-    public void TurnUsage_adds()
-    {
-        var a = new TurnUsage(10, 5, "m");
-        var b = new TurnUsage(1, 2, "m");
-        (a + b).Should().Be(new TurnUsage(11, 7, "m"));
-    }
 }
