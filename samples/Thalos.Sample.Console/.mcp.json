@@ -1,1 +1,11 @@
-{ "mcpServers": {} }
+{
+  "mcpServers": {
+    "roslyn": {
+      "type": "stdio",
+      "command": "dnx",
+      "args": ["RoslynCodeLens.Mcp", "--yes", "--", "C:/Projects/Prive/daedalus/Daedalus.sln"],
+      "env": { "ROSLYN_CODELENS_OPEN_PROJECT_TIMEOUT_SECONDS": "600" },
+      "shutdownTimeout": "00:00:01"
+    }
+  }
+}
