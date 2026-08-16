@@ -45,6 +45,38 @@ public sealed class ScriptedChatClientTests
     }
 
     [Fact]
+    public async Task Tool_call_with_preceding_text_puts_text_before_the_call_and_streams_it_first()
+    {
+        var client = new ScriptedChatClient().ThenToolCall("echo", new { text = "x" }, callId: "c1", precedingText: "Let me check.");
+
+        var updates = new List<ChatResponseUpdate>();
+        await foreach (var u in client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "go")]))
+        {
+            updates.Add(u);
+        }
+
+        var textDeltas = updates.TakeWhile(u => u.Contents.All(c => c is TextContent)).ToList();
+        string.Concat(textDeltas.Select(u => u.Text)).Should().Be("Let me check.");
+        textDeltas.Should().HaveCount(3);
+        var callUpdate = updates[textDeltas.Count];
+        callUpdate.Contents.Should().ContainSingle().Which.Should().BeOfType<FunctionCallContent>().Which.CallId.Should().Be("c1");
+        updates[^1].Contents.Should().ContainSingle().Which.Should().BeOfType<UsageContent>();
+        updates.Should().HaveCount(textDeltas.Count + 2);
+    }
+
+    [Fact]
+    public async Task Tool_call_with_preceding_text_is_one_assistant_message_when_buffered()
+    {
+        var client = new ScriptedChatClient().ThenToolCall("echo", new { text = "x" }, precedingText: "Let me check.");
+        var r = await client.GetResponseAsync([new ChatMessage(ChatRole.User, "go")]);
+        var contents = r.Messages.Single().Contents;
+        contents.Should().HaveCount(2);
+        contents[0].Should().BeOfType<TextContent>().Which.Text.Should().Be("Let me check.");
+        contents[1].Should().BeOfType<FunctionCallContent>().Which.Name.Should().Be("echo");
+        r.FinishReason.Should().Be(ChatFinishReason.ToolCalls);
+    }
+
+    [Fact]
     public async Task Exhausted_script_throws()
     {
         var client = new ScriptedChatClient();

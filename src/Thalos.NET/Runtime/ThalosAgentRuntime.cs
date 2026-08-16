@@ -141,6 +141,13 @@ public sealed partial class ThalosAgentRuntime(
             }
 
             await producer.ConfigureAwait(false);
+
+            // The consumer stopped reading before the producer finished: hub subscribers (channel adapters, audit) still get
+            // the remaining events, including the terminal one — the abandoned enumeration cannot receive them any more.
+            while (scope.Events.TryRead(out var rest))
+            {
+                await hub.PublishAsync(rest, CancellationToken.None).ConfigureAwait(false);
+            }
         }
     }
 

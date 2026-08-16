@@ -17,7 +17,7 @@ public sealed class ScriptedChatClient : IChatClient
 {
     private abstract record Step;
     private sealed record TextStep(string Text, int Input, int Output) : Step;
-    private sealed record ToolCallStep(string Name, IDictionary<string, object?> Args, string CallId, int Input, int Output) : Step;
+    private sealed record ToolCallStep(string Name, IDictionary<string, object?> Args, string CallId, int Input, int Output, string? PrecedingText) : Step;
     private sealed record ThrowStep(Exception Exception) : Step;
 
     private readonly Queue<Step> _script = new();
@@ -38,8 +38,10 @@ public sealed class ScriptedChatClient : IChatClient
     /// Appends a step that requests a tool call. <paramref name="args"/> is serialized with
     /// <see cref="AIJsonUtilities.DefaultOptions"/> (camelCase); primitive values become CLR primitives, objects and
     /// arrays stay <see cref="JsonElement"/>s. <paramref name="callId"/> defaults to <c>call-1</c>, <c>call-2</c>, …
+    /// When <paramref name="precedingText"/> is set, the assistant message contains that text <em>before</em> the tool call
+    /// (as real providers do) and the streaming path yields the text deltas first, then the tool-call update.
     /// </summary>
-    public ScriptedChatClient ThenToolCall(string name, object args, string? callId = null, int input = 1, int output = 1)
+    public ScriptedChatClient ThenToolCall(string name, object args, string? callId = null, int input = 1, int output = 1, string? precedingText = null)
     {
         var json = JsonSerializer.Serialize(args, AIJsonUtilities.DefaultOptions);
         var dict = JsonSerializer.Deserialize<Dictionary<string, object?>>(json, AIJsonUtilities.DefaultOptions) ?? [];
@@ -60,7 +62,7 @@ public sealed class ScriptedChatClient : IChatClient
                 };
             }
         }
-        _script.Enqueue(new ToolCallStep(name, dict, callId ?? $"call-{++_nextCallId}", input, output));
+        _script.Enqueue(new ToolCallStep(name, dict, callId ?? $"call-{++_nextCallId}", input, output, precedingText));
         return this;
     }
 
@@ -84,15 +86,16 @@ public sealed class ScriptedChatClient : IChatClient
         return Task.FromResult(step switch
         {
             TextStep t => Build(new ChatMessage(ChatRole.Assistant, t.Text), t.Input, t.Output),
-            ToolCallStep c => Build(new ChatMessage(ChatRole.Assistant, [new FunctionCallContent(c.CallId, c.Name, c.Args)]), c.Input, c.Output),
+            ToolCallStep c => Build(new ChatMessage(ChatRole.Assistant, ToolCallContents(c)), c.Input, c.Output),
             ThrowStep e => throw e.Exception,
             _ => throw new InvalidOperationException("unknown step"),
         });
     }
 
     /// <summary>
-    /// Same as <see cref="GetResponseAsync"/> but streamed: text is split into word-sized deltas, tool calls are yielded
-    /// whole, and a final update carries <see cref="UsageContent"/> with <see cref="ChatFinishReason.Stop"/>.
+    /// Same as <see cref="GetResponseAsync"/> but streamed: text is split into word-sized deltas (text preceding a tool
+    /// call is streamed before it), tool calls are yielded whole, and a final update carries <see cref="UsageContent"/>
+    /// with <see cref="ChatFinishReason.Stop"/>.
     /// </summary>
     public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
@@ -100,7 +103,7 @@ public sealed class ScriptedChatClient : IChatClient
         var message = response.Messages[0];
 
         // Split text into word-sized deltas so streaming consumers are exercised; keep tool calls whole.
-        if (message.Contents.All(c => c is TextContent))
+        if (message.Contents.Any(c => c is TextContent))
         {
             var words = message.Text.Split(' ');
             for (var i = 0; i < words.Length; i++)
@@ -109,12 +112,26 @@ public sealed class ScriptedChatClient : IChatClient
                 yield return new ChatResponseUpdate(ChatRole.Assistant, piece) { ResponseId = response.ResponseId, MessageId = message.MessageId, ModelId = ModelId };
             }
         }
-        else
+
+        var calls = message.Contents.Where(c => c is not TextContent).ToList();
+        if (calls.Count > 0)
         {
-            yield return new ChatResponseUpdate(ChatRole.Assistant, message.Contents) { ResponseId = response.ResponseId, MessageId = message.MessageId, ModelId = ModelId };
+            yield return new ChatResponseUpdate(ChatRole.Assistant, calls) { ResponseId = response.ResponseId, MessageId = message.MessageId, ModelId = ModelId };
         }
 
         yield return new ChatResponseUpdate(ChatRole.Assistant, [new UsageContent(response.Usage!)]) { ResponseId = response.ResponseId, ModelId = ModelId, FinishReason = ChatFinishReason.Stop };
+    }
+
+    private static List<AIContent> ToolCallContents(ToolCallStep step)
+    {
+        List<AIContent> contents = [];
+        if (!string.IsNullOrEmpty(step.PrecedingText))
+        {
+            contents.Add(new TextContent(step.PrecedingText));
+        }
+
+        contents.Add(new FunctionCallContent(step.CallId, step.Name, step.Args));
+        return contents;
     }
 
     private ChatResponse Build(ChatMessage message, int input, int output)
