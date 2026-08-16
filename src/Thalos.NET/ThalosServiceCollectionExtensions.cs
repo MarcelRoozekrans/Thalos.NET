@@ -32,9 +32,11 @@ public static class ThalosServiceCollectionExtensions
             sp.GetService<Microsoft.Extensions.Logging.ILogger<DefaultToolAuthorizer>>()));
         services.TryAddSingleton<IAgentRuntime>(sp =>
         {
-            var provider = sp.GetService<IChatClientProvider>()
+            // fail fast with actionable messages before the dependency graph reports a generic "unable to resolve"
+            _ = sp.GetService<IAgentSessionStore>()
+                ?? throw new InvalidOperationException("No IAgentSessionStore registered. Call UseInMemorySessionStore() or UseSessionStore<TStore>() inside AddThalos.");
+            _ = sp.GetService<IChatClientProvider>()
                 ?? throw new InvalidOperationException("No IChatClientProvider registered. Call UseAnthropic(...) (Thalos.NET.Anthropic) or UseChatClientProvider(...) inside AddThalos.");
-            _ = provider;
             return ActivatorUtilities.CreateInstance<ThalosAgentRuntime>(sp);
         });
 

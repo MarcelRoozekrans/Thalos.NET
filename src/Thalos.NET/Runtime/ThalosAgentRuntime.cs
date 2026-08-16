@@ -24,7 +24,7 @@ public sealed partial class ThalosAgentRuntime(
     IAgentNotificationPublisher publisher,
     AgentEventHub hub,
     TimeProvider clock,
-    ILogger<ThalosAgentRuntime>? logger) : IAgentRuntime
+    ILogger<ThalosAgentRuntime>? logger = null) : IAgentRuntime
 {
     private const string AdminRole = "admin";
     private static readonly AgentTurnRequestValidator Validator = new(); // generated validator is stateless
@@ -75,7 +75,8 @@ public sealed partial class ThalosAgentRuntime(
             return updated;
         }
 
-        await publisher.PublishAsync(new SessionClosedNotification(sessionId, clock.GetUtcNow()), ct).ConfigureAwait(false);
+        // the close is persisted; a failing notification must not report the session as still open
+        await PublishPostPersistAsync(new SessionClosedNotification(sessionId, clock.GetUtcNow()), sessionId, ct).ConfigureAwait(false);
         return UnitResult<AgentError>.Success();
     }
 
@@ -373,8 +374,9 @@ public sealed partial class ThalosAgentRuntime(
     }
 
     /// <summary>
-    /// Publishes a notification whose subject is already persisted (session created, turn recorded/released). The store is the
-    /// source of truth, so a failing publisher is logged and swallowed rather than reported to the caller as a failed operation.
+    /// Publishes a notification whose subject is already persisted (session created/closed, turn recorded/released). The store is
+    /// the source of truth, so a failing publisher is logged and swallowed rather than reported to the caller as a failed operation.
+    /// Only the caller's own cancellation (<paramref name="ct"/> signalled) propagates; a publisher-internal cancellation is a failure.
     /// </summary>
     private async ValueTask PublishPostPersistAsync<TNotification>(TNotification notification, SessionId sessionId, CancellationToken ct)
         where TNotification : ZeroAlloc.Mediator.INotification
@@ -383,7 +385,7 @@ public sealed partial class ThalosAgentRuntime(
         {
             await publisher.PublishAsync(notification, ct).ConfigureAwait(false);
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
             LogNotificationFailed(_logger, typeof(TNotification).Name, sessionId, ex.Message, ex);
         }

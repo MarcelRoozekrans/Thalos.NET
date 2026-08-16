@@ -49,6 +49,18 @@ public sealed class ThalosAgentRuntimeIntegrityTests
     }
 
     [Fact]
+    public async Task Publisher_throwing_on_SessionClosed_does_not_fail_close()
+    {
+        var f = new RuntimeFixture { PublisherDecorator = inner => new ThrowingPublisher<SessionClosedNotification>(inner) }.Build();
+        var s = (await f.Runtime.CreateSessionAsync(f.Agent.Id, RuntimeFixture.User(), default)).Value;
+
+        var closed = await f.Runtime.CloseSessionAsync(s, RuntimeFixture.User(), default);
+
+        closed.IsSuccess.Should().BeTrue();
+        (await f.Store.GetAsync(s, default)).Value.State.Should().Be(SessionState.Closed);
+    }
+
+    [Fact]
     public async Task Store_throwing_in_RecordTurn_fails_with_StoreError_and_releases_the_session()
     {
         var f = new RuntimeFixture { StoreDecorator = inner => new FaultingSessionStore(inner) { OnRecordTurn = () => throw new InvalidOperationException("db down") } }.Build();
