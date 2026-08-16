@@ -18,6 +18,12 @@ public sealed class DefaultToolAuthorizerTests
                 : UnitResult<AuthorizationFailure>.Failure(new AuthorizationFailure("role", "developer role required")));
     }
 
+    internal sealed class UnnamedPolicy : IAuthorizationPolicy
+    {
+        public ValueTask<UnitResult<AuthorizationFailure>> EvaluateAsync(ISecurityContext ctx, CancellationToken ct = default) =>
+            new(UnitResult<AuthorizationFailure>.Failure(new AuthorizationFailure("never", "should not be consulted")));
+    }
+
     private static readonly JsonElement NoArgs = JsonDocument.Parse("{}").RootElement;
     private static ISecurityContext Dev => new Runtime.TestSecurityContext("u", "developer");
     private static ISecurityContext Guest => new Runtime.TestSecurityContext("g");
@@ -43,12 +49,13 @@ public sealed class DefaultToolAuthorizerTests
     }
 
     [Fact]
-    public async Task Missing_policy_denies_closed()
+    public async Task Missing_policy_denies_closed_with_generic_reason()
     {
         var auth = new DefaultToolAuthorizer([new ToolPolicyBinding("*", "does-not-exist")], []);
         var d = await auth.AuthorizeAsync(Dev, "x__y", NoArgs, default);
         d.Allowed.Should().BeFalse();
-        d.Reason.Should().Contain("does-not-exist");
+        d.Reason.Should().Be("tool is not available to this caller", "the policy name is an internal detail that must not reach the model");
+        d.Reason.Should().NotContain("does-not-exist");
     }
 
     [Fact]
@@ -59,5 +66,22 @@ public sealed class DefaultToolAuthorizerTests
             [new DeveloperPolicy()]);
         (await auth.AuthorizeAsync(Dev, "roslyn__x", NoArgs, default)).Allowed.Should().BeFalse();
         (await auth.AuthorizeAsync(Dev, "other__x", NoArgs, default)).Allowed.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Duplicate_policy_names_throw_at_construction()
+    {
+        // Two instances of the same type: the ZeroAlloc.Authorization generator rejects two *types* with the same
+        // [Policy] name at compile time (ZAUTH002), so a runtime duplicate can only come from double registration.
+        var act = () => new DefaultToolAuthorizer([], [new DeveloperPolicy(), new DeveloperPolicy()]);
+        act.Should().Throw<InvalidOperationException>()
+            .WithMessage("*Duplicate policy name 'developer'*DeveloperPolicy*");
+    }
+
+    [Fact]
+    public async Task Policies_without_attribute_are_ignored()
+    {
+        var auth = new DefaultToolAuthorizer([new ToolPolicyBinding("*", "developer")], [new UnnamedPolicy(), new DeveloperPolicy()]);
+        (await auth.AuthorizeAsync(Dev, "x__y", NoArgs, default)).Allowed.Should().BeTrue();
     }
 }

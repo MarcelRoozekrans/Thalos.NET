@@ -62,4 +62,53 @@ public sealed class ToolCatalogTests
         var r = await catalog.ResolveAsync(Agent(), default);
         r.Value.Should().HaveCount(1);
     }
+
+    [Fact]
+    public async Task Allow_list_matching_nothing_yields_empty_set()
+    {
+        var catalog = Catalog(Source("roslyn", "find_callers"), Source("mem", "snapshot"));
+        var r = await catalog.ResolveAsync(Agent("nothing__*"), default);
+        r.IsSuccess.Should().BeTrue();
+        r.Value.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Non_function_tools_are_dropped()
+    {
+        var s = Substitute.For<IToolSource>();
+        s.Name.Returns("mixed");
+        IReadOnlyList<AITool> list = [new HostedWebSearchTool(), AIFunctionFactory.Create(() => "x", "fn")];
+        s.GetToolsAsync(Arg.Any<CancellationToken>()).Returns(Result<IReadOnlyList<AITool>, AgentError>.Success(list));
+
+        var tools = (await Catalog(s).ResolveAsync(Agent(), default)).Value;
+
+        tools.Select(t => t.Name).Should().Equal("mixed__fn");
+    }
+
+    [Theory]
+    [InlineData("bad name")]
+    [InlineData("a__b")]
+    [InlineData("dots.not.allowed")]
+    [InlineData("")]
+    public async Task Sources_with_invalid_names_are_skipped(string badName)
+    {
+        var bad = Source(badName, "t");
+        var catalog = Catalog(bad, Source("ok-1_x", "t"));
+
+        var tools = (await catalog.ResolveAsync(Agent(), default)).Value;
+
+        tools.Select(t => t.Name).Should().Equal("ok-1_x__t");
+        await bad.DidNotReceive().GetToolsAsync(Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Tools_whose_qualified_name_exceeds_64_chars_are_skipped()
+    {
+        var longName = new string('t', 60); // "src__" + 60 = 65 > 64
+        var catalog = Catalog(Source("src", longName, "short"));
+
+        var tools = (await catalog.ResolveAsync(Agent(), default)).Value;
+
+        tools.Select(t => t.Name).Should().Equal("src__short");
+    }
 }

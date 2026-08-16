@@ -6,23 +6,55 @@ using ZeroAlloc.Results;
 namespace Thalos.Tools;
 
 /// <summary>Aggregates all <see cref="IToolSource"/>s, qualifies names, filters by the agent's allow-list, wraps for authorization.</summary>
-public sealed partial class ToolCatalog(
-    IEnumerable<IToolSource> sources,
-    IToolAuthorizer authorizer,
-    IAgentNotificationPublisher publisher,
-    TimeProvider clock,
-    ILogger<ToolCatalog>? logger = null) : IToolCatalog
+/// <remarks>
+/// A source whose <see cref="IToolSource.Name"/> is not <c>^[a-zA-Z0-9_-]+$</c> or contains <c>__</c> is skipped, as is a
+/// source whose <see cref="IToolSource.GetToolsAsync"/> fails; non-<see cref="AIFunction"/> tools, duplicate qualified names
+/// (first wins) and qualified names longer than 64 characters (provider limit) are dropped. All of these are logged, none is fatal.
+/// </remarks>
+public sealed partial class ToolCatalog : IToolCatalog
 {
-    private readonly IReadOnlyList<IToolSource> _sources = sources.ToList();
-    private readonly ILogger<ToolCatalog> _logger = logger ?? NullLogger<ToolCatalog>.Instance;
+    private const int MaxQualifiedNameLength = 64;
 
+    private readonly IReadOnlyList<IToolSource> _sources;
+    private readonly IToolAuthorizer _authorizer;
+    private readonly IAgentNotificationPublisher _publisher;
+    private readonly TimeProvider _clock;
+    private readonly ILogger<ToolCatalog> _logger;
+    private readonly ILogger<AuthorizingAIFunction> _functionLogger;
+
+    /// <summary>Creates a catalog over <paramref name="sources"/>; every resolved tool is wrapped in an <see cref="AuthorizingAIFunction"/> using the given collaborators.</summary>
+    public ToolCatalog(
+        IEnumerable<IToolSource> sources,
+        IToolAuthorizer authorizer,
+        IAgentNotificationPublisher publisher,
+        TimeProvider clock,
+        ILoggerFactory? loggerFactory = null)
+    {
+        ArgumentNullException.ThrowIfNull(sources);
+        _sources = sources.ToList();
+        _authorizer = authorizer;
+        _publisher = publisher;
+        _clock = clock;
+        var factory = loggerFactory ?? NullLoggerFactory.Instance;
+        _logger = factory.CreateLogger<ToolCatalog>();
+        _functionLogger = factory.CreateLogger<AuthorizingAIFunction>();
+    }
+
+    /// <inheritdoc />
     public async ValueTask<Result<IReadOnlyList<AITool>, AgentError>> ResolveAsync(AgentDefinition agent, CancellationToken ct)
     {
+        ArgumentNullException.ThrowIfNull(agent);
         var result = new List<AITool>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var source in _sources)
         {
+            if (!IsValidSourceName(source.Name))
+            {
+                LogInvalidSourceName(_logger, source.Name);
+                continue;
+            }
+
             var tools = await source.GetToolsAsync(ct).ConfigureAwait(false);
             if (tools.IsFailure)
             {
@@ -34,10 +66,17 @@ public sealed partial class ToolCatalog(
             {
                 if (tool is not AIFunction fn)
                 {
+                    LogNonFunctionTool(_logger, source.Name, tool.Name, tool.GetType().Name);
                     continue; // only functions are callable
                 }
 
                 var qualified = $"{source.Name}__{fn.Name}";
+                if (qualified.Length > MaxQualifiedNameLength)
+                {
+                    LogNameTooLong(_logger, qualified, MaxQualifiedNameLength);
+                    continue;
+                }
+
                 if (!IsAllowed(agent.Tools, qualified))
                 {
                     continue;
@@ -49,7 +88,7 @@ public sealed partial class ToolCatalog(
                     continue;
                 }
 
-                result.Add(new AuthorizingAIFunction(fn, qualified, authorizer, publisher, clock));
+                result.Add(new AuthorizingAIFunction(fn, qualified, _authorizer, _publisher, _clock, _functionLogger));
             }
         }
 
@@ -71,6 +110,34 @@ public sealed partial class ToolCatalog(
         return false;
     }
 
+    // ^[a-zA-Z0-9_-]+$ without "__" (the source/tool separator) — hand-rolled to avoid Regex on the resolve path.
+    private static bool IsValidSourceName(string? name)
+    {
+        if (string.IsNullOrEmpty(name))
+        {
+            return false;
+        }
+
+        var previousUnderscore = false;
+        foreach (var c in name)
+        {
+            var underscore = c == '_';
+            if (underscore && previousUnderscore)
+            {
+                return false;
+            }
+
+            if (!underscore && c != '-' && !char.IsAsciiLetterOrDigit(c))
+            {
+                return false;
+            }
+
+            previousUnderscore = underscore;
+        }
+
+        return true;
+    }
+
     [LoggerMessage(EventId = 100, Level = LogLevel.Warning, Message = "Tool source '{Source}' failed and was skipped: {Error}")]
     private static partial void LogSourceFailed(ILogger logger, string source, string error);
 
@@ -79,4 +146,13 @@ public sealed partial class ToolCatalog(
 
     [LoggerMessage(EventId = 102, Level = LogLevel.Debug, Message = "Resolved {Count} tools for agent '{Agent}'")]
     private static partial void LogResolved(ILogger logger, string agent, int count);
+
+    [LoggerMessage(EventId = 103, Level = LogLevel.Information, Message = "Tool '{Tool}' from source '{Source}' is a {ToolType}, not an AIFunction, and was dropped")]
+    private static partial void LogNonFunctionTool(ILogger logger, string source, string tool, string toolType);
+
+    [LoggerMessage(EventId = 104, Level = LogLevel.Warning, Message = "Tool source name '{Source}' is invalid (must match ^[a-zA-Z0-9_-]+$ and not contain '__'); source skipped")]
+    private static partial void LogInvalidSourceName(ILogger logger, string? source);
+
+    [LoggerMessage(EventId = 105, Level = LogLevel.Warning, Message = "Qualified tool name '{Tool}' exceeds {Max} characters and was skipped")]
+    private static partial void LogNameTooLong(ILogger logger, string tool, int max);
 }
