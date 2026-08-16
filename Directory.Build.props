@@ -12,12 +12,13 @@
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
     <!-- $(BaseIntermediateOutputPath) is not yet defined when Directory.Build.props is imported, so spell out obj\ -->
-    <CompilerGeneratedFilesOutputPath>$(MSBuildProjectDirectory)\obj\generated</CompilerGeneratedFilesOutputPath>
+    <CompilerGeneratedFilesOutputPath>$(MSBuildProjectDirectory)/obj/generated</CompilerGeneratedFilesOutputPath>
   </PropertyGroup>
 
   <!-- Shared NuGet metadata; each package csproj sets PackageId/Description/PackageTags -->
   <PropertyGroup>
     <Authors>Marcel Roozekrans</Authors>
+    <Copyright>Copyright (c) 2026 Marcel Roozekrans</Copyright>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/MarcelRoozekrans/Thalos.NET</PackageProjectUrl>
     <RepositoryUrl>https://github.com/MarcelRoozekrans/Thalos.NET</RepositoryUrl>

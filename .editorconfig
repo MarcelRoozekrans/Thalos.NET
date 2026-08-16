@@ -4,7 +4,7 @@ root = true
 # All files
 [*]
 charset = utf-8
-end_of_line = crlf
+end_of_line = lf
 indent_style = space
 indent_size = 4
 insert_final_newline = true
@@ -145,96 +145,6 @@ dotnet_analyzer_diagnostic.category-Style.severity = suggestion
 dotnet_analyzer_diagnostic.category-Performance.severity = warning
 dotnet_analyzer_diagnostic.category-Security.severity = error
 dotnet_analyzer_diagnostic.category-Reliability.severity = warning
-
-# Specific rules
-dotnet_diagnostic.CA1848.severity = suggestion # Use LoggerMessage delegates - requires refactoring
-dotnet_diagnostic.CA2007.severity = suggestion # ConfigureAwait - important async best practice, but suppressible
-dotnet_diagnostic.CA2016.severity = suggestion # Forward CancellationToken
-dotnet_diagnostic.CA1062.severity = suggestion # Validate arguments of public methods
-dotnet_diagnostic.CA1031.severity = suggestion # Do not catch general exception types
-dotnet_diagnostic.MA0004.severity = suggestion # Use ConfigureAwait - important async best practice, but suppressible
-
-# CA1515: Types can be made internal - requires significant refactoring, suppress for now
-dotnet_diagnostic.CA1515.severity = suggestion
-
-# CA1812: Internal classes apparently never instantiated - suppress (test classes)
-dotnet_diagnostic.CA1812.severity = suggestion
-
-# CA1852: Type can be sealed - suppress for now
-dotnet_diagnostic.CA1852.severity = suggestion
-
-# MA0051: Method is too long - suppress for now
-dotnet_diagnostic.MA0051.severity = suggestion
-
-# S2139 & S6667: Exception logging - suppress for now
-dotnet_diagnostic.S2139.severity = suggestion
-dotnet_diagnostic.S6667.severity = suggestion
-
-# MA0048: File name must match type name - suppress for now
-dotnet_diagnostic.MA0048.severity = suggestion
-
-# S1199: Extract nested code - suppress for now
-dotnet_diagnostic.S1199.severity = suggestion
-
-# CA2012: ValueTask usage - suppress for now
-dotnet_diagnostic.CA2012.severity = suggestion
-
-# CA1707: Remove underscores from member names (test naming convention)
-dotnet_diagnostic.CA1707.severity = suggestion
-
-# CA1001: Types should dispose of disposable fields
-dotnet_diagnostic.CA1001.severity = suggestion
-
-# CA1724: Type names shouldn't match namespaces (test base classes)
-dotnet_diagnostic.CA1724.severity = suggestion
-
-# MA0052: Replace constant Enum.ToString with nameof
-dotnet_diagnostic.MA0052.severity = suggestion
-
-# S2699: Add at least one assertion to test case
-dotnet_diagnostic.S2699.severity = suggestion
-
-# S2219: Use a 'null' check instead
-dotnet_diagnostic.S2219.severity = suggestion
-
-# CA1806: Do not ignore method results
-dotnet_diagnostic.CA1806.severity = suggestion
-
-# CA2000: Dispose objects before losing scope
-dotnet_diagnostic.CA2000.severity = suggestion
-
-# S3878: Remove array creation and pass elements directly
-dotnet_diagnostic.S3878.severity = suggestion
-
-# S2925: Do not use Thread.Sleep in tests
-dotnet_diagnostic.S2925.severity = suggestion
-
-# CS1061: Does not contain definition - suppress for tests with mock compatibility issues
-dotnet_diagnostic.CS1061.severity = suggestion
-
-# CS7036: Missing required parameter
-dotnet_diagnostic.CS7036.severity = suggestion
-
-# CS1729: Constructor mismatch
-dotnet_diagnostic.CS1729.severity = suggestion
-
-# CS1503: Argument type mismatch
-dotnet_diagnostic.CS1503.severity = suggestion
-
-# CS1929: Method overload mismatch
-dotnet_diagnostic.CS1929.severity = suggestion
-
-# CS0854: Expression tree with optional arguments
-dotnet_diagnostic.CS0854.severity = suggestion
-
-# CS0121: Ambiguous reference
-dotnet_diagnostic.CS0121.severity = suggestion
-
-# CS4033: Missing async method body
-dotnet_diagnostic.CS4033.severity = suggestion
-
-# CS9035: Required member not set
-dotnet_diagnostic.CS9035.severity = suggestion
 
 # Generated code
 [**/obj/**.cs]

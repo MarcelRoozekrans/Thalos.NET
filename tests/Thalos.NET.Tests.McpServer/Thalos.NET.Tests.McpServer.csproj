@@ -17,6 +17,7 @@
     <PackageReference Remove="NSubstitute" />
     <PackageReference Remove="AwesomeAssertions" />
     <Using Remove="Xunit" />
+    <!-- AwesomeAssertions 7.x still ships the FluentAssertions namespace (renamed to AwesomeAssertions only in 9.x) -->
     <Using Remove="FluentAssertions" />
   </ItemGroup>
 </Project>
