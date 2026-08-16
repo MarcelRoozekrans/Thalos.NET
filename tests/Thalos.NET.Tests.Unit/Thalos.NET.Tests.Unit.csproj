@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <ProjectReference Include="..\..\src\Thalos.NET\Thalos.NET.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Anthropic\Thalos.NET.Anthropic.csproj" />
     <ProjectReference Include="..\..\src\Thalos.NET.Testing\Thalos.NET.Testing.csproj" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
     <PackageReference Include="Microsoft.Extensions.Logging" />
