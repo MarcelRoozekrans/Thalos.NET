@@ -1,0 +1,20 @@
+name: CI
+on:
+  push: { branches: [main] }
+  pull_request: { branches: [main] }
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: 10.0.x }
+      - run: dotnet restore
+      - run: dotnet build --no-restore -c Release
+      # the Mcp tests launch this server over stdio; make sure it is built even if the solution build order changes
+      - run: dotnet build tests/Thalos.NET.Tests.McpServer -c Release --no-restore
+      - run: dotnet test --no-build -c Release --logger "trx;LogFileName=tests.trx" --collect:"XPlat Code Coverage"
+      - run: dotnet pack --no-build -c Release -o artifacts/packages
+      - uses: actions/upload-artifact@v4
+        with: { name: packages, path: artifacts/packages }

@@ -15,4 +15,12 @@
     <PackageReference Include="AwesomeAssertions" />
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
   </ItemGroup>
+  <!-- xunit.core.targets (imported after this file) forces GenerateRuntimeConfigurationFiles=true for test hosts; this is a
+       library, and the generated Thalos.NET.Testing.runtimeconfig.json would otherwise be packed into lib/. A static property
+       cannot win over a package .targets file, so flip it off dynamically before the build pipeline evaluates it. -->
+  <Target Name="_ThalosTestingNoRuntimeConfig" AfterTargets="BeforeBuild">
+    <PropertyGroup>
+      <GenerateRuntimeConfigurationFiles>false</GenerateRuntimeConfigurationFiles>
+    </PropertyGroup>
+  </Target>
 </Project>
