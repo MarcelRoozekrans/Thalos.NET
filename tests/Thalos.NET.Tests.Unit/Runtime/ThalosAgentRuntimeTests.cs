@@ -152,14 +152,40 @@ public sealed class ThalosAgentRuntimeTests
         f.Publisher.Of<SessionClosedNotification>().Should().ContainSingle();
     }
 
+    /// <summary>Real cancellation: the caller's token is cancelled while a tool (honouring its token) blocks.</summary>
     [Fact]
     public async Task Cancellation_returns_Cancelled_and_idle()
     {
-        var f = new RuntimeFixture().Build();
-        f.Client.ThenThrow(new OperationCanceledException());
+        var toolStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var gate = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var blocking = AIFunctionFactory.Create(async (CancellationToken ct) => { toolStarted.TrySetResult(); return await gate.Task.WaitAsync(ct); }, "block");
+        var f = new RuntimeFixture().WithTool(blocking).Build();
+        f.Client.ThenToolCall("t__block", new { }).ThenText("unreachable");
         var s = (await f.Runtime.CreateSessionAsync(f.Agent.Id, RuntimeFixture.User(), default)).Value;
-        var r = await f.Runtime.RunTurnAsync(new AgentTurnRequest(s, "hi", RuntimeFixture.User()), default);
+        using var cts = new CancellationTokenSource();
+
+        var turn = f.Runtime.RunTurnAsync(new AgentTurnRequest(s, "hi", RuntimeFixture.User()), cts.Token).AsTask();
+        await toolStarted.Task;
+        await cts.CancelAsync();
+        var r = await turn;
+
         r.Error.Code.Should().Be(AgentErrorCode.Cancelled);
+        (await f.Store.GetAsync(s, default)).Value.State.Should().Be(SessionState.Idle);
+        f.Publisher.Of<TurnFailedNotification>().Should().ContainSingle(n => n.Error.Code == AgentErrorCode.Cancelled);
+    }
+
+    /// <summary>A provider-side timeout is the provider's failure, not the caller's cancellation.</summary>
+    [Fact]
+    public async Task Provider_TaskCanceledException_without_turn_cancellation_is_a_ProviderError()
+    {
+        var f = new RuntimeFixture().Build();
+        f.Client.ThenThrow(new TaskCanceledException("The request was canceled due to the configured HttpClient.Timeout"));
+        var s = (await f.Runtime.CreateSessionAsync(f.Agent.Id, RuntimeFixture.User(), default)).Value;
+
+        var r = await f.Runtime.RunTurnAsync(new AgentTurnRequest(s, "hi", RuntimeFixture.User()), default);
+
+        r.Error.Code.Should().Be(AgentErrorCode.ProviderError);
+        r.Error.Detail.Should().Contain("Timeout");
         (await f.Store.GetAsync(s, default)).Value.State.Should().Be(SessionState.Idle);
     }
 }

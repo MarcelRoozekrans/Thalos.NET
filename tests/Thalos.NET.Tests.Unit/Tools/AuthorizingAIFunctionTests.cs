@@ -186,6 +186,33 @@ public sealed class AuthorizingAIFunctionTests
         pub.Of<ToolCallCompletedNotification>().Should().BeEmpty();
     }
 
+    /// <summary>AIFunctionFactory marshals return values to JsonElement; a string result must preview as the string, not as <c>"\"…\""</c>.</summary>
+    [Fact]
+    public async Task String_result_marshalled_as_JsonElement_previews_as_the_plain_string()
+    {
+        var (fn, _, _) = Build(true);
+        using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), AnonymousSecurityContext.Instance);
+
+        var result = await fn.InvokeAsync(Args("hi"));
+
+        result.Should().BeOfType<JsonElement>().Which.ValueKind.Should().Be(JsonValueKind.String);
+        scope.ToolCalls.Should().ContainSingle().Which.ResultPreview.Should().Be("echo:hi");
+    }
+
+    [Fact]
+    public async Task Object_result_previews_as_its_json()
+    {
+        var tool = AIFunctionFactory.Create(() => new { ok = true }, "obj");
+        var fn = new AuthorizingAIFunction(tool, "t__obj", Allowing(), new RecordingPublisher(), TimeProvider.System);
+        using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), AnonymousSecurityContext.Instance);
+
+        await fn.InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal));
+
+        // raw JSON (AIJsonUtilities.DefaultOptions writes indented) — only strings are unwrapped
+        var preview = scope.ToolCalls.Should().ContainSingle().Which.ResultPreview;
+        preview.Should().StartWith("{").And.EndWith("}").And.Contain("\"ok\": true");
+    }
+
     [Fact]
     public async Task Long_results_are_previewed_to_200_chars_plus_ellipsis()
     {
