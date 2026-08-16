@@ -21,6 +21,34 @@ public sealed class ThalosAgentRuntimeIntegrityTests
     }
 
     [Fact]
+    public async Task Publisher_throwing_on_TurnCompleted_does_not_fail_the_persisted_turn()
+    {
+        var f = new RuntimeFixture { PublisherDecorator = inner => new ThrowingPublisher<TurnCompletedNotification>(inner) }.Build();
+        f.Client.ThenText("hello");
+        var s = (await f.Runtime.CreateSessionAsync(f.Agent.Id, RuntimeFixture.User(), default)).Value;
+
+        var r = await f.Runtime.RunTurnAsync(new AgentTurnRequest(s, "hi", RuntimeFixture.User()), default);
+
+        r.IsSuccess.Should().BeTrue();
+        r.Value.Text.Should().Be("hello");
+        var record = (await f.Store.GetAsync(s, default)).Value;
+        record.State.Should().Be(SessionState.Idle);
+        record.TurnCount.Should().Be(1);
+        f.Publisher.Of<TurnFailedNotification>().Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Publisher_throwing_on_SessionCreated_does_not_fail_session_creation()
+    {
+        var f = new RuntimeFixture { PublisherDecorator = inner => new ThrowingPublisher<SessionCreatedNotification>(inner) }.Build();
+
+        var created = await f.Runtime.CreateSessionAsync(f.Agent.Id, RuntimeFixture.User(), default);
+
+        created.IsSuccess.Should().BeTrue();
+        (await f.Store.GetAsync(created.Value, default)).IsSuccess.Should().BeTrue();
+    }
+
+    [Fact]
     public async Task Store_throwing_in_RecordTurn_fails_with_StoreError_and_releases_the_session()
     {
         var f = new RuntimeFixture { StoreDecorator = inner => new FaultingSessionStore(inner) { OnRecordTurn = () => throw new InvalidOperationException("db down") } }.Build();

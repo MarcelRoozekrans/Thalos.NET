@@ -46,7 +46,8 @@ public sealed partial class ThalosAgentRuntime(
             return Result<SessionId, AgentError>.Failure(created.Error);
         }
 
-        await publisher.PublishAsync(new SessionCreatedNotification(created.Value.Id, agentId, caller.Id, clock.GetUtcNow()), ct).ConfigureAwait(false);
+        // the session exists in the store (source of truth); a failing notification must not report it as not created
+        await PublishPostPersistAsync(new SessionCreatedNotification(created.Value.Id, agentId, caller.Id, clock.GetUtcNow()), created.Value.Id, ct).ConfigureAwait(false);
         LogSessionCreated(_logger, created.Value.Id, agentId, caller.Id);
         return Result<SessionId, AgentError>.Success(created.Value.Id);
     }
@@ -221,6 +222,8 @@ public sealed partial class ThalosAgentRuntime(
             await ReleaseBestEffortAsync(sessionId).ConfigureAwait(false);
             var error = failure ?? (ex is OperationCanceledException ? AgentError.Cancelled() : AgentError.StoreError("Failed to finish turn.", ex.Message));
             activity?.SetStatus(ActivityStatusCode.Error, error.Message);
+            ThalosTelemetry.TurnFailures.Add(1, new KeyValuePair<string, object?>("thalos.error", error.Code.ToString()));
+            await PublishPostPersistAsync(new TurnFailedNotification(sessionId, turnId, error, clock.GetUtcNow()), sessionId, CancellationToken.None).ConfigureAwait(false);
             LogTurnFailed(_logger, turnId, sessionId, error.ToString());
             await scope.PublishAsync(new TurnFailedEvent(sessionId, turnId, error), CancellationToken.None).ConfigureAwait(false);
         }
@@ -230,7 +233,7 @@ public sealed partial class ThalosAgentRuntime(
         }
     }
 
-    /// <summary>Second phase of a turn: records the outcome in the store, releases the session and publishes the terminal event(s). May throw (store/publisher).</summary>
+    /// <summary>Second phase of a turn: records the outcome in the store, releases the session and publishes the terminal event(s). May throw (store).</summary>
     private async ValueTask FinishTurnAsync(TurnScope scope, Activity? activity, AgentError? failure, string text, TurnUsage usage, TimeSpan elapsed)
     {
         var sessionId = scope.SessionId;
@@ -344,7 +347,8 @@ public sealed partial class ThalosAgentRuntime(
         ThalosTelemetry.InputTokens.Add(usage.InputTokens);
         ThalosTelemetry.OutputTokens.Add(usage.OutputTokens);
 
-        await publisher.PublishAsync(new TurnCompletedNotification(sessionId, turnId, usage, elapsed, clock.GetUtcNow()), ct).ConfigureAwait(false);
+        // the turn is persisted and the session released; a failing notification must not report the turn as failed
+        await PublishPostPersistAsync(new TurnCompletedNotification(sessionId, turnId, usage, elapsed, clock.GetUtcNow()), sessionId, ct).ConfigureAwait(false);
         LogTurnCompleted(_logger, turnId, sessionId, elapsed.TotalMilliseconds, usage.InputTokens, usage.OutputTokens);
         return Result<AgentTurnResult, AgentError>.Success(new AgentTurnResult(turnId, sessionId, text, usage, toolCalls, elapsed));
     }
@@ -362,9 +366,27 @@ public sealed partial class ThalosAgentRuntime(
         }
 
         ThalosTelemetry.TurnFailures.Add(1, new KeyValuePair<string, object?>("thalos.error", error.Code.ToString()));
-        await publisher.PublishAsync(new TurnFailedNotification(sessionId, turnId, error, clock.GetUtcNow()), CancellationToken.None).ConfigureAwait(false);
+        // the outcome is decided (and, if claimed, the release persisted); a failing audit notification must not mask the real error
+        await PublishPostPersistAsync(new TurnFailedNotification(sessionId, turnId, error, clock.GetUtcNow()), sessionId, CancellationToken.None).ConfigureAwait(false);
         LogTurnFailed(_logger, turnId, sessionId, error.ToString());
         return new TurnFailedEvent(sessionId, turnId, error);
+    }
+
+    /// <summary>
+    /// Publishes a notification whose subject is already persisted (session created, turn recorded/released). The store is the
+    /// source of truth, so a failing publisher is logged and swallowed rather than reported to the caller as a failed operation.
+    /// </summary>
+    private async ValueTask PublishPostPersistAsync<TNotification>(TNotification notification, SessionId sessionId, CancellationToken ct)
+        where TNotification : ZeroAlloc.Mediator.INotification
+    {
+        try
+        {
+            await publisher.PublishAsync(notification, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            LogNotificationFailed(_logger, typeof(TNotification).Name, sessionId, ex.Message, ex);
+        }
     }
 
     /// <summary>Releases the session (→ Idle) swallowing anything the store does; used only on the last-resort path where nothing else may throw.</summary>
@@ -431,4 +453,7 @@ public sealed partial class ThalosAgentRuntime(
 
     [LoggerMessage(EventId = 205, Level = LogLevel.Warning, Message = "Releasing session {SessionId} after a failed turn threw: {Error}")]
     private static partial void LogReleaseThrew(ILogger logger, SessionId sessionId, string error, Exception exception);
+
+    [LoggerMessage(EventId = 206, Level = LogLevel.Warning, Message = "Failed to publish {Notification} for session {SessionId}: {Error}")]
+    private static partial void LogNotificationFailed(ILogger logger, string notification, SessionId sessionId, string error, Exception exception);
 }
