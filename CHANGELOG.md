@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.1.0...v0.1.1) (2026-08-17)
+
+
+### Bug Fixes
+
+* **release:** honour the release tag on a detached checkout so a tag dispatch can publish ([67fbfb7](https://github.com/MarcelRoozekrans/Thalos.NET/commit/67fbfb72ed8993a9d6f65c8ddaca6c20b1227b13))
+
 ## 0.1.0 (2026-08-17)
 
 
