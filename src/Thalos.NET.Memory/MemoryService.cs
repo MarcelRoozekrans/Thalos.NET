@@ -18,7 +18,11 @@ public sealed partial class MemoryService(
     AgentEventHub hub,
     ILogger<MemoryService>? logger = null) : IMemoryService
 {
+    /// <summary>Score desc, importance desc, <c>UpdatedAt</c> desc, then id — a total order, so equal candidates always come back in the same sequence.</summary>
+    private static readonly Comparison<RecalledMemory> CandidateOrder = CompareCandidates;
+
     private readonly ILogger _logger = logger ?? NullLogger<MemoryService>.Instance;
+    private int _thresholdWarned;
 
     /// <inheritdoc />
     public async ValueTask<Result<MemoryRecord, AgentError>> RememberAsync(RememberRequest request, CancellationToken ct)
@@ -49,13 +53,14 @@ public sealed partial class MemoryService(
             return Result<MemoryRecord, AgentError>.Failure(invalid);
         }
 
-        var opts = options.Value;
-        if (opts.Dedupe.Enabled && await FindDuplicateAsync(record, opts.Dedupe.Threshold, ct).ConfigureAwait(false) is { } duplicate)
+        // Events after a successful write go out with CancellationToken.None: a late cancellation must not make the caller lose a committed record.
+        var dedupe = options.Value.Dedupe;
+        if (DedupeEnabled(dedupe) && await FindDuplicateAsync(record, dedupe.Threshold, ct).ConfigureAwait(false) is { } duplicate)
         {
             var refreshed = await store.UpdateAsync(duplicate.Id, new MemoryUpdate { Importance = Math.Max(duplicate.Importance, record.Importance) }, ct).ConfigureAwait(false);
             if (refreshed.IsSuccess)
             {
-                await MemoryEvents.PublishAsync(hub, (s, t) => new MemoryStoredEvent(s, t, refreshed.Value.Id, refreshed.Value.Kind.Value, Deduped: true), ct).ConfigureAwait(false);
+                await MemoryEvents.PublishAsync(hub, (s, t) => new MemoryStoredEvent(s, t, refreshed.Value.Id, refreshed.Value.Kind.Value, Deduped: true), CancellationToken.None).ConfigureAwait(false);
                 return refreshed;
             }
 
@@ -63,23 +68,50 @@ public sealed partial class MemoryService(
         }
 
         var created = await store.CreateAsync(record, ct).ConfigureAwait(false);
-        if (created.IsFailure)
-        {
-            return created;
-        }
+        return created.IsFailure ? created : Result<MemoryRecord, AgentError>.Success(await IndexNewAsync(created.Value, ct).ConfigureAwait(false));
+    }
 
-        var indexed = await index.UpsertAsync([created.Value], ct).ConfigureAwait(false);
+    /// <summary>Upserts a freshly created record, clears <c>IndexPending</c> and publishes the matching event; never fails (the record is already committed).</summary>
+    private async ValueTask<MemoryRecord> IndexNewAsync(MemoryRecord created, CancellationToken ct)
+    {
+        var indexed = await index.UpsertAsync([created], ct).ConfigureAwait(false);
         if (indexed.IsFailure)
         {
-            LogIndexPending(_logger, record.Id, indexed.Error.ToString());
-            await MemoryEvents.PublishAsync(hub, (s, t) => new MemoryIndexPendingEvent(s, t, record.Id), ct).ConfigureAwait(false);
+            LogIndexPending(_logger, created.Id, indexed.Error.ToString());
+            await MemoryEvents.PublishAsync(hub, (s, t) => new MemoryIndexPendingEvent(s, t, created.Id), CancellationToken.None).ConfigureAwait(false);
             return created;
         }
 
-        var cleared = await store.UpdateAsync(record.Id, new MemoryUpdate { IndexPending = false }, ct).ConfigureAwait(false);
-        var final = cleared.IsSuccess ? cleared.Value : created.Value;
-        await MemoryEvents.PublishAsync(hub, (s, t) => new MemoryStoredEvent(s, t, final.Id, final.Kind.Value, Deduped: false), ct).ConfigureAwait(false);
-        return Result<MemoryRecord, AgentError>.Success(final);
+        var cleared = await store.UpdateAsync(created.Id, new MemoryUpdate { IndexPending = false }, ct).ConfigureAwait(false);
+        if (cleared.IsFailure)
+        {
+            LogClearPendingFailed(_logger, created.Id, cleared.Error.ToString()); // vector written; the flag stays set and the next reindex re-embeds it
+        }
+
+        var final = cleared.IsSuccess ? cleared.Value : created;
+        await MemoryEvents.PublishAsync(hub, (s, t) => new MemoryStoredEvent(s, t, final.Id, final.Kind.Value, Deduped: false), CancellationToken.None).ConfigureAwait(false);
+        return final;
+    }
+
+    /// <summary>Dedupe runs only when enabled and the threshold is a similarity in (0, 1]; a misconfigured threshold disables it (warned once).</summary>
+    private bool DedupeEnabled(DedupeOptions dedupe)
+    {
+        if (!dedupe.Enabled)
+        {
+            return false;
+        }
+
+        if (!double.IsNaN(dedupe.Threshold) && dedupe.Threshold is > 0 and <= 1)
+        {
+            return true;
+        }
+
+        if (Interlocked.Exchange(ref _thresholdWarned, 1) == 0)
+        {
+            LogDedupeThresholdInvalid(_logger, dedupe.Threshold);
+        }
+
+        return false;
     }
 
     /// <summary>Same owner, same agent scope (no shared owner), score ≥ threshold, not archived. An index failure means "no duplicate" (remember still stores).</summary>
@@ -122,8 +154,8 @@ public sealed partial class MemoryService(
         }
 
         var candidates = hydrated.Value;
-        candidates.Sort(CompareCandidates);
-        var selected = SelectWithinBudget(candidates, topK, options.MaxChars);
+        candidates.Sort(CandidateOrder);
+        var selected = SelectWithinBudget(candidates, topK, options.MaxChars > 0 ? options.MaxChars : int.MaxValue); // MaxChars <= 0 = no char budget
         if (selected.Count > 0)
         {
             var marked = await store.MarkRecalledAsync(selected.Select(s => s.Record.Id).ToList(), clock.GetUtcNow(), ct).ConfigureAwait(false);
@@ -163,7 +195,7 @@ public sealed partial class MemoryService(
         return Result<List<RecalledMemory>, AgentError>.Success(candidates);
     }
 
-    /// <summary>Score desc, then importance desc, then <c>UpdatedAt</c> desc.</summary>
+    /// <summary>Score desc, then importance desc, then <c>UpdatedAt</c> desc, then id (deterministic ties).</summary>
     private static int CompareCandidates(RecalledMemory a, RecalledMemory b)
     {
         var c = b.Score.CompareTo(a.Score);
@@ -177,6 +209,11 @@ public sealed partial class MemoryService(
             c = b.Record.UpdatedAt.CompareTo(a.Record.UpdatedAt);
         }
 
+        if (c == 0)
+        {
+            c = a.Record.Id.CompareTo(b.Record.Id);
+        }
+
         return c;
     }
 
@@ -184,7 +221,7 @@ public sealed partial class MemoryService(
     private static List<RecalledMemory> SelectWithinBudget(List<RecalledMemory> candidates, int topK, int maxChars)
     {
         var selected = new List<RecalledMemory>(Math.Min(topK, candidates.Count));
-        var chars = 0;
+        var chars = 0L;
         foreach (var candidate in candidates)
         {
             if (selected.Count >= topK)
@@ -297,7 +334,11 @@ public sealed partial class MemoryService(
         return Result<ReindexReport, AgentError>.Success(new ReindexReport(scanned, indexed, failed));
     }
 
-    /// <summary>Upserts one batch; on failure the whole batch counts as failed (the index writes none of it, so <c>IndexPending</c> stays set and the next reindex retries).</summary>
+    /// <summary>
+    /// Upserts one batch. On upsert failure the whole batch counts as failed (the index writes none of it, so <c>IndexPending</c> stays
+    /// set and the next reindex retries). A record whose vector was written but whose flag could not be cleared also counts as failed:
+    /// it stays pending and is re-embedded next run.
+    /// </summary>
     private async ValueTask<(int Indexed, int Failed)> FlushAsync(List<MemoryRecord> batch, CancellationToken ct)
     {
         var upserted = await index.UpsertAsync(batch, ct).ConfigureAwait(false);
@@ -307,15 +348,23 @@ public sealed partial class MemoryService(
             return (0, batch.Count);
         }
 
+        var failed = 0;
         foreach (var record in batch)
         {
-            if (record.IndexPending)
+            if (!record.IndexPending)
             {
-                await store.UpdateAsync(record.Id, new MemoryUpdate { IndexPending = false }, ct).ConfigureAwait(false); // failure logged by the store proxy; next reindex retries
+                continue;
+            }
+
+            var cleared = await store.UpdateAsync(record.Id, new MemoryUpdate { IndexPending = false }, ct).ConfigureAwait(false);
+            if (cleared.IsFailure)
+            {
+                LogClearPendingFailed(_logger, record.Id, cleared.Error.ToString());
+                failed++;
             }
         }
 
-        return (batch.Count, 0);
+        return (batch.Count - failed, failed);
     }
 
     [LoggerMessage(EventId = 500, Level = LogLevel.Warning, Message = "Memory {Memory} stored but not indexed (pending): {Error}")]
@@ -332,4 +381,10 @@ public sealed partial class MemoryService(
 
     [LoggerMessage(EventId = 504, Level = LogLevel.Warning, Message = "Reindex batch of {Count} failed: {Error}")]
     private static partial void LogReindexBatchFailed(ILogger logger, int count, string error);
+
+    [LoggerMessage(EventId = 505, Level = LogLevel.Warning, Message = "Clearing IndexPending for memory {Memory} failed (next reindex retries): {Error}")]
+    private static partial void LogClearPendingFailed(ILogger logger, MemoryId memory, string error);
+
+    [LoggerMessage(EventId = 506, Level = LogLevel.Warning, Message = "Dedupe threshold {Threshold} is not in (0, 1]; dedupe is disabled")]
+    private static partial void LogDedupeThresholdInvalid(ILogger logger, double threshold);
 }

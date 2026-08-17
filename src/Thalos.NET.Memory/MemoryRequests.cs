@@ -20,8 +20,12 @@ public sealed record RememberRequest
 /// </summary>
 public sealed class RecallOptions
 {
+    /// <summary>Max memories per recall; values below 1 are treated as 1.</summary>
     public int TopK { get; set; } = 5;
+
     public double MinScore { get; set; } = 0.6;
+
+    /// <summary>Total character budget for the recalled texts; 0 or negative = no budget (TopK alone caps the result).</summary>
     public int MaxChars { get; set; } = 2000;
 }
 
@@ -47,4 +51,9 @@ public sealed record ReindexOptions
     public int BatchSize { get; init; } = 32;
 }
 
+/// <summary>
+/// Outcome of <c>IMemoryService.ReindexAsync</c>. <paramref name="Failed"/> counts records of a batch whose upsert failed (none of them
+/// were written) plus records whose vector was written but whose <c>IndexPending</c> flag could not be cleared — both stay pending and
+/// are re-embedded by the next run. <c>Scanned == Indexed + Failed</c>.
+/// </summary>
 public sealed record ReindexReport(int Scanned, int Indexed, int Failed);

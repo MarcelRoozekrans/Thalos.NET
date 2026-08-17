@@ -23,6 +23,6 @@ public sealed class DedupeOptions
 {
     public bool Enabled { get; set; } = true;
 
-    /// <summary>Similarity at or above which a new memory refreshes an existing one instead of inserting.</summary>
+    /// <summary>Similarity in (0, 1] at or above which a new memory refreshes an existing one instead of inserting. A value outside (0, 1] (or NaN) disables dedupe (warned once).</summary>
     public double Threshold { get; set; } = 0.95;
 }
