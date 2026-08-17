@@ -28,6 +28,9 @@ public sealed partial class MemoryContextProvider(
 {
     private readonly ILogger _logger = logger ?? NullLogger<MemoryContextProvider>.Instance;
 
+    /// <summary>The recall budget this provider applies (tests: verifies the per-agent copy).</summary>
+    internal RecallOptions Recall => recall;
+
     /// <inheritdoc />
     protected override async ValueTask<AIContext> ProvideAIContextAsync(InvokingContext context, CancellationToken cancellationToken = default)
     {
