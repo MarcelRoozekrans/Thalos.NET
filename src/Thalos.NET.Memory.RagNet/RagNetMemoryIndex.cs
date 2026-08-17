@@ -1,3 +1,4 @@
+using System.Globalization;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -122,8 +123,28 @@ public sealed partial class RagNetMemoryIndex(
     }
 
     /// <inheritdoc />
-    public ValueTask<Result<MemoryIndexHealth, AgentError>> ProbeAsync(CancellationToken ct) =>
-        new(Result<MemoryIndexHealth, AgentError>.Success(new MemoryIndexHealth(false, options.VectorDimensions, "probe not implemented"))); // Task 22
+    /// <remarks>Embeds a probe text (checks the generator, learns the dimensions), compares with <see cref="RagNetMemoryOptions.VectorDimensions"/>, then runs a filtered search (checks the table). Never throws.</remarks>
+    public async ValueTask<Result<MemoryIndexHealth, AgentError>> ProbeAsync(CancellationToken ct)
+    {
+        try
+        {
+            var vector = await embeddings.GenerateVectorAsync("thalos memory probe", null, ct).ConfigureAwait(false);
+            var dims = vector.Length;
+            if (dims != options.VectorDimensions)
+            {
+                return Result<MemoryIndexHealth, AgentError>.Success(new MemoryIndexHealth(false, dims,
+                    string.Create(CultureInfo.InvariantCulture, $"the embedding generator produces {dims}-dimensional vectors but VectorDimensions is {options.VectorDimensions}")));
+            }
+
+            await vectorStore.SearchAsync(vector, new SearchOptions { TopK = 1, MinScore = 0, MetadataFilter = new Dictionary<string, MetadataValue>(StringComparer.Ordinal) { [MarkerKey] = MarkerValue } }, ct).ConfigureAwait(false);
+            return Result<MemoryIndexHealth, AgentError>.Success(new MemoryIndexHealth(true, dims));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            var error = Map(ex, "probe");
+            return Result<MemoryIndexHealth, AgentError>.Success(new MemoryIndexHealth(false, null, error.Detail ?? error.Message));
+        }
+    }
 
     private static Dictionary<string, MetadataValue> Metadata(string owner, AgentId? agent, MemoryKind? kind)
     {
