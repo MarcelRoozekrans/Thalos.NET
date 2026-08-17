@@ -171,7 +171,7 @@ jobs:
           [ "$(ls "$feed" | wc -l)" -eq 6 ] || { echo "::error::rehearsal feed does not hold 6 packages"; exit 1; }
 
       - name: Upload packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: packages-${{ env.PACKAGE_VERSION }}
           path: artifacts/packages
