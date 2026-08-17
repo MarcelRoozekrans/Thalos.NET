@@ -75,7 +75,8 @@ public sealed class InMemoryMemoryIndex(IEmbeddingGenerator<string, Embedding<fl
                 var byScore = b.Score.CompareTo(a.Score);
                 return byScore != 0 ? byScore : a.Id.CompareTo(b.Id);
             });
-            IReadOnlyList<MemoryHit> top = hits.Count > options.TopK ? hits.GetRange(0, Math.Max(0, options.TopK)) : hits;
+            var topK = Math.Max(1, options.TopK); // TopK <= 0 is treated as 1, like RagNetMemoryIndex
+            IReadOnlyList<MemoryHit> top = hits.Count > topK ? hits.GetRange(0, topK) : hits;
             return Result<IReadOnlyList<MemoryHit>, AgentError>.Success(top);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)

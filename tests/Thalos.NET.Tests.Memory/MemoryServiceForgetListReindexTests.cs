@@ -23,6 +23,28 @@ public sealed class MemoryServiceForgetListReindexTests
     }
 
     [Fact]
+    public async Task Soft_forget_marks_the_record_pending_so_an_unarchived_record_is_reindexed()
+    {
+        var f = new MemoryServiceFixture();
+        f.Options.Dedupe.Enabled = false;
+        var svc = f.Build();
+        var a = (await svc.RememberAsync(MemoryServiceFixture.Remember("whiskey xray yankee"), default)).Value;
+        a.IndexPending.Should().BeFalse();
+
+        (await svc.ForgetAsync(a.Id, new MemoryScope("alice", null), hard: false, default)).IsSuccess.Should().BeTrue();
+        var archived = (await f.Store.GetAsync(a.Id, default)).Value;
+        archived.IsArchived.Should().BeTrue();
+        archived.IndexPending.Should().BeTrue("the vector was removed, so the record must be re-embedded if it ever comes back");
+        (await svc.ReindexAsync(new ReindexOptions(), default)).Value.Should().Be(new ReindexReport(0, 0, 0), "archived records are never reindexed");
+
+        // a host un-archives it (e.g. an admin API): the next pending-only reindex picks it up and recall finds it again
+        await f.Store.UpdateAsync(a.Id, new MemoryUpdate { IsArchived = false }, default);
+        (await svc.ReindexAsync(new ReindexOptions(), default)).Value.Should().Be(new ReindexReport(1, 1, 0));
+        (await f.Store.GetAsync(a.Id, default)).Value.IndexPending.Should().BeFalse();
+        (await svc.RecallAsync("whiskey xray yankee", new MemoryScope("alice", null), new RecallOptions(), default)).Value.Should().ContainSingle(m => m.Record.Id == a.Id);
+    }
+
+    [Fact]
     public async Task Forget_enforces_owner_and_reports_not_found()
     {
         var f = new MemoryServiceFixture();

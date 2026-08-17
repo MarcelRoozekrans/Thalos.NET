@@ -17,7 +17,7 @@ public interface IMemoryIndex
     /// </summary>
     ValueTask<UnitResult<AgentError>> UpsertAsync(IReadOnlyList<MemoryRecord> records, CancellationToken ct);
 
-    /// <summary>Hits visible in <paramref name="scope"/> (see <see cref="MemoryScope.Includes"/>) with score ≥ MinScore, best first, at most TopK. Blank query → empty.</summary>
+    /// <summary>Hits visible in <paramref name="scope"/> (see <see cref="MemoryScope.Includes"/>) with score ≥ MinScore, best first, at most TopK (values ≤ 0 are treated as 1); each id at most once even when it is visible through several <see cref="MemoryScope.Partitions"/>. Blank query → empty.</summary>
     ValueTask<Result<IReadOnlyList<MemoryHit>, AgentError>> SearchAsync(string query, MemoryScope scope, MemorySearchOptions options, CancellationToken ct);
 
     /// <summary>Removes the vector; unknown id → success.</summary>

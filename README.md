@@ -129,7 +129,9 @@ vector store) is back — hosts typically run it from a hosted service.
 
 **Rag.NET adapter** (`Thalos.NET.Memory.RagNet`, `net10.0` only): `.UseRagNetMemory(connectionString, vectorDimensions)`
 (or the options overload) registers `RagNetMemoryIndex` over Rag.NET's `PgVectorStore`; every search filters on the
-owner, so a shared table can never leak across owners. Caveats: Rag.NET uses the hard-coded `rag_chunks` table (shared
+owner, so a shared table can never leak across owners. Caveats: `rag_chunks` stores a copy of each memory's text next to
+its vector, so purge memories through `ForgetAsync(hard: true)`/`IMemoryIndex.RemoveAsync`, not by deleting host store rows
+directly; Rag.NET uses the hard-coded `rag_chunks` table (shared
 with any other Rag.NET use on that database — give memory its own database when in doubt) and its own Npgsql pool
 built from the connection string; `VectorDimensions` must equal the generator's output size (e.g. 768 for
 nomic-embed-text); with `EnsureSchemaOnStartup` (default) a hosted service creates extension/table/indexes at start

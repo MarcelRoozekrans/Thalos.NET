@@ -42,9 +42,12 @@ public interface IMemoryStore
     ValueTask<UnitResult<AgentError>> MarkRecalledAsync(IReadOnlyList<MemoryId> ids, DateTimeOffset at, CancellationToken ct);
 
     /// <summary>
-    /// Streams every match of <paramref name="query"/> (paging ignored) oldest first — used by reindex. An <c>IAsyncEnumerable</c> cannot
-    /// return a <c>Result</c>: a backend failure mid-stream may throw; <see cref="IMemoryService.ReindexAsync"/> maps that to
-    /// <see cref="AgentErrorCode.MemoryStoreFailed"/>.
+    /// Streams every match of <paramref name="query"/> (paging ignored) oldest first — used by reindex. Callers update already-yielded
+    /// records while the stream is open (reindex clears <c>IndexPending</c> on the records it just received), so implementations must
+    /// yield a stable snapshot or use keyset paging by <c>(CreatedAt, Id)</c> — never OFFSET paging over the filtered set, which skips or
+    /// repeats rows as matches drop out of the filter — and must tolerate <see cref="UpdateAsync"/> on yielded records from the same
+    /// service (no single-connection reader that blocks writes). An <c>IAsyncEnumerable</c> cannot return a <c>Result</c>: a backend
+    /// failure mid-stream may throw; <see cref="IMemoryService.ReindexAsync"/> maps that to <see cref="AgentErrorCode.MemoryStoreFailed"/>.
     /// </summary>
     IAsyncEnumerable<MemoryRecord> StreamAsync(MemoryQuery query, CancellationToken ct);
 }

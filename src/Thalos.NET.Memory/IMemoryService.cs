@@ -17,11 +17,17 @@ public interface IMemoryService
     /// <summary>
     /// Search within <paramref name="scope"/> (over-fetching 2 × TopK), hydrate, drop archived/missing/out-of-scope, order by score ↓
     /// importance ↓ UpdatedAt ↓ id, apply TopK/MaxChars, mark recalled. Fewer than TopK may come back when many hits were archived or
-    /// do not fit the budget. Index failures are returned (callers decide); blank query → empty.
+    /// do not fit the budget. Index failures are returned (callers decide); blank query → empty. <c>MarkRecalledAsync</c> runs here, before
+    /// the provider/tools apply the untrusted-content scanner, so <c>RecallCount</c>/<c>LastRecalledAt</c> may over-report memories that
+    /// were then quarantined and never shown.
     /// </summary>
     ValueTask<Result<IReadOnlyList<RecalledMemory>, AgentError>> RecallAsync(string query, MemoryScope scope, RecallOptions options, CancellationToken ct);
 
-    /// <summary>Archive (<paramref name="hard"/> = false) or delete a memory owned by <c>scope.OwnerId</c>; other owners → <see cref="AgentErrorCode.MemoryForbidden"/>.</summary>
+    /// <summary>
+    /// Archive (<paramref name="hard"/> = false) or delete a memory owned by <c>scope.OwnerId</c>; other owners → <see cref="AgentErrorCode.MemoryForbidden"/>.
+    /// Both remove the vector from the index; a soft forget also sets <c>IndexPending</c>, so a record a host un-archives later
+    /// (<c>UpdateAsync { IsArchived = false }</c>) is re-embedded by the next pending-only <see cref="ReindexAsync"/>.
+    /// </summary>
     ValueTask<UnitResult<AgentError>> ForgetAsync(MemoryId id, MemoryScope scope, bool hard, CancellationToken ct);
 
     /// <summary>Paged listing; <see cref="MemoryQuery.OwnerIds"/> must contain at least one owner.</summary>

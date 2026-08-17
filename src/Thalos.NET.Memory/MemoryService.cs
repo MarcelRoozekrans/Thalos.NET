@@ -265,7 +265,8 @@ public sealed partial class MemoryService(
         }
         else
         {
-            var archived = await store.UpdateAsync(id, new MemoryUpdate { IsArchived = true }, ct).ConfigureAwait(false);
+            // IndexPending too: the vector is removed below, so an un-archived record is picked up again by a pending-only reindex
+            var archived = await store.UpdateAsync(id, new MemoryUpdate { IsArchived = true, IndexPending = true }, ct).ConfigureAwait(false);
             if (archived.IsFailure)
             {
                 return UnitResult<AgentError>.Failure(archived.Error);
