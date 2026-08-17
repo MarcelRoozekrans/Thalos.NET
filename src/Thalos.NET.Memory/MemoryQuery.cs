@@ -13,7 +13,7 @@ public sealed record MemoryQuery
 
     public IReadOnlyList<MemoryKind>? Kinds { get; init; }
 
-    /// <summary>Every listed tag must be present on the record.</summary>
+    /// <summary>Every listed tag must be present on the record. Query tags are normalised like stored tags (trimmed, lower-cased; see <see cref="MemoryRules.NormalizeTags"/>) and matched ordinally.</summary>
     public IReadOnlyList<string>? Tags { get; init; }
 
     public bool IncludeArchived { get; init; }
@@ -50,7 +50,8 @@ public sealed record MemoryQuery
         {
             foreach (var tag in Tags)
             {
-                if (!record.Tags.Contains(tag, StringComparer.Ordinal))
+                var normalized = MemoryRules.NormalizeTag(tag);
+                if (string.IsNullOrEmpty(normalized) || !record.Tags.Contains(normalized, StringComparer.Ordinal))
                 {
                     return false;
                 }

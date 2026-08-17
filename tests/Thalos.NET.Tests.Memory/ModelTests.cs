@@ -27,6 +27,8 @@ public sealed class ModelTests
         MemoryKind.Learning.Should().Be(new MemoryKind("learning"));
         MemoryKind.TryParse("preference", out var p).Should().BeTrue();
         p.Should().Be(MemoryKind.Preference);
+        MemoryKind.TryParse(null, out var none).Should().BeFalse();
+        none.Should().BeNull();
     }
 
     [Fact]
@@ -37,20 +39,29 @@ public sealed class ModelTests
 
     [Theory]
     [InlineData("")] [InlineData("   ")]
-    public void Empty_text_fails(string text) => MemoryRules.Validate(Record(text: text))!.Value.Code.Should().Be(AgentErrorCode.MemoryValidationFailed);
+    public void Empty_text_fails(string text)
+    {
+        var error = MemoryRules.Validate(Record(text: text));
+        error!.Value.Code.Should().Be(AgentErrorCode.MemoryValidationFailed);
+        error.Value.Message.Should().Contain("Text");
+    }
 
     [Fact]
     public void Limits_are_enforced()
     {
-        MemoryRules.Validate(Record(text: new string('x', MemoryRecord.MaxTextLength + 1))).Should().NotBeNull();
+        MemoryRules.Validate(Record(text: new string('x', MemoryRecord.MaxTextLength + 1)))!.Value.Message.Should().Contain("Text");
         MemoryRules.Validate(Record(text: new string('x', MemoryRecord.MaxTextLength))).Should().BeNull();
-        MemoryRules.Validate(Record(tags: Enumerable.Range(0, 11).Select(i => $"t{i}").ToArray())).Should().NotBeNull();
-        MemoryRules.Validate(Record(tags: [new string('t', 33)])).Should().NotBeNull();
-        MemoryRules.Validate(Record() with { Importance = 1.5 }).Should().NotBeNull();
+        MemoryRules.Validate(Record(tags: Enumerable.Range(0, 11).Select(i => $"t{i}").ToArray()))!.Value.Message.Should().Contain("tags");
+        MemoryRules.Validate(Record(tags: [new string('t', 33)]))!.Value.Message.Should().Contain("Tags");
+        MemoryRules.Validate(Record(tags: ["   "]))!.Value.Message.Should().Contain("Tags", "whitespace-only tags are rejected");
+        MemoryRules.Validate(Record() with { Source = new string('s', MemoryRecord.MaxSourceLength + 1) })!.Value.Message.Should().Contain("Source");
+        MemoryRules.Validate(Record() with { Source = new string('s', MemoryRecord.MaxSourceLength) }).Should().BeNull();
+        MemoryRules.Validate(Record() with { Importance = 1.5 })!.Value.Message.Should().Contain("Importance");
         MemoryRules.Validate(Record() with { Importance = -0.1 }).Should().NotBeNull();
+        MemoryRules.Validate(Record() with { Importance = double.NaN })!.Value.Message.Should().Contain("Importance");
         MemoryRules.Validate(Record() with { Importance = 1.0 }).Should().BeNull();
-        MemoryRules.Validate(Record(kind: new MemoryKind("Bad Kind"))).Should().NotBeNull();
-        MemoryRules.Validate(Record(owner: "")).Should().NotBeNull();
+        MemoryRules.Validate(Record(kind: new MemoryKind("Bad Kind")))!.Value.Message.Should().Contain("Kind");
+        MemoryRules.Validate(Record(owner: ""))!.Value.Message.Should().Contain("OwnerId");
     }
 
     [Fact]
@@ -58,6 +69,12 @@ public sealed class ModelTests
     {
         MemoryRules.NormalizeTags([" a ", "b", "a", "", "  "]).Should().Equal("a", "b");
         MemoryRules.NormalizeTags(null).Should().BeEmpty();
+    }
+
+    [Fact]
+    public void NormalizeTags_lower_cases_before_deduping()
+    {
+        MemoryRules.NormalizeTags(["A", " a ", "b"]).Should().Equal("a", "b");
     }
 
     [Fact]
@@ -73,6 +90,11 @@ public sealed class ModelTests
         scope.Includes("shared-owner", a).Should().BeFalse("shared owner memories are never agent-pinned");
         new MemoryScope("alice", null, null).Includes("alice", a).Should().BeFalse("no agent in scope → only owner-wide");
         new MemoryScope("alice", a, null).Includes("shared-owner", null).Should().BeFalse("no shared owner configured");
+
+        var self = new MemoryScope("alice", a, "alice");
+        self.Includes("alice", a).Should().BeTrue("shared owner equal to the owner still sees memories pinned to its agent");
+        self.Includes("alice", b).Should().BeFalse("pinned to another agent, even when the shared owner is the owner");
+        self.Includes("alice", null).Should().BeTrue();
     }
 
     [Fact]
@@ -92,16 +114,21 @@ public sealed class ModelTests
         new MemoryQuery { OwnerIds = ["alice"] }.Matches(r).Should().BeTrue();
         new MemoryQuery { OwnerIds = ["bob"] }.Matches(r).Should().BeFalse();
         new MemoryQuery().Matches(r).Should().BeTrue("no owner filter = all owners (store level)");
+        new MemoryQuery { OwnerIds = [] }.Matches(r).Should().BeTrue("an empty owner list is treated as all owners");
         new MemoryQuery { AgentId = a }.Matches(r).Should().BeTrue();
         new MemoryQuery { AgentId = AgentId.New() }.Matches(r).Should().BeFalse();
         new MemoryQuery { Kinds = [MemoryKind.Fact, MemoryKind.Note] }.Matches(r).Should().BeTrue();
         new MemoryQuery { Kinds = [MemoryKind.Note] }.Matches(r).Should().BeFalse();
         new MemoryQuery { Tags = ["x", "y"] }.Matches(r).Should().BeTrue("all listed tags present");
         new MemoryQuery { Tags = ["x", "z"] }.Matches(r).Should().BeFalse();
+        new MemoryQuery { Tags = ["X", " Y "] }.Matches(r).Should().BeTrue("query tags are normalised (trimmed, lower-cased) before matching");
+        new MemoryQuery { Tags = [" "] }.Matches(r).Should().BeFalse("a blank query tag never matches");
         new MemoryQuery().Matches(r with { IsArchived = true }).Should().BeFalse();
         new MemoryQuery { IncludeArchived = true }.Matches(r with { IsArchived = true }).Should().BeTrue();
         new MemoryQuery { IndexPending = true }.Matches(r).Should().BeFalse();
         new MemoryQuery { IndexPending = true }.Matches(r with { IndexPending = true }).Should().BeTrue();
+        new MemoryQuery { IndexPending = false }.Matches(r).Should().BeTrue();
+        new MemoryQuery { IndexPending = false }.Matches(r with { IndexPending = true }).Should().BeFalse();
     }
 
     [Fact]
@@ -114,6 +141,10 @@ public sealed class ModelTests
         MemoryOptions.SectionName.Should().Be("Thalos:Memory");
         new ReindexOptions().PendingOnly.Should().BeTrue();
         new MemoryUpdate { IndexPending = false }.TouchesContent.Should().BeFalse();
+        new MemoryUpdate().TouchesContent.Should().BeFalse();
         new MemoryUpdate { Importance = 0.9 }.TouchesContent.Should().BeTrue();
+        new MemoryUpdate { Text = "t" }.TouchesContent.Should().BeTrue();
+        new MemoryUpdate { Tags = ["a"] }.TouchesContent.Should().BeTrue();
+        new MemoryUpdate { IsArchived = true }.TouchesContent.Should().BeTrue();
     }
 }

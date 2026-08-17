@@ -14,7 +14,10 @@ public sealed record RememberRequest
     public double Importance { get; init; } = 0.5;
 }
 
-/// <summary>Recall budget. Bindable (class with setters) because it is part of <see cref="MemoryOptions"/>.</summary>
+/// <summary>
+/// Recall budget. Bindable (class with setters) because it is part of <see cref="MemoryOptions"/>. It is a bound singleton:
+/// never mutate it per call — copy it (Task 13 builds a fresh instance when applying <c>AgentMemorySettings.TopK</c>).
+/// </summary>
 public sealed class RecallOptions
 {
     public int TopK { get; set; } = 5;
