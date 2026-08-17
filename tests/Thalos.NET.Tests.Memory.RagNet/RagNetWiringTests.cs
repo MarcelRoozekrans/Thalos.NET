@@ -36,7 +36,8 @@ public sealed class RagNetWiringTests
     {
         using var sp = Services(FakeConnectionString, 64, 64).BuildServiceProvider();
         sp.GetRequiredService<IMemoryIndex>().Should().BeOfType<RagNetMemoryIndex>();
-        sp.GetServices<IHostedService>().Should().ContainSingle(h => h is RagNetMemorySchemaInitializer);
+        sp.GetServices<IHostedService>().Should().ContainSingle(h => h is RagNetMemorySchemaInitializer)
+            .Which.Should().BeAssignableTo<IHostedLifecycleService>("the schema must exist before other hosted services start");
         using var without = Services(FakeConnectionString, 64, 64, ensureSchema: false).BuildServiceProvider();
         without.GetServices<IHostedService>().Should().NotContain(h => h is RagNetMemorySchemaInitializer);
     }
@@ -55,8 +56,57 @@ public sealed class RagNetWiringTests
     {
         using var sp = Services(FakeConnectionString, 64, 32).BuildServiceProvider();
         var init = sp.GetServices<IHostedService>().OfType<RagNetMemorySchemaInitializer>().Single();
-        var act = () => init.StartAsync(default);
+        var act = () => init.StartingAsync(default);
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*VectorDimensions*32*");
+        var noop = () => init.StartAsync(default);
+        await noop.Should().NotThrowAsync("StartAsync is a no-op; the work happens in StartingAsync");
+    }
+
+    [Fact]
+    public void Calling_UseRagNetMemory_twice_is_last_wins_with_a_single_initializer()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(new HashedBagOfWordsEmbeddingGenerator(128));
+        services.AddThalos(t => t
+            .UseChatClientProvider(Substitute.For<IChatClientProvider>())
+            .UseInMemorySessionStore()
+            .UseMemory()
+            .UseRagNetMemory(FakeConnectionString, 64)
+            .UseRagNetMemory(o => { o.ConnectionString = FakeConnectionString + ";Application Name=second"; o.VectorDimensions = 128; }));
+
+        services.Count(d => d.ServiceType == typeof(PgVectorStore) && Equals(d.ServiceKey, RagNetMemory.VectorStoreKey)).Should().Be(1);
+        services.Count(d => d.ServiceType == typeof(RagNetMemoryOptions)).Should().Be(1);
+        services.Count(d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(RagNetMemorySchemaInitializer)).Should().Be(1);
+
+        using var sp = services.BuildServiceProvider();
+        sp.GetRequiredService<RagNetMemoryOptions>().VectorDimensions.Should().Be(128);
+        sp.GetRequiredService<RagNetMemoryOptions>().ConnectionString.Should().EndWith("Application Name=second");
+        sp.GetRequiredService<IMemoryIndex>().Should().BeOfType<RagNetMemoryIndex>().Which.Options.VectorDimensions.Should().Be(128);
+        sp.GetServices<IHostedService>().Should().ContainSingle(h => h is RagNetMemorySchemaInitializer);
+        sp.GetRequiredKeyedService<PgVectorStore>(RagNetMemory.VectorStoreKey).Should().NotBeNull();
+
+        // a later call that turns the schema step off removes the initializer
+        var off = new ServiceCollection();
+        off.AddThalos(t => t.UseChatClientProvider(Substitute.For<IChatClientProvider>()).UseMemory()
+            .UseRagNetMemory(FakeConnectionString, 64)
+            .UseRagNetMemory(o => { o.ConnectionString = FakeConnectionString; o.VectorDimensions = 64; o.EnsureSchemaOnStartup = false; }));
+        off.Should().NotContain(d => d.ServiceType == typeof(IHostedService) && d.ImplementationType == typeof(RagNetMemorySchemaInitializer));
+    }
+
+    [Fact]
+    public void UseMemory_after_UseRagNetMemory_still_resolves_the_RagNet_index()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(new HashedBagOfWordsEmbeddingGenerator(64));
+        services.AddThalos(t => t
+            .UseChatClientProvider(Substitute.For<IChatClientProvider>())
+            .UseInMemorySessionStore()
+            .UseRagNetMemory(FakeConnectionString, 64)
+            .UseMemory());
+        using var sp = services.BuildServiceProvider();
+        sp.GetRequiredService<IMemoryIndex>().Should().BeOfType<RagNetMemoryIndex>();
     }
 
     [Fact]
@@ -82,7 +132,7 @@ public sealed class RagNetWiringDockerTests(PgVectorFixture pg)
 
         using (var sp = RagNetWiringTests.Services(pg.ConnectionString, 64, 64).BuildServiceProvider())
         {
-            await sp.GetServices<IHostedService>().OfType<RagNetMemorySchemaInitializer>().Single().StartAsync(default);
+            await sp.GetServices<IHostedService>().OfType<RagNetMemorySchemaInitializer>().Single().StartingAsync(default);
             var svc = sp.GetRequiredService<IMemoryService>();
             var r = await svc.RememberAsync(new RememberRequest { OwnerId = "alice", Text = "papa quebec romeo" }, default);
             r.Value.IndexPending.Should().BeFalse();
@@ -90,8 +140,9 @@ public sealed class RagNetWiringDockerTests(PgVectorFixture pg)
         }
 
         using var mismatched = RagNetWiringTests.Services(pg.ConnectionString, 128, 128).BuildServiceProvider();
-        var act = () => mismatched.GetServices<IHostedService>().OfType<RagNetMemorySchemaInitializer>().Single().StartAsync(default);
-        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Thalos.NET.Memory.RagNet*ReindexAsync*");
+        var act = () => mismatched.GetServices<IHostedService>().OfType<RagNetMemorySchemaInitializer>().Single().StartingAsync(default);
+        (await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Thalos.NET.Memory.RagNet*vector(N) mismatch*ReindexAsync*"))
+            .Which.Message.Should().Contain("vector(64)").And.Contain("vector(128)", "Rag.NET's own message is kept");
 
         // other test classes reset (drop) the table before initialising, but leave the shared default behind anyway
         await pg.ResetAsync();
@@ -102,7 +153,7 @@ public sealed class RagNetWiringDockerTests(PgVectorFixture pg)
     {
         await pg.ResetAsync();
         using var sp = RagNetWiringTests.Services(pg.ConnectionString, 64, generatorDims: null).BuildServiceProvider();
-        await sp.GetServices<IHostedService>().OfType<RagNetMemorySchemaInitializer>().Single().StartAsync(default);
+        await sp.GetServices<IHostedService>().OfType<RagNetMemorySchemaInitializer>().Single().StartingAsync(default);
 
         using var same = new PgVectorStore(pg.ConnectionString, 64);
         var ok = () => same.InitializeAsync();
@@ -115,6 +166,28 @@ public sealed class RagNetWiringDockerTests(PgVectorFixture pg)
         var r = await sp.GetRequiredService<IMemoryService>().RememberAsync(new RememberRequest { OwnerId = "alice", Text = "sierra tango uniform" }, default);
         r.IsSuccess.Should().BeTrue();
         r.Value.IndexPending.Should().BeTrue();
+        await pg.ResetAsync();
+    }
+
+    [Fact]
+    public async Task Second_UseRagNetMemory_call_decides_the_table_dimensions()
+    {
+        await pg.ResetAsync();
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(new HashedBagOfWordsEmbeddingGenerator(128));
+        services.AddThalos(t => t.UseChatClientProvider(Substitute.For<IChatClientProvider>()).UseInMemorySessionStore().UseMemory()
+            .UseRagNetMemory(pg.ConnectionString, 64)
+            .UseRagNetMemory(pg.ConnectionString, 128));
+        using var sp = services.BuildServiceProvider();
+        await sp.GetServices<IHostedService>().OfType<RagNetMemorySchemaInitializer>().Single().StartingAsync(default);
+
+        using var at128 = new PgVectorStore(pg.ConnectionString, 128);
+        var ok = () => at128.InitializeAsync();
+        await ok.Should().NotThrowAsync("the keyed store was built from the second call's options");
+        using var at64 = new PgVectorStore(pg.ConnectionString, 64);
+        var mismatch = () => at64.InitializeAsync();
+        await mismatch.Should().ThrowAsync<InvalidOperationException>();
         await pg.ResetAsync();
     }
 }

@@ -12,7 +12,8 @@ public interface IMemoryIndex
     /// <summary>
     /// Embeds and upserts (same id replaces; duplicate ids within one batch → the last one wins). Empty batch → success.
     /// Generator/backend down → <see cref="AgentErrorCode.MemoryIndexUnavailable"/>. On failure callers must assume none of the
-    /// batch was written; the store's <see cref="MemoryRecord.IndexPending"/> flag stays authoritative.
+    /// batch was written (it may have been partially written — backends need not be transactional; re-upserting is idempotent);
+    /// the store's <see cref="MemoryRecord.IndexPending"/> flag stays authoritative.
     /// </summary>
     ValueTask<UnitResult<AgentError>> UpsertAsync(IReadOnlyList<MemoryRecord> records, CancellationToken ct);
 

@@ -18,6 +18,11 @@ namespace Thalos.Memory.RagNet;
 /// leak across owners — and merges by best score. Errors: <see cref="PostgresException"/> → <see cref="AgentErrorCode.MemoryIndexFailed"/>
 /// (detail = SQL state), anything else → <see cref="AgentErrorCode.MemoryIndexUnavailable"/> (detail = exception type name).
 /// </summary>
+/// <remarks>
+/// <c>PgVectorStore.StoreAsync</c> upserts row by row without a transaction, so a failed batch may have been partially written; that is
+/// harmless — re-upserting the same ids is idempotent and the store's <see cref="MemoryRecord.IndexPending"/> flag stays authoritative
+/// (reindex retries). A batch is deduplicated by id before embedding (last occurrence wins).
+/// </remarks>
 public sealed partial class RagNetMemoryIndex(
     IVectorStore vectorStore,
     IEmbeddingGenerator<string, Embedding<float>> embeddings,
@@ -32,6 +37,9 @@ public sealed partial class RagNetMemoryIndex(
 
     private readonly ILogger _logger = logger ?? NullLogger<RagNetMemoryIndex>.Instance;
 
+    /// <summary>The options this index was built with (tests).</summary>
+    internal RagNetMemoryOptions Options => options;
+
     /// <inheritdoc />
     public async ValueTask<UnitResult<AgentError>> UpsertAsync(IReadOnlyList<MemoryRecord> records, CancellationToken ct)
     {
@@ -41,6 +49,7 @@ public sealed partial class RagNetMemoryIndex(
             return UnitResult<AgentError>.Success();
         }
 
+        records = DedupeLastWins(records);
         try
         {
             var vectors = await embeddings.GenerateAsync(records.Select(r => r.Text), null, ct).ConfigureAwait(false);
@@ -124,7 +133,11 @@ public sealed partial class RagNetMemoryIndex(
     }
 
     /// <inheritdoc />
-    /// <remarks>Embeds a probe text (checks the generator, learns the dimensions), compares with <see cref="RagNetMemoryOptions.VectorDimensions"/>, then runs a filtered search (checks the table). Never throws.</remarks>
+    /// <remarks>
+    /// Embeds a probe text (checks the generator, learns the dimensions), compares with <see cref="RagNetMemoryOptions.VectorDimensions"/>, then runs a
+    /// filtered search (checks the table). Never throws. A table whose <c>vector(N)</c> differs from the generator is only detected once it holds a row
+    /// (Postgres evaluates the distance operator per row) — the schema initializer's <c>InitializeAsync()</c> catches that case at startup.
+    /// </remarks>
     public async ValueTask<Result<MemoryIndexHealth, AgentError>> ProbeAsync(CancellationToken ct)
     {
         try
@@ -145,6 +158,33 @@ public sealed partial class RagNetMemoryIndex(
             var error = Map(ex, "probe");
             return Result<MemoryIndexHealth, AgentError>.Success(new MemoryIndexHealth(false, null, error.Detail ?? error.Message));
         }
+    }
+
+    /// <summary>Keeps the last record per id (defensive: the row-by-row upsert would already make the last one win, but this also saves embeddings).</summary>
+    private static IReadOnlyList<MemoryRecord> DedupeLastWins(IReadOnlyList<MemoryRecord> records)
+    {
+        if (records.Count < 2)
+        {
+            return records;
+        }
+
+        var seen = new HashSet<MemoryId>(records.Count);
+        var kept = new List<MemoryRecord>(records.Count);
+        for (var i = records.Count - 1; i >= 0; i--)
+        {
+            if (seen.Add(records[i].Id))
+            {
+                kept.Add(records[i]);
+            }
+        }
+
+        if (kept.Count == records.Count)
+        {
+            return records;
+        }
+
+        kept.Reverse();
+        return kept;
     }
 
     private static Dictionary<string, MetadataValue> Metadata(string owner, AgentId? agent, MemoryKind? kind)
@@ -171,6 +211,6 @@ public sealed partial class RagNetMemoryIndex(
             : AgentError.MemoryIndexUnavailable($"The memory index is unavailable ({operation}).", ex.GetType().Name);
     }
 
-    [LoggerMessage(EventId = 520, Level = LogLevel.Warning, Message = "Rag.NET memory index {Operation} failed with {ExceptionType}: {Error}")]
+    [LoggerMessage(EventId = 540, Level = LogLevel.Warning, Message = "Rag.NET memory index {Operation} failed with {ExceptionType}: {Error}")]
     private static partial void LogFailed(ILogger logger, string operation, string exceptionType, string error, Exception exception);
 }
