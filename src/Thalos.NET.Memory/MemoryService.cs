@@ -82,8 +82,21 @@ public sealed partial class MemoryService(
         return Result<MemoryRecord, AgentError>.Success(final);
     }
 
-    // Task 10 replaces this stub with the real dedupe lookup.
-    private static ValueTask<MemoryRecord?> FindDuplicateAsync(MemoryRecord candidate, double threshold, CancellationToken ct) => new((MemoryRecord?)null);
+    /// <summary>Same owner, same agent scope (no shared owner), score ≥ threshold, not archived. An index failure means "no duplicate" (remember still stores).</summary>
+    private async ValueTask<MemoryRecord?> FindDuplicateAsync(MemoryRecord candidate, double threshold, CancellationToken ct)
+    {
+        var scope = new MemoryScope(candidate.OwnerId, candidate.AgentId, SharedOwnerId: null);
+        var hits = await index.SearchAsync(candidate.Text, scope, new MemorySearchOptions(TopK: 1, MinScore: threshold), ct).ConfigureAwait(false);
+        if (hits.IsFailure || hits.Value.Count == 0)
+        {
+            return null;
+        }
+
+        var existing = await store.GetAsync(hits.Value[0].Id, ct).ConfigureAwait(false);
+        return existing.IsSuccess && !existing.Value.IsArchived && string.Equals(existing.Value.OwnerId, candidate.OwnerId, StringComparison.Ordinal)
+            ? existing.Value
+            : null;
+    }
 
     // Tasks 11–12 implement these (MA0025 forbids NotImplementedException; these bodies fail every test until then).
     public ValueTask<Result<IReadOnlyList<RecalledMemory>, AgentError>> RecallAsync(string query, MemoryScope scope, RecallOptions options, CancellationToken ct) =>
