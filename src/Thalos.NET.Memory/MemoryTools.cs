@@ -94,14 +94,68 @@ public sealed class MemoryTools(IMemoryService memory, IOptions<MemoryOptions> o
         return sb.ToString().TrimEnd();
     }
 
-    // Task 17 replaces these stubs with the real forget + list.
     [ThalosTool("forget")]
-    [Description("Archive one of the caller's own memories by id.")]
-    public static string Forget([Description("The memory id.")] string id) => NoCaller;
+    [Description("Archive one of the caller's own memories by id (ids come from memory__recall or memory__list). Archived memories are no longer recalled.")]
+    public async Task<string> ForgetAsync([Description("The memory id.")] string id, CancellationToken cancellationToken = default)
+    {
+        if (Caller() is not { } caller)
+        {
+            return NoCaller;
+        }
+
+        if (!MemoryId.TryParse(id, null, out var memoryId))
+        {
+            return "Invalid memory id.";
+        }
+
+        // no shared owner in the scope: the tool archives the caller's own memories only, never the host's project memories
+        var result = await memory.ForgetAsync(memoryId, new MemoryScope(caller.OwnerId, caller.AgentId, null), hard: false, cancellationToken).ConfigureAwait(false);
+        return result.IsSuccess ? $"Archived memory {memoryId}." : $"Could not forget: {result.Error.Message}";
+    }
 
     [ThalosTool("list")]
-    [Description("List the caller's memories.")]
-    public static string List([Description("fact | preference | decision | learning | note; omit for all.")] string? kind = null, [Description("1-based page (default 1).")] int? page = null) => NoCaller;
+    [Description("List the caller's memories (own and shared project memories), newest first, 20 per page, optionally filtered by kind.")]
+    public async Task<string> ListAsync(
+        [Description("fact | preference | decision | learning | note; omit for all.")] string? kind = null,
+        [Description("1-based page (default 1).")] int? page = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (Caller() is not { } caller)
+        {
+            return NoCaller;
+        }
+
+        IReadOnlyList<MemoryKind>? kinds = null;
+        if (!string.IsNullOrWhiteSpace(kind))
+        {
+            if (!MemoryKind.TryParse(kind, out var parsed))
+            {
+                return $"Could not list: unknown kind '{kind}'.";
+            }
+
+            kinds = [parsed];
+        }
+
+        var o = options.Value;
+        IReadOnlyList<string> owners = o.SharedOwnerId is { } shared && !string.Equals(shared, caller.OwnerId, StringComparison.Ordinal) ? [caller.OwnerId, shared] : [caller.OwnerId];
+        var result = await memory.ListAsync(new MemoryQuery { OwnerIds = owners, Kinds = kinds, Page = Math.Max(1, page ?? 1), PageSize = ListPageSize }, cancellationToken).ConfigureAwait(false);
+        if (result.IsFailure)
+        {
+            return $"Could not list: {result.Error.Message}";
+        }
+
+        var p = result.Value;
+        var pages = Math.Max(1, (p.TotalCount + p.PageSize - 1) / p.PageSize);
+        var sb = new StringBuilder();
+        sb.Append(CultureInfo.InvariantCulture, $"{p.TotalCount} memories (page {p.Page}/{pages}):");
+        foreach (var r in p.Items)
+        {
+            var text = r.Text.Length <= PreviewLength ? r.Text : string.Concat(r.Text.AsSpan(0, PreviewLength), "…");
+            sb.Append('\n').Append(CultureInfo.InvariantCulture, $"- [{r.Kind.Value} · {r.Id}] {text}");
+        }
+
+        return sb.ToString();
+    }
 
     /// <summary>The turn's owner and agent, or null when there is no turn or the caller is anonymous.</summary>
     internal static (string OwnerId, AgentId? AgentId)? Caller()

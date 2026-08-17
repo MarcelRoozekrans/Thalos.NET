@@ -1,8 +1,11 @@
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
+using NSubstitute;
 using Thalos.Memory;
 using Thalos.Runtime;
+using Thalos.Testing;
+using Thalos.Tools;
 using ZeroAlloc.Authorization;
 
 namespace Thalos.Tests.Memory;
@@ -94,5 +97,75 @@ public sealed class MemoryToolsTests
         text.Should().Contain(mine.Id.ToString()).And.Contain("(project)").And.NotContain("(bob)");
         text.Should().StartWith("1. [");
         (await recall.InvokeAsync(Args(("query", "nothing about this"))))!.ToString().Should().Be("No relevant memories.");
+    }
+
+    [Fact]
+    public async Task Forget_archives_own_memories_only()
+    {
+        var (f, source) = Build(o => o.SharedOwnerId = "daedalus");
+        var svc = f.Build();
+        var mine = (await svc.RememberAsync(MemoryServiceFixture.Remember("mine"), default)).Value;
+        var project = (await svc.RememberAsync(MemoryServiceFixture.Remember("project", owner: "daedalus"), default)).Value;
+        var forget = await Tool(source, "forget");
+        using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), new TestCaller("alice"));
+
+        (await forget.InvokeAsync(Args(("id", mine.Id.ToString()))))!.ToString().Should().Be($"Archived memory {mine.Id}.");
+        (await f.Store.GetAsync(mine.Id, default)).Value.IsArchived.Should().BeTrue();
+        (await forget.InvokeAsync(Args(("id", project.Id.ToString()))))!.ToString().Should().StartWith("Could not forget:").And.Contain("another owner");
+        (await f.Store.GetAsync(project.Id, default)).Value.IsArchived.Should().BeFalse("the shared owner's memory is never touched by the tool");
+        (await forget.InvokeAsync(Args(("id", "nope"))))!.ToString().Should().Be("Invalid memory id.");
+    }
+
+    [Fact]
+    public async Task List_pages_own_and_shared_memories_newest_first()
+    {
+        var (f, source) = Build(o => o.SharedOwnerId = "daedalus");
+        var svc = f.Build();
+        await svc.RememberAsync(MemoryServiceFixture.Remember("first", kind: MemoryKind.Note), default);
+        f.Clock.Advance(TimeSpan.FromSeconds(1));
+        await svc.RememberAsync(MemoryServiceFixture.Remember("second", kind: MemoryKind.Fact), default);
+        await svc.RememberAsync(MemoryServiceFixture.Remember("project fact", owner: "daedalus", kind: MemoryKind.Fact), default);
+        await svc.RememberAsync(MemoryServiceFixture.Remember("bobs", owner: "bob"), default);
+        var list = await Tool(source, "list");
+        using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), new TestCaller("alice"));
+
+        var all = (await list.InvokeAsync(Args()))!.ToString()!;
+        all.Should().StartWith("3 memories (page 1/1)").And.Contain("second").And.Contain("first").And.Contain("project fact").And.NotContain("bobs");
+        all.IndexOf("second", StringComparison.Ordinal).Should().BeLessThan(all.IndexOf("first", StringComparison.Ordinal));
+        (await list.InvokeAsync(Args(("kind", "note"))))!.ToString().Should().StartWith("1 memories").And.Contain("first");
+        (await list.InvokeAsync(Args(("kind", "???"))))!.ToString().Should().Contain("unknown kind");
+    }
+
+    [Fact]
+    public async Task Anonymous_or_no_turn_is_refused()
+    {
+        var (_, source) = Build();
+        var remember = await Tool(source, "remember");
+        (await remember.InvokeAsync(Args(("text", "x"))))!.ToString().Should().Contain("authenticated caller inside an agent turn");
+        using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), AnonymousSecurityContext.Instance);
+        (await remember.InvokeAsync(Args(("text", "x"))))!.ToString().Should().Contain("authenticated caller inside an agent turn");
+    }
+
+    [Fact]
+    public async Task Through_the_catalog_denied_calls_never_reach_the_service()
+    {
+        var (f, source) = Build();
+        var authorizer = Substitute.For<IToolAuthorizer>();
+        authorizer.AuthorizeAsync(default!, default!, default, default).ReturnsForAnyArgs(ci =>
+            string.Equals(ci.Arg<string>(), "memory__forget", StringComparison.Ordinal) ? ToolAuthorizationDecision.Deny("policy") : ToolAuthorizationDecision.Allow());
+        var publisher = new RecordingNotificationPublisher();
+        var catalog = new ToolCatalog([source], authorizer, publisher, TimeProvider.System);
+        var tools = (await catalog.ResolveAsync(new AgentDefinition { Id = AgentId.New(), Name = "a", Instructions = "i" }, default)).Value.Cast<AIFunction>().ToList();
+        tools.Select(t => t.Name).Should().BeEquivalentTo(["memory__remember", "memory__recall", "memory__forget", "memory__list"]);
+        using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), new TestCaller("alice"));
+
+        var stored = (await tools.Single(t => string.Equals(t.Name, "memory__remember", StringComparison.Ordinal)).InvokeAsync(Args(("text", "guarded"))))!.ToString();
+        var id = (await f.Store.ListAsync(new MemoryQuery { OwnerIds = ["alice"] }, default)).Value.Items.Single().Id;
+        var denied = (await tools.Single(t => string.Equals(t.Name, "memory__forget", StringComparison.Ordinal)).InvokeAsync(Args(("id", id.ToString()))))!.ToString();
+
+        stored.Should().StartWith("Remembered");
+        denied.Should().StartWith("Tool call denied:");
+        (await f.Store.GetAsync(id, default)).Value.IsArchived.Should().BeFalse();
+        publisher.Of<ToolCallDeniedNotification>().Should().ContainSingle().Which.ToolName.Should().Be("memory__forget");
     }
 }
