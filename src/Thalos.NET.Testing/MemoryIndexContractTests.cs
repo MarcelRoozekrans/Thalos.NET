@@ -10,6 +10,12 @@ namespace Thalos.Testing;
 /// <see cref="HashedBagOfWordsEmbeddingGenerator"/> (cosine = word overlap). Derive, implement <see cref="CreateIndexAsync(IEmbeddingGenerator{string, Embedding{float}})"/>
 /// (fresh, empty index over the given generator; override <see cref="Dimensions"/> if your backend needs another size).
 /// </summary>
+/// <remarks>
+/// What the suite assumes beyond the interface docs: a blank query yields no hits (do not embed whitespace and match everything at
+/// <c>MinScore = 0</c>); a search with <c>MinScore = 0</c> over a handful of vectors returns every one of them (<c>score &gt;= MinScore</c>,
+/// exact recall at this size — an approximate index must not drop rows from a three-vector table); every test calls
+/// <c>CreateIndexAsync</c> exactly once, so an implementation may reset its backing table there.
+/// </remarks>
 public abstract class MemoryIndexContractTests
 {
     /// <summary>Vector size of the generator the suite builds (override when the backend is fixed to another size).</summary>

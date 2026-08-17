@@ -12,6 +12,7 @@ public sealed class RagNetMemoryIndexContractTests(PgVectorFixture pg) : MemoryI
 {
     private readonly List<PgVectorStore> _stores = [];
 
+    // Drops and recreates rag_chunks: the contract suite calls this exactly once per test (documented on MemoryIndexContractTests).
     protected override async ValueTask<IMemoryIndex> CreateIndexAsync(IEmbeddingGenerator<string, Embedding<float>> embeddings)
     {
         var store = new PgVectorStore(pg.ConnectionString, Dimensions);

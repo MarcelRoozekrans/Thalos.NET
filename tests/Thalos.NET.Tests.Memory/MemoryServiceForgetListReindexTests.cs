@@ -90,6 +90,7 @@ public sealed class MemoryServiceForgetListReindexTests
         foreach (var text in new[] { "one uno", "two dos", "three tres" })
         {
             ids.Add((await svc.RememberAsync(MemoryServiceFixture.Remember(text), default)).Value.Id);
+            f.Clock.Advance(TimeSpan.FromSeconds(1)); // distinct CreatedAt: the stream order (oldest first) must not rest on id ordering
         }
 
         var real = new InMemoryMemoryIndex(new HashedBagOfWordsEmbeddingGenerator());

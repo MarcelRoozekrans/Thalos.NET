@@ -23,7 +23,7 @@ public sealed class ContextProviderTurnTests
         public AIContextProvider? CreateProvider(AgentDefinition agent) => new StaticContextProvider();
     }
 
-    /// <summary>MAF may deliver AIContext.Instructions as ChatOptions.Instructions or as a system message; accept both and record which in plan §0.7.</summary>
+    /// <summary>MAF may deliver AIContext.Instructions as ChatOptions.Instructions (what 1.17.0 does) or as a system message; accept both.</summary>
     internal static string AllInstructions((IReadOnlyList<ChatMessage> Messages, ChatOptions? Options) request) =>
         (request.Options?.Instructions ?? "") + "\n" + string.Join('\n', request.Messages.Where(m => m.Role == ChatRole.System).Select(m => m.Text));
 

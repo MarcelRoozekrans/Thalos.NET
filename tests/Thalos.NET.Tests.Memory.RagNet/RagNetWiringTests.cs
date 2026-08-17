@@ -112,10 +112,9 @@ public sealed class RagNetWiringTests
     [Fact]
     public void Without_a_generator_the_index_is_unavailable_and_the_initializer_still_registers()
     {
-        // §0.6 item 13: hosts without an IEmbeddingGenerator (Daedalus without Ollama) must still start
+        // hosts without an IEmbeddingGenerator (e.g. a Daedalus instance without Ollama) must still start
         using var sp = Services(FakeConnectionString, 64, generatorDims: null).BuildServiceProvider();
         sp.GetRequiredService<IMemoryIndex>().Should().BeSameAs(UnavailableMemoryIndex.Instance);
-        sp.GetRequiredService<IMemoryIndex>().Should().BeSameAs(UnavailableMemoryIndex.Instance, "the singleton factory resolves once");
         sp.GetServices<IHostedService>().Should().ContainSingle(h => h is RagNetMemorySchemaInitializer);
         sp.GetRequiredKeyedService<PgVectorStore>(RagNetMemory.VectorStoreKey).Should().NotBeNull();
     }

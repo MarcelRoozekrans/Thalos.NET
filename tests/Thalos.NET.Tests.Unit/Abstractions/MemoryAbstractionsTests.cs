@@ -11,7 +11,7 @@ public sealed class MemoryAbstractionsTests
         MemoryId.Parse(id.ToString(), null).Should().Be(id);
         JsonSerializer.Deserialize<MemoryId>(JsonSerializer.Serialize(id)).Should().Be(id);
         id.ToString().Should().HaveLength(26);
-        typeof(MemoryId).Should().NotBe<SessionId>();
+        id.Equals(SessionId.Parse(id.ToString(), null)).Should().BeFalse("a MemoryId never equals a SessionId, even with the same underlying value");
     }
 
     [Fact]

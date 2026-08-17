@@ -67,7 +67,7 @@ public sealed class MemoryServiceRecallTests
 
         (await svc.RecallAsync("quebec romeo", new MemoryScope("alice", null), Opts(topK: 2, maxChars: 2000), default)).Value.Should().HaveCount(2);
         var budgeted = (await svc.RecallAsync("quebec romeo", new MemoryScope("alice", null), Opts(topK: 5, maxChars: 60), default)).Value;
-        budgeted.Select(m => m.Record.Id).Should().BeEquivalentTo([small1.Id, small2.Id], "the 160-char memory does not fit; smaller ones still do");
+        budgeted.Select(m => m.Record.Id).Should().BeEquivalentTo([small1.Id, small2.Id], "the 163-char memory does not fit; smaller ones still do");
         budgeted.Should().NotContain(m => m.Record.Id == big.Id);
     }
 

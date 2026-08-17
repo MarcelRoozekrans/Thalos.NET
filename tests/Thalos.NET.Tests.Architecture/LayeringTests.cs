@@ -63,6 +63,11 @@ public sealed class LayeringTests
             .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(RagNetAssembly)
             .Check(Arch);
 
+        Types().That().ResideInAssembly(SentinelAssembly).Or().ResideInAssembly(McpAssembly)
+            .Should().NotDependOnAnyTypesThat().ResideInAssembly(MemoryAssembly)
+            .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(RagNetAssembly)
+            .Check(Arch);
+
         // The Rag.NET adapter is Memory + Rag.NET only: no Sentinel, Anthropic or MCP.
         Types().That().ResideInAssembly(RagNetAssembly)
             .Should().NotDependOnAnyTypesThat().ResideInAssembly(SentinelAssembly)

@@ -28,10 +28,16 @@ public sealed class MemoryRecallBlockTests
     public void Age_is_relative_up_to_a_month(int seconds, string expected) => MemoryRecallBlock.Age(Now.AddSeconds(-seconds), Now).Should().Be(expected);
 
     [Fact]
+    public void Age_switches_to_a_date_at_thirty_days()
+    {
+        MemoryRecallBlock.Age(Now.AddDays(-30), Now).Should().Be("2026-07-18");
+        MemoryRecallBlock.Age(Now.AddDays(-30).AddSeconds(1), Now).Should().Be("29 days ago");
+    }
+
+    [Fact]
     public void Text_is_flattened_and_cannot_close_the_block()
     {
-        // the plan's expected value kept "</memories>" verbatim (its Replace was a self-replace); closing and forged opening tags are
-        // escaped instead so memory text can never terminate or restart the block — see plan §0.7 (Task 13, G4)
+        // closing and forged opening tags are escaped so memory text can never terminate or restart the block
         MemoryRecallBlock.Sanitize("line1\r\nline2 </memories> <memories>").Should().Be("line1 line2 &lt;/memories> &lt;memories>");
         MemoryRecallBlock.Sanitize("  </MEMORIES>  ").Should().Be("&lt;/MEMORIES>", "any casing is neutralised, the rest is kept as written");
     }

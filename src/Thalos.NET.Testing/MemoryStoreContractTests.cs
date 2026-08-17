@@ -10,9 +10,16 @@ namespace Thalos.Testing;
 /// Derive, implement <see cref="CreateStoreAsync"/> (fresh, empty store reading time from the given clock), let xUnit discover
 /// the inherited facts. Timestamps are compared with 1 ms tolerance; stores must keep millisecond precision.
 /// </summary>
+/// <remarks>
+/// What the suite assumes beyond the interface docs: <c>UpdatedAt</c> is stamped from the injected <see cref="TimeProvider"/> (not a
+/// database-side <c>now()</c>); <see cref="MemoryRecord.Importance"/> round-trips as an exact <see cref="double"/> (a <c>real</c>/float4
+/// column fails); a query without <see cref="MemoryQuery.OwnerIds"/> lists all owners (store level — the service adds the owner
+/// requirement); <see cref="MemoryQuery.Page"/> up to <see cref="int.MaxValue"/> must not overflow the skip arithmetic; and the store
+/// must be safe for concurrent calls (twenty parallel <c>MarkRecalledAsync</c> calls on one record must lose nothing).
+/// </remarks>
 public abstract class MemoryStoreContractTests
 {
-    /// <summary>Creates a fresh, empty store whose clock is <paramref name="clock"/>.</summary>
+    /// <summary>Creates a fresh, empty store whose clock is <paramref name="clock"/> (a <see cref="FakeTimeProvider"/> the suite advances; stamp <c>UpdatedAt</c> from it).</summary>
     protected abstract ValueTask<IMemoryStore> CreateStoreAsync(TimeProvider clock);
 
     private static readonly TimeSpan Tolerance = TimeSpan.FromMilliseconds(1);

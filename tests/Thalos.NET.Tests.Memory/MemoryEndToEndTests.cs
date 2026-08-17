@@ -29,6 +29,7 @@ public sealed class MemoryEndToEndTests
     public async Task Auto_recall_injects_the_callers_memories_and_streams_MemoryRecalled()
     {
         var (sp, client, agent) = Build();
+        await using var _ = sp;
         var caller = new TestCaller("alice");
         await sp.GetRequiredService<IMemoryService>().RememberAsync(new RememberRequest { OwnerId = "alice", Text = "The user prefers xUnit over NUnit.", Kind = MemoryKind.Preference }, default);
         await sp.GetRequiredService<IMemoryService>().RememberAsync(new RememberRequest { OwnerId = "bob", Text = "Bob prefers NUnit over xUnit." }, default);
@@ -52,6 +53,7 @@ public sealed class MemoryEndToEndTests
     public async Task The_model_can_call_memory__remember_and_the_record_lands_under_the_caller()
     {
         var (sp, client, agent) = Build();
+        await using var _ = sp;
         var caller = new TestCaller("alice");
         client.ThenToolCall("memory__remember", new { text = "The user's project is Daedalus.", kind = "fact" }).ThenText("Noted.");
         var runtime = sp.GetRequiredService<IAgentRuntime>();
@@ -69,6 +71,7 @@ public sealed class MemoryEndToEndTests
     public async Task Per_agent_disable_skips_auto_recall_but_tools_still_resolve()
     {
         var (sp, client, agent) = Build(new AgentMemorySettings { Enabled = false });
+        await using var _ = sp;
         var caller = new TestCaller("alice");
         await sp.GetRequiredService<IMemoryService>().RememberAsync(new RememberRequest { OwnerId = "alice", Text = "secret sauce" }, default);
         client.ThenText("ok");

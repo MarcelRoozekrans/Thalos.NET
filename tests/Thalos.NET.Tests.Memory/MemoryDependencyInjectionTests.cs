@@ -49,18 +49,29 @@ public sealed class MemoryDependencyInjectionTests
     }
 
     [Fact]
-    public void Custom_store_and_index_replace_the_defaults_in_any_order()
+    public async Task Custom_store_and_index_replace_the_defaults_in_any_order()
     {
         using var before = Build(t => t.UseMemoryStore<FakeStore>().UseMemoryIndex<FakeIndex>());
-        before.GetRequiredService<IMemoryStore>().Should().BeOfType<MemoryStoreInstrumented>();
-        before.GetRequiredService<FakeStore>().Should().NotBeNull();
+        await AssertFakeStoreIsWrapped(before);
         before.GetRequiredService<IMemoryIndex>().Should().BeOfType<FakeIndex>();
 
         var services = new ServiceCollection().AddLogging();
         var provider = Substitute.For<IChatClientProvider>();
-        services.AddThalos(t => t.UseChatClientProvider(provider).UseInMemorySessionStore().UseMemoryIndex<FakeIndex>().UseMemory());
+        services.AddThalos(t => t.UseChatClientProvider(provider).UseInMemorySessionStore().UseMemoryIndex<FakeIndex>().UseMemoryStore<FakeStore>().UseMemory());
         using var after = services.BuildServiceProvider();
+        await AssertFakeStoreIsWrapped(after);
         after.GetRequiredService<IMemoryIndex>().Should().BeOfType<FakeIndex>();
+    }
+
+    /// <summary>The telemetry proxy must wrap the custom store, not the default one: a record written through IMemoryStore is visible in FakeStore.</summary>
+    private static async Task AssertFakeStoreIsWrapped(ServiceProvider sp)
+    {
+        var store = sp.GetRequiredService<IMemoryStore>();
+        store.Should().BeOfType<MemoryStoreInstrumented>();
+        var now = DateTimeOffset.UtcNow;
+        var record = new MemoryRecord { Id = MemoryId.New(), OwnerId = "alice", Kind = MemoryKind.Fact, Text = "written through the proxy", CreatedAt = now, UpdatedAt = now };
+        (await store.CreateAsync(record, default)).IsSuccess.Should().BeTrue();
+        (await sp.GetRequiredService<FakeStore>().GetAsync(record.Id, default)).IsSuccess.Should().BeTrue("the proxy delegates to FakeStore");
     }
 
     [Fact]

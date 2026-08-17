@@ -50,7 +50,9 @@ public sealed class MemoryServiceFailurePathTests
         var f = new MemoryServiceFixture(UnavailableMemoryIndex.Instance);
         var svc = f.Build();
         var first = (await svc.RememberAsync(MemoryServiceFixture.Remember("romeo sierra"), default)).Value;
+        f.Clock.Advance(TimeSpan.FromSeconds(1)); // distinct CreatedAt so the stream order (oldest first) is explicit
         var second = (await svc.RememberAsync(MemoryServiceFixture.Remember("tango uniform"), default)).Value;
+        f.Clock.Advance(TimeSpan.FromSeconds(1));
         var third = (await svc.RememberAsync(MemoryServiceFixture.Remember("victor whiskey"), default)).Value;
 
         f.Index = new InMemoryMemoryIndex(new Thalos.Testing.HashedBagOfWordsEmbeddingGenerator());
@@ -72,18 +74,33 @@ public sealed class MemoryServiceFailurePathTests
     }
 
     [Fact]
-    public async Task Reindex_propagates_cancellation_from_the_stream()
+    public async Task Reindex_propagates_cancellation_of_the_ambient_token()
     {
         var f = new MemoryServiceFixture(UnavailableMemoryIndex.Instance);
         await f.Build().RememberAsync(MemoryServiceFixture.Remember("xray yankee"), default);
         f.Index = new InMemoryMemoryIndex(new Thalos.Testing.HashedBagOfWordsEmbeddingGenerator());
         using var cts = new CancellationTokenSource();
-        var store = new HookedStore(f.Store) { OnStream = (0, new OperationCanceledException(cts.Token)) };
         await cts.CancelAsync();
 
-        var act = async () => await f.Build(store).ReindexAsync(new ReindexOptions(), cts.Token);
+        // the in-memory store itself throws OperationCanceledException on the first pull of a cancelled stream
+        var act = async () => await f.Build().ReindexAsync(new ReindexOptions(), cts.Token);
 
         await act.Should().ThrowAsync<OperationCanceledException>("a cancelled ambient token is not a store failure");
+    }
+
+    [Fact]
+    public async Task Reindex_maps_a_store_timeout_style_OperationCanceledException_when_the_ambient_token_is_live()
+    {
+        var f = new MemoryServiceFixture(UnavailableMemoryIndex.Instance);
+        await f.Build().RememberAsync(MemoryServiceFixture.Remember("zulu alpha"), default);
+        f.Index = new InMemoryMemoryIndex(new Thalos.Testing.HashedBagOfWordsEmbeddingGenerator());
+        var store = new HookedStore(f.Store) { OnStream = (0, new OperationCanceledException("driver-side timeout")) };
+
+        var report = await f.Build(store).ReindexAsync(new ReindexOptions(), default);
+
+        report.IsFailure.Should().BeTrue("the caller did not cancel, so this is a store failure like any other");
+        report.Error.Code.Should().Be(AgentErrorCode.MemoryStoreFailed);
+        report.Error.Detail.Should().Be("OperationCanceledException");
     }
 
     [Fact]

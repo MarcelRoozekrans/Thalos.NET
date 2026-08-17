@@ -5,8 +5,9 @@ namespace Thalos.Testing;
 /// <summary>
 /// Deterministic, dependency-free <see cref="IEmbeddingGenerator{TInput,TEmbedding}"/> for tests: lower-cases, splits on
 /// non-alphanumerics, hashes each token (FNV-1a) into <see cref="Dimensions"/> buckets and L2-normalises, so cosine similarity
-/// equals word overlap — identical texts score 1, disjoint texts 0. Reports <see cref="EmbeddingGeneratorMetadata"/> with
-/// <c>DefaultModelDimensions</c> so dimension checks can be exercised. Not a semantic model.
+/// approximates word overlap — identical texts score 1, disjoint texts 0 unless two tokens hash into the same bucket (with 128
+/// buckets a long text overlaps a little with almost anything; keep test texts short or raise the dimensions). Reports
+/// <see cref="EmbeddingGeneratorMetadata"/> with <c>DefaultModelDimensions</c> so dimension checks can be exercised. Not a semantic model.
 /// </summary>
 public sealed class HashedBagOfWordsEmbeddingGenerator(int dimensions = 128) : IEmbeddingGenerator<string, Embedding<float>>
 {
