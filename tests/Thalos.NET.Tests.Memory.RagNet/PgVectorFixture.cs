@@ -3,7 +3,11 @@ using Testcontainers.PostgreSql;
 
 namespace Thalos.Tests.Memory.RagNet;
 
-/// <summary>One pgvector container per test collection; tests TRUNCATE rag_chunks between runs. Requires Docker (Linux containers) — exclude with --filter Category!=Docker.</summary>
+/// <summary>
+/// One pgvector container per test collection; tests call <see cref="ResetAsync"/> (DROP TABLE rag_chunks) before <c>InitializeAsync</c> so every
+/// test starts from an empty table at its own vector dimension whatever ran before it (test classes use 64 and 128; Rag.NET refuses to
+/// initialise over a table of another dimension). Requires Docker (Linux containers) — exclude with --filter Category!=Docker.
+/// </summary>
 public sealed class PgVectorFixture : IAsyncLifetime
 {
     public const string Image = "pgvector/pgvector:pg16";
@@ -32,7 +36,7 @@ public sealed class PgVectorFixture : IAsyncLifetime
     {
         await using var conn = new NpgsqlConnection(ConnectionString);
         await conn.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand("TRUNCATE TABLE rag_chunks", conn);
+        await using var cmd = new NpgsqlCommand("DROP TABLE IF EXISTS rag_chunks", conn);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 }
