@@ -5,6 +5,8 @@
     <ProjectReference Include="..\..\src\Thalos.NET.Mcp\Thalos.NET.Mcp.csproj" />
     <ProjectReference Include="..\..\src\Thalos.NET.Anthropic\Thalos.NET.Anthropic.csproj" />
     <ProjectReference Include="..\..\src\Thalos.NET.Sentinel\Thalos.NET.Sentinel.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Memory\Thalos.NET.Memory.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Memory.RagNet\Thalos.NET.Memory.RagNet.csproj" />
     <ProjectReference Include="..\..\src\Thalos.NET.Testing\Thalos.NET.Testing.csproj" />
     <PackageReference Include="TngTech.ArchUnitNET.xUnit" />
   </ItemGroup>
