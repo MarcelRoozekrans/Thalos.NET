@@ -27,7 +27,11 @@ namespace Thalos.Runtime;
 /// </para>
 /// <para>
 /// A cached agent is reused while the supplied <see cref="AgentDefinition"/> is equal by value (id, name, description,
-/// instructions, model, max output tokens, tool globs); a changed definition rebuilds and disposes the old pipeline.
+/// instructions, model, max output tokens, tool globs, memory settings); a changed definition rebuilds and disposes the old pipeline.
+/// </para>
+/// <para>
+/// Every registered <see cref="IAgentContextProviderSource"/> is asked once per build; the non-null
+/// <see cref="AIContextProvider"/>s are attached to the agent (<c>ChatClientAgentOptions.AIContextProviders</c>) and cached with it.
 /// </para>
 /// <para>
 /// <see cref="Invalidate"/> (and replacement by a changed definition) disposes the pipeline immediately and is <em>not</em>
@@ -45,6 +49,7 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
     private readonly IServiceProvider _services;
     private readonly ILoggerFactory? _loggerFactory;
     private readonly ILogger _logger;
+    private readonly IReadOnlyList<IAgentContextProviderSource> _contextProviderSources;
     private readonly ConcurrentDictionary<AgentId, Lazy<Task<Result<Entry, AgentError>>>> _cache = new();
     private volatile bool _disposed;
 
@@ -54,7 +59,8 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
         IToolCatalog toolCatalog,
         SessionStoreChatHistoryProvider historyProvider,
         IServiceProvider services,
-        ILoggerFactory? loggerFactory = null)
+        ILoggerFactory? loggerFactory = null,
+        IEnumerable<IAgentContextProviderSource>? contextProviderSources = null)
     {
         _provider = provider;
         _decorators = decorators.OrderBy(d => d.Order).ToList();
@@ -63,6 +69,7 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
         _services = services;
         _loggerFactory = loggerFactory;
         _logger = loggerFactory?.CreateLogger<AgentFactory>() ?? NullLogger<AgentFactory>.Instance;
+        _contextProviderSources = contextProviderSources?.ToList() ?? [];
     }
 
     /// <inheritdoc />
@@ -167,7 +174,8 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
         && string.Equals(a.Instructions, b.Instructions, StringComparison.Ordinal)
         && string.Equals(a.Model, b.Model, StringComparison.Ordinal)
         && a.MaxOutputTokens == b.MaxOutputTokens
-        && a.Tools.SequenceEqual(b.Tools, StringComparer.Ordinal);
+        && a.Tools.SequenceEqual(b.Tools, StringComparer.Ordinal)
+        && Equals(a.Memory, b.Memory);
 
     private async Task<Result<Entry, AgentError>> BuildAsync(AgentDefinition definition)
     {
@@ -186,12 +194,22 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
                 client = decorator.Decorate(client, definition, _services);
             }
 
+            var contextProviders = new List<AIContextProvider>();
+            foreach (var source in _contextProviderSources)
+            {
+                if (source.CreateProvider(definition) is { } contextProvider)
+                {
+                    contextProviders.Add(contextProvider);
+                }
+            }
+
             var agent = new ChatClientAgent(client, new ChatClientAgentOptions
             {
                 Id = definition.Id.ToString(),
                 Name = definition.Name,
                 Description = string.IsNullOrEmpty(definition.Description) ? null : definition.Description,
                 ChatHistoryProvider = _historyProvider,
+                AIContextProviders = contextProviders.Count == 0 ? null : contextProviders,
                 ChatOptions = new ChatOptions
                 {
                     Instructions = definition.Instructions,
