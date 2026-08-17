@@ -99,7 +99,8 @@ public sealed partial class RagNetMemoryIndex(
                 }
             }
 
-            IReadOnlyList<MemoryHit> hits = best.OrderByDescending(kv => kv.Value).Take(topK).Select(kv => new MemoryHit(kv.Key, kv.Value)).ToList();
+            // score desc, then id — the same deterministic tie order as InMemoryMemoryIndex
+            IReadOnlyList<MemoryHit> hits = best.OrderByDescending(kv => kv.Value).ThenBy(kv => kv.Key).Take(topK).Select(kv => new MemoryHit(kv.Key, kv.Value)).ToList();
             return Result<IReadOnlyList<MemoryHit>, AgentError>.Success(hits);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
