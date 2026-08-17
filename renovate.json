@@ -2,5 +2,7 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "local>MarcelRoozekrans/renovate-config"
-  ]
+  ],
+  "ignoreDeps": ["dotnet-sdk"],
+  "description": "dotnet-sdk is ignored on purpose: global.json pins the lowest 10.0.x feature band with rollForward=latestFeature so dev machines and CI both resolve; bumping the pin above locally-installed SDKs breaks local builds."
 }

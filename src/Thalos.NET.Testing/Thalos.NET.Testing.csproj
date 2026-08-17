@@ -4,23 +4,15 @@
     <PackageId>Thalos.NET.Testing</PackageId>
     <Description>Test doubles and contract tests for Thalos.NET: ScriptedChatClient (scripted IChatClient), RecordingNotificationPublisher (in-memory IAgentNotificationPublisher), reusable IAgentSessionStore contract tests (xUnit + AwesomeAssertions).</Description>
     <PackageTags>agents;testing;zeroalloc</PackageTags>
-    <!-- xunit.core.props sets IsTestProject=true; this is a library, not a test host -->
-    <IsTestProject>false</IsTestProject>
     <!-- CA1707: this package ships xUnit contract-test classes whose [Fact] methods use the repo's underscore test-naming style -->
     <NoWarn>$(NoWarn);CA1707</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />
-    <PackageReference Include="xunit" />
+    <!-- xunit.extensibility.core carries [Fact]/[Theory] without the xunit.core build targets
+         (which mark the project as a test host, force a runtimeconfig.json and break `dotnet pack`). -->
+    <PackageReference Include="xunit.extensibility.core" />
     <PackageReference Include="AwesomeAssertions" />
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
   </ItemGroup>
-  <!-- xunit.core.targets (imported after this file) forces GenerateRuntimeConfigurationFiles=true for test hosts; this is a
-       library, and the generated Thalos.NET.Testing.runtimeconfig.json would otherwise be packed into lib/. A static property
-       cannot win over a package .targets file, so flip it off dynamically before the build pipeline evaluates it. -->
-  <Target Name="_ThalosTestingNoRuntimeConfig" AfterTargets="BeforeBuild">
-    <PropertyGroup>
-      <GenerateRuntimeConfigurationFiles>false</GenerateRuntimeConfigurationFiles>
-    </PropertyGroup>
-  </Target>
 </Project>
