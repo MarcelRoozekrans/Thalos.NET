@@ -13,8 +13,9 @@ namespace Thalos.Testing;
 /// <remarks>
 /// What the suite assumes beyond the interface docs: a blank query yields no hits (do not embed whitespace and match everything at
 /// <c>MinScore = 0</c>); a search with <c>MinScore = 0</c> over a handful of vectors returns every one of them (<c>score &gt;= MinScore</c>,
-/// exact recall at this size — an approximate index must not drop rows from a three-vector table); every test calls
-/// <c>CreateIndexAsync</c> exactly once, so an implementation may reset its backing table there.
+/// exact recall at this size — an approximate index must not drop rows from a three-vector table); <c>TopK &lt;= 0</c> is treated as 1;
+/// an id is returned at most once even when several <see cref="MemoryScope.Partitions"/> match it (a scope whose shared owner equals the
+/// owner included); every test calls <c>CreateIndexAsync</c> exactly once, so an implementation may reset its backing table there.
 /// </remarks>
 public abstract class MemoryIndexContractTests
 {
@@ -149,6 +150,42 @@ public abstract class MemoryIndexContractTests
         fresh.Value.Should().BeEmpty();
         await index.UpsertAsync([Rec("alice", null, "something")], CancellationToken.None);
         (await index.SearchAsync("   ", new MemoryScope("alice", null), Any(), CancellationToken.None)).Value.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task TopK_at_or_below_zero_is_treated_as_one()
+    {
+        var index = await CreateIndexAsync();
+        await index.UpsertAsync([Rec("alice", null, "kilo lima mike"), Rec("alice", null, "kilo lima november")], CancellationToken.None);
+
+        (await index.SearchAsync("kilo lima", new MemoryScope("alice", null), new MemorySearchOptions(0, 0.0), CancellationToken.None)).Value.Should().HaveCount(1);
+        (await index.SearchAsync("kilo lima", new MemoryScope("alice", null), new MemorySearchOptions(-5, 0.0), CancellationToken.None)).Value.Should().HaveCount(1);
+    }
+
+    [Fact]
+    public async Task Shared_owner_equal_to_the_owner_yields_each_hit_once()
+    {
+        var index = await CreateIndexAsync();
+        var mine = Rec("alice", null, "oscar papa quebec");
+        await index.UpsertAsync([mine], CancellationToken.None);
+
+        var hits = (await index.SearchAsync("oscar papa quebec", new MemoryScope("alice", null, "alice"), Any(), CancellationToken.None)).Value;
+        hits.Should().ContainSingle("MemoryScope.Partitions de-duplicates the shared owner when it is the caller").Which.Id.Should().Be(mine.Id);
+    }
+
+    [Fact]
+    public async Task Hits_never_repeat_an_id_across_partitions()
+    {
+        var index = await CreateIndexAsync();
+        var agent = AgentId.New();
+        var ownerWide = Rec("alice", null, "sierra tango uniform");
+        var pinned = Rec("alice", agent, "sierra tango uniform victor");
+        var shared = Rec("daedalus", null, "sierra tango uniform whiskey");
+        await index.UpsertAsync([ownerWide, pinned, shared], CancellationToken.None);
+
+        var hits = (await index.SearchAsync("sierra tango uniform", new MemoryScope("alice", agent, "daedalus"), Any(), CancellationToken.None)).Value;
+        hits.Select(h => h.Id).Should().OnlyHaveUniqueItems();
+        hits.Select(h => h.Id).Should().BeEquivalentTo([ownerWide.Id, pinned.Id, shared.Id], "all three partitions are visible, each record once");
     }
 
     [Fact]

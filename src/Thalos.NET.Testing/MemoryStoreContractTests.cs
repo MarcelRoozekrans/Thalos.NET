@@ -14,8 +14,12 @@ namespace Thalos.Testing;
 /// What the suite assumes beyond the interface docs: <c>UpdatedAt</c> is stamped from the injected <see cref="TimeProvider"/> (not a
 /// database-side <c>now()</c>); <see cref="MemoryRecord.Importance"/> round-trips as an exact <see cref="double"/> (a <c>real</c>/float4
 /// column fails); a query without <see cref="MemoryQuery.OwnerIds"/> lists all owners (store level — the service adds the owner
-/// requirement); <see cref="MemoryQuery.Page"/> up to <see cref="int.MaxValue"/> must not overflow the skip arithmetic; and the store
-/// must be safe for concurrent calls (twenty parallel <c>MarkRecalledAsync</c> calls on one record must lose nothing).
+/// requirement); empty-but-non-null filter lists mean "no filter"; custom <see cref="MemoryKind"/> values round-trip and filter;
+/// <c>GetAsync</c> returns archived records and <c>MarkRecalledAsync</c> counts on them; texts/sources/tags at the exact limits (4000-char
+/// multi-line non-BMP text, 256-char source, ten 32-char tags) round-trip; <see cref="MemoryQuery.Page"/> up to <see cref="int.MaxValue"/>
+/// must not overflow the skip arithmetic; <see cref="IMemoryStore.StreamAsync"/> must keep yielding every match exactly once while the
+/// consumer updates already-yielded records (snapshot or keyset paging — see its docs); and the store must be safe for concurrent calls
+/// (twenty parallel <c>MarkRecalledAsync</c> calls on one record must lose nothing).
 /// </remarks>
 public abstract class MemoryStoreContractTests
 {
@@ -302,6 +306,114 @@ public abstract class MemoryStoreContractTests
         }
 
         texts.Should().Equal("m0", "m2", "m4", "m6");
+    }
+
+    [Fact]
+    public async Task Stream_tolerates_updates_to_yielded_records_and_yields_each_match_exactly_once()
+    {
+        // reindex clears IndexPending on records it just received while the stream is still open: OFFSET paging over the filtered
+        // set would skip rows as matches drop out of the filter; a snapshot or keyset paging by (CreatedAt, Id) must not
+        var clock = NewClock();
+        var store = await CreateStoreAsync(clock);
+        var expected = new List<MemoryId>();
+        for (var i = 0; i < 12; i++)
+        {
+            expected.Add((await store.CreateAsync(NewRecord(clock, text: $"pending {i}", indexPending: true), CancellationToken.None)).Value.Id);
+            clock.Advance(TimeSpan.FromSeconds(1));
+        }
+
+        var yielded = new List<MemoryId>();
+        await foreach (var r in store.StreamAsync(new MemoryQuery { IndexPending = true, PageSize = 3 }, CancellationToken.None))
+        {
+            yielded.Add(r.Id);
+            (await store.UpdateAsync(r.Id, new MemoryUpdate { IndexPending = false }, CancellationToken.None)).IsSuccess.Should().BeTrue("updating a yielded record while the stream is open must work");
+        }
+
+        yielded.Should().Equal(expected, "every match once, oldest first, whatever paging the store uses internally");
+        (await store.ListAsync(new MemoryQuery { IndexPending = true }, CancellationToken.None)).Value.TotalCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Custom_kind_roundtrips_and_filters()
+    {
+        var clock = NewClock();
+        var store = await CreateStoreAsync(clock);
+        var custom = new MemoryKind("ralph-learning");
+        var record = NewRecord(clock, kind: custom);
+        await store.CreateAsync(record, CancellationToken.None);
+        await store.CreateAsync(NewRecord(clock, kind: MemoryKind.Fact), CancellationToken.None);
+
+        (await store.GetAsync(record.Id, CancellationToken.None)).Value.Kind.Should().Be(custom);
+        (await store.ListAsync(new MemoryQuery { OwnerIds = ["alice"], Kinds = [custom] }, CancellationToken.None)).Value.Items.Should().ContainSingle().Which.Id.Should().Be(record.Id);
+        (await store.ListAsync(new MemoryQuery { OwnerIds = ["alice"], Kinds = [MemoryKind.Learning] }, CancellationToken.None)).Value.Items.Should().BeEmpty("a custom kind is not the built-in learning kind");
+    }
+
+    [Fact]
+    public async Task Empty_filter_lists_mean_no_filter()
+    {
+        var clock = NewClock();
+        var store = await CreateStoreAsync(clock);
+        await store.CreateAsync(NewRecord(clock, owner: "alice", kind: MemoryKind.Fact, tags: ["x"]), CancellationToken.None);
+        await store.CreateAsync(NewRecord(clock, owner: "bob", kind: MemoryKind.Note, tags: []), CancellationToken.None);
+
+        var query = new MemoryQuery { OwnerIds = [], Kinds = [], Tags = [] };
+        (await store.ListAsync(query, CancellationToken.None)).Value.TotalCount.Should().Be(2, "empty lists are 'no filter', like null");
+        var streamed = 0;
+        await foreach (var _ in store.StreamAsync(query, CancellationToken.None))
+        {
+            streamed++;
+        }
+
+        streamed.Should().Be(2);
+    }
+
+    [Fact]
+    public async Task Get_returns_archived_records()
+    {
+        var clock = NewClock();
+        var store = await CreateStoreAsync(clock);
+        var record = NewRecord(clock);
+        await store.CreateAsync(record, CancellationToken.None);
+        await store.UpdateAsync(record.Id, new MemoryUpdate { IsArchived = true }, CancellationToken.None);
+
+        var got = await store.GetAsync(record.Id, CancellationToken.None);
+        got.IsSuccess.Should().BeTrue("Get does not filter archived records — callers decide");
+        got.Value.IsArchived.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Boundary_lengths_roundtrip()
+    {
+        var clock = NewClock();
+        var store = await CreateStoreAsync(clock);
+        var text = string.Concat(Enumerable.Repeat("memo 🚀\n", MemoryRecord.MaxTextLength / 8)); // 8 UTF-16 chars per unit: multi-line, non-BMP
+        text.Length.Should().Be(MemoryRecord.MaxTextLength);
+        var source = new string('s', MemoryRecord.MaxSourceLength);
+        var tags = Enumerable.Range(0, MemoryRecord.MaxTags).Select(i => string.Concat(new string('t', MemoryRecord.MaxTagLength - 1), ((char)('a' + i)).ToString())).ToList();
+        var record = NewRecord(clock, text: text, tags: tags) with { Source = source };
+        MemoryRules.Validate(record).Should().BeNull("the record is at the limits, not over them");
+
+        var created = await store.CreateAsync(record, CancellationToken.None);
+        created.IsSuccess.Should().BeTrue(created.IsFailure ? created.Error.ToString() : "");
+        var got = (await store.GetAsync(record.Id, CancellationToken.None)).Value;
+        got.Text.Should().Be(text);
+        got.Source.Should().Be(source);
+        got.Tags.Should().Equal(tags);
+    }
+
+    [Fact]
+    public async Task MarkRecalled_counts_on_archived_records_too()
+    {
+        // the service never recalls archived records; a store must not second-guess that (a stale index hit that was archived
+        // between search and hydration is dropped by the service, not by the store)
+        var clock = NewClock();
+        var store = await CreateStoreAsync(clock);
+        var record = NewRecord(clock);
+        await store.CreateAsync(record, CancellationToken.None);
+        await store.UpdateAsync(record.Id, new MemoryUpdate { IsArchived = true }, CancellationToken.None);
+
+        (await store.MarkRecalledAsync([record.Id], clock.GetUtcNow(), CancellationToken.None)).IsSuccess.Should().BeTrue();
+        (await store.GetAsync(record.Id, CancellationToken.None)).Value.RecallCount.Should().Be(1);
     }
 
     [Fact]
