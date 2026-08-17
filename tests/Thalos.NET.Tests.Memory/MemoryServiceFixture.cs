@@ -58,6 +58,9 @@ internal sealed class HookedStore(IMemoryStore inner) : IMemoryStore
     public Func<MemoryId, MemoryUpdate, AgentError?>? OnUpdate { get; set; }
     public Func<AgentError?>? OnMarkRecalled { get; set; }
 
+    /// <summary>When set, <see cref="StreamAsync"/> yields this many records and then throws the exception (an <c>IAsyncEnumerable</c> cannot return a <c>Result</c>).</summary>
+    public (int After, Exception Throw)? OnStream { get; set; }
+
     public ValueTask<Result<MemoryRecord, AgentError>> CreateAsync(MemoryRecord record, CancellationToken ct) => inner.CreateAsync(record, ct);
 
     public ValueTask<Result<MemoryRecord, AgentError>> GetAsync(MemoryId id, CancellationToken ct) =>
@@ -72,5 +75,22 @@ internal sealed class HookedStore(IMemoryStore inner) : IMemoryStore
     public ValueTask<UnitResult<AgentError>> MarkRecalledAsync(IReadOnlyList<MemoryId> ids, DateTimeOffset at, CancellationToken ct) =>
         OnMarkRecalled?.Invoke() is { } error ? new(UnitResult<AgentError>.Failure(error)) : inner.MarkRecalledAsync(ids, at, ct);
 
-    public IAsyncEnumerable<MemoryRecord> StreamAsync(MemoryQuery query, CancellationToken ct) => inner.StreamAsync(query, ct);
+    public IAsyncEnumerable<MemoryRecord> StreamAsync(MemoryQuery query, CancellationToken ct) =>
+        OnStream is { } fault ? StreamThenThrowAsync(query, fault.After, fault.Throw, ct) : inner.StreamAsync(query, ct);
+
+    private async IAsyncEnumerable<MemoryRecord> StreamThenThrowAsync(MemoryQuery query, int after, Exception exception, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+    {
+        var yielded = 0;
+        await foreach (var record in inner.StreamAsync(query, ct))
+        {
+            if (yielded++ >= after)
+            {
+                throw exception;
+            }
+
+            yield return record;
+        }
+
+        throw exception;
+    }
 }

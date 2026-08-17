@@ -30,7 +30,8 @@ public interface IMemoryService
     /// <summary>
     /// Re-embeds pending (or, with <c>PendingOnly = false</c>, all non-archived) records in batches and clears <c>IndexPending</c>; fails
     /// fast when the index probe says unavailable. Full mode re-embeds but does not purge stale vectors (those are dropped at recall).
-    /// See <see cref="ReindexReport"/> for how failures are counted.
+    /// See <see cref="ReindexReport"/> for how failures are counted. A store that throws while streaming records aborts the run with
+    /// <see cref="AgentErrorCode.MemoryStoreFailed"/> (batches flushed before that keep their cleared flags; the rest stays pending).
     /// </summary>
     ValueTask<Result<ReindexReport, AgentError>> ReindexAsync(ReindexOptions options, CancellationToken ct);
 }

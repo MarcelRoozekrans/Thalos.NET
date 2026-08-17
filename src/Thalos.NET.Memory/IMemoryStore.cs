@@ -41,6 +41,10 @@ public interface IMemoryStore
     [Trace("thalos.memory.mark-recalled")]
     ValueTask<UnitResult<AgentError>> MarkRecalledAsync(IReadOnlyList<MemoryId> ids, DateTimeOffset at, CancellationToken ct);
 
-    /// <summary>Streams every match of <paramref name="query"/> (paging ignored) oldest first — used by reindex.</summary>
+    /// <summary>
+    /// Streams every match of <paramref name="query"/> (paging ignored) oldest first — used by reindex. An <c>IAsyncEnumerable</c> cannot
+    /// return a <c>Result</c>: a backend failure mid-stream may throw; <see cref="IMemoryService.ReindexAsync"/> maps that to
+    /// <see cref="AgentErrorCode.MemoryStoreFailed"/>.
+    /// </summary>
     IAsyncEnumerable<MemoryRecord> StreamAsync(MemoryQuery query, CancellationToken ct);
 }

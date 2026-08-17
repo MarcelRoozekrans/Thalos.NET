@@ -4,7 +4,7 @@ using Thalos.Runtime;
 
 namespace Thalos.Tests.Memory;
 
-/// <summary>Degraded paths of <see cref="MemoryService"/>: store hiccups are logged (event ids 501–506) and never lose a committed record.</summary>
+/// <summary>Degraded paths of <see cref="MemoryService"/>: store hiccups are logged (event ids 501–507) and never lose a committed record.</summary>
 public sealed class MemoryServiceFailurePathTests
 {
     private static readonly AgentError StoreDown = AgentError.MemoryStoreFailed("store down", "Test");
@@ -42,6 +42,48 @@ public sealed class MemoryServiceFailurePathTests
         f.Logger.Entries.Should().Contain((505, LogLevel.Warning));
 
         (await f.Build().ReindexAsync(new ReindexOptions(), default)).Value.Should().Be(new ReindexReport(Scanned: 1, Indexed: 1, Failed: 0));
+    }
+
+    [Fact]
+    public async Task Reindex_maps_a_store_that_throws_mid_stream_to_MemoryStoreFailed_and_keeps_flushed_batches()
+    {
+        var f = new MemoryServiceFixture(UnavailableMemoryIndex.Instance);
+        var svc = f.Build();
+        var first = (await svc.RememberAsync(MemoryServiceFixture.Remember("romeo sierra"), default)).Value;
+        var second = (await svc.RememberAsync(MemoryServiceFixture.Remember("tango uniform"), default)).Value;
+        var third = (await svc.RememberAsync(MemoryServiceFixture.Remember("victor whiskey"), default)).Value;
+
+        f.Index = new InMemoryMemoryIndex(new Thalos.Testing.HashedBagOfWordsEmbeddingGenerator());
+        var store = new HookedStore(f.Store) { OnStream = (2, new TimeoutException("connection lost")) };
+
+        // BatchSize 1: the first two records are flushed before the stream throws on the third
+        var report = await f.Build(store).ReindexAsync(new ReindexOptions { BatchSize = 1 }, default);
+
+        report.IsFailure.Should().BeTrue();
+        report.Error.Code.Should().Be(AgentErrorCode.MemoryStoreFailed);
+        report.Error.Detail.Should().Be("TimeoutException", "only the exception type, never its message");
+        report.Error.Message.Should().NotContain("connection lost");
+        (await f.Store.GetAsync(first.Id, default)).Value.IndexPending.Should().BeFalse("flushed before the failure");
+        (await f.Store.GetAsync(second.Id, default)).Value.IndexPending.Should().BeFalse("flushed before the failure");
+        (await f.Store.GetAsync(third.Id, default)).Value.IndexPending.Should().BeTrue("never reached; the next run picks it up");
+        f.Logger.Entries.Should().Contain((507, LogLevel.Warning));
+
+        (await f.Build().ReindexAsync(new ReindexOptions(), default)).Value.Should().Be(new ReindexReport(Scanned: 1, Indexed: 1, Failed: 0));
+    }
+
+    [Fact]
+    public async Task Reindex_propagates_cancellation_from_the_stream()
+    {
+        var f = new MemoryServiceFixture(UnavailableMemoryIndex.Instance);
+        await f.Build().RememberAsync(MemoryServiceFixture.Remember("xray yankee"), default);
+        f.Index = new InMemoryMemoryIndex(new Thalos.Testing.HashedBagOfWordsEmbeddingGenerator());
+        using var cts = new CancellationTokenSource();
+        var store = new HookedStore(f.Store) { OnStream = (0, new OperationCanceledException(cts.Token)) };
+        await cts.CancelAsync();
+
+        var act = async () => await f.Build(store).ReindexAsync(new ReindexOptions(), cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>("a cancelled ambient token is not a store failure");
     }
 
     [Fact]

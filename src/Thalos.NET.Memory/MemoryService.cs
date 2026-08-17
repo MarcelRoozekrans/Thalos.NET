@@ -311,17 +311,27 @@ public sealed partial class MemoryService(
         var indexed = 0;
         var failed = 0;
         var batch = new List<MemoryRecord>(batchSize);
-        await foreach (var record in store.StreamAsync(query, ct).ConfigureAwait(false))
+        try
         {
-            scanned++;
-            batch.Add(record);
-            if (batch.Count >= batchSize)
+            await foreach (var record in store.StreamAsync(query, ct).ConfigureAwait(false))
             {
-                var (ok, ko) = await FlushAsync(batch, ct).ConfigureAwait(false);
-                indexed += ok;
-                failed += ko;
-                batch.Clear();
+                scanned++;
+                batch.Add(record);
+                if (batch.Count >= batchSize)
+                {
+                    var (ok, ko) = await FlushAsync(batch, ct).ConfigureAwait(false);
+                    indexed += ok;
+                    failed += ko;
+                    batch.Clear();
+                }
             }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            // IAsyncEnumerable cannot return a Result: a store that fails mid-stream surfaces here. Batches flushed so far are done
+            // (their flags are cleared); the rest stays pending for the next run.
+            LogReindexStreamFailed(_logger, scanned, ex.GetType().Name, ex);
+            return Result<ReindexReport, AgentError>.Failure(AgentError.MemoryStoreFailed("Streaming memory records for reindex failed.", ex.GetType().Name));
         }
 
         if (batch.Count > 0)
@@ -387,4 +397,7 @@ public sealed partial class MemoryService(
 
     [LoggerMessage(EventId = 506, Level = LogLevel.Warning, Message = "Dedupe threshold {Threshold} is not in (0, 1]; dedupe is disabled")]
     private static partial void LogDedupeThresholdInvalid(ILogger logger, double threshold);
+
+    [LoggerMessage(EventId = 507, Level = LogLevel.Warning, Message = "Reindex aborted: the store's record stream threw {ExceptionType} after {Scanned} records (unflushed records stay pending)")]
+    private static partial void LogReindexStreamFailed(ILogger logger, int scanned, string exceptionType, Exception exception);
 }
