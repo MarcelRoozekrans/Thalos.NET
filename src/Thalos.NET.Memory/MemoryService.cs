@@ -108,7 +108,8 @@ public sealed partial class MemoryService(
         }
 
         var topK = Math.Max(1, options.TopK); // options is a shared bound instance — read, never mutate
-        var hits = await index.SearchAsync(query, scope, new MemorySearchOptions(topK * 2, options.MinScore), ct).ConfigureAwait(false); // over-fetch: archived/stale hits are dropped below
+        var fetch = (int)Math.Min(int.MaxValue, 2L * topK); // over-fetch: archived/stale hits are dropped below
+        var hits = await index.SearchAsync(query, scope, new MemorySearchOptions(fetch, options.MinScore), ct).ConfigureAwait(false);
         if (hits.IsFailure)
         {
             return Result<IReadOnlyList<RecalledMemory>, AgentError>.Failure(hits.Error);
@@ -203,15 +204,119 @@ public sealed partial class MemoryService(
         return selected;
     }
 
-    // Task 12 implements these (MA0025 forbids NotImplementedException; these bodies fail every test until then).
-    public ValueTask<UnitResult<AgentError>> ForgetAsync(MemoryId id, MemoryScope scope, bool hard, CancellationToken ct) =>
-        new(UnitResult<AgentError>.Failure(AgentError.MemoryValidationFailed("not implemented")));
+    /// <inheritdoc />
+    public async ValueTask<UnitResult<AgentError>> ForgetAsync(MemoryId id, MemoryScope scope, bool hard, CancellationToken ct)
+    {
+        var got = await store.GetAsync(id, ct).ConfigureAwait(false);
+        if (got.IsFailure)
+        {
+            return UnitResult<AgentError>.Failure(got.Error);
+        }
 
-    public ValueTask<Result<MemoryPage, AgentError>> ListAsync(MemoryQuery query, CancellationToken ct) =>
-        new(Result<MemoryPage, AgentError>.Failure(AgentError.MemoryValidationFailed("not implemented")));
+        if (!string.Equals(got.Value.OwnerId, scope.OwnerId, StringComparison.Ordinal))
+        {
+            return UnitResult<AgentError>.Failure(AgentError.MemoryForbidden(id)); // the shared owner grants read, never forget
+        }
 
-    public ValueTask<Result<ReindexReport, AgentError>> ReindexAsync(ReindexOptions options, CancellationToken ct) =>
-        new(Result<ReindexReport, AgentError>.Failure(AgentError.MemoryValidationFailed("not implemented")));
+        if (hard)
+        {
+            var deleted = await store.DeleteAsync(id, ct).ConfigureAwait(false);
+            if (deleted.IsFailure)
+            {
+                return deleted;
+            }
+        }
+        else
+        {
+            var archived = await store.UpdateAsync(id, new MemoryUpdate { IsArchived = true }, ct).ConfigureAwait(false);
+            if (archived.IsFailure)
+            {
+                return UnitResult<AgentError>.Failure(archived.Error);
+            }
+        }
+
+        var removed = await index.RemoveAsync(id, ct).ConfigureAwait(false);
+        if (removed.IsFailure)
+        {
+            LogIndexRemoveFailed(_logger, id, removed.Error.ToString()); // a stale vector is dropped at hydration
+        }
+
+        return UnitResult<AgentError>.Success();
+    }
+
+    /// <inheritdoc />
+    public ValueTask<Result<MemoryPage, AgentError>> ListAsync(MemoryQuery query, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(query);
+        return query.OwnerIds is { Count: > 0 }
+            ? store.ListAsync(query, ct)
+            : new(Result<MemoryPage, AgentError>.Failure(AgentError.MemoryValidationFailed("At least one owner id is required.")));
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<Result<ReindexReport, AgentError>> ReindexAsync(ReindexOptions options, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        var probe = await index.ProbeAsync(ct).ConfigureAwait(false);
+        if (probe.IsFailure)
+        {
+            return Result<ReindexReport, AgentError>.Failure(probe.Error);
+        }
+
+        if (!probe.Value.Available)
+        {
+            return Result<ReindexReport, AgentError>.Failure(AgentError.MemoryIndexUnavailable("The memory index is unavailable.", probe.Value.Detail));
+        }
+
+        var query = new MemoryQuery { IndexPending = options.PendingOnly ? true : null, IncludeArchived = false };
+        var batchSize = Math.Max(1, options.BatchSize);
+        var scanned = 0;
+        var indexed = 0;
+        var failed = 0;
+        var batch = new List<MemoryRecord>(batchSize);
+        await foreach (var record in store.StreamAsync(query, ct).ConfigureAwait(false))
+        {
+            scanned++;
+            batch.Add(record);
+            if (batch.Count >= batchSize)
+            {
+                var (ok, ko) = await FlushAsync(batch, ct).ConfigureAwait(false);
+                indexed += ok;
+                failed += ko;
+                batch.Clear();
+            }
+        }
+
+        if (batch.Count > 0)
+        {
+            var (ok, ko) = await FlushAsync(batch, ct).ConfigureAwait(false);
+            indexed += ok;
+            failed += ko;
+        }
+
+        return Result<ReindexReport, AgentError>.Success(new ReindexReport(scanned, indexed, failed));
+    }
+
+    /// <summary>Upserts one batch; on failure the whole batch counts as failed (the index writes none of it, so <c>IndexPending</c> stays set and the next reindex retries).</summary>
+    private async ValueTask<(int Indexed, int Failed)> FlushAsync(List<MemoryRecord> batch, CancellationToken ct)
+    {
+        var upserted = await index.UpsertAsync(batch, ct).ConfigureAwait(false);
+        if (upserted.IsFailure)
+        {
+            LogReindexBatchFailed(_logger, batch.Count, upserted.Error.ToString());
+            return (0, batch.Count);
+        }
+
+        foreach (var record in batch)
+        {
+            if (record.IndexPending)
+            {
+                await store.UpdateAsync(record.Id, new MemoryUpdate { IndexPending = false }, ct).ConfigureAwait(false); // failure logged by the store proxy; next reindex retries
+            }
+        }
+
+        return (batch.Count, 0);
+    }
 
     [LoggerMessage(EventId = 500, Level = LogLevel.Warning, Message = "Memory {Memory} stored but not indexed (pending): {Error}")]
     private static partial void LogIndexPending(ILogger logger, MemoryId memory, string error);
@@ -221,4 +326,10 @@ public sealed partial class MemoryService(
 
     [LoggerMessage(EventId = 502, Level = LogLevel.Warning, Message = "MarkRecalled failed (recall still returned): {Error}")]
     private static partial void LogMarkRecalledFailed(ILogger logger, string error);
+
+    [LoggerMessage(EventId = 503, Level = LogLevel.Warning, Message = "Removing memory {Memory} from the index failed (stale entry is harmless): {Error}")]
+    private static partial void LogIndexRemoveFailed(ILogger logger, MemoryId memory, string error);
+
+    [LoggerMessage(EventId = 504, Level = LogLevel.Warning, Message = "Reindex batch of {Count} failed: {Error}")]
+    private static partial void LogReindexBatchFailed(ILogger logger, int count, string error);
 }
