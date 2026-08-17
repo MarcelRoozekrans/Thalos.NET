@@ -6,6 +6,7 @@
     <Project Path="src/Thalos.NET.Abstractions/Thalos.NET.Abstractions.csproj" />
     <Project Path="src/Thalos.NET.Anthropic/Thalos.NET.Anthropic.csproj" />
     <Project Path="src/Thalos.NET.Mcp/Thalos.NET.Mcp.csproj" />
+    <Project Path="src/Thalos.NET.Memory.RagNet/Thalos.NET.Memory.RagNet.csproj" />
     <Project Path="src/Thalos.NET.Memory/Thalos.NET.Memory.csproj" />
     <Project Path="src/Thalos.NET.Sentinel/Thalos.NET.Sentinel.csproj" />
     <Project Path="src/Thalos.NET.Testing/Thalos.NET.Testing.csproj" />
@@ -15,6 +16,7 @@
     <Project Path="tests/Thalos.NET.Tests.Architecture/Thalos.NET.Tests.Architecture.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Mcp/Thalos.NET.Tests.Mcp.csproj" />
     <Project Path="tests/Thalos.NET.Tests.McpServer/Thalos.NET.Tests.McpServer.csproj" />
+    <Project Path="tests/Thalos.NET.Tests.Memory.RagNet/Thalos.NET.Tests.Memory.RagNet.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Memory/Thalos.NET.Tests.Memory.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Sentinel/Thalos.NET.Tests.Sentinel.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Unit/Thalos.NET.Tests.Unit.csproj" />

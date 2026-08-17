@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- Rag.NET 0.1.x targets net10.0 only -->
+    <TargetFrameworks>net10.0</TargetFrameworks>
+    <RootNamespace>Thalos.Memory.RagNet</RootNamespace>
+    <PackageId>Thalos.NET.Memory.RagNet</PackageId>
+    <Description>Rag.NET pgvector adapter for Thalos.NET.Memory: IMemoryIndex over Rag.NET IVectorStore (PgVectorStore) and an IEmbeddingGenerator, with schema initialisation and dimension checks.</Description>
+    <PackageTags>agents;memory;rag;pgvector;postgres;ragnet</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Thalos.NET.Memory\Thalos.NET.Memory.csproj" />
+    <PackageReference Include="Rag.NET.Abstractions" />
+    <PackageReference Include="Rag.NET.VectorStores.PgVector" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Memory.RagNet" />
+  </ItemGroup>
+</Project>

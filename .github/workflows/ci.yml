@@ -60,8 +60,13 @@ jobs:
       - name: Build the stdio MCP test server
         run: dotnet build tests/Thalos.NET.Tests.McpServer -c Release --no-restore
 
+      # windows-latest runs Windows containers only; the pgvector image is Linux, so the Docker-tagged tests run on the ubuntu leg.
       - name: Test
-        run: dotnet test Thalos.NET.slnx --no-build -c Release --logger "trx;LogFileName=tests.trx"
+        shell: bash
+        run: |
+          filter=""
+          if [ "$RUNNER_OS" = "Windows" ]; then filter='--filter Category!=Docker'; fi
+          dotnet test Thalos.NET.slnx --no-build -c Release --logger "trx;LogFileName=tests.trx" $filter
 
   # Conventional commits, enforced mechanically — release-please derives release versions from
   # commit messages, so a malformed type is a commit the release tooling cannot read. Lints only the
@@ -137,7 +142,7 @@ jobs:
         run: |
           set -euo pipefail
           cd artifacts/packages
-          expected="Thalos.NET Thalos.NET.Abstractions Thalos.NET.Testing Thalos.NET.Mcp Thalos.NET.Anthropic Thalos.NET.Sentinel Thalos.NET.Memory"
+          expected="Thalos.NET Thalos.NET.Abstractions Thalos.NET.Testing Thalos.NET.Mcp Thalos.NET.Anthropic Thalos.NET.Sentinel Thalos.NET.Memory Thalos.NET.Memory.RagNet"
           failed=0
           for id in $expected; do
             pkg="$id.$PACKAGE_VERSION.nupkg"; sym="$id.$PACKAGE_VERSION.snupkg"
@@ -163,7 +168,7 @@ jobs:
             echo "ok: $pkg"
           done
           count=$(ls *.nupkg | wc -l)
-          [ "$count" -eq 7 ] || { echo "::error::expected 7 packages, found $count"; failed=1; }
+          [ "$count" -eq 8 ] || { echo "::error::expected 8 packages, found $count"; failed=1; }
           exit $failed
 
       # Rehearse the push: same command shape as the release (quoted glob, --skip-duplicate) against a
@@ -175,7 +180,7 @@ jobs:
           feed="$RUNNER_TEMP/rehearsal-feed"; mkdir -p "$feed"
           dotnet nuget push "artifacts/packages/*.nupkg" --source "$feed" --skip-duplicate
           dotnet nuget push "artifacts/packages/*.nupkg" --source "$feed" --skip-duplicate
-          [ "$(ls "$feed" | wc -l)" -eq 7 ] || { echo "::error::rehearsal feed does not hold 7 packages"; exit 1; }
+          [ "$(ls "$feed" | wc -l)" -eq 8 ] || { echo "::error::rehearsal feed does not hold 8 packages"; exit 1; }
 
       - name: Upload packages
         uses: actions/upload-artifact@v7
