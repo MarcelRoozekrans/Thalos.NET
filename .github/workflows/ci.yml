@@ -1,20 +1,261 @@
 name: CI
+
 on:
-  push: { branches: [main] }
-  pull_request: { branches: [main] }
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Manual dispatch: re-run after a flake, or — with publish_to_nuget=true — the gated release
+  # push. Underscore, not hyphen, so the job `if:` below reads it plainly. Defaulting false keeps an
+  # ordinary dispatch exactly what it was.
+  workflow_dispatch:
+    inputs:
+      publish_to_nuget:
+        description: "Push the packed packages to nuget.org (the release procedure; see docs/release.md)"
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
 jobs:
+  # Two operating systems on purpose: the library multi-targets and its MCP tests spawn a stdio child
+  # process; both are the kind of thing that fails differently per platform. fail-fast is off so a
+  # red Linux leg does not cancel the Windows leg that may be red for a different reason.
   build-test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
-        with: { fetch-depth: 0 }
-      - uses: actions/setup-dotnet@v4
-        with: { dotnet-version: 10.0.x }
-      - run: dotnet restore
-      - run: dotnet build --no-restore -c Release
-      # the Mcp tests launch this server over stdio; make sure it is built even if the solution build order changes
-      - run: dotnet build tests/Thalos.NET.Tests.McpServer -c Release --no-restore
-      - run: dotnet test --no-build -c Release --logger "trx;LogFileName=tests.trx" --collect:"XPlat Code Coverage"
-      - run: dotnet pack --no-build -c Release -o artifacts/packages
-      - uses: actions/upload-artifact@v4
-        with: { name: packages, path: artifacts/packages }
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', 'Directory.Packages.props') }}
+          restore-keys: ${{ runner.os }}-nuget-
+
+      - name: Restore
+        run: dotnet restore Thalos.NET.slnx
+
+      - name: Build
+        run: dotnet build Thalos.NET.slnx --no-restore -c Release
+
+      # The Mcp tests launch this server over stdio; build it explicitly so it exists even if the
+      # solution build order ever changes.
+      - name: Build the stdio MCP test server
+        run: dotnet build tests/Thalos.NET.Tests.McpServer -c Release --no-restore
+
+      - name: Test
+        run: dotnet test Thalos.NET.slnx --no-build -c Release --logger "trx;LogFileName=tests.trx"
+
+  # Conventional commits, enforced mechanically — release-please derives release versions from
+  # commit messages, so a malformed type is a commit the release tooling cannot read. Lints only the
+  # commits a pull request adds, never the existing history. Rules: .commitlintrc.yml.
+  commitlint:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Lint the commits this pull request adds
+        run: >
+          npx --yes --package @commitlint/cli@21.2.1 --package @commitlint/config-conventional@21.2.0
+          commitlint --from ${{ github.event.pull_request.base.sha }} --to ${{ github.event.pull_request.head.sha }} --verbose
+
+  # Packs every package the solution ships and validates what was actually produced, then rehearses
+  # the nuget.org push against a local directory feed — so the commands the release runs for real
+  # have executed on every push. Its own job, on one OS: a .nupkg is platform-independent.
+  pack-validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # GitVersion derives the version from history and refuses a shallow clone.
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', 'Directory.Packages.props') }}
+          restore-keys: ${{ runner.os }}-nuget-
+
+      # The version every package packs with, derived from history by GitVersion (GitVersion.yml; the
+      # tool is pinned in .config/dotnet-tools.json). Main derives plain stable numbers (no
+      # prereleases, by decision); the packages built here are a rehearsal and are never pushed
+      # anywhere but the local feed below. The regex guard is load-bearing: `-p:Version=` with an
+      # empty value would silently pack the csproj default.
+      - name: Derive the package version
+        shell: bash
+        run: |
+          dotnet tool restore
+          version=$(dotnet dotnet-gitversion /output json | jq -r '.SemVer')
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::GitVersion produced '$version', which is not a version — failing instead of packing a default."
+            exit 1
+          fi
+          echo "PACKAGE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "packing as $version"
+
+      - name: Pack
+        run: dotnet pack Thalos.NET.slnx -c Release -o artifacts/packages -p:Version="$PACKAGE_VERSION"
+
+      # dotnet pack enforces none of its metadata; validate the artefacts instead of trusting them.
+      - name: Validate the produced packages
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd artifacts/packages
+          expected="Thalos.NET Thalos.NET.Abstractions Thalos.NET.Testing Thalos.NET.Mcp Thalos.NET.Anthropic Thalos.NET.Sentinel"
+          failed=0
+          for id in $expected; do
+            pkg="$id.$PACKAGE_VERSION.nupkg"; sym="$id.$PACKAGE_VERSION.snupkg"
+            [ -f "$pkg" ] || { echo "::error::missing $pkg"; failed=1; continue; }
+            [ -f "$sym" ] || { echo "::error::missing symbols $sym"; failed=1; }
+            listing=$(unzip -l "$pkg")
+            for must in "README.md" "logo.png" "lib/net8.0/$id.dll" "lib/net10.0/$id.dll" "lib/net8.0/$id.xml" "lib/net10.0/$id.xml"; do
+              echo "$listing" | grep -q " $must" || { echo "::error::$pkg lacks $must"; failed=1; }
+            done
+            echo "$listing" | grep -q "runtimeconfig.json" && { echo "::error::$pkg ships a runtimeconfig.json"; failed=1; }
+            nuspec=$(unzip -p "$pkg" "$id.nuspec")
+            echo "$nuspec" | grep -q "<version>$PACKAGE_VERSION</version>" || { echo "::error::$pkg nuspec version is not $PACKAGE_VERSION"; failed=1; }
+            echo "$nuspec" | grep -q "<license type=\"expression\">MIT</license>" || { echo "::error::$pkg lacks the MIT licence expression"; failed=1; }
+            echo "$nuspec" | grep -q "<repository " || { echo "::error::$pkg lacks repository metadata (SourceLink)"; failed=1; }
+            echo "$nuspec" | grep -q "Package Description" && { echo "::error::$pkg has the default description"; failed=1; }
+            echo "ok: $pkg"
+          done
+          count=$(ls *.nupkg | wc -l)
+          [ "$count" -eq 6 ] || { echo "::error::expected 6 packages, found $count"; failed=1; }
+          exit $failed
+
+      # Rehearse the push: same command shape as the release (quoted glob, --skip-duplicate) against a
+      # local directory feed, twice — the second push proves --skip-duplicate is the retry policy.
+      - name: Rehearse the push against a local feed
+        shell: bash
+        run: |
+          set -euo pipefail
+          feed="$RUNNER_TEMP/rehearsal-feed"; mkdir -p "$feed"
+          dotnet nuget push "artifacts/packages/*.nupkg" --source "$feed" --skip-duplicate
+          dotnet nuget push "artifacts/packages/*.nupkg" --source "$feed" --skip-duplicate
+          [ "$(ls "$feed" | wc -l)" -eq 6 ] || { echo "::error::rehearsal feed does not hold 6 packages"; exit 1; }
+
+      - name: Upload packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: packages-${{ env.PACKAGE_VERSION }}
+          path: artifacts/packages
+
+  # THE GATE: a manual workflow_dispatch on main or on a release tag with publish_to_nuget=true, plus
+  # a Trusted Publishing policy on nuget.org naming this repository and workflow, and the NUGET_USER
+  # repository variable. Both gating jobs must be green on this exact commit first, and the commit
+  # must be the one release-please tagged (checked below). Trusted Publishing mints a short-lived key
+  # from an OIDC token, so this job needs id-token: write; a job-level permissions block replaces the
+  # workflow-level one, hence contents: read is restated. Procedure: docs/release.md.
+  publish-nuget:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_to_nuget && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v'))
+    needs: [build-test, pack-validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      # Character-identical to pack-validate's derive + pack steps: the version published must be
+      # produced by commands that have run green on every push. On the release commit (tagged
+      # vX.Y.Z by release-please) GitVersion returns the tag's stable version.
+      - name: Derive the package version
+        shell: bash
+        run: |
+          dotnet tool restore
+          version=$(dotnet dotnet-gitversion /output json | jq -r '.SemVer')
+          if ! [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]]; then
+            echo "::error::GitVersion produced '$version', which is not a version — failing instead of packing a default."
+            exit 1
+          fi
+          echo "PACKAGE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "packing as $version"
+
+      # No prereleases, and no unreleased commits under a stable-looking number: nuget.org only ever
+      # receives the commit release-please tagged. Main derives plain X.Y.Z for every commit (see
+      # GitVersion.yml), so the version alone cannot tell a release from the commit after it — the
+      # tag can. Both checks are stated even though the tag check implies the first, so a failure
+      # reads as the rule that was broken.
+      - name: Refuse anything that is not the tagged release commit
+        shell: bash
+        run: |
+          if [[ "$PACKAGE_VERSION" == *-* ]]; then
+            echo "::error::'$PACKAGE_VERSION' is a prerelease. This project publishes stable versions only (docs/release.md)."
+            exit 1
+          fi
+          if ! git tag --points-at HEAD | grep -qx "v$PACKAGE_VERSION"; then
+            echo "::error::HEAD is not tagged v$PACKAGE_VERSION. Only the release commit release-please tagged may be published — cut the release first (docs/release.md)."
+            exit 1
+          fi
+          echo "publishing release v$PACKAGE_VERSION"
+
+      - name: Pack
+        run: dotnet pack Thalos.NET.slnx -c Release -o artifacts/packages -p:Version="$PACKAGE_VERSION"
+
+      - name: Mint a short-lived nuget.org key
+        uses: NuGet/login@v1
+        id: nuget-login
+        with:
+          user: ${{ vars.NUGET_USER }}
+
+      # The .snupkg files are pushed automatically alongside each .nupkg from the same directory.
+      # --skip-duplicate: nuget.org never forgets a published version, so a push that dies partway
+      # must be re-runnable.
+      - name: Push every package to nuget.org
+        shell: bash
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}
+        run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "::error::The NuGet login step minted no key. Check the NUGET_USER repository variable and the Trusted Publishing policy on nuget.org — see docs/release.md."
+            exit 1
+          fi
+          dotnet nuget push "artifacts/packages/*.nupkg" \
+            --source https://api.nuget.org/v3/index.json \
+            --api-key "$NUGET_API_KEY" \
+            --skip-duplicate

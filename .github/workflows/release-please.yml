@@ -1,0 +1,39 @@
+name: Release Please
+
+# The release half of the versioning design (the derivation half is GitVersion — see GitVersion.yml):
+# release-please reads the conventional commits since the last release, opens a pull request
+# proposing the version they imply, and — when that PR is merged and this workflow is dispatched
+# again — creates the GitHub release and the vX.Y.Z tag. That tag is the publish gate: on the tagged
+# commit GitVersion returns the tag's version, and the publish-nuget job in ci.yml refuses any
+# commit that is not tagged v<version> — there are no prereleases, so the tag is the only thing that
+# marks a commit as released. The maintainer merges the release PR, like every PR here — this
+# workflow only proposes.
+#
+# Manual dispatch only, deliberately: a workflow that opened a release PR on every push to main
+# would be proposing a release nobody asked for. Procedure: docs/release.md.
+on:
+  workflow_dispatch:
+
+# release-please writes: the release PR (contents for the branch, pull-requests for the PR) and, on
+# the dispatch after that PR merges, the tag and the GitHub release.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # release-type simple: the release PR maintains CHANGELOG.md and a version.txt; nothing in the
+      # build consumes either — GitVersion derives the build's version from the tag this creates.
+      # The version rules live in release-please-config.json: bump-minor-pre-major keeps a breaking
+      # change on 0.x at a minor bump instead of jumping to 1.0.0, and bump-patch-for-minor-pre-major
+      # keeps a feature at a patch. .release-please-manifest.json records the last released version.
+      # The first release's version is chosen, not derived: a `Release-As: x.y.z` footer on an empty
+      # commit overrides whatever the commits imply (docs/release.md).
+      - name: Create or update the release pull request
+        uses: googleapis/release-please-action@v5
+        with:
+          release-type: simple

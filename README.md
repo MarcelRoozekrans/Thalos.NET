@@ -115,7 +115,16 @@ dotnet build              # 0 warnings — TreatWarningsAsErrors with Meziantou,
 dotnet test               # unit, MCP (launches tests/Thalos.NET.Tests.McpServer over stdio), Sentinel, architecture
 ```
 
-CI (`.github/workflows/ci.yml`) runs the same on every push/PR to `main` and uploads the packed `.nupkg`s as an artifact;
-`release.yml` publishes to nuget.org when a `v*` tag is pushed (version taken from the tag).
+## Versioning and releases
+
+Same setup as [Rag.NET](https://github.com/MarcelRoozekrans/Rag.NET); the runbook is [docs/release.md](docs/release.md).
+
+- Versions come from git history via [GitVersion](GitVersion.yml) (`dotnet tool restore && dotnet dotnet-gitversion`);
+  nothing is hand-edited. Stable versions only — no prereleases are published.
+- Releases are cut by [release-please](.github/workflows/release-please.yml) from conventional commits (enforced on
+  PRs by commitlint): dispatch → review/merge the release PR → dispatch → `vX.Y.Z` tag + GitHub release.
+- CI (`.github/workflows/ci.yml`) builds and tests on Ubuntu and Windows on every push/PR, packs and validates the six
+  packages, and rehearses the nuget.org push against a local feed. Publishing to nuget.org is a manual dispatch with
+  `publish_to_nuget=true` on the tagged release commit, using nuget.org Trusted Publishing (no stored API key).
 
 Status: **0.1.0 — API is unstable until 1.0.**

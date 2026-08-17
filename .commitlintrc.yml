@@ -1,0 +1,33 @@
+# Conventional commits, enforced mechanically on pull requests (see the commitlint job in ci.yml).
+# release-please derives release versions from these messages, so a malformed type is a commit the
+# release tooling cannot read, not a style nit. Base rules are @commitlint/config-conventional; the
+# deviations mirror the house configuration (Rag.NET).
+extends:
+  - "@commitlint/config-conventional"
+
+rules:
+  type-enum:
+    - 2
+    - always
+    - - bench
+      - build
+      - chore
+      - ci
+      - docs
+      - feat
+      - fix
+      - perf
+      - refactor
+      - revert
+      - style
+      - test
+  # Subjects may start with a proper noun (ScriptedChatClient, AI.Sentinel, MCP…).
+  subject-case:
+    - 0
+    - never
+    - []
+  # Bodies quote error messages, command lines and URLs verbatim; the header cap stays at 100.
+  body-max-line-length:
+    - 0
+    - always
+    - 100

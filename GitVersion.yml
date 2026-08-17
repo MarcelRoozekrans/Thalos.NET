@@ -1,0 +1,22 @@
+# Derives every package version from git history — the house convention shared with Rag.NET and
+# AdoNet.Async: GitVersion as a dotnet local tool (.config/dotnet-tools.json), this file as its
+# configuration, output parsed with jq in ci.yml, release-please for the release itself.
+#
+# No prereleases, by decision: main carries no label, so an untagged main commit derives the plain
+# next stable version (0.1.0 until the first release tag; then the tag's version bumped per
+# GitHubFlow) and the release commit tagged vX.Y.Z derives exactly X.Y.Z. What keeps an untagged
+# build from being published under a stable-looking number is not the version but the gate in
+# ci.yml: publish-nuget refuses any commit that is not tagged v<derived version>. Branches other than
+# main still get a branch label (0.1.0-<branch>.N) so nothing packed from a branch can be confused
+# with main; those never reach nuget.org either.
+workflow: GitHubFlow/v1
+
+# The fallback base while no tag exists. 0.x on purpose: the API is not 1.0-stable yet.
+next-version: 0.1.0
+
+branches:
+  main:
+    # Empty label + ContinuousDeployment = a plain X.Y.Z on every main commit (verified: 0.1.0).
+    # ContinuousDelivery would still append the commit count as a prerelease number (0.1.0-50).
+    label: ''
+    mode: ContinuousDeployment
