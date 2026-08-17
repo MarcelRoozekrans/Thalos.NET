@@ -137,15 +137,22 @@ jobs:
         run: |
           set -euo pipefail
           cd artifacts/packages
-          expected="Thalos.NET Thalos.NET.Abstractions Thalos.NET.Testing Thalos.NET.Mcp Thalos.NET.Anthropic Thalos.NET.Sentinel"
+          expected="Thalos.NET Thalos.NET.Abstractions Thalos.NET.Testing Thalos.NET.Mcp Thalos.NET.Anthropic Thalos.NET.Sentinel Thalos.NET.Memory"
           failed=0
           for id in $expected; do
             pkg="$id.$PACKAGE_VERSION.nupkg"; sym="$id.$PACKAGE_VERSION.snupkg"
             [ -f "$pkg" ] || { echo "::error::missing $pkg"; failed=1; continue; }
             [ -f "$sym" ] || { echo "::error::missing symbols $sym"; failed=1; }
             listing=$(unzip -l "$pkg")
-            for must in "README.md" "logo.png" "lib/net8.0/$id.dll" "lib/net10.0/$id.dll" "lib/net8.0/$id.xml" "lib/net10.0/$id.xml"; do
+            # Rag.NET is net10.0-only, so its adapter ships one lib folder; every other package ships both TFMs.
+            tfms="net8.0 net10.0"; [ "$id" = "Thalos.NET.Memory.RagNet" ] && tfms="net10.0"
+            for must in "README.md" "logo.png"; do
               echo "$listing" | grep -q " $must" || { echo "::error::$pkg lacks $must"; failed=1; }
+            done
+            for tfm in $tfms; do
+              for must in "lib/$tfm/$id.dll" "lib/$tfm/$id.xml"; do
+                echo "$listing" | grep -q " $must" || { echo "::error::$pkg lacks $must"; failed=1; }
+              done
             done
             echo "$listing" | grep -q "runtimeconfig.json" && { echo "::error::$pkg ships a runtimeconfig.json"; failed=1; }
             nuspec=$(unzip -p "$pkg" "$id.nuspec")
@@ -156,7 +163,7 @@ jobs:
             echo "ok: $pkg"
           done
           count=$(ls *.nupkg | wc -l)
-          [ "$count" -eq 6 ] || { echo "::error::expected 6 packages, found $count"; failed=1; }
+          [ "$count" -eq 7 ] || { echo "::error::expected 7 packages, found $count"; failed=1; }
           exit $failed
 
       # Rehearse the push: same command shape as the release (quoted glob, --skip-duplicate) against a
@@ -168,7 +175,7 @@ jobs:
           feed="$RUNNER_TEMP/rehearsal-feed"; mkdir -p "$feed"
           dotnet nuget push "artifacts/packages/*.nupkg" --source "$feed" --skip-duplicate
           dotnet nuget push "artifacts/packages/*.nupkg" --source "$feed" --skip-duplicate
-          [ "$(ls "$feed" | wc -l)" -eq 6 ] || { echo "::error::rehearsal feed does not hold 6 packages"; exit 1; }
+          [ "$(ls "$feed" | wc -l)" -eq 7 ] || { echo "::error::rehearsal feed does not hold 7 packages"; exit 1; }
 
       - name: Upload packages
         uses: actions/upload-artifact@v7

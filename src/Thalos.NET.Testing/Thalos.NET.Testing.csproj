@@ -2,13 +2,14 @@
   <PropertyGroup>
     <RootNamespace>Thalos.Testing</RootNamespace>
     <PackageId>Thalos.NET.Testing</PackageId>
-    <Description>Test doubles and contract tests for Thalos.NET: ScriptedChatClient (scripted IChatClient), RecordingNotificationPublisher (in-memory IAgentNotificationPublisher), reusable IAgentSessionStore contract tests (xUnit + AwesomeAssertions).</Description>
+    <Description>Test doubles and contract tests for Thalos.NET: ScriptedChatClient (scripted IChatClient), RecordingNotificationPublisher (in-memory IAgentNotificationPublisher), reusable IAgentSessionStore contract tests, memory store/index contract tests, deterministic embedding generator (xUnit + AwesomeAssertions).</Description>
     <PackageTags>agents;testing;zeroalloc</PackageTags>
     <!-- CA1707: this package ships xUnit contract-test classes whose [Fact] methods use the repo's underscore test-naming style -->
     <NoWarn>$(NoWarn);CA1707</NoWarn>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />
+    <ProjectReference Include="..\Thalos.NET.Memory\Thalos.NET.Memory.csproj" />
     <!-- xunit.extensibility.core carries [Fact]/[Theory] without the xunit.core build targets
          (which mark the project as a test host, force a runtimeconfig.json and break `dotnet pack`). -->
     <PackageReference Include="xunit.extensibility.core" />
