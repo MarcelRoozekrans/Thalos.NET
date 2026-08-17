@@ -1,15 +1,17 @@
 using AI.Sentinel;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace Thalos.Sentinel;
 
-/// <summary>Registers AI.Sentinel as a Thalos chat-client decorator.</summary>
+/// <summary>Registers AI.Sentinel as a Thalos chat-client decorator and as the <see cref="IUntrustedContentScanner"/>.</summary>
 public static class SentinelThalosBuilderExtensions
 {
     /// <summary>
     /// Adds AI.Sentinel scanning to every agent. Tool-call authorization is enforced by Thalos itself
     /// (<c>RequireToolPolicy</c>) — Sentinel's <c>UseToolCallAuthorization</c> is intentionally not used (see design §0.1).
-    /// Calling this twice is a no-op (the first configuration wins).
+    /// Also registers <see cref="IUntrustedContentScanner"/> (over the same detection pipeline) so Thalos.NET.Memory scans
+    /// recalled memories before injecting them. Calling this twice is a no-op (the first configuration wins).
     /// </summary>
     /// <remarks>
     /// AI.Sentinel 2.0.1's security detectors (prompt injection, jailbreak, exfiltration, …) are embedding-based: set
@@ -27,6 +29,7 @@ public static class SentinelThalosBuilderExtensions
         }
 
         builder.Services.AddAISentinel(configure);
+        builder.Services.TryAddSingleton<IUntrustedContentScanner, SentinelContentScanner>();
         return builder.AddChatClientDecorator<SentinelChatClientDecorator>();
     }
 }
