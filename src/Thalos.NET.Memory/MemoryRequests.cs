@@ -1,0 +1,47 @@
+using System.Runtime.InteropServices;
+
+namespace Thalos.Memory;
+
+/// <summary>Input of <c>IMemoryService.RememberAsync</c>. Owner comes from the caller's security context or the host's shared owner — never from a model.</summary>
+public sealed record RememberRequest
+{
+    public required string OwnerId { get; init; }
+    public AgentId? AgentId { get; init; }
+    public required string Text { get; init; }
+    public MemoryKind Kind { get; init; } = MemoryKind.Note;
+    public IReadOnlyList<string> Tags { get; init; } = [];
+    public string Source { get; init; } = "";
+    public double Importance { get; init; } = 0.5;
+}
+
+/// <summary>Recall budget. Bindable (class with setters) because it is part of <see cref="MemoryOptions"/>.</summary>
+public sealed class RecallOptions
+{
+    public int TopK { get; set; } = 5;
+    public double MinScore { get; set; } = 0.6;
+    public int MaxChars { get; set; } = 2000;
+}
+
+/// <summary>What an index applies before returning hits.</summary>
+[StructLayout(LayoutKind.Auto)] // MA0008: all-blittable
+public readonly record struct MemorySearchOptions(int TopK, double MinScore);
+
+/// <summary>An index hit; <paramref name="Score"/> is a similarity in [0, 1] (cosine).</summary>
+[StructLayout(LayoutKind.Auto)] // MA0008: all-blittable
+public readonly record struct MemoryHit(MemoryId Id, double Score);
+
+/// <summary>A hydrated recall result.</summary>
+public sealed record RecalledMemory(MemoryRecord Record, double Score);
+
+/// <summary>Index health from <c>IMemoryIndex.ProbeAsync</c>.</summary>
+public sealed record MemoryIndexHealth(bool Available, int? Dimensions, string? Detail = null);
+
+public sealed record ReindexOptions
+{
+    /// <summary>True = only records with <c>IndexPending</c>; false = every non-archived record.</summary>
+    public bool PendingOnly { get; init; } = true;
+
+    public int BatchSize { get; init; } = 32;
+}
+
+public sealed record ReindexReport(int Scanned, int Indexed, int Failed);
