@@ -12,12 +12,15 @@ namespace Thalos.Testing;
 /// </summary>
 public abstract class MemoryStoreContractTests
 {
+    /// <summary>Creates a fresh, empty store whose clock is <paramref name="clock"/>.</summary>
     protected abstract ValueTask<IMemoryStore> CreateStoreAsync(TimeProvider clock);
 
     private static readonly TimeSpan Tolerance = TimeSpan.FromMilliseconds(1);
 
+    /// <summary>A fake clock starting at 2026-08-17 12:00 UTC (advance it between operations).</summary>
     protected static FakeTimeProvider NewClock() => new(new DateTimeOffset(2026, 8, 17, 12, 0, 0, TimeSpan.Zero));
 
+    /// <summary>A valid record timestamped from <paramref name="clock"/> (defaults: owner <c>alice</c>, kind <c>fact</c>, one tag).</summary>
     protected static MemoryRecord NewRecord(TimeProvider clock, string owner = "alice", AgentId? agent = null, string text = "The user prefers xUnit.", MemoryKind? kind = null, IReadOnlyList<string>? tags = null, bool indexPending = false)
     {
         ArgumentNullException.ThrowIfNull(clock);

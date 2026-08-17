@@ -1,8 +1,9 @@
 namespace Thalos.Memory;
 
-/// <summary>Filter + paging for <c>IMemoryStore.ListAsync</c>/<c>IMemoryStore.StreamAsync</c>. Null filters mean "no filter".</summary>
+/// <summary>Filter + paging for <see cref="IMemoryStore.ListAsync"/>/<see cref="IMemoryStore.StreamAsync"/>. Null filters mean "no filter".</summary>
 public sealed record MemoryQuery
 {
+    /// <summary>Upper bound of <see cref="PageSize"/>.</summary>
     public const int MaxPageSize = 100;
 
     /// <summary>Owners to include. Null/empty = all owners (store level only; <c>IMemoryService.ListAsync</c> requires at least one).</summary>
@@ -11,11 +12,13 @@ public sealed record MemoryQuery
     /// <summary>Only records pinned to this agent. Null = no agent filter (owner-wide and pinned alike).</summary>
     public AgentId? AgentId { get; init; }
 
+    /// <summary>Only records of one of these kinds. Null/empty = all kinds.</summary>
     public IReadOnlyList<MemoryKind>? Kinds { get; init; }
 
     /// <summary>Every listed tag must be present on the record. Query tags are normalised like stored tags (trimmed, lower-cased; see <see cref="MemoryRules.NormalizeTags"/>) and matched ordinally.</summary>
     public IReadOnlyList<string>? Tags { get; init; }
 
+    /// <summary>Include archived (soft-deleted) records; default false.</summary>
     public bool IncludeArchived { get; init; }
 
     /// <summary>Filter on <see cref="MemoryRecord.IndexPending"/>; null = both.</summary>
@@ -73,10 +76,19 @@ public sealed record MemoryPage(IReadOnlyList<MemoryRecord> Items, int Page, int
 /// <summary>Partial update; null members are left unchanged. Setting Text/Tags/Importance/IsArchived bumps <c>UpdatedAt</c>; <see cref="IndexPending"/> alone does not.</summary>
 public sealed record MemoryUpdate
 {
+    /// <summary>New text (validated like <see cref="MemoryRecord.Text"/>).</summary>
     public string? Text { get; init; }
+
+    /// <summary>New tags (normalised by the store; an empty list clears them).</summary>
     public IReadOnlyList<string>? Tags { get; init; }
+
+    /// <summary>New importance in 0..1.</summary>
     public double? Importance { get; init; }
+
+    /// <summary>Archive (true) or restore (false).</summary>
     public bool? IsArchived { get; init; }
+
+    /// <summary>Set/clear the index-pending flag (bookkeeping; does not bump <c>UpdatedAt</c>).</summary>
     public bool? IndexPending { get; init; }
 
     /// <summary>True when the update changes user-visible content (and must bump <c>UpdatedAt</c>).</summary>

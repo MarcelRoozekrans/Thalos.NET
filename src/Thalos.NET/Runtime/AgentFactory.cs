@@ -53,6 +53,7 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
     private readonly ConcurrentDictionary<AgentId, Lazy<Task<Result<Entry, AgentError>>>> _cache = new();
     private volatile bool _disposed;
 
+    /// <summary>Resolved by DI; <paramref name="contextProviderSources"/> are every registered <see cref="IAgentContextProviderSource"/> (Thalos.NET.Memory registers one).</summary>
     public AgentFactory(
         IChatClientProvider provider,
         IEnumerable<IChatClientDecorator> decorators,

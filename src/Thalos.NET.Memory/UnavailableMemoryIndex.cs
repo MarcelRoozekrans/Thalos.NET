@@ -5,8 +5,10 @@ namespace Thalos.Memory;
 /// <summary>Default index when no <c>IEmbeddingGenerator&lt;string, Embedding&lt;float&gt;&gt;</c> is registered: remember stores with <c>IndexPending</c>, recall finds nothing, probe says so.</summary>
 public sealed class UnavailableMemoryIndex : IMemoryIndex
 {
+    /// <summary>The probe detail / error message explaining how to get an index.</summary>
     public const string Reason = "No memory index is configured: register an IEmbeddingGenerator<string, Embedding<float>> (in-memory index) or call UseRagNetMemory(...).";
 
+    /// <summary>The singleton (the type is stateless).</summary>
     public static UnavailableMemoryIndex Instance { get; } = new();
 
     private UnavailableMemoryIndex()

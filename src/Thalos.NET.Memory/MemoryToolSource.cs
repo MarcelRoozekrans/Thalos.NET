@@ -20,6 +20,7 @@ public sealed class MemoryToolSource : IToolSource
     private readonly LocalToolSource _inner;
     private readonly IOptions<MemoryOptions> _options;
 
+    /// <summary>Resolved by DI (<c>UseMemory</c>); <see cref="MemoryTools"/> instances are created per invocation from <paramref name="services"/>.</summary>
     [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
     [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     public MemoryToolSource(IServiceProvider services, IOptions<MemoryOptions> options)

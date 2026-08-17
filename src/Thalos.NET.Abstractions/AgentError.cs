@@ -144,5 +144,6 @@ public readonly record struct AgentError(AgentErrorCode Code, string Message, st
 public sealed class AgentTurnException(AgentError error, Exception? inner = null)
     : Exception(error.ToString(), inner)
 {
+    /// <summary>The error the runtime reports for the turn.</summary>
     public AgentError Error { get; } = error;
 }

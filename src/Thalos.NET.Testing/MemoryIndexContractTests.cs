@@ -12,14 +12,18 @@ namespace Thalos.Testing;
 /// </summary>
 public abstract class MemoryIndexContractTests
 {
+    /// <summary>Vector size of the generator the suite builds (override when the backend is fixed to another size).</summary>
     protected virtual int Dimensions => 128;
 
+    /// <summary>Creates a fresh, empty index over <paramref name="embeddings"/>.</summary>
     protected abstract ValueTask<IMemoryIndex> CreateIndexAsync(IEmbeddingGenerator<string, Embedding<float>> embeddings);
 
+    /// <summary>Creates a fresh, empty index over a <see cref="HashedBagOfWordsEmbeddingGenerator"/> of <see cref="Dimensions"/>.</summary>
     protected ValueTask<IMemoryIndex> CreateIndexAsync() => CreateIndexAsync(new HashedBagOfWordsEmbeddingGenerator(Dimensions));
 
     private static readonly DateTimeOffset T0 = new(2026, 8, 17, 12, 0, 0, TimeSpan.Zero);
 
+    /// <summary>A valid record with a fresh id and fixed timestamps.</summary>
     protected static MemoryRecord Rec(string owner, AgentId? agent, string text, MemoryKind? kind = null) => new()
     {
         Id = MemoryId.New(), OwnerId = owner, AgentId = agent, Kind = kind ?? MemoryKind.Fact, Text = text, CreatedAt = T0, UpdatedAt = T0,
