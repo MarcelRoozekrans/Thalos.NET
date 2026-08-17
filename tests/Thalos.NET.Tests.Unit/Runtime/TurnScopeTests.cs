@@ -93,4 +93,27 @@ public sealed class TurnScopeTests
         captured.Should().BeNull();
         TurnScope.Current.Should().BeNull();
     }
+
+    [Fact]
+    public void Begin_carries_the_agent_id_and_defaults_to_none()
+    {
+        var agent = AgentId.New();
+        using (var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), AnonymousSecurityContext.Instance, agent))
+        {
+            scope.AgentId.Should().Be(agent);
+        }
+
+        using var legacy = TurnScope.Begin(SessionId.New(), TurnId.New(), AnonymousSecurityContext.Instance);
+        legacy.AgentId.Should().Be(default(AgentId));
+    }
+
+    [Fact]
+    public async Task Extensions_can_publish_events_into_the_turn()
+    {
+        var s = SessionId.New(); var t = TurnId.New();
+        using var scope = TurnScope.Begin(s, t, AnonymousSecurityContext.Instance);
+        await scope.PublishAsync(new MemoryIndexPendingEvent(s, t, MemoryId.New()), CancellationToken.None);
+        scope.Events.TryRead(out var evt).Should().BeTrue();
+        evt.Should().BeOfType<MemoryIndexPendingEvent>();
+    }
 }

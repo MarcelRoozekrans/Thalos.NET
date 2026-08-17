@@ -156,7 +156,7 @@ public sealed partial class ThalosAgentRuntime(
         // 2. the producer owns the scope (created here so it flows into the producer's async context) and writes every event.
         //    A linked CTS lets an abandoned enumeration (consumer stopped reading) cancel the model turn instead of leaking it.
         using var producerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var scope = TurnScope.Begin(sessionId, turnId, request.Caller);
+        var scope = TurnScope.Begin(sessionId, turnId, request.Caller, start.Value.Id);
         var producer = ProduceTurnAsync(scope, start.Value, request, producerCts.Token); // never throws; disposes the scope
 
         // 3. drain until the producer completes the channel; the reader ignores ct so a cancelled turn still ends with its error event
