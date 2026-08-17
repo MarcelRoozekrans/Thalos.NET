@@ -20,3 +20,10 @@ branches:
     # ContinuousDelivery would still append the commit count as a prerelease number (0.1.0-50).
     label: ''
     mode: ContinuousDeployment
+  # A checked-out release tag (workflow_dispatch --ref vX.Y.Z) is a detached HEAD, which GitVersion
+  # maps to `unknown`; by default that config increments even when the commit itself is tagged, so
+  # a publish run on the tag would derive X.Y.(Z+1)-(no-branch).1 and the gate would refuse it.
+  # Honour the tag instead. An untagged detached commit still derives a labelled prerelease.
+  unknown:
+    prevent-increment:
+      when-current-commit-tagged: true
