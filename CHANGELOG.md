@@ -1,5 +1,49 @@
 # Changelog
 
+## [0.2.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.1.1...v0.2.0) (2026-08-17)
+
+
+### Features
+
+* **abstractions:** MemoryId, memory error codes/events, AgentMemorySettings, content scanner port ([69673cd](https://github.com/MarcelRoozekrans/Thalos.NET/commit/69673cd2c17c32b73de737791e9b1f427f19cc89))
+* **core:** AgentFactory attaches IAgentContextProviderSource providers; memory settings in identity ([a3aadef](https://github.com/MarcelRoozekrans/Thalos.NET/commit/a3aadefe9fb53c0ff7dc039e8c038b2df7119489))
+* **core:** TurnScope carries the agent id and accepts events from extensions ([aea1290](https://github.com/MarcelRoozekrans/Thalos.NET/commit/aea129012bcfd6db90c05d70358835a3a161fdf5))
+* **memory-ragnet:** probe with dimension check; Postgres/transport error mapping, no raw messages ([97d5e9b](https://github.com/MarcelRoozekrans/Thalos.NET/commit/97d5e9b42f97d28b46d73aa6710ab1db6baefbdf))
+* **memory-ragnet:** RagNetMemoryIndex — upsert/search/remove over PgVectorStore, owner partitions ([ace072e](https://github.com/MarcelRoozekrans/Thalos.NET/commit/ace072e525607d664b86b46afb8c4a0b953f395a))
+* **memory-ragnet:** UseRagNetMemory with keyed PgVectorStore and fail-fast schema initializer ([7dfa66f](https://github.com/MarcelRoozekrans/Thalos.NET/commit/7dfa66f8983a785968ffca0de79ffd8f2966e369))
+* **memory:** dedupe on remember — same owner, threshold 0.95, refresh instead of insert ([629f511](https://github.com/MarcelRoozekrans/Thalos.NET/commit/629f511442dbb7d8a000c305b48ab8d78ed36fe0))
+* **memory:** forget (soft/hard, owner check), list, reindex with batched upsert ([9ceb9e5](https://github.com/MarcelRoozekrans/Thalos.NET/commit/9ceb9e50da3b7ad78bc054d41f0c1f43809a9322))
+* **memory:** IMemoryIndex, InMemoryMemoryIndex (cosine), UnavailableMemoryIndex, contract tests ([ad47a76](https://github.com/MarcelRoozekrans/Thalos.NET/commit/ad47a76ecb6d5e85ecf3df4d7811e52678de8d1c))
+* **memory:** IMemoryService and MemoryService.RememberAsync with index-pending fallback and events ([a631390](https://github.com/MarcelRoozekrans/Thalos.NET/commit/a631390ee26b2506ce11623b214ae5cebacdea4b))
+* **memory:** IMemoryStore port, InMemoryMemoryStore and reusable MemoryStoreContractTests ([e6ecb27](https://github.com/MarcelRoozekrans/Thalos.NET/commit/e6ecb27ead3931138956d322acb9e65482610724))
+* **memory:** memory model — kinds, validated record, scope, queries, requests, options, rules ([a7fb623](https://github.com/MarcelRoozekrans/Thalos.NET/commit/a7fb6239e31fe610675dc79c7554789d0dbcfef7))
+* **memory:** memory tool source with remember/recall scoped to the turn caller ([b5afebe](https://github.com/MarcelRoozekrans/Thalos.NET/commit/b5afebe38a2e322a76cbc38fdca9046a7efdce8b))
+* **memory:** memory__forget and memory__list; anonymous refusal; authorization through the catalog ([02915d7](https://github.com/MarcelRoozekrans/Thalos.NET/commit/02915d79d80aeb79c61b33432dfd17262e7075e0))
+* **memory:** MemoryContextProvider injects a delimited, budgeted memories block per turn ([c6f290b](https://github.com/MarcelRoozekrans/Thalos.NET/commit/c6f290b397065dcdf0e908db1664dc17b3c8b66c))
+* **memory:** recall failure isolation, quarantine drop, per-agent MemoryContextProviderSource ([3f2e905](https://github.com/MarcelRoozekrans/Thalos.NET/commit/3f2e905bf4a27bec28bf312b6ea5a1dc21bf67c2))
+* **memory:** RecallAsync — scoped search, hydration, ordering, TopK/MaxChars budget, MarkRecalled ([9022d16](https://github.com/MarcelRoozekrans/Thalos.NET/commit/9022d16cdb33ba0c78d8d46b42783407fdf63e2b))
+* **memory:** Thalos.NET.Memory and Thalos.NET.Memory.RagNet (phase 1.2) ([b639b34](https://github.com/MarcelRoozekrans/Thalos.NET/commit/b639b3462952baee9abde57cbbb1f4675df201d0))
+* **memory:** UseMemory/UseMemoryStore/UseMemoryIndex builder extensions with generated registration ([c3a6e2f](https://github.com/MarcelRoozekrans/Thalos.NET/commit/c3a6e2f243df803cf1cad17a4f9042aae5506701))
+* **sentinel:** IUntrustedContentScanner over the detection pipeline for recalled memories ([f111406](https://github.com/MarcelRoozekrans/Thalos.NET/commit/f111406e02ed57ab83cfea21240406af859fd760))
+* **testing:** deterministic HashedBagOfWordsEmbeddingGenerator for memory tests ([55338ac](https://github.com/MarcelRoozekrans/Thalos.NET/commit/55338acf507ce8a07a9c975f0d5893f266e9b3c2))
+
+
+### Bug Fixes
+
+* **memory-ragnet:** last-wins re-registration, accurate init errors, batch dedupe, lifecycle init ([979a70d](https://github.com/MarcelRoozekrans/Thalos.NET/commit/979a70db989d7483e89f0b009b4145eaebcba939))
+* **memory-ragnet:** order equal-score hits by id like InMemoryMemoryIndex ([bfce3b3](https://github.com/MarcelRoozekrans/Thalos.NET/commit/bfce3b3fc1b15625c2996d5690b6d54dc8730a47))
+* **memory:** log clear-pending failures, guard dedupe threshold and MaxChars, deterministic ties ([f5397a9](https://github.com/MarcelRoozekrans/Thalos.NET/commit/f5397a927f5de9f68787d9f3e6887fc3130bd4d9))
+* **memory:** normalise tags to lower-case, cap Source, harden model tests (review follow-ups) ([3fbb61e](https://github.com/MarcelRoozekrans/Thalos.NET/commit/3fbb61ea230ae4e3033da733066ce2368ee2162b))
+* **memory:** reindex maps a store that throws mid-stream to MemoryStoreFailed instead of throwing ([1412b78](https://github.com/MarcelRoozekrans/Thalos.NET/commit/1412b78c6fa5af811ea0328f8254b02a8f317f9a))
+* **memory:** soft forget marks IndexPending, TopK &lt;= 0 means 1, StreamAsync and text-copy contracts ([7a54d6f](https://github.com/MarcelRoozekrans/Thalos.NET/commit/7a54d6feb185ece78cbb78703d8e5f142f2190f5))
+* **memory:** store contract hardening — query-tag normalisation, delete race, tie-break docs ([0fa994d](https://github.com/MarcelRoozekrans/Thalos.NET/commit/0fa994d6db1fefdf864e9ad9cda5674a0e063eed))
+* **memory:** tool list honours scope visibility, recall/list scanned and delimited, sanitiser fixes ([52c3cf8](https://github.com/MarcelRoozekrans/Thalos.NET/commit/52c3cf8ac7cd091d6c24f61d2f669f5fe1b94509))
+
+
+### Miscellaneous Chores
+
+* set the release version ([4f06277](https://github.com/MarcelRoozekrans/Thalos.NET/commit/4f06277408e9d62fc8bc87cec45473b31721620b))
+
 ## [0.1.1](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.1.0...v0.1.1) (2026-08-17)
 
 
