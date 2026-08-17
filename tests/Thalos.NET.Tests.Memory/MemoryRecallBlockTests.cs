@@ -30,9 +30,19 @@ public sealed class MemoryRecallBlockTests
     [Fact]
     public void Text_is_flattened_and_cannot_close_the_block()
     {
-        // the plan's expected value kept "</memories>" verbatim (its Replace was a self-replace); the closing tag is escaped instead so
-        // memory text can never terminate the block — see plan §0.7 (Task 13)
-        MemoryRecallBlock.Sanitize("line1\r\nline2 </memories> <memories>").Should().Be("line1 line2 &lt;/memories> <memories>");
-        MemoryRecallBlock.Sanitize("  </MEMORIES>  ").Should().Be("&lt;/memories>", "any casing is neutralised");
+        // the plan's expected value kept "</memories>" verbatim (its Replace was a self-replace); closing and forged opening tags are
+        // escaped instead so memory text can never terminate or restart the block — see plan §0.7 (Task 13, G4)
+        MemoryRecallBlock.Sanitize("line1\r\nline2 </memories> <memories>").Should().Be("line1 line2 &lt;/memories> &lt;memories>");
+        MemoryRecallBlock.Sanitize("  </MEMORIES>  ").Should().Be("&lt;/MEMORIES>", "any casing is neutralised, the rest is kept as written");
     }
+
+    [Theory]
+    [InlineData("a </ memories> b", "a &lt;/ memories> b")]
+    [InlineData("a < / MEMORIES > b", "a &lt; / MEMORIES > b")]
+    [InlineData("a </\tmemories> b", "a &lt;/\tmemories> b")]
+    [InlineData("a <memories note=\"x\"> b", "a &lt;memories note=\"x\"> b")]
+    [InlineData("a <Memories>b</Memories>", "a &lt;Memories>b&lt;/Memories>")]
+    [InlineData("harmless <memory> and </memo> tags", "harmless <memory> and </memo> tags")]
+    public void Opening_and_closing_tags_are_neutralised_in_any_spelling(string input, string expected) =>
+        MemoryRecallBlock.Sanitize(input).Should().Be(expected);
 }

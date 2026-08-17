@@ -155,4 +155,52 @@ public sealed class MemoryContextProviderTests
         events.OfType<MemoryRecalledEvent>().Should().ContainSingle().Which.MemoryIds.Should().Equal(good.Id);
         events.OfType<MemoryRecallFailedEvent>().Should().BeEmpty("the scanner failure is per memory, not a recall failure");
     }
+
+    [Fact]
+    public async Task The_own_agents_pinned_memory_is_included()
+    {
+        var f = new MemoryServiceFixture();
+        var agent = AgentId.New();
+        var svc = f.Build();
+        await svc.RememberAsync(MemoryServiceFixture.Remember("pinned rule: use data-testid", agent: agent), default);
+        var provider = Provider(f, agent);
+        using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), new TestCaller("alice"), agent);
+
+        var ctx = await provider.InvokingAsync(Invoking("rule for data-testid?"), default);
+
+        ctx.Instructions.Should().Contain("pinned rule");
+    }
+
+    [Fact]
+    public void LastUserText_takes_the_last_non_blank_user_message_and_joins_multi_content()
+    {
+        var messages = new List<ChatMessage>
+        {
+            new(ChatRole.User, "first question"),
+            new(ChatRole.Assistant, "an answer"),
+            new(ChatRole.User, [new TextContent("part one"), new TextContent("part two")]),
+            new(ChatRole.Assistant, "trailing assistant text"),
+            new(ChatRole.User, "   "),
+        };
+
+        MemoryContextProvider.LastUserText(messages).Should().Be("part onepart two", "ChatMessage.Text concatenates the text contents");
+        MemoryContextProvider.LastUserText(null).Should().BeNull();
+        MemoryContextProvider.LastUserText([new ChatMessage(ChatRole.Assistant, "only assistant")]).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task With_a_scanner_registered_a_service_failure_still_yields_MemoryRecallFailed_and_never_scans()
+    {
+        var f = new MemoryServiceFixture(UnavailableMemoryIndex.Instance);
+        var agent = AgentId.New();
+        var scanner = Substitute.For<IUntrustedContentScanner>();
+        var provider = Provider(f, agent, scanner);
+        using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), new TestCaller("alice"), agent);
+
+        (await provider.InvokingAsync(Invoking("q"), default)).Instructions.Should().BeNull();
+
+        scope.Events.TryRead(out var evt).Should().BeTrue();
+        evt.Should().BeOfType<MemoryRecallFailedEvent>().Which.Code.Should().Be(AgentErrorCode.MemoryIndexUnavailable);
+        await scanner.DidNotReceiveWithAnyArgs().ScanAsync(default!, default);
+    }
 }

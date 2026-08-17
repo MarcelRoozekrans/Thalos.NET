@@ -6,9 +6,15 @@ using ZeroAlloc.Results;
 
 namespace Thalos.Memory;
 
-/// <summary>The <c>memory</c> tool source (<c>memory__remember/recall/forget/list</c>) built on <see cref="LocalToolSource"/>; returns no tools when memory or <see cref="MemoryOptions.ExposeTools"/> is disabled.</summary>
+/// <summary>
+/// The <c>memory</c> tool source (<c>memory__remember/recall/forget/list</c>) built on <see cref="LocalToolSource"/>; returns no tools when
+/// <see cref="MemoryOptions.Enabled"/> or <see cref="MemoryOptions.ExposeTools"/> is false. The tools are host-wide: an agent that opts into
+/// auto-recall via <see cref="AgentMemorySettings.Enabled"/> while memory is globally disabled still gets no tools; which agents see them
+/// is governed by <see cref="AgentDefinition.Tools"/> globs.
+/// </summary>
 public sealed class MemoryToolSource : IToolSource
 {
+    /// <summary>The source name; tools are qualified as <c>memory__{tool}</c>.</summary>
     public const string SourceName = "memory";
 
     private readonly LocalToolSource _inner;

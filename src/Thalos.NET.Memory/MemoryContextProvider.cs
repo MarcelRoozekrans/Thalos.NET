@@ -8,7 +8,8 @@ using ZeroAlloc.Authorization;
 namespace Thalos.Memory;
 
 /// <summary>
-/// Auto-recall: before each model call, recalls memories relevant to the last user message for the turn's caller
+/// Auto-recall: once per agent run (MAF invokes context providers before the run's first model call, not again inside the
+/// tool-call loop), recalls memories relevant to the last user message for the turn's caller
 /// (<see cref="TurnScope.Caller"/>), this agent and the configured shared owner, and injects them as a delimited
 /// <c>&lt;memories&gt;</c> block via <see cref="AIContext.Instructions"/>. Recall never fails a turn: any error is logged,
 /// a <see cref="MemoryRecallFailedEvent"/> is published and the turn proceeds without memories. Recalled text is

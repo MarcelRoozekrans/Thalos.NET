@@ -12,6 +12,12 @@ namespace Thalos.Sentinel;
 /// (<see cref="SentinelOptions.OnCritical"/> … <see cref="SentinelOptions.OnLow"/>) is <see cref="SentinelAction.Quarantine"/>.
 /// The verdict detail is <c>"{Severity}: {DetectorId}"</c>; the detector's reason text goes to the log only.
 /// </summary>
+/// <remarks>
+/// This runs the detection pipeline directly and bypasses Sentinel's InterventionEngine: non-quarantine outcomes (Log/Alert)
+/// produce no Sentinel audit entry or alert here — only the 401 warning below when quarantined. That log carries the severity,
+/// the detector id and the detector-authored <c>Reason</c> (a description of the detection, e.g. a similarity score), never the
+/// scanned text; a test asserts the log line does not echo the content.
+/// </remarks>
 internal sealed partial class SentinelContentScanner(IDetectionPipeline pipeline, SentinelOptions options, ILogger<SentinelContentScanner>? logger = null) : IUntrustedContentScanner
 {
     public async ValueTask<UntrustedContentVerdict> ScanAsync(string content, CancellationToken ct)
