@@ -21,6 +21,11 @@ public sealed class AgentEventTests
     [InlineData(typeof(UsageEvent), "usage")]
     [InlineData(typeof(TurnCompletedEvent), "done")]
     [InlineData(typeof(TurnFailedEvent), "error")]
+    [InlineData(typeof(MemoryRecalledEvent), "memory-recalled")]
+    [InlineData(typeof(MemoryStoredEvent), "memory-stored")]
+    [InlineData(typeof(MemoryRecallFailedEvent), "memory-recall-failed")]
+    [InlineData(typeof(MemoryIndexPendingEvent), "memory-index-pending")]
+    [InlineData(typeof(MemoryQuarantinedEvent), "memory-quarantined")]
     public void Kinds_are_stable_wire_names(Type type, string kind)
     {
         AgentEvent.KindOf(type).Should().Be(kind);

@@ -28,4 +28,7 @@ public sealed record AgentDefinition
 
     /// <summary>Glob allow-list over qualified tool names ("source__tool"). Default: everything.</summary>
     public IReadOnlyList<string> Tools { get; init; } = ["*"];
+
+    /// <summary>Per-agent memory settings (Thalos.NET.Memory); null = host defaults. Compared by value by the agent factory.</summary>
+    public AgentMemorySettings? Memory { get; init; }
 }
