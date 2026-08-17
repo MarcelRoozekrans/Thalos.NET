@@ -25,5 +25,5 @@ public sealed class UnavailableMemoryIndex : IMemoryIndex
     public ValueTask<UnitResult<AgentError>> RemoveAsync(MemoryId id, CancellationToken ct) => new(UnitResult<AgentError>.Success());
 
     /// <inheritdoc />
-    public ValueTask<Result<MemoryIndexHealth, AgentError>> ProbeAsync(CancellationToken ct) => new(Result<MemoryIndexHealth, AgentError>.Success(new MemoryIndexHealth(false, null, "no embedding generator registered")));
+    public ValueTask<Result<MemoryIndexHealth, AgentError>> ProbeAsync(CancellationToken ct) => new(Result<MemoryIndexHealth, AgentError>.Success(new MemoryIndexHealth(false, null, Reason)));
 }

@@ -29,11 +29,15 @@ public interface IMemoryStore
     [Trace("thalos.memory.delete")]
     ValueTask<UnitResult<AgentError>> DeleteAsync(MemoryId id, CancellationToken ct);
 
-    /// <summary>Filters with <see cref="MemoryQuery.Matches"/>, orders by <c>UpdatedAt</c> desc then id desc, pages (page ≥ 1, size clamped to 1..100), returns the total match count.</summary>
+    /// <summary>
+    /// Filters with <see cref="MemoryQuery.Matches"/>, orders by <c>UpdatedAt</c> desc then a stable deterministic tie-break
+    /// (implementations may use the id; byte order need not match across stores — only "no duplicates, no gaps across pages" is
+    /// contractual), pages (page &lt; 1 → 1, size clamped to 1..100), returns the total match count.
+    /// </summary>
     [Trace("thalos.memory.list")]
     ValueTask<Result<MemoryPage, AgentError>> ListAsync(MemoryQuery query, CancellationToken ct);
 
-    /// <summary>Increments <c>RecallCount</c> and sets <c>LastRecalledAt = at</c> for every known id; unknown ids are ignored; empty list is a no-op.</summary>
+    /// <summary>Increments <c>RecallCount</c> once and sets <c>LastRecalledAt = at</c> for every known id; <paramref name="ids"/> is a set (duplicates count once); unknown ids are ignored; empty list is a no-op.</summary>
     [Trace("thalos.memory.mark-recalled")]
     ValueTask<UnitResult<AgentError>> MarkRecalledAsync(IReadOnlyList<MemoryId> ids, DateTimeOffset at, CancellationToken ct);
 

@@ -160,8 +160,32 @@ public abstract class MemoryStoreContractTests
         Texts((await store.ListAsync(new MemoryQuery { OwnerIds = ["alice"], AgentId = agent }, CancellationToken.None)).Value).Should().BeEquivalentTo(["a2"]);
         Texts((await store.ListAsync(new MemoryQuery { Kinds = [MemoryKind.Learning] }, CancellationToken.None)).Value).Should().BeEquivalentTo(["a2", "s1"]);
         Texts((await store.ListAsync(new MemoryQuery { Tags = ["x", "y"] }, CancellationToken.None)).Value).Should().BeEquivalentTo(["a2"]);
+        Texts((await store.ListAsync(new MemoryQuery { Tags = ["X ", "Y"] }, CancellationToken.None)).Value).Should().BeEquivalentTo(["a2"], "query tags are normalised like stored tags");
         Texts((await store.ListAsync(new MemoryQuery { IndexPending = true }, CancellationToken.None)).Value).Should().BeEquivalentTo(["a2"]);
+        Texts((await store.ListAsync(new MemoryQuery { IndexPending = false }, CancellationToken.None)).Value).Should().BeEquivalentTo(["a1", "b1", "s1"]);
         (await store.ListAsync(new MemoryQuery { OwnerIds = ["nobody"] }, CancellationToken.None)).Value.Items.Should().BeEmpty();
+
+        var streamed = new List<string>();
+        await foreach (var r in store.StreamAsync(new MemoryQuery { Tags = ["X ", "Y"] }, CancellationToken.None))
+        {
+            streamed.Add(r.Text);
+        }
+
+        streamed.Should().Equal(["a2"], "stream applies the same normalised tag filter");
+    }
+
+    [Fact]
+    public async Task Blank_tags_are_dropped_on_create_and_empty_update_tags_clear()
+    {
+        var clock = NewClock();
+        var store = await CreateStoreAsync(clock);
+        var record = NewRecord(clock, tags: ["", "  ", "keep"]);
+        (await store.CreateAsync(record, CancellationToken.None)).Value.Tags.Should().Equal("keep");
+
+        var cleared = await store.UpdateAsync(record.Id, new MemoryUpdate { Tags = [] }, CancellationToken.None);
+        cleared.IsSuccess.Should().BeTrue();
+        cleared.Value.Tags.Should().BeEmpty();
+        (await store.GetAsync(record.Id, CancellationToken.None)).Value.Tags.Should().BeEmpty();
     }
 
     [Fact]
@@ -193,11 +217,41 @@ public abstract class MemoryStoreContractTests
     }
 
     [Fact]
-    public async Task List_clamps_page_size_to_100()
+    public async Task List_clamps_page_size_to_100_and_page_to_at_least_1()
     {
-        var store = await CreateStoreAsync(NewClock());
+        var clock = NewClock();
+        var store = await CreateStoreAsync(clock);
+        await store.CreateAsync(NewRecord(clock), CancellationToken.None);
         var page = (await store.ListAsync(new MemoryQuery { PageSize = 1000 }, CancellationToken.None)).Value;
         page.PageSize.Should().Be(MemoryQuery.MaxPageSize);
+
+        var first = (await store.ListAsync(new MemoryQuery { Page = 0, PageSize = 10 }, CancellationToken.None)).Value;
+        first.Page.Should().Be(1);
+        first.Items.Should().ContainSingle();
+        (await store.ListAsync(new MemoryQuery { Page = -5, PageSize = 10 }, CancellationToken.None)).Value.Page.Should().Be(1);
+        (await store.ListAsync(new MemoryQuery { Page = int.MaxValue, PageSize = 100 }, CancellationToken.None)).Value.Items.Should().BeEmpty("a huge page must not overflow");
+    }
+
+    [Fact]
+    public async Task List_pages_records_with_identical_UpdatedAt_without_gaps_or_duplicates()
+    {
+        var clock = NewClock();
+        var store = await CreateStoreAsync(clock);
+        var ids = new List<MemoryId>();
+        for (var i = 0; i < 7; i++)
+        {
+            var r = NewRecord(clock, text: $"same{i}");
+            ids.Add(r.Id);
+            (await store.CreateAsync(r, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        }
+
+        var page1 = (await store.ListAsync(new MemoryQuery { OwnerIds = ["alice"], Page = 1, PageSize = 4 }, CancellationToken.None)).Value;
+        var page2 = (await store.ListAsync(new MemoryQuery { OwnerIds = ["alice"], Page = 2, PageSize = 4 }, CancellationToken.None)).Value;
+        page1.Items.Should().HaveCount(4);
+        page2.Items.Should().HaveCount(3);
+        page1.Items.Concat(page2.Items).Select(r => r.Id).Should().BeEquivalentTo(ids, "pages partition the matches even when UpdatedAt ties");
+        page1.Items.Select(r => r.Id).Should().OnlyHaveUniqueItems();
+        page1.Items.Select(r => r.Id).Should().NotIntersectWith(page2.Items.Select(r => r.Id));
     }
 
     [Fact]
@@ -210,11 +264,11 @@ public abstract class MemoryStoreContractTests
         var at = clock.GetUtcNow().AddMinutes(1);
 
         (await store.MarkRecalledAsync([r.Id, MemoryId.New()], at, CancellationToken.None)).IsSuccess.Should().BeTrue();
-        (await store.MarkRecalledAsync([r.Id], at.AddMinutes(1), CancellationToken.None)).IsSuccess.Should().BeTrue();
+        (await store.MarkRecalledAsync([r.Id, r.Id], at.AddMinutes(1), CancellationToken.None)).IsSuccess.Should().BeTrue();
         (await store.MarkRecalledAsync([], at, CancellationToken.None)).IsSuccess.Should().BeTrue();
 
         var got = (await store.GetAsync(r.Id, CancellationToken.None)).Value;
-        got.RecallCount.Should().Be(2);
+        got.RecallCount.Should().Be(2, "ids are a set: a duplicate id counts once");
         got.LastRecalledAt.Should().NotBeNull();
         got.LastRecalledAt!.Value.Should().BeCloseTo(at.AddMinutes(1), Tolerance);
         got.UpdatedAt.Should().BeCloseTo(r.UpdatedAt, Tolerance, "recall is not a content change");

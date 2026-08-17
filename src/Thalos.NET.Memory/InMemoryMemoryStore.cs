@@ -50,8 +50,13 @@ public sealed class InMemoryMemoryStore(TimeProvider clock) : IMemoryStore
     }
 
     /// <inheritdoc />
-    public ValueTask<UnitResult<AgentError>> DeleteAsync(MemoryId id, CancellationToken ct) =>
-        new(_records.TryRemove(id, out _) ? UnitResult<AgentError>.Success() : UnitResult<AgentError>.Failure(AgentError.MemoryNotFound(id)));
+    public ValueTask<UnitResult<AgentError>> DeleteAsync(MemoryId id, CancellationToken ct)
+    {
+        lock (_gate) // under the gate so a concurrent Update/MarkRecalled cannot re-insert the record it read before the delete
+        {
+            return new(_records.TryRemove(id, out _) ? UnitResult<AgentError>.Success() : UnitResult<AgentError>.Failure(AgentError.MemoryNotFound(id)));
+        }
+    }
 
     /// <inheritdoc />
     public ValueTask<Result<MemoryPage, AgentError>> ListAsync(MemoryQuery query, CancellationToken ct)
@@ -60,7 +65,8 @@ public sealed class InMemoryMemoryStore(TimeProvider clock) : IMemoryStore
         var page = Math.Max(1, query.Page);
         var size = Math.Clamp(query.PageSize, 1, MemoryQuery.MaxPageSize);
         var matches = _records.Values.Where(query.Matches).OrderByDescending(r => r.UpdatedAt).ThenByDescending(r => r.Id).ToList();
-        IReadOnlyList<MemoryRecord> items = matches.Skip((page - 1) * size).Take(size).ToList();
+        var skip = (int)Math.Min((long)(page - 1) * size, matches.Count); // long arithmetic: a huge Page must not overflow into a negative skip
+        IReadOnlyList<MemoryRecord> items = matches.Skip(skip).Take(size).ToList();
         return new(Result<MemoryPage, AgentError>.Success(new MemoryPage(items, page, size, matches.Count)));
     }
 
@@ -68,11 +74,12 @@ public sealed class InMemoryMemoryStore(TimeProvider clock) : IMemoryStore
     public ValueTask<UnitResult<AgentError>> MarkRecalledAsync(IReadOnlyList<MemoryId> ids, DateTimeOffset at, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(ids);
+        var seen = new HashSet<MemoryId>(); // ids are a set: a duplicate id counts once
         lock (_gate)
         {
             foreach (var id in ids)
             {
-                if (_records.TryGetValue(id, out var r))
+                if (seen.Add(id) && _records.TryGetValue(id, out var r))
                 {
                     _records[id] = r with { RecallCount = r.RecallCount + 1, LastRecalledAt = at };
                 }

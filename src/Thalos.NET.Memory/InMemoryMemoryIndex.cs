@@ -4,7 +4,10 @@ using ZeroAlloc.Results;
 
 namespace Thalos.Memory;
 
-/// <summary>Brute-force cosine index over the injected embedding generator; for tests, samples and small hosts.</summary>
+/// <summary>
+/// Brute-force cosine index over the injected embedding generator; for tests, samples and small hosts. Hits are ordered by
+/// score desc, then id (deterministic). <see cref="ProbeAsync"/> only reads the generator's metadata — it does not call the generator.
+/// </summary>
 public sealed class InMemoryMemoryIndex(IEmbeddingGenerator<string, Embedding<float>> embeddings) : IMemoryIndex
 {
     private sealed record Entry(string OwnerId, AgentId? AgentId, float[] Vector);
@@ -67,7 +70,11 @@ public sealed class InMemoryMemoryIndex(IEmbeddingGenerator<string, Embedding<fl
                 }
             }
 
-            hits.Sort(static (a, b) => b.Score.CompareTo(a.Score));
+            hits.Sort(static (a, b) =>
+            {
+                var byScore = b.Score.CompareTo(a.Score);
+                return byScore != 0 ? byScore : a.Id.CompareTo(b.Id);
+            });
             IReadOnlyList<MemoryHit> top = hits.Count > options.TopK ? hits.GetRange(0, Math.Max(0, options.TopK)) : hits;
             return Result<IReadOnlyList<MemoryHit>, AgentError>.Success(top);
         }

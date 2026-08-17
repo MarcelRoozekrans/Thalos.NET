@@ -108,6 +108,17 @@ public abstract class MemoryIndexContractTests
     }
 
     [Fact]
+    public async Task Duplicate_ids_in_one_batch_last_wins()
+    {
+        var index = await CreateIndexAsync();
+        var r = Rec("alice", null, "alpha bravo charlie");
+        (await index.UpsertAsync([r, r with { Text = "delta echo foxtrot" }], CancellationToken.None)).IsSuccess.Should().BeTrue();
+
+        (await index.SearchAsync("alpha bravo charlie", new MemoryScope("alice", null), new MemorySearchOptions(10, 0.5), CancellationToken.None)).Value.Should().BeEmpty();
+        (await index.SearchAsync("delta echo foxtrot", new MemoryScope("alice", null), Any(), CancellationToken.None)).Value.Should().ContainSingle().Which.Id.Should().Be(r.Id);
+    }
+
+    [Fact]
     public async Task Remove_makes_it_unfindable_and_unknown_remove_succeeds()
     {
         var index = await CreateIndexAsync();
