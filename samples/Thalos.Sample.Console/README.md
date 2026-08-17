@@ -2,7 +2,9 @@
 
 A minimal REPL: one `Architect` agent backed by Anthropic Claude, scanned by AI.Sentinel, with the
 [roslyn-codelens](https://github.com/MarcelRoozekrans/roslyn-codelens-mcp) MCP server exposed as `roslyn__*` tools.
-Mutating tools (`roslyn__apply_*`, `roslyn__rename_*`) are gated behind a `developer` policy.
+Mutating tools (`roslyn__apply_*`, `roslyn__rename_*`) are gated behind a `developer` policy. Long-term memory
+(`Thalos.NET.Memory`) is enabled with the in-memory store and no embedding generator, so the `memory__*` tools work but
+recall finds nothing (see the note below).
 
 ## Prerequisites
 
@@ -37,18 +39,22 @@ Try:
 - `Apply the first available code action in TaskRepository.cs` — the model calls `roslyn__apply_code_action`, which the
   `developer` policy denies (`✗ … developer role required (run with --developer)`).
 - Re-run with the role: `dotnet run --project samples/Thalos.Sample.Console -- --developer` and ask again.
+- `Remember that I prefer xUnit over NUnit.` — the model calls `memory__remember`; you will see `✎ stored …` (or
+  `⧗ stored … but not indexed`, because this sample registers no embedding generator — recall stays empty until one is
+  wired: `builder.Services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(…)` before `AddThalos`).
 
 `/quit` or `/exit` (or Ctrl+Z / Ctrl+D) ends the session.
 
 ## What to look at
 
 - `Program.cs` — the whole wiring is one `AddThalos(...)` call: `UseAnthropic(configuration)`, `UseAISentinel(...)`,
-  `UseInMemorySessionStore()`, `AddMcpServersFromFile(...)`, `RequireToolPolicy(...)`, `AddPolicy<DeveloperPolicy>()`,
-  `AddAgent(...)`.
+  `UseInMemorySessionStore()`, `UseMemory()`, `AddMcpServersFromFile(...)`, `RequireToolPolicy(...)`,
+  `AddPolicy<DeveloperPolicy>()`, `AddAgent(...)`.
 - `DeveloperPolicy` — a plain ZeroAlloc.Authorization `[Policy("developer")]`; Thalos looks it up by name and enforces it
   at the tool boundary, before the tool runs.
 - `ConsoleCaller` — the `ISecurityContext` the channel supplies with every turn. Thalos never infers the caller.
-- The event switch — `TextDeltaEvent`, `ToolCallStartedEvent`, `ToolCallFinishedEvent`, `UsageEvent`, `TurnFailedEvent` are
+- The event switch — `TextDeltaEvent`, `ToolCallStartedEvent`, `ToolCallFinishedEvent`, `UsageEvent`, `TurnFailedEvent` and
+  the memory events (`MemoryRecalledEvent`, `MemoryStoredEvent`, `MemoryIndexPendingEvent`, `MemoryRecallFailedEvent`) are
   the same events a web channel would forward as SSE.
 
 ## Security note: AI.Sentinel needs an embedding generator

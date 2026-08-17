@@ -13,6 +13,7 @@
     <ProjectReference Include="..\..\src\Thalos.NET.Mcp\Thalos.NET.Mcp.csproj" />
     <ProjectReference Include="..\..\src\Thalos.NET.Anthropic\Thalos.NET.Anthropic.csproj" />
     <ProjectReference Include="..\..\src\Thalos.NET.Sentinel\Thalos.NET.Sentinel.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Memory\Thalos.NET.Memory.csproj" />
     <PackageReference Include="Microsoft.Extensions.Hosting" />
   </ItemGroup>
   <ItemGroup>
