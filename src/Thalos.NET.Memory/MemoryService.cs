@@ -98,10 +98,112 @@ public sealed partial class MemoryService(
             : null;
     }
 
-    // Tasks 11–12 implement these (MA0025 forbids NotImplementedException; these bodies fail every test until then).
-    public ValueTask<Result<IReadOnlyList<RecalledMemory>, AgentError>> RecallAsync(string query, MemoryScope scope, RecallOptions options, CancellationToken ct) =>
-        new(Result<IReadOnlyList<RecalledMemory>, AgentError>.Failure(AgentError.MemoryValidationFailed("not implemented")));
+    /// <inheritdoc />
+    public async ValueTask<Result<IReadOnlyList<RecalledMemory>, AgentError>> RecallAsync(string query, MemoryScope scope, RecallOptions options, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        if (string.IsNullOrWhiteSpace(query) || string.IsNullOrEmpty(scope.OwnerId))
+        {
+            return Result<IReadOnlyList<RecalledMemory>, AgentError>.Success([]);
+        }
 
+        var topK = Math.Max(1, options.TopK); // options is a shared bound instance — read, never mutate
+        var hits = await index.SearchAsync(query, scope, new MemorySearchOptions(topK * 2, options.MinScore), ct).ConfigureAwait(false); // over-fetch: archived/stale hits are dropped below
+        if (hits.IsFailure)
+        {
+            return Result<IReadOnlyList<RecalledMemory>, AgentError>.Failure(hits.Error);
+        }
+
+        var hydrated = await HydrateAsync(hits.Value, scope, ct).ConfigureAwait(false);
+        if (hydrated.IsFailure)
+        {
+            return Result<IReadOnlyList<RecalledMemory>, AgentError>.Failure(hydrated.Error);
+        }
+
+        var candidates = hydrated.Value;
+        candidates.Sort(CompareCandidates);
+        var selected = SelectWithinBudget(candidates, topK, options.MaxChars);
+        if (selected.Count > 0)
+        {
+            var marked = await store.MarkRecalledAsync(selected.Select(s => s.Record.Id).ToList(), clock.GetUtcNow(), ct).ConfigureAwait(false);
+            if (marked.IsFailure)
+            {
+                LogMarkRecalledFailed(_logger, marked.Error.ToString());
+            }
+        }
+
+        return Result<IReadOnlyList<RecalledMemory>, AgentError>.Success(selected);
+    }
+
+    /// <summary>Loads each hit from the store; drops stale (not found), archived and out-of-scope records; any other store failure is returned.</summary>
+    private async ValueTask<Result<List<RecalledMemory>, AgentError>> HydrateAsync(IReadOnlyList<MemoryHit> hits, MemoryScope scope, CancellationToken ct)
+    {
+        var candidates = new List<RecalledMemory>(hits.Count);
+        foreach (var hit in hits)
+        {
+            var got = await store.GetAsync(hit.Id, ct).ConfigureAwait(false);
+            if (got.IsFailure)
+            {
+                if (got.Error.Code == AgentErrorCode.MemoryNotFound)
+                {
+                    continue; // stale index entry — harmless
+                }
+
+                return Result<List<RecalledMemory>, AgentError>.Failure(got.Error);
+            }
+
+            var record = got.Value;
+            if (!record.IsArchived && scope.Includes(record.OwnerId, record.AgentId))
+            {
+                candidates.Add(new RecalledMemory(record, hit.Score));
+            }
+        }
+
+        return Result<List<RecalledMemory>, AgentError>.Success(candidates);
+    }
+
+    /// <summary>Score desc, then importance desc, then <c>UpdatedAt</c> desc.</summary>
+    private static int CompareCandidates(RecalledMemory a, RecalledMemory b)
+    {
+        var c = b.Score.CompareTo(a.Score);
+        if (c == 0)
+        {
+            c = b.Record.Importance.CompareTo(a.Record.Importance);
+        }
+
+        if (c == 0)
+        {
+            c = b.Record.UpdatedAt.CompareTo(a.Record.UpdatedAt);
+        }
+
+        return c;
+    }
+
+    /// <summary>Takes ordered candidates while fewer than <paramref name="topK"/> are selected; one whose text does not fit the remaining <paramref name="maxChars"/> is skipped (a smaller later one may still fit).</summary>
+    private static List<RecalledMemory> SelectWithinBudget(List<RecalledMemory> candidates, int topK, int maxChars)
+    {
+        var selected = new List<RecalledMemory>(Math.Min(topK, candidates.Count));
+        var chars = 0;
+        foreach (var candidate in candidates)
+        {
+            if (selected.Count >= topK)
+            {
+                break;
+            }
+
+            if (chars + candidate.Record.Text.Length > maxChars)
+            {
+                continue; // does not fit the budget; a smaller later candidate may
+            }
+
+            chars += candidate.Record.Text.Length;
+            selected.Add(candidate);
+        }
+
+        return selected;
+    }
+
+    // Task 12 implements these (MA0025 forbids NotImplementedException; these bodies fail every test until then).
     public ValueTask<UnitResult<AgentError>> ForgetAsync(MemoryId id, MemoryScope scope, bool hard, CancellationToken ct) =>
         new(UnitResult<AgentError>.Failure(AgentError.MemoryValidationFailed("not implemented")));
 
@@ -116,4 +218,7 @@ public sealed partial class MemoryService(
 
     [LoggerMessage(EventId = 501, Level = LogLevel.Warning, Message = "Refreshing duplicate memory {Memory} failed, inserting instead: {Error}")]
     private static partial void LogDedupeRefreshFailed(ILogger logger, MemoryId memory, string error);
+
+    [LoggerMessage(EventId = 502, Level = LogLevel.Warning, Message = "MarkRecalled failed (recall still returned): {Error}")]
+    private static partial void LogMarkRecalledFailed(ILogger logger, string error);
 }
