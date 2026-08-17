@@ -39,7 +39,7 @@
     <!-- Analyzers / build -->
     <PackageVersion Include="Meziantou.Analyzer" Version="3.0.159" />
     <PackageVersion Include="Roslynator.Analyzers" Version="4.16.1" />
-    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="8.0.0" />
+    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.400" />
 
     <!-- Tests -->
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.9.0" />
