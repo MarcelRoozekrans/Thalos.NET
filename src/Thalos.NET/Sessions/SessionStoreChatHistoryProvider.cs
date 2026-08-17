@@ -60,6 +60,7 @@ public sealed class SessionStoreChatHistoryProvider(IAgentSessionStore store) : 
         throw new AgentTurnException(AgentError.StoreError("Corrupt session binding.", raw));
     }
 
+    /// <inheritdoc />
     protected override async ValueTask<IEnumerable<ChatMessage>> ProvideChatHistoryAsync(InvokingContext context, CancellationToken cancellationToken = default)
     {
         if (context.Session is not { } session || GetBoundSessionId(session) is not { } id)
@@ -76,6 +77,7 @@ public sealed class SessionStoreChatHistoryProvider(IAgentSessionStore store) : 
         return loaded.Value;
     }
 
+    /// <inheritdoc />
     protected override async ValueTask StoreChatHistoryAsync(InvokedContext context, CancellationToken cancellationToken = default)
     {
         if (context.InvokeException is not null || context.Session is not { } session || GetBoundSessionId(session) is not { } id)

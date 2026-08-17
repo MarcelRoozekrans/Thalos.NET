@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Thalos.Memory</RootNamespace>
+    <PackageId>Thalos.NET.Memory</PackageId>
+    <Description>Curated long-term memory for Thalos.NET agents: MemoryRecord model, IMemoryStore/IMemoryIndex/IMemoryService ports, auto-recall AIContextProvider, memory tools, in-memory implementations.</Description>
+    <PackageTags>agents;memory;semantic-search;microsoft-agent-framework;zeroalloc</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" />
+    <PackageReference Include="ZeroAlloc.Validation" />
+    <PackageReference Include="ZeroAlloc.Validation.Generator" PrivateAssets="all" />
+    <PackageReference Include="ZeroAlloc.Telemetry" />
+    <PackageReference Include="ZeroAlloc.Inject" />
+    <PackageReference Include="ZeroAlloc.Inject.Generator" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Memory" />
+  </ItemGroup>
+</Project>

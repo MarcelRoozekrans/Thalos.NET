@@ -17,3 +17,7 @@ public readonly partial record struct TurnId;
 /// <summary>Identifies one tool invocation inside a turn.</summary>
 [TypedId]
 public readonly partial record struct ToolCallId;
+
+/// <summary>Identifies one memory record (Thalos.NET.Memory).</summary>
+[TypedId]
+public readonly partial record struct MemoryId;

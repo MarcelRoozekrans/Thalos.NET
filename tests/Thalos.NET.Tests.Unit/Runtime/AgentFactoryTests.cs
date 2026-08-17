@@ -269,4 +269,38 @@ public sealed class AgentFactoryTests
 
         h.Client.Requests[0].Options!.Tools.Should().BeNull();
     }
+
+    private sealed class StaticContextProvider(string instructions) : AIContextProvider
+    {
+        protected override ValueTask<AIContext> ProvideAIContextAsync(InvokingContext context, CancellationToken cancellationToken = default) =>
+            new(new AIContext { Instructions = instructions });
+    }
+
+    private sealed class Source(Func<AgentDefinition, AIContextProvider?> create) : IAgentContextProviderSource
+    {
+        public AIContextProvider? CreateProvider(AgentDefinition agent) => create(agent);
+    }
+
+    [Fact]
+    public async Task Context_provider_sources_are_consulted_per_agent()
+    {
+        var h = new Harness(tools: null);
+        var factory = new AgentFactory(h.Provider, [], h.Catalog, new SessionStoreChatHistoryProvider(new InMemorySessionStore(TimeProvider.System)), new ServiceCollection().BuildServiceProvider(), null,
+            [new Source(a => string.Equals(a.Name, "with", StringComparison.Ordinal) ? new StaticContextProvider("ctx") : null)]);
+
+        var with = (ChatClientAgent)(await factory.GetOrCreateAsync(Def() with { Name = "with" }, default)).Value;
+        with.AIContextProviders.Should().NotBeNull().And.ContainSingle().Which.Should().BeOfType<StaticContextProvider>();
+        var without = (ChatClientAgent)(await factory.GetOrCreateAsync(Def() with { Name = "without" }, default)).Value;
+        (without.AIContextProviders ?? []).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Changing_memory_settings_rebuilds_the_agent()
+    {
+        var h = Build();
+        var def = Def();
+        var a = (await h.Factory.GetOrCreateAsync(def, default)).Value;
+        var b = (await h.Factory.GetOrCreateAsync(def with { Memory = new AgentMemorySettings { TopK = 2 } }, default)).Value;
+        b.Should().NotBeSameAs(a);
+    }
 }

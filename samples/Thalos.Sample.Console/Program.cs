@@ -5,6 +5,7 @@ using Microsoft.Extensions.Hosting;
 using Thalos;
 using Thalos.Anthropic;
 using Thalos.Mcp;
+using Thalos.Memory;
 using Thalos.Sample;
 using Thalos.Sentinel;
 using ZeroAlloc.Authorization;
@@ -21,8 +22,9 @@ var architect = new AgentDefinition
     Instructions = """
         You are a senior .NET architect. Use the roslyn__* tools to answer precisely; cite symbols and files.
         Never guess: if a tool call fails, say so.
+        Use memory__remember for durable facts and preferences the user states, and memory__recall before answering questions about earlier work.
         """,
-    Tools = ["roslyn__*"],
+    Tools = ["roslyn__*", "memory__*"],
 };
 
 builder.Services.AddThalos(thalos => thalos
@@ -36,6 +38,10 @@ builder.Services.AddThalos(thalos => thalos
         o.OnHigh = SentinelAction.Alert;
     })
     .UseInMemorySessionStore()
+    // Long-term memory: auto-recall block + memory__* tools. Without an IEmbeddingGenerator<string, Embedding<float>> in DI the
+    // index is UnavailableMemoryIndex: memory__remember stores (IndexPending — see the ⧗ line), memory__recall finds nothing.
+    // Register one (Ollama, OpenAI, …) for semantic recall; the in-memory store forgets everything when the process ends.
+    .UseMemory()
     .AddMcpServersFromFile(Path.Combine(AppContext.BaseDirectory, ".mcp.json"))
     .RequireToolPolicy("roslyn__apply_*", "developer")
     .RequireToolPolicy("roslyn__rename_*", "developer")
@@ -87,6 +93,18 @@ while (true)
                 break;
             case TurnFailedEvent e:
                 Console.WriteLine($"\n  ✗ {e.Error}");
+                break;
+            case MemoryRecalledEvent r:
+                Console.WriteLine($"  ⟲ recalled {r.Count} memories ({r.Chars} chars)");
+                break;
+            case MemoryStoredEvent s:
+                Console.WriteLine($"  ✎ stored {s.MemoryId} ({s.MemoryKind}{(s.Deduped ? ", deduped" : "")})");
+                break;
+            case MemoryIndexPendingEvent p:
+                Console.WriteLine($"  ⧗ stored {p.MemoryId} but not indexed (no embedding generator — recall will not find it)");
+                break;
+            case MemoryRecallFailedEvent rf:
+                Console.WriteLine($"  ⚠ memory recall failed: {rf.Code} (the turn continues without memories)");
                 break;
             default:
                 break;

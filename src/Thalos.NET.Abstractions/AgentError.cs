@@ -47,6 +47,24 @@ public enum AgentErrorCode
 
     /// <summary>The caller cancelled the operation. HTTP 499.</summary>
     Cancelled,
+
+    /// <summary>No memory record exists under the given id (or it is not visible to the caller). HTTP 404.</summary>
+    MemoryNotFound,
+
+    /// <summary>The memory store (records) failed. HTTP 502.</summary>
+    MemoryStoreFailed,
+
+    /// <summary>The memory index (vectors / embedding generator) is unreachable; records may still be stored with <c>IndexPending</c>. HTTP 503.</summary>
+    MemoryIndexUnavailable,
+
+    /// <summary>The memory index rejected an operation (schema, dimension, malformed data). HTTP 502.</summary>
+    MemoryIndexFailed,
+
+    /// <summary>A memory request violated the limits (empty text, > 4000 chars, > 10 tags, importance outside 0..1, bad kind). HTTP 400.</summary>
+    MemoryValidationFailed,
+
+    /// <summary>The memory belongs to another owner (forget/hard-delete scope check). HTTP 403.</summary>
+    MemoryForbidden,
 }
 
 /// <summary>
@@ -97,6 +115,24 @@ public readonly record struct AgentError(AgentErrorCode Code, string Message, st
     /// <summary><see cref="AgentErrorCode.Cancelled"/>: the caller's token was cancelled after the session was claimed.</summary>
     public static AgentError Cancelled() => new(AgentErrorCode.Cancelled, "The operation was cancelled.");
 
+    /// <summary><see cref="AgentErrorCode.MemoryNotFound"/> for <paramref name="id"/>.</summary>
+    public static AgentError MemoryNotFound(MemoryId id) => new(AgentErrorCode.MemoryNotFound, $"Memory '{id}' was not found.");
+
+    /// <summary><see cref="AgentErrorCode.MemoryStoreFailed"/>; <paramref name="detail"/> is a diagnostic such as the exception type name.</summary>
+    public static AgentError MemoryStoreFailed(string message, string? detail = null) => new(AgentErrorCode.MemoryStoreFailed, message, detail);
+
+    /// <summary><see cref="AgentErrorCode.MemoryIndexUnavailable"/>; <paramref name="detail"/> is a diagnostic such as the exception type name.</summary>
+    public static AgentError MemoryIndexUnavailable(string message, string? detail = null) => new(AgentErrorCode.MemoryIndexUnavailable, message, detail);
+
+    /// <summary><see cref="AgentErrorCode.MemoryIndexFailed"/>; <paramref name="detail"/> is a diagnostic such as a SQL state.</summary>
+    public static AgentError MemoryIndexFailed(string message, string? detail = null) => new(AgentErrorCode.MemoryIndexFailed, message, detail);
+
+    /// <summary><see cref="AgentErrorCode.MemoryValidationFailed"/> with the given message.</summary>
+    public static AgentError MemoryValidationFailed(string message) => new(AgentErrorCode.MemoryValidationFailed, message);
+
+    /// <summary><see cref="AgentErrorCode.MemoryForbidden"/>: <paramref name="id"/> belongs to another owner.</summary>
+    public static AgentError MemoryForbidden(MemoryId id) => new(AgentErrorCode.MemoryForbidden, $"Memory '{id}' belongs to another owner.");
+
     /// <summary><c>"{Code}: {Message}"</c>, with <c>" — {Detail}"</c> appended when <see cref="Detail"/> is set.</summary>
     public override string ToString() => Detail is null ? $"{Code}: {Message}" : $"{Code}: {Message} — {Detail}";
 }
@@ -108,5 +144,6 @@ public readonly record struct AgentError(AgentErrorCode Code, string Message, st
 public sealed class AgentTurnException(AgentError error, Exception? inner = null)
     : Exception(error.ToString(), inner)
 {
+    /// <summary>The error the runtime reports for the turn.</summary>
     public AgentError Error { get; } = error;
 }

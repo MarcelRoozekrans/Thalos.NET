@@ -1,0 +1,200 @@
+using FluentAssertions;
+using Microsoft.Extensions.AI;
+using Thalos.Memory;
+using Xunit;
+
+namespace Thalos.Testing;
+
+/// <summary>
+/// Behavioural contract every <see cref="IMemoryIndex"/> must satisfy, run with the deterministic
+/// <see cref="HashedBagOfWordsEmbeddingGenerator"/> (cosine = word overlap). Derive, implement <see cref="CreateIndexAsync(IEmbeddingGenerator{string, Embedding{float}})"/>
+/// (fresh, empty index over the given generator; override <see cref="Dimensions"/> if your backend needs another size).
+/// </summary>
+/// <remarks>
+/// What the suite assumes beyond the interface docs: a blank query yields no hits (do not embed whitespace and match everything at
+/// <c>MinScore = 0</c>); a search with <c>MinScore = 0</c> over a handful of vectors returns every one of them (<c>score &gt;= MinScore</c>,
+/// exact recall at this size — an approximate index must not drop rows from a three-vector table); <c>TopK &lt;= 0</c> is treated as 1;
+/// an id is returned at most once even when several <see cref="MemoryScope.Partitions"/> match it (a scope whose shared owner equals the
+/// owner included); every test calls <c>CreateIndexAsync</c> exactly once, so an implementation may reset its backing table there.
+/// </remarks>
+public abstract class MemoryIndexContractTests
+{
+    /// <summary>Vector size of the generator the suite builds (override when the backend is fixed to another size).</summary>
+    protected virtual int Dimensions => 128;
+
+    /// <summary>Creates a fresh, empty index over <paramref name="embeddings"/>.</summary>
+    protected abstract ValueTask<IMemoryIndex> CreateIndexAsync(IEmbeddingGenerator<string, Embedding<float>> embeddings);
+
+    /// <summary>Creates a fresh, empty index over a <see cref="HashedBagOfWordsEmbeddingGenerator"/> of <see cref="Dimensions"/>.</summary>
+    protected ValueTask<IMemoryIndex> CreateIndexAsync() => CreateIndexAsync(new HashedBagOfWordsEmbeddingGenerator(Dimensions));
+
+    private static readonly DateTimeOffset T0 = new(2026, 8, 17, 12, 0, 0, TimeSpan.Zero);
+
+    /// <summary>A valid record with a fresh id and fixed timestamps.</summary>
+    protected static MemoryRecord Rec(string owner, AgentId? agent, string text, MemoryKind? kind = null) => new()
+    {
+        Id = MemoryId.New(), OwnerId = owner, AgentId = agent, Kind = kind ?? MemoryKind.Fact, Text = text, CreatedAt = T0, UpdatedAt = T0,
+    };
+
+    private static MemorySearchOptions Any(int topK = 10) => new(topK, 0.0);
+
+    [Fact]
+    public async Task Upsert_then_search_ranks_by_similarity_with_unit_range_scores()
+    {
+        var index = await CreateIndexAsync();
+        var xunit = Rec("alice", null, "The user prefers xUnit over NUnit for tests.");
+        var playwright = Rec("alice", null, "Playwright locators on the PRD page use data-testid.");
+        (await index.UpsertAsync([xunit, playwright], CancellationToken.None)).IsSuccess.Should().BeTrue();
+
+        var hits = await index.SearchAsync("xUnit or NUnit for the tests?", new MemoryScope("alice", null), Any(), CancellationToken.None);
+        hits.IsSuccess.Should().BeTrue(hits.IsFailure ? hits.Error.ToString() : "");
+        hits.Value.Should().NotBeEmpty();
+        hits.Value[0].Id.Should().Be(xunit.Id);
+        hits.Value.Should().OnlyContain(h => h.Score >= 0 && h.Score <= 1.0001);
+        hits.Value.Should().BeInDescendingOrder(h => h.Score);
+    }
+
+    [Fact]
+    public async Task Search_never_crosses_owners()
+    {
+        var index = await CreateIndexAsync();
+        await index.UpsertAsync([Rec("alice", null, "alice secret token"), Rec("bob", null, "bob secret token")], CancellationToken.None);
+        var hits = (await index.SearchAsync("secret token", new MemoryScope("alice", null), Any(), CancellationToken.None)).Value;
+        hits.Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task Agent_pinned_memories_are_visible_only_to_that_agent()
+    {
+        var index = await CreateIndexAsync();
+        var a = AgentId.New();
+        var b = AgentId.New();
+        var shared = Rec("alice", null, "shared note about deployment");
+        var pinnedA = Rec("alice", a, "agent a note about deployment");
+        var pinnedB = Rec("alice", b, "agent b note about deployment");
+        await index.UpsertAsync([shared, pinnedA, pinnedB], CancellationToken.None);
+
+        (await index.SearchAsync("note about deployment", new MemoryScope("alice", a), Any(), CancellationToken.None)).Value.Select(h => h.Id).Should().BeEquivalentTo([shared.Id, pinnedA.Id]);
+        (await index.SearchAsync("note about deployment", new MemoryScope("alice", b), Any(), CancellationToken.None)).Value.Select(h => h.Id).Should().BeEquivalentTo([shared.Id, pinnedB.Id]);
+        (await index.SearchAsync("note about deployment", new MemoryScope("alice", null), Any(), CancellationToken.None)).Value.Select(h => h.Id).Should().BeEquivalentTo([shared.Id]);
+    }
+
+    [Fact]
+    public async Task Shared_owner_partition_is_included_only_when_configured()
+    {
+        var index = await CreateIndexAsync();
+        var project = Rec("daedalus", null, "project learning about playwright locators");
+        var pinnedShared = Rec("daedalus", AgentId.New(), "pinned shared-owner learning about playwright locators");
+        await index.UpsertAsync([project, pinnedShared, Rec("alice", null, "unrelated")], CancellationToken.None);
+
+        // MinScore > 0: alice's zero-overlap record scores exactly 0, which a "score >= MinScore" index (in-memory, pgvector) would return at 0.0
+        var related = new MemorySearchOptions(10, 0.1);
+        (await index.SearchAsync("playwright locators learning", new MemoryScope("alice", null, "daedalus"), related, CancellationToken.None)).Value.Select(h => h.Id).Should().BeEquivalentTo([project.Id]);
+        (await index.SearchAsync("playwright locators learning", new MemoryScope("alice", null), related, CancellationToken.None)).Value.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task MinScore_and_TopK_apply()
+    {
+        var index = await CreateIndexAsync();
+        var exact = Rec("alice", null, "rotate the api key monthly");
+        await index.UpsertAsync([exact, Rec("alice", null, "rotate the logs weekly"), Rec("alice", null, "monthly report")], CancellationToken.None);
+
+        var strict = (await index.SearchAsync("rotate the api key monthly", new MemoryScope("alice", null), new MemorySearchOptions(10, 0.99), CancellationToken.None)).Value;
+        strict.Should().ContainSingle().Which.Id.Should().Be(exact.Id);
+        (await index.SearchAsync("rotate the api key monthly", new MemoryScope("alice", null), new MemorySearchOptions(1, 0.0), CancellationToken.None)).Value.Should().HaveCount(1);
+        (await index.SearchAsync("rotate the api key monthly", new MemoryScope("alice", null), new MemorySearchOptions(10, 0.0), CancellationToken.None)).Value.Should().HaveCount(3);
+    }
+
+    [Fact]
+    public async Task Upsert_same_id_replaces_the_vector()
+    {
+        var index = await CreateIndexAsync();
+        var r = Rec("alice", null, "alpha bravo charlie");
+        await index.UpsertAsync([r], CancellationToken.None);
+        await index.UpsertAsync([r with { Text = "delta echo foxtrot" }], CancellationToken.None);
+
+        (await index.SearchAsync("alpha bravo charlie", new MemoryScope("alice", null), new MemorySearchOptions(10, 0.5), CancellationToken.None)).Value.Should().BeEmpty();
+        (await index.SearchAsync("delta echo foxtrot", new MemoryScope("alice", null), Any(), CancellationToken.None)).Value.Should().ContainSingle().Which.Id.Should().Be(r.Id);
+    }
+
+    [Fact]
+    public async Task Duplicate_ids_in_one_batch_last_wins()
+    {
+        var index = await CreateIndexAsync();
+        var r = Rec("alice", null, "alpha bravo charlie");
+        (await index.UpsertAsync([r, r with { Text = "delta echo foxtrot" }], CancellationToken.None)).IsSuccess.Should().BeTrue();
+
+        (await index.SearchAsync("alpha bravo charlie", new MemoryScope("alice", null), new MemorySearchOptions(10, 0.5), CancellationToken.None)).Value.Should().BeEmpty();
+        (await index.SearchAsync("delta echo foxtrot", new MemoryScope("alice", null), Any(), CancellationToken.None)).Value.Should().ContainSingle().Which.Id.Should().Be(r.Id);
+    }
+
+    [Fact]
+    public async Task Remove_makes_it_unfindable_and_unknown_remove_succeeds()
+    {
+        var index = await CreateIndexAsync();
+        var r = Rec("alice", null, "golf hotel india");
+        await index.UpsertAsync([r], CancellationToken.None);
+        (await index.RemoveAsync(r.Id, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        (await index.RemoveAsync(MemoryId.New(), CancellationToken.None)).IsSuccess.Should().BeTrue();
+        (await index.SearchAsync("golf hotel india", new MemoryScope("alice", null), Any(), CancellationToken.None)).Value.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Empty_index_blank_query_and_empty_batch_are_successful_no_ops()
+    {
+        var index = await CreateIndexAsync();
+        (await index.UpsertAsync([], CancellationToken.None)).IsSuccess.Should().BeTrue();
+        var fresh = await index.SearchAsync("anything", new MemoryScope("alice", null), Any(), CancellationToken.None);
+        fresh.IsSuccess.Should().BeTrue();
+        fresh.Value.Should().BeEmpty();
+        await index.UpsertAsync([Rec("alice", null, "something")], CancellationToken.None);
+        (await index.SearchAsync("   ", new MemoryScope("alice", null), Any(), CancellationToken.None)).Value.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task TopK_at_or_below_zero_is_treated_as_one()
+    {
+        var index = await CreateIndexAsync();
+        await index.UpsertAsync([Rec("alice", null, "kilo lima mike"), Rec("alice", null, "kilo lima november")], CancellationToken.None);
+
+        (await index.SearchAsync("kilo lima", new MemoryScope("alice", null), new MemorySearchOptions(0, 0.0), CancellationToken.None)).Value.Should().HaveCount(1);
+        (await index.SearchAsync("kilo lima", new MemoryScope("alice", null), new MemorySearchOptions(-5, 0.0), CancellationToken.None)).Value.Should().HaveCount(1);
+    }
+
+    [Fact]
+    public async Task Shared_owner_equal_to_the_owner_yields_each_hit_once()
+    {
+        var index = await CreateIndexAsync();
+        var mine = Rec("alice", null, "oscar papa quebec");
+        await index.UpsertAsync([mine], CancellationToken.None);
+
+        var hits = (await index.SearchAsync("oscar papa quebec", new MemoryScope("alice", null, "alice"), Any(), CancellationToken.None)).Value;
+        hits.Should().ContainSingle("MemoryScope.Partitions de-duplicates the shared owner when it is the caller").Which.Id.Should().Be(mine.Id);
+    }
+
+    [Fact]
+    public async Task Hits_never_repeat_an_id_across_partitions()
+    {
+        var index = await CreateIndexAsync();
+        var agent = AgentId.New();
+        var ownerWide = Rec("alice", null, "sierra tango uniform");
+        var pinned = Rec("alice", agent, "sierra tango uniform victor");
+        var shared = Rec("daedalus", null, "sierra tango uniform whiskey");
+        await index.UpsertAsync([ownerWide, pinned, shared], CancellationToken.None);
+
+        var hits = (await index.SearchAsync("sierra tango uniform", new MemoryScope("alice", agent, "daedalus"), Any(), CancellationToken.None)).Value;
+        hits.Select(h => h.Id).Should().OnlyHaveUniqueItems();
+        hits.Select(h => h.Id).Should().BeEquivalentTo([ownerWide.Id, pinned.Id, shared.Id], "all three partitions are visible, each record once");
+    }
+
+    [Fact]
+    public async Task Probe_reports_available()
+    {
+        var index = await CreateIndexAsync();
+        var health = await index.ProbeAsync(CancellationToken.None);
+        health.IsSuccess.Should().BeTrue();
+        health.Value.Available.Should().BeTrue(health.Value.Detail);
+        health.Value.Dimensions.Should().Match(d => d == null || d == Dimensions);
+    }
+}

@@ -11,8 +11,9 @@ namespace Thalos.Runtime;
 /// </summary>
 /// <remarks>
 /// <para>
-/// Only the runtime begins, feeds and disposes scopes (those members are internal); the public surface is read-only:
-/// <see cref="Current"/>, <see cref="SessionId"/>, <see cref="TurnId"/>, <see cref="Caller"/>, <see cref="Events"/>, <see cref="ToolCalls"/>.
+/// Only the runtime begins, feeds and disposes scopes (those members are internal); the public surface is read-only —
+/// <see cref="Current"/>, <see cref="SessionId"/>, <see cref="TurnId"/>, <see cref="AgentId"/>, <see cref="Caller"/>, <see cref="Events"/>,
+/// <see cref="ToolCalls"/> — plus <see cref="PublishAsync"/> for extensions that raise their own events inside the turn.
 /// Tools and decorators may read <see cref="Current"/> to learn who is calling; they must never dispose it.
 /// </para>
 /// <para>
@@ -33,10 +34,11 @@ public sealed class TurnScope : IDisposable
     private readonly ConcurrentQueue<ToolCallSummary> _toolCalls = new();
     private readonly Channel<AgentEvent> _events;
 
-    private TurnScope(SessionId sessionId, TurnId turnId, ISecurityContext caller, TurnScope? previous)
+    private TurnScope(SessionId sessionId, TurnId turnId, AgentId agentId, ISecurityContext caller, TurnScope? previous)
     {
         SessionId = sessionId;
         TurnId = turnId;
+        AgentId = agentId;
         Caller = caller;
         _previous = previous;
         _events = Channel.CreateUnbounded<AgentEvent>(new UnboundedChannelOptions { SingleReader = true });
@@ -51,6 +53,9 @@ public sealed class TurnScope : IDisposable
     /// <summary>The turn being executed.</summary>
     public TurnId TurnId { get; }
 
+    /// <summary>The agent running the turn (default when the scope was begun without one).</summary>
+    public AgentId AgentId { get; }
+
     /// <summary>The principal on whose behalf the turn runs; tool authorization is evaluated against it.</summary>
     public ISecurityContext Caller { get; }
 
@@ -64,18 +69,19 @@ public sealed class TurnScope : IDisposable
     public IReadOnlyCollection<ToolCallSummary> ToolCalls => _toolCalls;
 
     /// <summary>Begins a scope on the current async flow and makes it <see cref="Current"/>; dispose to restore the previous scope.</summary>
-    internal static TurnScope Begin(SessionId sessionId, TurnId turnId, ISecurityContext caller)
+    internal static TurnScope Begin(SessionId sessionId, TurnId turnId, ISecurityContext caller, AgentId agentId = default)
     {
-        var scope = new TurnScope(sessionId, turnId, caller, _current.Value);
+        var scope = new TurnScope(sessionId, turnId, agentId, caller, _current.Value);
         _current.Value = scope;
         return scope;
     }
 
     /// <summary>
-    /// Queues an event for the runtime. Never throws once the scope is disposed: events published after the consumer
-    /// abandoned the stream (e.g. a tool still running after cancellation) are dropped silently.
+    /// Queues an event for the runtime (streamed to the caller and fanned out to <see cref="AgentEventHub"/>). Extensions such as
+    /// Thalos.NET.Memory publish their own <see cref="AgentEvent"/>s here. Never throws once the scope is disposed: events
+    /// published after the consumer abandoned the stream (e.g. a tool still running after cancellation) are dropped silently.
     /// </summary>
-    internal ValueTask PublishAsync(AgentEvent agentEvent, CancellationToken ct)
+    public ValueTask PublishAsync(AgentEvent agentEvent, CancellationToken ct)
     {
         ct.ThrowIfCancellationRequested();
         _events.Writer.TryWrite(agentEvent);

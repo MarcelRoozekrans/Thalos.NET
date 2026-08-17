@@ -54,11 +54,16 @@ gh workflow run ci.yml --ref vX.Y.Z -f publish_to_nuget=true
 
 Pre-1.0 bump rules (`release-please-config.json`): a `feat!:`/`BREAKING CHANGE` bumps the minor
 (0.1.0 → 0.2.0), a `feat:` bumps the patch (0.1.0 → 0.1.1). Once 1.0.0 is cut those become
-major/minor as usual.
+major/minor as usual. Because `feat:` only bumps the patch, a deliberate minor (0.2.0 for the memory
+packages) needs the same empty commit as step 1 with `Release-As: 0.2.0` before the first dispatch.
+
+0.2.0 ships eight packages (`Thalos.NET.Memory` and `Thalos.NET.Memory.RagNet` joined the six of 0.1.x);
+`pack-validate` checks the package list and each package's TFMs (`Thalos.NET.Memory.RagNet` is
+`net10.0`-only, the others ship `net8.0` + `net10.0`) and rehearses the push of all eight.
 
 ## Local development against a consumer (Daedalus)
 
-`scripts/pack-local.ps1` packs `0.1.0-local.<timestamp>` into `C:\Projects\Prive\.nuget-local`
+`scripts/pack-local.ps1` packs `0.2.0-local.<timestamp>` (the `VersionPrefix` in `Directory.Build.props`) into `C:\Projects\Prive\.nuget-local`
 (no GitVersion involved) — the consumer pins that exact version until the release is on nuget.org.
 
 ## Renovate
