@@ -15,6 +15,9 @@ namespace Thalos.Skills;
 public sealed class SkillTools(ISkillStore store, ISkillIndex index, IAgentCatalog agents, IOptions<SkillOptions> options)
 {
     // The catalogue is authoritative whatever search says, so every "no result" answer points back at it.
+    /// <summary>Ceiling on <c>skills__search</c> results, applied to both the model's topK and the configured default.</summary>
+    private const int MaxTopK = 20;
+
     private const string CatalogueTail = "the <skills> block in your instructions lists every skill you can load.";
 
     private const string UnavailableText = "Skill search is unavailable; " + CatalogueTail;
@@ -80,7 +83,12 @@ public sealed class SkillTools(ISkillStore store, ISkillIndex index, IAgentCatal
 
         // A copy: options.Value.Search is bound configuration shared by every turn, so the clamp lands on a local.
         var configured = options.Value.Search;
-        var search = new SkillSearchOptions { TopK = Math.Clamp(topK ?? configured.TopK, 1, 20), MinScore = configured.MinScore };
+        var wanted = Math.Clamp(topK ?? configured.TopK, 1, MaxTopK);
+
+        // Ask the index for the ceiling rather than for `wanted`. The index knows nothing about this agent's
+        // globs, so clamping before the filter returns fewer rows than were asked for whenever a higher-scoring
+        // skill is invisible to this agent — and that shortfall is itself a hint that one exists.
+        var search = new SkillSearchOptions { TopK = MaxTopK, MinScore = configured.MinScore };
         var hits = await index.SearchAsync(query, search, cancellationToken).ConfigureAwait(false);
         if (hits.IsFailure)
         {
@@ -89,8 +97,8 @@ public sealed class SkillTools(ISkillStore store, ISkillIndex index, IAgentCatal
                 : "Could not search skills: " + hits.Error.Message;
         }
 
-        var names = new List<SkillName>(hits.Value.Count);
-        for (var i = 0; i < hits.Value.Count; i++)
+        var names = new List<SkillName>(wanted);
+        for (var i = 0; i < hits.Value.Count && names.Count < wanted; i++)
         {
             if (SkillCatalogue.IsAllowed(globs, hits.Value[i].Name.Value))
             {

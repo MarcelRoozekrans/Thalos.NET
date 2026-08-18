@@ -146,7 +146,7 @@ public sealed class SkillSearchToolTests
     /// of an agent. A hidden better match therefore costs a row - two visible matching skills, <c>topK</c> 2, one row back.
     /// </summary>
     [Fact]
-    public async Task Globs_are_applied_after_topK_so_a_hidden_better_match_costs_a_row()
+    public async Task Globs_are_applied_before_topK_so_a_hidden_better_match_costs_no_row()
     {
         using var generator = new HashedBagOfWordsEmbeddingGenerator(512);
         var (_, _, store) = SkillToolsTests.Build(["dotnet-*"]);
@@ -157,12 +157,12 @@ public sealed class SkillSearchToolTests
         var (tools, agent, _) = SkillToolsTests.BuildOver(store, index, ["dotnet-*"], Unfiltered());
         using var scope = SkillToolsTests.Turn(agent);
 
-        // release scores 1.0 and takes one of the two slots before the globs are consulted.
-        Rows(await tools.SearchAsync("release publish", 2, CancellationToken.None)).Should().Equal("- dotnet-one: publish");
-
-        // Widening topK brings the second visible skill back, so the row count is not a function of what this agent can see.
-        Rows(await tools.SearchAsync("release publish", 3, CancellationToken.None))
+        // release scores 1.0 but is invisible to this agent, so it must not consume one of the two slots:
+        // asking for two visible skills returns two, and the row count never depends on what is hidden.
+        Rows(await tools.SearchAsync("release publish", 2, CancellationToken.None))
             .Should().Equal("- dotnet-one: publish", "- dotnet-two: publish extra words here");
+
+        Rows(await tools.SearchAsync("release publish", 1, CancellationToken.None)).Should().Equal("- dotnet-one: publish");
     }
 
     [Fact]
@@ -239,7 +239,8 @@ public sealed class SkillSearchToolTests
         Rows(await tools.SearchAsync("shared words here", -5, CancellationToken.None)).Should().ContainSingle("a negative topK clamps to 1");
         await tools.SearchAsync("shared words here", 999, CancellationToken.None);
 
-        index.Searches.Select(s => s.TopK).Should().Equal(1, 1, 20);
+        // The index is always asked for the ceiling, because the glob filter runs after it and before the clamp.
+        index.Searches.Select(s => s.TopK).Should().Equal(20, 20, 20);
         index.Searches.Should().AllSatisfy(s => s.Should().NotBeSameAs(options.Search, "the bound singleton is copied, never handed on"));
         options.Search.TopK.Should().Be(5, "the bound options instance is never mutated");
         options.Search.MinScore.Should().Be(0);
