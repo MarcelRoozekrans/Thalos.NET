@@ -3,8 +3,10 @@ using Thalos.Skills;
 
 namespace Thalos.Tests.Skills;
 
-public sealed class InMemorySkillStoreTests
+public sealed class InMemorySkillStoreTests : Thalos.Testing.SkillStoreContractTests
 {
+    protected override ValueTask<ISkillStore> CreateStoreAsync(TimeProvider clock) => new(new InMemorySkillStore(clock));
+
     private static FakeTimeProvider Clock() => new(new DateTimeOffset(2026, 8, 18, 12, 0, 0, TimeSpan.Zero));
 
     [Fact]
@@ -22,12 +24,11 @@ public sealed class InMemorySkillStoreTests
     }
 
     [Fact]
-    public async Task Get_unknown_returns_SkillNotFound()
+    public async Task Get_unknown_names_the_skill_in_the_error_message()
     {
         var store = new InMemorySkillStore(Clock());
         var got = await store.GetAsync(SkillName.Parse("nope"), CancellationToken.None);
         got.IsFailure.Should().BeTrue();
-        got.Error.Code.Should().Be(AgentErrorCode.SkillNotFound);
         got.Error.Message.Should().Contain("nope");
     }
 
