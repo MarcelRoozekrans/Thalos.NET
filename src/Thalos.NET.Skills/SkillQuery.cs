@@ -1,6 +1,6 @@
 namespace Thalos.Skills;
 
-/// <summary>Filter for <c>ISkillStore.ListAsync</c>. Null <em>and empty</em> filter lists mean "no filter".</summary>
+/// <summary>Filter for <see cref="ISkillStore.ListAsync"/>. Null <em>and empty</em> filter lists mean "no filter".</summary>
 public sealed record SkillQuery
 {
     /// <summary>Only these names. Null/empty = every name.</summary>
