@@ -36,7 +36,18 @@ internal sealed class RecordingSkillIndex(ISkillIndex inner) : ISkillIndex
         return OnUpsert?.Invoke(skills) is { } error ? new(UnitResult<AgentError>.Failure(error)) : inner.UpsertAsync(skills, ct);
     }
 
-    public ValueTask<Result<IReadOnlyList<SkillHit>, AgentError>> SearchAsync(string query, SkillSearchOptions options, CancellationToken ct) => inner.SearchAsync(query, options, ct);
+    /// <summary>The options object each search was handed, so a caller that mutates the bound singleton is visible.</summary>
+    public List<SkillSearchOptions> Searches { get; } = [];
+
+    public Func<string, AgentError?>? OnSearch { get; set; }
+
+    public ValueTask<Result<IReadOnlyList<SkillHit>, AgentError>> SearchAsync(string query, SkillSearchOptions options, CancellationToken ct)
+    {
+        Searches.Add(options);
+        return OnSearch?.Invoke(query) is { } error
+            ? new(Result<IReadOnlyList<SkillHit>, AgentError>.Failure(error))
+            : inner.SearchAsync(query, options, ct);
+    }
 
     public ValueTask<UnitResult<AgentError>> RemoveAsync(SkillName name, CancellationToken ct)
     {

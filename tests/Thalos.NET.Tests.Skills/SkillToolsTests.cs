@@ -38,13 +38,14 @@ public sealed partial class SkillToolsTests
 
     private const string UnknownSkill = "Unknown skill";
 
-    internal static (SkillTools Tools, AgentDefinition Agent, InMemorySkillStore Store) Build(IReadOnlyList<string> globs) =>
-        BuildOver(new InMemorySkillStore(new FakeTimeProvider(new DateTimeOffset(2026, 8, 18, 12, 0, 0, TimeSpan.Zero))), globs);
+    /// <summary>A tool set over a fresh store and no index at all, which is what a host without an embedding generator has.</summary>
+    internal static (SkillTools Tools, AgentDefinition Agent, InMemorySkillStore Store) Build(IReadOnlyList<string> globs, SkillOptions? options = null) =>
+        BuildOver(new InMemorySkillStore(new FakeTimeProvider(new DateTimeOffset(2026, 8, 18, 12, 0, 0, TimeSpan.Zero))), UnavailableSkillIndex.Instance, globs, options);
 
-    internal static (SkillTools Tools, AgentDefinition Agent, InMemorySkillStore Store) BuildOver(InMemorySkillStore store, IReadOnlyList<string> globs)
+    internal static (SkillTools Tools, AgentDefinition Agent, InMemorySkillStore Store) BuildOver(InMemorySkillStore store, ISkillIndex index, IReadOnlyList<string> globs, SkillOptions? options = null)
     {
         var agent = Agent(globs);
-        return (new SkillTools(store, Catalog(agent)), agent, store);
+        return (new SkillTools(store, index, Catalog(agent), Options.Create(options ?? new SkillOptions())), agent, store);
     }
 
     internal static AgentDefinition Agent(IReadOnlyList<string> globs) => new() { Id = AgentId.New(), Name = "a", Instructions = "i", Skills = globs };
@@ -79,7 +80,7 @@ public sealed partial class SkillToolsTests
     [GeneratedRegex(@"<\s*/\s*skills?\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 1000)]
     private static partial Regex CloseTag();
 
-    private static AIFunctionArguments Args(params (string Key, object? Value)[] args)
+    internal static AIFunctionArguments Args(params (string Key, object? Value)[] args)
     {
         var a = new AIFunctionArguments(StringComparer.Ordinal);
         foreach (var (k, v) in args)
@@ -226,7 +227,7 @@ public sealed partial class SkillToolsTests
         var inner = new InMemorySkillStore(new FakeTimeProvider(new DateTimeOffset(2026, 8, 18, 12, 0, 0, TimeSpan.Zero)));
         var store = new RecordingSkillStore(inner) { OnList = () => AgentError.SkillStoreFailed("the store is down") };
         var agent = Agent(["*"]);
-        var tools = new SkillTools(store, Catalog(agent));
+        var tools = new SkillTools(store, UnavailableSkillIndex.Instance, Catalog(agent), Options.Create(new SkillOptions()));
         using var scope = Turn(agent);
 
         (await tools.LoadAsync("release", CancellationToken.None)).Should().Contain("the store is down");
@@ -237,7 +238,7 @@ public sealed partial class SkillToolsTests
     public async Task A_store_that_throws_propagates_out_of_the_tool()
     {
         var agent = Agent(["*"]);
-        var tools = new SkillTools(new ThrowingSkillStore(), Catalog(agent));
+        var tools = new SkillTools(new ThrowingSkillStore(), UnavailableSkillIndex.Instance, Catalog(agent), Options.Create(new SkillOptions()));
         using var scope = Turn(agent);
 
         var load = async () => await tools.LoadAsync("release", CancellationToken.None);
@@ -301,7 +302,7 @@ public sealed partial class SkillToolsTests
         publisher.Of<ToolCallCompletedNotification>().Should().ContainSingle().Which.Succeeded.Should().BeFalse();
     }
 
-    private static async Task<List<AIFunction>> ResolveAsync(IServiceProvider services, AgentDefinition agent, RecordingNotificationPublisher publisher)
+    internal static async Task<List<AIFunction>> ResolveAsync(IServiceProvider services, AgentDefinition agent, RecordingNotificationPublisher publisher)
     {
         var authorizer = Substitute.For<IToolAuthorizer>();
         authorizer.AuthorizeAsync(default!, default!, default, default).ReturnsForAnyArgs(ToolAuthorizationDecision.Allow());
