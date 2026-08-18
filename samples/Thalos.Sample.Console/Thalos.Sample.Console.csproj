@@ -14,10 +14,13 @@
     <ProjectReference Include="..\..\src\Thalos.NET.Anthropic\Thalos.NET.Anthropic.csproj" />
     <ProjectReference Include="..\..\src\Thalos.NET.Sentinel\Thalos.NET.Sentinel.csproj" />
     <ProjectReference Include="..\..\src\Thalos.NET.Memory\Thalos.NET.Memory.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Skills\Thalos.NET.Skills.csproj" />
     <PackageReference Include="Microsoft.Extensions.Hosting" />
   </ItemGroup>
   <ItemGroup>
+    <!-- Update, not Include: the SDK's default None glob already owns these files, and a second Include is NETSDK1022. -->
     <None Update=".mcp.json" CopyToOutputDirectory="PreserveNewest" />
     <None Update="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="skills\**" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

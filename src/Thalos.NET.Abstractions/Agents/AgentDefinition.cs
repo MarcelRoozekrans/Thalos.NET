@@ -30,6 +30,13 @@ public sealed record AgentDefinition
     public IReadOnlyList<string> Tools { get; init; } = ["*"];
 
     /// <summary>
+    /// Glob allow-list over skill names (Thalos.NET.Skills). Unlike <see cref="Tools"/> the default is <em>empty</em>: a skill
+    /// catalogue is injected into every turn, so an agent opts in explicitly (<c>["*"]</c> for all). Added in 0.3.0; definitions
+    /// serialised before that simply carry an empty list. Compared by value by the agent factory.
+    /// </summary>
+    public IReadOnlyList<string> Skills { get; init; } = [];
+
+    /// <summary>
     /// Per-agent memory settings (Thalos.NET.Memory); null = host defaults. Compared by value by the agent factory. Added in 0.2.0:
     /// definitions serialised before that (or by hosts without memory) simply carry <see langword="null"/> here.
     /// </summary>

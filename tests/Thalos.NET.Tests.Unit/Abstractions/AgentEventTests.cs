@@ -26,6 +26,7 @@ public sealed class AgentEventTests
     [InlineData(typeof(MemoryRecallFailedEvent), "memory-recall-failed")]
     [InlineData(typeof(MemoryIndexPendingEvent), "memory-index-pending")]
     [InlineData(typeof(MemoryQuarantinedEvent), "memory-quarantined")]
+    [InlineData(typeof(SkillCatalogueFailedEvent), "skill-catalogue-failed")]
     public void Kinds_are_stable_wire_names(Type type, string kind)
     {
         AgentEvent.KindOf(type).Should().Be(kind);

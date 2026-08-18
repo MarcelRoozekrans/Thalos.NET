@@ -35,6 +35,9 @@ public static class AgentEventKinds
 
     /// <summary><see cref="MemoryQuarantinedEvent"/> (Thalos.NET.Memory).</summary>
     public const string MemoryQuarantined = "memory-quarantined";
+
+    /// <summary><see cref="SkillCatalogueFailedEvent"/> (Thalos.NET.Skills).</summary>
+    public const string SkillCatalogueFailed = "skill-catalogue-failed";
 }
 
 /// <summary>Streaming event emitted while a turn runs. <see cref="Kind"/> is the stable wire name (SSE event type), see <see cref="AgentEventKinds"/>.</summary>
@@ -44,6 +47,7 @@ public abstract record AgentEvent(SessionId SessionId, TurnId TurnId)
     public abstract string Kind { get; }
 
     /// <summary>Maps a concrete event type to its wire name; throws <see cref="ArgumentOutOfRangeException"/> for any other type.</summary>
+#pragma warning disable MA0051 // one append-only branch per event kind: a flat dispatch reads better here than a lookup table
     public static string KindOf(Type eventType)
     {
         if (eventType == typeof(TextDeltaEvent))
@@ -101,8 +105,14 @@ public abstract record AgentEvent(SessionId SessionId, TurnId TurnId)
             return AgentEventKinds.MemoryQuarantined;
         }
 
+        if (eventType == typeof(SkillCatalogueFailedEvent))
+        {
+            return AgentEventKinds.SkillCatalogueFailed;
+        }
+
         throw new ArgumentOutOfRangeException(nameof(eventType), eventType, "Unknown AgentEvent type");
     }
+#pragma warning restore MA0051
 }
 
 /// <summary>A chunk of assistant text.</summary>
@@ -186,4 +196,11 @@ public sealed record MemoryQuarantinedEvent(SessionId SessionId, TurnId TurnId, 
 {
     /// <inheritdoc />
     public override string Kind => AgentEventKinds.MemoryQuarantined;
+}
+
+/// <summary>The skill catalogue could not be built for this turn (<paramref name="Code"/> says why); the turn continued without a <c>&lt;skills&gt;</c> block.</summary>
+public sealed record SkillCatalogueFailedEvent(SessionId SessionId, TurnId TurnId, AgentErrorCode Code) : AgentEvent(SessionId, TurnId)
+{
+    /// <inheritdoc />
+    public override string Kind => AgentEventKinds.SkillCatalogueFailed;
 }

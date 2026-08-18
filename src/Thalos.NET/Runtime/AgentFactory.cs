@@ -27,7 +27,7 @@ namespace Thalos.Runtime;
 /// </para>
 /// <para>
 /// A cached agent is reused while the supplied <see cref="AgentDefinition"/> is equal by value (id, name, description,
-/// instructions, model, max output tokens, tool globs, memory settings); a changed definition rebuilds and disposes the old pipeline.
+/// instructions, model, max output tokens, tool globs, skill globs, memory settings); a changed definition rebuilds and disposes the old pipeline.
 /// </para>
 /// <para>
 /// Every registered <see cref="IAgentContextProviderSource"/> is asked once per build; the non-null
@@ -176,6 +176,7 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
         && string.Equals(a.Model, b.Model, StringComparison.Ordinal)
         && a.MaxOutputTokens == b.MaxOutputTokens
         && a.Tools.SequenceEqual(b.Tools, StringComparer.Ordinal)
+        && a.Skills.SequenceEqual(b.Skills, StringComparer.Ordinal)
         && Equals(a.Memory, b.Memory);
 
     private async Task<Result<Entry, AgentError>> BuildAsync(AgentDefinition definition)
