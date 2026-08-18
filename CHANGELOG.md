@@ -6,7 +6,14 @@
 ### Features
 
 * **skills:** Thalos.NET.Skills — agent-scoped procedure documents ([#28](https://github.com/MarcelRoozekrans/Thalos.NET/issues/28)) ([904cbf5](https://github.com/MarcelRoozekrans/Thalos.NET/commit/904cbf571a3429de93c2db7f57e44ae45a87f772))
-
+* **abstractions:** `AgentDefinition` gains `Skills`, a glob allow-list over skill names. It is additive
+  and defaults to **empty**, so definitions written for 0.2.0 behave exactly as before — unlike `Tools`,
+  an agent opts into a skill catalogue explicitly, because a catalogue costs tokens on every turn.
+* **memory:** `MemoryRecallBlock` now neutralises `<skills` and `</skills` as well as its own tag.
+  Recalled memory text is untrusted, and from 0.3.0 the `<skills>` block carries meaning in the prompt,
+  so without this a stored memory could forge a skill entry beside the real catalogue. The pattern also
+  gained a word boundary, which stops it over-escaping unrelated text such as `<memoriesX`. Escaping is
+  therefore slightly different from 0.2.0 for text that was never a tag.
 
 ### Bug Fixes
 
