@@ -10,8 +10,9 @@ namespace Thalos.Skills;
 /// per sync; every turn is then a dictionary lookup rather than a query. Rendering is deterministic: entries are sorted by name
 /// and the block is capped by the configured budget with an explicit "… and N more" line — truncation is never silent.
 /// </summary>
+/// <remarks>Not sealed: a host may override <see cref="Render"/>; the default implementation never throws.</remarks>
 [Singleton(As = typeof(SkillCatalogue))] // registered by UseSkills through the generated AddThalosSkillsServices()
-public sealed class SkillCatalogue
+public class SkillCatalogue
 {
     private readonly ConcurrentDictionary<string, string?> _rendered = new(StringComparer.Ordinal);
     private volatile Snapshot _snapshot = new([], 0);
@@ -26,7 +27,7 @@ public sealed class SkillCatalogue
     }
 
     /// <summary>The block for an agent whose <see cref="AgentDefinition.Skills"/> are <paramref name="globs"/>, or null when nothing matches.</summary>
-    public string? Render(IReadOnlyList<string> globs)
+    public virtual string? Render(IReadOnlyList<string> globs)
     {
         ArgumentNullException.ThrowIfNull(globs);
         var snapshot = _snapshot;
