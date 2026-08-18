@@ -1,4 +1,4 @@
-using FluentAssertions; // AwesomeAssertions 7.0.0 namespace
+using AwesomeAssertions;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Time.Testing;
 using Xunit;

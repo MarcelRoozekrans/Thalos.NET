@@ -1,4 +1,4 @@
-using FluentAssertions; // AwesomeAssertions 7.x namespace
+using AwesomeAssertions;
 using Microsoft.Extensions.Time.Testing;
 using Thalos.Memory;
 using Xunit;
