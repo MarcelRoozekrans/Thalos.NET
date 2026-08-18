@@ -115,6 +115,28 @@ public abstract class SkillStoreContractTests
         (await store.ListAsync(new SkillQuery { IncludeInactive = true }, CancellationToken.None)).Value.Select(s => s.Name.Value).Should().Equal(["alpha", "mid", "zeta"]);
     }
 
+    /// <summary>
+    /// Ordering is <em>ordinal</em>, not collation-dependent. The other ordering fact uses names that sort identically
+    /// under every collation, so it cannot tell the two apart; these four differ. Ordinal orders by code point —
+    /// <c>-</c> (U+002D) &lt; <c>0</c> (U+0030) &lt; <c>_</c> (U+005F) &lt; <c>a</c> (U+0061) — whereas a typical database
+    /// collation treats punctuation as variable-weight and would return a different order. A store that delegates
+    /// ordering to the database must therefore ask for a binary/C collation or sort client-side.
+    /// </summary>
+    [Fact]
+    public async Task List_orders_ordinally_not_by_culture_collation()
+    {
+        var clock = NewClock();
+        var store = await CreateStoreAsync(clock);
+        foreach (var name in new[] { "aab", "a_b", "a0b", "a-b" })
+        {
+            (await store.UpsertAsync(NewSkill(clock, name), CancellationToken.None).ConfigureAwait(false)).IsSuccess.Should().BeTrue();
+        }
+
+        var listed = (await store.ListAsync(new SkillQuery(), CancellationToken.None).ConfigureAwait(false)).Value;
+
+        listed.Select(s => s.Name.Value).Should().Equal(["a-b", "a0b", "a_b", "aab"]);
+    }
+
     [Fact]
     public async Task List_filters_by_name_and_by_tag_and_empty_filters_mean_no_filter()
     {
