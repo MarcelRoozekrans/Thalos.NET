@@ -7,37 +7,45 @@ namespace Thalos.Skills;
 
 /// <summary>
 /// The rendered <c>&lt;skills&gt;</c> block, cached per glob set. <see cref="SkillSyncService"/> calls <see cref="Set"/> once
-/// per sync; every turn is then a dictionary lookup rather than a query. Rendering is deterministic: entries are sorted by name
+/// per sync; every turn is then a dictionary lookup rather than a query. <see cref="Set"/> may run while a turn is rendering:
+/// the snapshot and its cache are swapped as one pair, so a render that loses the race returns the snapshot it captured and
+/// cannot leave that block behind for later turns. Rendering is deterministic: entries are sorted by name
 /// and the block is capped by the configured budget with an explicit "… and N more" line — truncation is never silent.
 /// </summary>
 /// <remarks>Not sealed: a host may override <see cref="Render"/>; the default implementation never throws.</remarks>
 [Singleton(As = typeof(SkillCatalogue))] // registered by UseSkills through the generated AddThalosSkillsServices()
 public class SkillCatalogue
 {
-    private readonly ConcurrentDictionary<string, string?> _rendered = new(StringComparer.Ordinal);
-    private volatile Snapshot _snapshot = new([], 0);
+    private volatile State _state = new(new Snapshot([], 0), NewCache());
 
-    /// <summary>Replaces the catalogue's contents (active skills only, any order) and clears the per-glob-set cache.</summary>
+    /// <summary>Replaces the catalogue's contents (active skills only, any order) and the per-glob-set cache with it.</summary>
     public void Set(IReadOnlyList<SkillDocument> skills, int maxChars)
     {
         ArgumentNullException.ThrowIfNull(skills);
         var sorted = skills.OrderBy(s => s.Name).ToList();
-        _snapshot = new Snapshot(sorted, maxChars);
-        _rendered.Clear();
+
+        // A new dictionary, not Clear(): the snapshot and its cache are swapped as one immutable pair. Clearing a
+        // shared dictionary leaves a Render that already captured the previous snapshot free to insert its now-stale
+        // block into the cache this call just emptied, where nothing would ever evict it again — every later turn
+        // would read the old catalogue for the rest of the process. A render that loses the race can now only write
+        // into the dictionary that belongs to the snapshot it rendered, which nobody reads any more.
+        _state = new State(new Snapshot(sorted, maxChars), NewCache());
     }
 
     /// <summary>The block for an agent whose <see cref="AgentDefinition.Skills"/> are <paramref name="globs"/>, or null when nothing matches.</summary>
     public virtual string? Render(IReadOnlyList<string> globs)
     {
         ArgumentNullException.ThrowIfNull(globs);
-        var snapshot = _snapshot;
-        if (snapshot.Skills.Count == 0 || globs.Count == 0)
+        var state = _state;
+        if (state.Snapshot.Skills.Count == 0 || globs.Count == 0)
         {
             return null;
         }
 
-        return _rendered.GetOrAdd(CacheKey(globs), static (_, state) => RenderCore(Matching(state.Snapshot.Skills, state.Globs), state.Snapshot.MaxChars), (Snapshot: snapshot, Globs: globs));
+        return state.Rendered.GetOrAdd(CacheKey(globs), static (_, s) => RenderCore(Matching(s.Snapshot.Skills, s.Globs), s.Snapshot.MaxChars), (state.Snapshot, Globs: globs));
     }
+
+    private static ConcurrentDictionary<string, string?> NewCache() => new(StringComparer.Ordinal);
 
     /// <summary>The active skills matching <paramref name="globs"/>, sorted by name.</summary>
     internal static List<SkillDocument> Matching(IReadOnlyList<SkillDocument> skills, IReadOnlyList<string> globs)
@@ -129,4 +137,7 @@ public class SkillCatalogue
     }
 
     private sealed record Snapshot(IReadOnlyList<SkillDocument> Skills, int MaxChars);
+
+    /// <summary>A snapshot and the cache of blocks rendered from it — swapped together so the two can never disagree.</summary>
+    private sealed record State(Snapshot Snapshot, ConcurrentDictionary<string, string?> Rendered);
 }

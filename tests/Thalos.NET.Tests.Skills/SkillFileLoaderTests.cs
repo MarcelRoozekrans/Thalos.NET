@@ -49,6 +49,25 @@ public sealed class SkillFileLoaderTests
     }
 
     [Fact]
+    public void Enumerate_keeps_the_root_when_one_subfolder_cannot_be_listed()
+    {
+        // An ACL change, an unmounted share or an antivirus lock on one folder must cost that one skill.
+        // Failing the whole root would skip the deactivation sweep for every root and, before that guard
+        // existed, retire every skill the root contributed.
+        using var folder = new SkillFolder();
+        folder.WriteFolderSkill("locked");
+        folder.WriteFolderSkill("release");
+        folder.WriteFlatSkill("notes");
+
+        using var denied = folder.DenyAccess("locked");
+        var files = SkillFileLoader.Enumerate(folder.Root);
+
+        files.IsSuccess.Should().BeTrue(files.IsFailure ? files.Error.ToString() : "");
+        files.Value.Select(f => SkillFileLoader.RelativePath(folder.Root, f))
+            .Should().Equal(["locked/SKILL.md", "notes.md", "release/SKILL.md"], "the unreadable folder is offered as one candidate file, which LoadAsync then reports as skipped");
+    }
+
+    [Fact]
     public void Enumerate_reports_a_missing_or_unreadable_root_instead_of_throwing()
     {
         var result = SkillFileLoader.Enumerate(Path.Combine(Path.GetTempPath(), "thalos-skills-does-not-exist-" + Guid.NewGuid().ToString("N")));

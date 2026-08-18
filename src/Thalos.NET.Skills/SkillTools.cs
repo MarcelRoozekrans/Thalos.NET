@@ -18,6 +18,9 @@ public sealed class SkillTools(ISkillStore store, ISkillIndex index, IAgentCatal
     /// <summary>Ceiling on <c>skills__search</c> results, applied to both the model's topK and the configured default.</summary>
     private const int MaxTopK = 20;
 
+    /// <summary>Longest run of the model's own name text echoed back to it; the parameter itself is unbounded.</summary>
+    private const int MaxEchoedNameChars = 80;
+
     private const string CatalogueTail = "the <skills> block in your instructions lists every skill you can load.";
 
     private const string UnavailableText = "Skill search is unavailable; " + CatalogueTail;
@@ -45,7 +48,7 @@ public sealed class SkillTools(ISkillStore store, ISkillIndex index, IAgentCatal
         var found = await store.ListAsync(new SkillQuery { Names = [skill] }, cancellationToken).ConfigureAwait(false);
         if (found.IsFailure)
         {
-            return $"Could not load skill '{skill.Value}': {found.Error.Message}";
+            return $"Could not load skill '{skill.Value}': {SkillBlock.SanitizeLine(found.Error.Message)}";
         }
 
         if (found.Value.Count == 0)
@@ -94,7 +97,7 @@ public sealed class SkillTools(ISkillStore store, ISkillIndex index, IAgentCatal
         {
             return hits.Error.Code == AgentErrorCode.SkillSearchUnavailable
                 ? UnavailableText
-                : "Could not search skills: " + hits.Error.Message;
+                : "Could not search skills: " + SkillBlock.SanitizeLine(hits.Error.Message);
         }
 
         var names = new List<SkillName>(wanted);
@@ -112,7 +115,7 @@ public sealed class SkillTools(ISkillStore store, ISkillIndex index, IAgentCatal
         }
 
         var found = await store.ListAsync(new SkillQuery { Names = names }, cancellationToken).ConfigureAwait(false);
-        return found.IsFailure ? "Could not search skills: " + found.Error.Message : Render(names, found.Value);
+        return found.IsFailure ? "Could not search skills: " + SkillBlock.SanitizeLine(found.Error.Message) : Render(names, found.Value);
     }
 
     /// <summary>Ranked lines in hit order (the store returns them sorted by name), descriptions only — never a body.</summary>
@@ -146,5 +149,25 @@ public sealed class SkillTools(ISkillStore store, ISkillIndex index, IAgentCatal
         return scope is not null && scope.AgentId != default && agents.TryGet(scope.AgentId, out var agent) ? agent.Skills : [];
     }
 
-    private static string UnknownText(string name) => string.Concat("Unknown skill '", name, UnknownTail);
+    /// <summary>
+    /// The one answer every "you cannot have this" case shares, echoing what the model asked for. <paramref name="name"/> is
+    /// raw model input on a model-facing path, so it is sanitised like every other echoed string and capped: unsanitised it
+    /// forges a <c>&lt;skill&gt;</c> block inside the tool result, which the next round trip shows the model and which also
+    /// reaches <c>ToolCall.ResultPreview</c>. The same function on the same input, so out-of-glob, unknown, inactive and
+    /// unparsable names still answer byte for byte alike.
+    /// </summary>
+    private static string UnknownText(string name) => string.Concat("Unknown skill '", Echo(name), UnknownTail);
+
+    /// <summary>Sanitised and capped to <see cref="MaxEchoedNameChars"/>, never splitting a surrogate pair.</summary>
+    private static string Echo(string name)
+    {
+        var clean = SkillBlock.SanitizeLine(name);
+        if (clean.Length <= MaxEchoedNameChars)
+        {
+            return clean;
+        }
+
+        var cut = char.IsHighSurrogate(clean[MaxEchoedNameChars - 1]) ? MaxEchoedNameChars - 1 : MaxEchoedNameChars;
+        return string.Concat(clean.AsSpan(0, cut), "…");
+    }
 }

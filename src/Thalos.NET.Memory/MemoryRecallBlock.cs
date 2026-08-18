@@ -56,12 +56,21 @@ internal static partial class MemoryRecallBlock
     private static string Plural(int n, string unit) => string.Create(CultureInfo.InvariantCulture, $"{n} {unit}{(n == 1 ? "" : "s")} ago");
 
     /// <summary>
-    /// One line, and neither the closing nor a forged opening tag can be produced from memory text: every <c>&lt;memories</c> /
-    /// <c>&lt;/memories</c> (any casing, whitespace allowed around the slash) gets its <c>&lt;</c> escaped to <c>&amp;lt;</c>; the rest is kept as written.
+    /// One line, and neither the closing nor a forged opening tag can be produced from memory text: every <c>&lt;memories</c>,
+    /// <c>&lt;/memories</c>, <c>&lt;skill</c>, <c>&lt;skills</c> or their closing forms (any casing, whitespace allowed around
+    /// the slash) gets its <c>&lt;</c> escaped to <c>&amp;lt;</c>; the rest is kept as written.
     /// </summary>
+    /// <remarks>
+    /// The skill tags are neutralised here too, and deliberately. Memory text is extracted from the user's conversation and is
+    /// untrusted, while <c>Thalos.NET.Skills</c> injects its catalogue into the very same <c>ChatOptions.Instructions</c> —
+    /// so a memory that could spell <c>&lt;skills&gt;</c> would be authoring a skill entry the model treats as trusted because
+    /// it comes from git. <c>Thalos.NET.Skills</c> escapes both tag families for the mirror-image reason; neither package
+    /// references the other, so the two patterns are kept in step by their tests, not by a shared type.
+    /// </remarks>
     internal static string Sanitize(string text) =>
         MemoriesTag().Replace(text.ReplaceLineEndings(" "), static m => string.Concat("&lt;", m.ValueSpan[1..])).Trim();
 
-    [GeneratedRegex(@"<\s*/?\s*memories", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 1000)] // MA0009: timeout (memory text is ≤ 4000 chars; the pattern is linear)
+    // The word boundary keeps the escape to real tags: "<memoriesX" is not one, and neither is "<skillset".
+    [GeneratedRegex(@"<\s*/?\s*(?:memories|skills?)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 1000)] // MA0009: timeout (memory text is ≤ 4000 chars; the pattern is linear)
     private static partial Regex MemoriesTag();
 }

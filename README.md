@@ -214,10 +214,14 @@ the configured order** (on a duplicate name the first root wins and the loser is
 unchanged, deactivates skills whose files have disappeared (the row survives, but the skill leaves every catalogue and can
 no longer be loaded) and republishes the catalogue and the index. A malformed file is logged and skipped — one bad skill
 must never stop a host. A **store** failure is fatal and fails the host start: an agent silently missing its procedures is
-worse than a host that will not start. A configured root that does not exist is deliberately *not* a configuration error; it
-is logged and the library is left alone, because a path typo must never retire every skill. What *is* validated at host
-start: `Catalogue.MaxChars` ≥ 0, `Search.TopK` ≥ 1, `Search.MinScore` in [0, 1] (roots are only trimmed, made absolute and
-de-duplicated). There is no `WatchFiles`, so **editing a skill needs a restart** — on purpose: changing a procedure the agent
+worse than a host that will not start. A configured root that cannot be read is deliberately *not* a configuration error; it
+is logged and the library is left alone — that run upserts whatever the readable roots hold but **deactivates nothing at
+all**, whether one root failed or every root did, because a listing missing a root says nothing about the skills that root
+contributes and a path typo must never retire a skill. The same applies one level down: a sub-folder that cannot be listed
+costs at most its own `SKILL.md`, never the root. What *is* validated at host
+start: `Catalogue.MaxChars` ≥ 0, `Search.TopK` ≥ 1, `Search.MinScore` in [0, 1], and every root has to be a path the
+file system could express — a value holding a NUL is a `Thalos:Skills:` validation failure naming its index, not an
+`ArgumentException` out of the options provider (roots are otherwise only trimmed, made absolute and de-duplicated). There is no `WatchFiles`, so **editing a skill needs a restart** — on purpose: changing a procedure the agent
 has already loaded mid-run would be worse. `InMemorySkillStore` ships for tests and small hosts; a production host plugs its
 own with `UseSkillStore<T>()` (verified by `SkillStoreContractTests` in `Thalos.NET.Testing`) and an index with
 `UseSkillIndex<T>()` — either may be called before or after `UseSkills`, and the custom type wins in both orders.

@@ -28,7 +28,8 @@ public static partial class SkillThalosBuilderExtensions
     /// roots are trimmed, de-duplicated and made absolute; <see cref="SkillCatalogueOptions.MaxChars"/> must be ≥ 0,
     /// <see cref="SkillSearchOptions.TopK"/> ≥ 1 and <see cref="SkillSearchOptions.MinScore"/> in [0, 1]; otherwise an
     /// <see cref="OptionsValidationException"/> is thrown. A root that does not exist is deliberately <em>not</em> a
-    /// configuration error — the sync logs it and leaves the library alone, because a path typo must never retire every skill.
+    /// configuration error — the sync logs it and leaves the library alone, deactivating nothing that run whether one root
+    /// failed or all of them did, because a path typo must never retire a skill.
     /// </para>
     /// <para>
     /// <see cref="SkillOptions.Enabled"/> is a runtime switch, not a registration one: the services are always registered and
@@ -112,6 +113,11 @@ public static partial class SkillThalosBuilderExtensions
     }
 
     /// <summary>Trims roots, drops blanks, makes them absolute and removes duplicates (the sync searches them in order).</summary>
+    /// <remarks>
+    /// A root that no path can express — a NUL is legal JSON and reaches here straight from a configuration file — is kept
+    /// verbatim rather than expanded, so <see cref="Describe"/> reports it as a <c>Thalos:Skills</c> validation failure like
+    /// every other misconfiguration instead of an <see cref="ArgumentException"/> escaping <c>PostConfigure</c>.
+    /// </remarks>
     private static void Normalize(SkillOptions o)
     {
         var seen = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
@@ -124,7 +130,12 @@ public static partial class SkillThalosBuilderExtensions
                 continue;
             }
 
-            var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+            if (FullPath(root) is not { } full)
+            {
+                roots.Add(root);
+                continue;
+            }
+
             if (seen.Add(full))
             {
                 roots.Add(full);
@@ -134,6 +145,19 @@ public static partial class SkillThalosBuilderExtensions
         o.Roots = roots;
     }
 
+    /// <summary>The absolute, separator-trimmed form of <paramref name="root"/>, or null when no path can hold it.</summary>
+    private static string? FullPath(string root)
+    {
+        try
+        {
+            return Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or IOException)
+        {
+            return null;
+        }
+    }
+
     /// <summary>The first violation as text, or null when the options are valid.</summary>
     internal static string? Describe(SkillOptions o)
     {
@@ -141,6 +165,15 @@ public static partial class SkillThalosBuilderExtensions
         if (o.Catalogue is null || o.Search is null || o.Roots is null)
         {
             return "Roots, Catalogue and Search must not be null.";
+        }
+
+        for (var i = 0; i < o.Roots.Count; i++)
+        {
+            // The value is never echoed: what makes it invalid is a character that cannot be printed in the first place.
+            if (o.Roots[i] is { } root && root.Trim().Length > 0 && FullPath(root) is null)
+            {
+                return string.Create(CultureInfo.InvariantCulture, $"Roots[{i}] is not a usable file-system path (it holds a NUL or another character no path can express).");
+            }
         }
 
         if (o.Catalogue.MaxChars < 0)

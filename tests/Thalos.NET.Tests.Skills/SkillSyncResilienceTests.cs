@@ -127,7 +127,58 @@ public sealed class SkillSyncResilienceTests
 
         result.Value.Scanned.Should().Be(1);
         log.Entries.Should().Contain(e => e.EventId == 562 && e.Level == LogLevel.Warning);
-        store.DeactivateCalls.Should().ContainSingle();
+        store.Upserts.Should().Equal(["release"], "the readable root still syncs");
+        store.DeactivateCalls.Should().BeEmpty("an unreadable root says nothing about the skills that live in it, so the sweep is skipped");
+        log.Entries.Should().Contain(e => e.EventId == 569 && e.Level == LogLevel.Warning);
+    }
+
+    /// <summary>The blocker: with two roots and one gone, the sweep would retire everything the missing root contributed.</summary>
+    [Fact]
+    public async Task A_root_that_disappears_never_retires_the_skills_it_contributed()
+    {
+        var clock = Clock();
+        using var kept = new SkillFolder("kept");
+        using var lost = new SkillFolder("lost");
+        kept.WriteFolderSkill("release");
+        lost.WriteFolderSkill("migrations");
+        var (sync, store, log) = Build(clock, Roots(kept.Root, lost.Root));
+
+        var first = await sync.SyncAsync(CancellationToken.None);
+        first.Value.Should().Be(new SkillSyncReport(2, 2, 0, 0, 0));
+        store.DeactivateCalls.Clear();
+
+        lost.Dispose(); // the share is unmounted, the checkout is gone, the ACL changed — the root is simply unreadable
+
+        var second = await sync.SyncAsync(CancellationToken.None);
+
+        second.IsSuccess.Should().BeTrue(second.IsFailure ? second.Error.ToString() : "");
+        second.Value.Deactivated.Should().Be(0);
+        store.DeactivateCalls.Should().BeEmpty("a path typo must never retire a skill, whether it hits one root or every root");
+        (await store.ListAsync(new SkillQuery(), CancellationToken.None)).Value.Select(s => s.Name.Value)
+            .Should().Equal(["migrations", "release"], "the missing root's skill is still active");
+        log.Entries.Should().Contain(e => e.EventId == 569 && e.Level == LogLevel.Warning);
+    }
+
+    [Fact]
+    public async Task An_unreadable_subfolder_costs_one_skill_not_the_whole_root()
+    {
+        using var folder = new SkillFolder();
+        folder.WriteFolderSkill("locked");
+        folder.WriteFolderSkill("release");
+        folder.WriteFlatSkill("notes");
+        var (sync, store, log) = Build(Clock(), Roots(folder.Root));
+
+        using var denied = folder.DenyAccess("locked");
+        var result = await sync.SyncAsync(CancellationToken.None);
+
+        // Whether 'locked' itself loads is a platform detail — Windows still opens a named child when only
+        // listing the folder is denied, Unix mode 000 does not — so what is asserted is the part that must
+        // hold everywhere: the root is not failed, and the skills outside that folder are untouched.
+        result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error.ToString() : "");
+        log.Entries.Should().NotContain(e => e.EventId == 562, "the root itself is perfectly readable");
+        (await store.ListAsync(new SkillQuery(), CancellationToken.None)).Value.Select(s => s.Name.Value)
+            .Should().Contain(["notes", "release"], "one unlistable folder must not cost the skills beside it");
+        store.DeactivateCalls.Should().ContainSingle("every configured root was readable, so the sweep still runs");
     }
 
     [Fact]

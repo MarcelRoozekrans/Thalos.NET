@@ -178,6 +178,30 @@ public sealed class SkillSearchToolTests
         result.Should().Contain("unavailable").And.Contain("<skills>");
     }
 
+    /// <summary>Both plug-in points report their own text, and neither may author a block inside the answer.</summary>
+    [Fact]
+    public async Task Store_and_index_error_text_is_sanitised_before_the_model_sees_it()
+    {
+        using var generator = new HashedBagOfWordsEmbeddingGenerator(512);
+        var (_, _, inner) = SkillToolsTests.Build(["*"]);
+        var index = await IndexedAsync(inner, generator, SkillModelTests.Doc("release", "how we cut and publish a release"));
+        var agent = SkillToolsTests.Agent(["*"]);
+        var store = new RecordingSkillStore(inner);
+        var failingIndex = new RecordingSkillIndex(index) { OnSearch = _ => AgentError.SkillStoreFailed(SkillToolsTests.HostileMessage) };
+        using var scope = SkillToolsTests.Turn(agent);
+
+        var fromIndex = await SkillToolsTests.ToolsOver(store, failingIndex, agent).SearchAsync("release", null, CancellationToken.None);
+        store.OnList = () => AgentError.SkillStoreFailed(SkillToolsTests.HostileMessage);
+        var fromStore = await SkillToolsTests.ToolsOver(store, index, agent).SearchAsync("release", null, CancellationToken.None);
+
+        foreach (var answer in new[] { fromIndex, fromStore })
+        {
+            answer.Should().StartWith("Could not search skills: ");
+            answer.Should().Contain("&lt;/skill>").And.Contain("&lt;skills note=");
+            answer.Should().NotContain("</skill>", "a plug-in store or index must not be able to close the block it lands next to");
+        }
+    }
+
     [Fact]
     public async Task An_index_failure_that_is_not_unavailability_is_reported_as_text()
     {

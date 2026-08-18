@@ -237,6 +237,22 @@ public sealed class SkillDependencyInjectionTests
         sp.GetRequiredService<IOptions<SkillOptions>>().Value.Roots.Should().ContainSingle();
     }
 
+    /// <summary>
+    /// A NUL is legal JSON, so it can reach Roots from a config file. Path.GetFullPath then throws
+    /// ArgumentException straight out of PostConfigure, which is not how any other Thalos:Skills
+    /// misconfiguration reports itself: the operator gets a raw BCL exception with no section name.
+    /// </summary>
+    [Fact]
+    public void A_root_no_path_can_hold_is_reported_like_every_other_misconfiguration()
+    {
+        using var sp = Build(configure: o => o.Roots.Add("skills bad"));
+
+        var act = () => sp.GetRequiredService<IOptions<SkillOptions>>().Value;
+
+        act.Should().Throw<OptionsValidationException>().WithMessage("*Thalos:Skills:*")
+            .WithMessage("*Roots[0]*", "the operator has to be told which root, and the value itself is not printable");
+    }
+
     [Theory]
     [InlineData(-1, 5, 0.5, "Catalogue.MaxChars")]
     [InlineData(2000, 0, 0.5, "Search.TopK")]

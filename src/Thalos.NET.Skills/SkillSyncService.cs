@@ -20,6 +20,11 @@ namespace Thalos.Skills;
 /// The <see cref="ISkillIndex"/> is fed from the same run, but only as a best effort — an embedding backend that is down
 /// degrades <c>skills__search</c> and nothing else, because the catalogue in the agent's instructions stays authoritative.
 /// </para>
+/// <para>
+/// A configured root that cannot be read is logged and ignored, and it also suspends the deactivation sweep for that run —
+/// whether it is the only root or one of several. A listing that is missing a root says nothing about the skills that root
+/// contributes, so retiring them would turn a path typo, an ACL change or an unmounted share into silent data loss.
+/// </para>
 /// <para>The service holds no state, so a host may resolve or construct another instance and call <see cref="SyncAsync"/> itself.</para>
 /// </remarks>
 /// <param name="store">Where the parsed documents land; the source of truth, and a failure writing it is fatal.</param>
@@ -76,7 +81,10 @@ public sealed partial class SkillSyncService(
     /// <param name="cancellationToken">Ignored.</param>
     public Task StoppedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 
-    /// <summary>Scans every root, upserts what changed, deactivates what disappeared, and reports what it did.</summary>
+    /// <summary>
+    /// Scans every root, upserts what changed, deactivates what disappeared (only when every configured root was readable)
+    /// and reports what it did.
+    /// </summary>
     /// <param name="ct">Cancels the scan between files.</param>
     /// <returns>What the run did, or the store failure that stopped it.</returns>
     public async ValueTask<Result<SkillSyncReport, AgentError>> SyncAsync(CancellationToken ct)
@@ -107,7 +115,16 @@ public sealed partial class SkillSyncService(
             return Result<SkillSyncReport, AgentError>.Success(new SkillSyncReport(0, 0, 0, scan.Skipped, 0));
         }
 
-        return await ApplyAsync(scan, known, ct).ConfigureAwait(false);
+        // The sweep may only run over a *complete* listing. One failed root out of several still leaves a listing, but it
+        // is missing everything that root contributed, and DeactivateMissingAsync would retire exactly those skills — the
+        // same data loss as the all-failed case, only quieter. So the scan must have covered every configured root.
+        var complete = roots.Count == scan.Readable;
+        if (!complete)
+        {
+            LogSweepSkipped(_logger, roots.Count - scan.Readable, roots.Count);
+        }
+
+        return await ApplyAsync(scan, known, complete, ct).ConfigureAwait(false);
     }
 
     private sealed record Scan(List<SkillDocument> Documents, int Skipped, int Readable);
@@ -159,7 +176,12 @@ public sealed partial class SkillSyncService(
         return new Scan(documents, skipped, readable);
     }
 
-    private async ValueTask<Result<SkillSyncReport, AgentError>> ApplyAsync(Scan scan, Dictionary<SkillName, SkillDocument> known, CancellationToken ct)
+    /// <summary>Writes what the scan found, then sweeps and republishes.</summary>
+    /// <param name="scan">What the roots produced this run.</param>
+    /// <param name="known">Everything the store held before this run, active and inactive.</param>
+    /// <param name="complete">Whether every configured root was readable; when false, nothing is deactivated.</param>
+    /// <param name="ct">Cancels the store calls.</param>
+    private async ValueTask<Result<SkillSyncReport, AgentError>> ApplyAsync(Scan scan, Dictionary<SkillName, SkillDocument> known, bool complete, CancellationToken ct)
     {
         var upserted = 0;
         var unchanged = 0;
@@ -187,21 +209,24 @@ public sealed partial class SkillSyncService(
         }
 
         var deactivated = 0;
-        foreach (var (name, skill) in known)
+        if (complete)
         {
-            if (skill.IsActive && !seen.Contains(name))
+            foreach (var (name, skill) in known)
             {
-                deactivated++;
+                if (skill.IsActive && !seen.Contains(name))
+                {
+                    deactivated++;
+                }
+            }
+
+            var swept = await store.DeactivateMissingAsync(seen, ct).ConfigureAwait(false);
+            if (swept.IsFailure)
+            {
+                return Result<SkillSyncReport, AgentError>.Failure(swept.Error);
             }
         }
 
-        var swept = await store.DeactivateMissingAsync(seen, ct).ConfigureAwait(false);
-        if (swept.IsFailure)
-        {
-            return Result<SkillSyncReport, AgentError>.Failure(swept.Error);
-        }
-
-        await PublishAsync(seen, known, ct).ConfigureAwait(false);
+        await PublishAsync(seen, known, complete, ct).ConfigureAwait(false);
 
         LogSynced(_logger, scan.Documents.Count, upserted, unchanged, scan.Skipped, deactivated);
         return Result<SkillSyncReport, AgentError>.Success(new SkillSyncReport(scan.Documents.Count, upserted, unchanged, scan.Skipped, deactivated));
@@ -215,17 +240,21 @@ public sealed partial class SkillSyncService(
     /// </summary>
     /// <param name="seen">Every name that loaded this run.</param>
     /// <param name="known">Everything the store held before this run, active and inactive.</param>
+    /// <param name="complete">Whether every configured root was readable; when false, no vector is dropped either.</param>
     /// <param name="ct">Cancels the embedding calls.</param>
-    private async ValueTask PublishAsync(List<SkillName> seen, Dictionary<SkillName, SkillDocument> known, CancellationToken ct)
+    private async ValueTask PublishAsync(List<SkillName> seen, Dictionary<SkillName, SkillDocument> known, bool complete, CancellationToken ct)
     {
-        foreach (var (name, skill) in known)
+        if (complete)
         {
-            if (skill.IsActive && !seen.Contains(name))
+            foreach (var (name, skill) in known)
             {
-                var removed = await index.RemoveAsync(name, ct).ConfigureAwait(false);
-                if (removed.IsFailure)
+                if (skill.IsActive && !seen.Contains(name))
                 {
-                    LogIndexFailed(_logger, removed.Error.ToString());
+                    var removed = await index.RemoveAsync(name, ct).ConfigureAwait(false);
+                    if (removed.IsFailure)
+                    {
+                        LogIndexFailed(_logger, removed.Error.ToString());
+                    }
                 }
             }
         }
@@ -267,4 +296,7 @@ public sealed partial class SkillSyncService(
 
     [LoggerMessage(EventId = 567, Level = LogLevel.Information, Message = "Skill sync is disabled (Thalos:Skills Enabled or SyncOnStartup is false)")]
     private static partial void LogSyncDisabled(ILogger logger);
+
+    [LoggerMessage(EventId = 569, Level = LogLevel.Warning, Message = "{Failed} of {Total} skill roots could not be read, so nothing was deactivated this run; the skills they contribute stay active until every root is readable again")]
+    private static partial void LogSweepSkipped(ILogger logger, int failed, int total);
 }

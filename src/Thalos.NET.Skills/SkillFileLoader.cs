@@ -71,7 +71,8 @@ public static class SkillFileLoader
     /// <summary>
     /// Every skill file under <paramref name="root"/>, ordered by its root-relative path: <c>&lt;root&gt;/*.md</c> and
     /// <c>&lt;root&gt;/*/SKILL.md</c> — one level down only, deeper folders are ignored. A missing or unreadable root is a
-    /// failure, not an exception, so one bad root cannot stop a sync.
+    /// failure, not an exception, so one bad root cannot stop a sync; a sub-folder that cannot be listed costs only its own
+    /// candidate file, which is returned anyway and reported as skipped when it is loaded.
     /// </summary>
     /// <remarks>
     /// Names are matched <b>case-sensitively on every OS</b> — the extension must be exactly <c>.md</c> and a folder skill's
@@ -189,6 +190,20 @@ public static class SkillFileLoader
 
         foreach (var folder in Directory.EnumerateDirectories(root, "*", SearchOption.TopDirectoryOnly))
         {
+            CollectFolder(root, folder, found);
+        }
+    }
+
+    /// <summary>
+    /// One candidate sub-folder. A folder that cannot be listed — an ACL change, an unmounted share, an antivirus lock —
+    /// yields its candidate <c>SKILL.md</c> path instead of propagating, so <see cref="LoadAsync"/> reports one skipped
+    /// file. Letting it fail the whole root would be far worse: the sync then skips its deactivation sweep for every
+    /// root, so one locked folder would stop the library updating at all.
+    /// </summary>
+    private static void CollectFolder(string root, string folder, List<(string Relative, string Full)> found)
+    {
+        try
+        {
             foreach (var candidate in Directory.EnumerateFiles(folder, SkillFileName, SearchOption.TopDirectoryOnly))
             {
                 if (string.Equals(Path.GetFileName(candidate), SkillFileName, StringComparison.Ordinal))
@@ -196,6 +211,11 @@ public static class SkillFileLoader
                     found.Add((RelativePath(root, candidate), candidate));
                 }
             }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            var candidate = Path.Combine(folder, SkillFileName);
+            found.Add((RelativePath(root, candidate), candidate));
         }
     }
 
