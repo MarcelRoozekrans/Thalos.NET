@@ -4,8 +4,16 @@ using Thalos.Testing;
 
 namespace Thalos.Tests.Skills;
 
-public sealed class InMemorySkillIndexTests
+/// <summary>
+/// The shared <see cref="SkillIndexContractTests"/> plus the facts that are specific to this implementation:
+/// the cosine helper, the bound-options rule, generator failure mapping and the unavailable fallback.
+/// Everything the contract already states (blank query, wordless query, empty batch, last-wins, TopK, MinScore, Remove)
+/// is inherited rather than repeated.
+/// </summary>
+public sealed class InMemorySkillIndexTests : SkillIndexContractTests
 {
+    protected override ValueTask<ISkillIndex> CreateIndexAsync(IEmbeddingGenerator<string, Embedding<float>> embeddings) => new(new InMemorySkillIndex(embeddings));
+
     private static SkillDocument Doc(string name, string description, params string[] tags) =>
         SkillModelTests.Doc(name, description, tags: tags);
 
@@ -60,61 +68,6 @@ public sealed class InMemorySkillIndexTests
 
         (await index.SearchAsync("quokka wombat script", new SkillSearchOptions { TopK = 5, MinScore = 0.1 }, CancellationToken.None))
             .Value.Should().BeEmpty("skills are embedded from name, description and tags — never the body");
-    }
-
-    [Fact]
-    public async Task A_blank_query_returns_nothing_and_MinScore_filters()
-    {
-        var index = NewIndex();
-        await index.UpsertAsync([Doc("release", "how we cut a release")], CancellationToken.None);
-
-        (await index.SearchAsync("   ", new SkillSearchOptions(), CancellationToken.None)).Value.Should().BeEmpty();
-
-        // MinScore 0 would admit a zero-scoring hit, so this only holds if the blank query short-circuits
-        // before the index is scanned at all — with the default MinScore the assertion passes either way.
-        (await index.SearchAsync("   ", new SkillSearchOptions { MinScore = 0 }, CancellationToken.None)).Value.Should().BeEmpty();
-
-        (await index.SearchAsync("completely unrelated words", new SkillSearchOptions { MinScore = 0.9 }, CancellationToken.None)).Value.Should().BeEmpty();
-    }
-
-    [Fact]
-    public async Task Upsert_is_last_wins_and_Remove_drops_the_vector()
-    {
-        var index = NewIndex();
-        await index.UpsertAsync([Doc("release", "aaaa bbbb"), Doc("release", "cutting and publishing")], CancellationToken.None);
-        (await index.SearchAsync("cutting and publishing", new SkillSearchOptions { MinScore = 0.5 }, CancellationToken.None)).Value.Should().ContainSingle();
-
-        (await index.RemoveAsync(SkillName.Parse("release"), CancellationToken.None)).IsSuccess.Should().BeTrue();
-        (await index.SearchAsync("cutting and publishing", new SkillSearchOptions { MinScore = 0.5 }, CancellationToken.None)).Value.Should().BeEmpty();
-        (await index.RemoveAsync(SkillName.Parse("never-there"), CancellationToken.None)).IsSuccess.Should().BeTrue("removing an unknown name is not an error");
-    }
-
-    [Fact]
-    public async Task An_empty_batch_and_an_empty_index_are_successful_and_empty()
-    {
-        var index = NewIndex();
-        (await index.UpsertAsync([], CancellationToken.None)).IsSuccess.Should().BeTrue();
-
-        var hits = await index.SearchAsync("anything at all", new SkillSearchOptions(), CancellationToken.None);
-        hits.IsSuccess.Should().BeTrue();
-        hits.Value.Should().BeEmpty();
-    }
-
-    [Fact]
-    public async Task A_query_with_no_words_scores_zero_rather_than_NaN()
-    {
-        var index = NewIndex();
-        await index.UpsertAsync([Doc("release", "how we cut a release")], CancellationToken.None);
-
-        // "!!! ???" is not whitespace, so it passes the blank guard and reaches a zero-magnitude vector.
-        // MinScore 0 is deliberate: NaN fails every comparison, so a NaN score would silently drop the hit
-        // and an "is empty" assertion would pass for the wrong reason. Demanding the hit back at exactly 0 bites.
-        var scored = await index.SearchAsync("!!! ???", new SkillSearchOptions { TopK = 5, MinScore = 0 }, CancellationToken.None);
-        scored.IsSuccess.Should().BeTrue();
-        scored.Value.Should().ContainSingle().Which.Score.Should().Be(0d, "a zero-magnitude query vector must score 0, not NaN");
-
-        var filtered = await index.SearchAsync("!!! ???", new SkillSearchOptions { TopK = 5, MinScore = 0.1 }, CancellationToken.None);
-        filtered.Value.Should().BeEmpty();
     }
 
     [Fact]

@@ -62,7 +62,7 @@ public sealed class SkillSyncServiceTests
         }
 
         var store = new RecordingSkillStore(new InMemorySkillStore(clock));
-        return (new SkillSyncService(store, Options.Create(options), clock), store);
+        return (new SkillSyncService(store, UnavailableSkillIndex.Instance, Options.Create(options), clock), store);
     }
 
     [Fact]

@@ -16,14 +16,20 @@ namespace Thalos.Skills;
 /// A file that fails to load is logged and skipped, never fatal — one malformed skill must not stop a host. A <em>store</em>
 /// failure is fatal: an agent silently missing its procedures is worse than a host that will not start.
 /// </para>
+/// <para>
+/// The <see cref="ISkillIndex"/> is fed from the same run, but only as a best effort — an embedding backend that is down
+/// degrades <c>skills__search</c> and nothing else, because the catalogue in the agent's instructions stays authoritative.
+/// </para>
 /// <para>The service holds no state, so a host may resolve or construct another instance and call <see cref="SyncAsync"/> itself.</para>
 /// </remarks>
-/// <param name="store">Where the parsed documents land; the only thing this service writes to.</param>
+/// <param name="store">Where the parsed documents land; the source of truth, and a failure writing it is fatal.</param>
+/// <param name="index">The search cache, refilled from the store on every run; a failure here only degrades <c>skills__search</c>.</param>
 /// <param name="options">Supplies <see cref="SkillOptions.Roots"/>, <see cref="SkillOptions.Enabled"/> and <see cref="SkillOptions.SyncOnStartup"/>.</param>
 /// <param name="clock">Stamps <see cref="SkillDocument.UpdatedAt"/> on everything this run writes.</param>
 /// <param name="logger">Optional; a null logger is used when the host registered none.</param>
 public sealed partial class SkillSyncService(
     ISkillStore store,
+    ISkillIndex index,
     IOptions<SkillOptions> options,
     TimeProvider clock,
     ILogger<SkillSyncService>? logger = null) : IHostedLifecycleService
@@ -193,9 +199,51 @@ public sealed partial class SkillSyncService(
             return Result<SkillSyncReport, AgentError>.Failure(swept.Error);
         }
 
+        await RefreshIndexAsync(seen, known, ct).ConfigureAwait(false);
+
         LogSynced(_logger, scan.Documents.Count, upserted, unchanged, scan.Skipped, deactivated);
         return Result<SkillSyncReport, AgentError>.Success(new SkillSyncReport(scan.Documents.Count, upserted, unchanged, scan.Skipped, deactivated));
     }
+
+    /// <summary>
+    /// Refills the index from the store's active set and drops the vectors of skills that just disappeared. The index is a
+    /// rebuildable cache that does not survive the process while the store does, so the content-hash skip governs the store
+    /// upsert only: every active skill is re-embedded on every run, or a restart over an unmodified repository would leave
+    /// <c>skills__search</c> with nothing to search. Best effort throughout — a failure is logged and only degrades search.
+    /// </summary>
+    /// <param name="seen">Every name that loaded this run.</param>
+    /// <param name="known">Everything the store held before this run, active and inactive.</param>
+    /// <param name="ct">Cancels the embedding calls.</param>
+    private async ValueTask RefreshIndexAsync(List<SkillName> seen, Dictionary<SkillName, SkillDocument> known, CancellationToken ct)
+    {
+        foreach (var (name, skill) in known)
+        {
+            if (skill.IsActive && !seen.Contains(name))
+            {
+                var removed = await index.RemoveAsync(name, ct).ConfigureAwait(false);
+                if (removed.IsFailure)
+                {
+                    LogIndexFailed(_logger, removed.Error.ToString());
+                }
+            }
+        }
+
+        var active = await store.ListAsync(new SkillQuery(), ct).ConfigureAwait(false);
+        if (active.IsFailure)
+        {
+            LogIndexFailed(_logger, active.Error.ToString());
+            return;
+        }
+
+        var indexed = await index.UpsertAsync(active.Value, ct).ConfigureAwait(false);
+        if (indexed.IsFailure)
+        {
+            LogIndexFailed(_logger, indexed.Error.ToString());
+        }
+    }
+
+    [LoggerMessage(EventId = 563, Level = LogLevel.Warning, Message = "Skill index refresh failed; the catalogue still works but skills__search may be incomplete: {Error}")]
+    private static partial void LogIndexFailed(ILogger logger, string error);
 
     [LoggerMessage(EventId = 560, Level = LogLevel.Information, Message = "Skill sync: {Scanned} scanned, {Upserted} upserted, {Unchanged} unchanged, {Skipped} skipped, {Deactivated} deactivated")]
     private static partial void LogSynced(ILogger logger, int scanned, int upserted, int unchanged, int skipped, int deactivated);

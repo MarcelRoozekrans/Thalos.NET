@@ -42,7 +42,7 @@ public sealed class SkillSyncResilienceTests
     {
         var store = new RecordingSkillStore(new InMemorySkillStore(clock));
         var log = new CapturingLogger<SkillSyncService>();
-        return (new SkillSyncService(store, Options.Create(options), clock, log), store, log);
+        return (new SkillSyncService(store, UnavailableSkillIndex.Instance, Options.Create(options), clock, log), store, log);
     }
 
     private static SkillOptions Roots(params string[] roots)
@@ -66,7 +66,7 @@ public sealed class SkillSyncResilienceTests
                 services.AddSingleton<IHostedService>(probe);
             }
 
-            services.AddSingleton<IHostedService>(new SkillSyncService(store, Options.Create(options), clock, new CapturingLogger<SkillSyncService>()));
+            services.AddSingleton<IHostedService>(new SkillSyncService(store, UnavailableSkillIndex.Instance, Options.Create(options), clock, new CapturingLogger<SkillSyncService>()));
         }).Build();
 
     [Fact]
