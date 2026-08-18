@@ -21,5 +21,6 @@
     <InternalsVisibleTo Include="Thalos.NET.Tests.Unit" />
     <InternalsVisibleTo Include="Thalos.NET.Testing" />
     <InternalsVisibleTo Include="Thalos.NET.Tests.Memory" />
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Skills" />
   </ItemGroup>
 </Project>
