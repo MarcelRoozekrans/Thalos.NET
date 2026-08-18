@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.2.0...v0.3.0) (2026-08-18)
+
+
+### Features
+
+* **skills:** Thalos.NET.Skills — agent-scoped procedure documents ([#28](https://github.com/MarcelRoozekrans/Thalos.NET/issues/28)) ([904cbf5](https://github.com/MarcelRoozekrans/Thalos.NET/commit/904cbf571a3429de93c2db7f57e44ae45a87f772))
+
+
+### Bug Fixes
+
+* unbreak main after the AwesomeAssertions v9 major bump ([#25](https://github.com/MarcelRoozekrans/Thalos.NET/issues/25)) ([119375d](https://github.com/MarcelRoozekrans/Thalos.NET/commit/119375dd9afe969e5c48baf92c0fa302c71be96c))
+
+
+### Miscellaneous Chores
+
+* set the release version ([e60209c](https://github.com/MarcelRoozekrans/Thalos.NET/commit/e60209ce49000569c8d2c65c9a3c977d7d80aff5))
+
 ## [0.2.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.1.1...v0.2.0) (2026-08-17)
 
 
