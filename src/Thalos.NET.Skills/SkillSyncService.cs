@@ -137,11 +137,13 @@ public sealed partial class SkillSyncService(
                 if (byName.TryGetValue(loaded.Value.Name, out var first))
                 {
                     skipped++;
-                    LogDuplicateName(_logger, loaded.Value.Name.Value, first, SkillFileLoader.RelativePath(root, files.Value[i]));
+                    // Both paths are logged in full, not root-relative: two copies of the same skill in two roots
+                    // usually share their relative path, so only the root tells the operator which file lost.
+                    LogDuplicateName(_logger, loaded.Value.Name.Value, first, files.Value[i]);
                     continue;
                 }
 
-                byName[loaded.Value.Name] = SkillFileLoader.RelativePath(root, files.Value[i]);
+                byName[loaded.Value.Name] = files.Value[i];
                 documents.Add(loaded.Value);
             }
         }

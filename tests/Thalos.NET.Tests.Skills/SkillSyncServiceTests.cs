@@ -8,6 +8,8 @@ namespace Thalos.Tests.Skills;
 /// <summary>
 /// Delegates to a real store and records what the sync actually asked it to do, so "an unchanged file is not
 /// upserted at all" and "the sweep is told every loaded name" are assertions rather than inferences from state.
+/// A hook returning an <see cref="AgentError"/> makes that call fail instead (null = pass through), which is how
+/// <c>SkillSyncResilienceTests</c> proves a store failure is fatal. Attempts are recorded either way.
 /// </summary>
 internal sealed class RecordingSkillStore(ISkillStore inner) : ISkillStore
 {
@@ -15,16 +17,23 @@ internal sealed class RecordingSkillStore(ISkillStore inner) : ISkillStore
 
     public List<IReadOnlyList<string>> DeactivateCalls { get; } = [];
 
+    public Func<SkillDocument, AgentError?>? OnUpsert { get; set; }
+
+    public Func<AgentError?>? OnList { get; set; }
+
+    public Func<AgentError?>? OnDeactivate { get; set; }
+
     public ValueTask<Result<SkillDocument, AgentError>> UpsertAsync(SkillDocument skill, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(skill);
         Upserts.Add(skill.Name.Value);
-        return inner.UpsertAsync(skill, ct);
+        return OnUpsert?.Invoke(skill) is { } error ? new(Result<SkillDocument, AgentError>.Failure(error)) : inner.UpsertAsync(skill, ct);
     }
 
     public ValueTask<Result<SkillDocument, AgentError>> GetAsync(SkillName name, CancellationToken ct) => inner.GetAsync(name, ct);
 
-    public ValueTask<Result<IReadOnlyList<SkillDocument>, AgentError>> ListAsync(SkillQuery query, CancellationToken ct) => inner.ListAsync(query, ct);
+    public ValueTask<Result<IReadOnlyList<SkillDocument>, AgentError>> ListAsync(SkillQuery query, CancellationToken ct) =>
+        OnList?.Invoke() is { } error ? new(Result<IReadOnlyList<SkillDocument>, AgentError>.Failure(error)) : inner.ListAsync(query, ct);
 
     public ValueTask<UnitResult<AgentError>> DeactivateMissingAsync(IReadOnlyList<SkillName> seen, CancellationToken ct)
     {
@@ -36,7 +45,7 @@ internal sealed class RecordingSkillStore(ISkillStore inner) : ISkillStore
         }
 
         DeactivateCalls.Add(names);
-        return inner.DeactivateMissingAsync(seen, ct);
+        return OnDeactivate?.Invoke() is { } error ? new(UnitResult<AgentError>.Failure(error)) : inner.DeactivateMissingAsync(seen, ct);
     }
 }
 
