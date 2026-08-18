@@ -65,6 +65,18 @@ public enum AgentErrorCode
 
     /// <summary>The memory belongs to another owner (forget/hard-delete scope check). HTTP 403.</summary>
     MemoryForbidden,
+
+    /// <summary>No skill exists under the given name, or it is not visible to the agent. HTTP 404.</summary>
+    SkillNotFound,
+
+    /// <summary>The skill store failed. HTTP 502.</summary>
+    SkillStoreFailed,
+
+    /// <summary>A skill file or document violated the limits (frontmatter, name mismatch, over-size body). HTTP 400.</summary>
+    SkillValidationFailed,
+
+    /// <summary>Skill search is unavailable (no embedding generator or the index is down); the catalogue is still authoritative. HTTP 503.</summary>
+    SkillSearchUnavailable,
 }
 
 /// <summary>
@@ -132,6 +144,18 @@ public readonly record struct AgentError(AgentErrorCode Code, string Message, st
 
     /// <summary><see cref="AgentErrorCode.MemoryForbidden"/>: <paramref name="id"/> belongs to another owner.</summary>
     public static AgentError MemoryForbidden(MemoryId id) => new(AgentErrorCode.MemoryForbidden, $"Memory '{id}' belongs to another owner.");
+
+    /// <summary><see cref="AgentErrorCode.SkillNotFound"/> for <paramref name="name"/>.</summary>
+    public static AgentError SkillNotFound(string name) => new(AgentErrorCode.SkillNotFound, $"Skill '{name}' was not found.");
+
+    /// <summary><see cref="AgentErrorCode.SkillStoreFailed"/>; <paramref name="detail"/> is a diagnostic such as the exception type name.</summary>
+    public static AgentError SkillStoreFailed(string message, string? detail = null) => new(AgentErrorCode.SkillStoreFailed, message, detail);
+
+    /// <summary><see cref="AgentErrorCode.SkillValidationFailed"/> with the given message (which may name the source path, never the file's contents).</summary>
+    public static AgentError SkillValidationFailed(string message) => new(AgentErrorCode.SkillValidationFailed, message);
+
+    /// <summary><see cref="AgentErrorCode.SkillSearchUnavailable"/>; <paramref name="detail"/> is a diagnostic such as the exception type name.</summary>
+    public static AgentError SkillSearchUnavailable(string message, string? detail = null) => new(AgentErrorCode.SkillSearchUnavailable, message, detail);
 
     /// <summary><c>"{Code}: {Message}"</c>, with <c>" — {Detail}"</c> appended when <see cref="Detail"/> is set.</summary>
     public override string ToString() => Detail is null ? $"{Code}: {Message}" : $"{Code}: {Message} — {Detail}";
