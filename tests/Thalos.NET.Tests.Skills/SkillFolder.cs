@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.AccessControl;
 using System.Security.Principal;
 
@@ -45,24 +46,35 @@ internal sealed class SkillFolder : IDisposable
 
     /// <summary>
     /// Makes one sub-folder unlistable for the length of the returned scope — the ACL change, unmounted share or
-    /// antivirus lock the loader has to survive. Windows uses a deny ACE for the current user (no elevation needed),
-    /// Unix a mode of 000; either way the denial is verified before the test runs, so it can never pass vacuously.
+    /// antivirus lock the loader has to survive. Unix uses a mode of 000; Windows uses a deny ACE for the current
+    /// user, falling back to a dangling junction when that ACE does not bite, which is the case whenever the tests
+    /// run elevated (a CI runner is typically an administrator, and administrators bypass DACLs). A junction needs
+    /// no privilege to create and defeats an administrator too, because its target genuinely does not exist rather
+    /// than being merely forbidden. Either way the denial is verified below, so this can never pass vacuously.
     /// </summary>
     public IDisposable DenyAccess(string relativeFolder)
     {
         var path = Path.Combine(Root, relativeFolder.Replace('/', Path.DirectorySeparatorChar));
         var scope = OperatingSystem.IsWindows() ? DenyOnWindows(path) : DenyOnUnix(path);
-        try
-        {
-            _ = Directory.EnumerateFiles(path).GetEnumerator().MoveNext();
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        if (Unlistable(path))
         {
             return scope;
         }
 
         scope.Dispose();
-        throw new InvalidOperationException($"'{path}' is still readable after access was denied, so the test would prove nothing. Run it as an ordinary user.");
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new InvalidOperationException($"'{path}' is still listable after its mode was set to 000, so the test would prove nothing. Do not run the suite as root.");
+        }
+
+        var junction = DanglingJunction(path);
+        if (Unlistable(path))
+        {
+            return junction;
+        }
+
+        junction.Dispose();
+        throw new InvalidOperationException($"'{path}' is still listable after both a deny ACE and a dangling junction, so the test would prove nothing.");
     }
 
     public void Dispose()
@@ -75,6 +87,41 @@ internal sealed class SkillFolder : IDisposable
         {
             // a temp folder that will not delete is not a test failure
         }
+    }
+
+    private static bool Unlistable(string path)
+    {
+        try
+        {
+            _ = Directory.EnumerateFiles(path).GetEnumerator().MoveNext();
+            return false;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return true;
+        }
+    }
+
+    /// <summary>Replaces <paramref name="path"/> with a junction to a target that does not exist, and restores the folder on dispose.</summary>
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static Restore DanglingJunction(string path)
+    {
+        // Outside the skills root: a sibling would be scanned as another skill folder.
+        var saved = Path.Combine(Path.GetTempPath(), "thalos-skills-saved-" + Guid.NewGuid().ToString("N"));
+        Directory.Move(path, saved);
+        Run("cmd.exe", $"/c mklink /J \"{path}\" \"{path}.no-such-target\"");
+        return new Restore(() =>
+        {
+            Directory.Delete(path);
+            Directory.Move(saved, path);
+        });
+    }
+
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static void Run(string file, string arguments)
+    {
+        using var process = Process.Start(new ProcessStartInfo(file, arguments) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true })!;
+        process.WaitForExit();
     }
 
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
