@@ -61,9 +61,13 @@ packages) needs the same empty commit as step 1 with `Release-As: 0.2.0` before 
 `pack-validate` checks the package list and each package's TFMs (`Thalos.NET.Memory.RagNet` is
 `net10.0`-only, the others ship `net8.0` + `net10.0`) and rehearses the push of all eight.
 
+0.3.0 ships nine packages (`Thalos.NET.Skills` joined the eight of 0.2.x); pre-1.0 a `feat:` still bumps
+the patch, so 0.3.0 used the same `Release-As: 0.3.0` empty commit as 0.2.0 did. `pack-validate` expects
+the nine ids and `Thalos.NET.Skills` on both TFMs.
+
 ## Local development against a consumer (Daedalus)
 
-`scripts/pack-local.ps1` packs `0.2.0-local.<timestamp>` (the `VersionPrefix` in `Directory.Build.props`) into `C:\Projects\Prive\.nuget-local`
+`scripts/pack-local.ps1` packs `0.3.0-local.<timestamp>` (the `VersionPrefix` in `Directory.Build.props`) into `C:\Projects\Prive\.nuget-local`
 (no GitVersion involved) — the consumer pins that exact version until the release is on nuget.org.
 
 ## Renovate

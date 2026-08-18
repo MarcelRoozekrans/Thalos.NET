@@ -8,6 +8,7 @@ using Thalos.Mcp;
 using Thalos.Memory;
 using Thalos.Sample;
 using Thalos.Sentinel;
+using Thalos.Skills;
 using ZeroAlloc.Authorization;
 using ZeroAlloc.Results;
 
@@ -23,8 +24,10 @@ var architect = new AgentDefinition
         You are a senior .NET architect. Use the roslyn__* tools to answer precisely; cite symbols and files.
         Never guess: if a tool call fails, say so.
         Use memory__remember for durable facts and preferences the user states, and memory__recall before answering questions about earlier work.
+        The <skills> block in your instructions lists the procedures you may read; skills__load returns the full procedure for one of them.
         """,
-    Tools = ["roslyn__*", "memory__*"],
+    Tools = ["roslyn__*", "memory__*", "skills__*"],
+    Skills = ["*"],
 };
 
 builder.Services.AddThalos(thalos => thalos
@@ -42,6 +45,11 @@ builder.Services.AddThalos(thalos => thalos
     // index is UnavailableMemoryIndex: memory__remember stores (IndexPending — see the ⧗ line), memory__recall finds nothing.
     // Register one (Ollama, OpenAI, …) for semantic recall; the in-memory store forgets everything when the process ends.
     .UseMemory()
+    // Skills: the <skills> catalogue is appended to the agent's instructions every turn and skills__load reads one body.
+    // The files under skills/ are copied next to the executable and synced into the store at start-up — one way, so an
+    // edit needs a restart. With no embedding generator the index is UnavailableSkillIndex: the catalogue still works and
+    // skills__search answers that search is unavailable, which is exactly what a host without embeddings should show.
+    .UseSkills(o => o.Roots.Add(Path.Combine(AppContext.BaseDirectory, "skills")))
     .AddMcpServersFromFile(Path.Combine(AppContext.BaseDirectory, ".mcp.json"))
     .RequireToolPolicy("roslyn__apply_*", "developer")
     .RequireToolPolicy("roslyn__rename_*", "developer")
@@ -49,6 +57,11 @@ builder.Services.AddThalos(thalos => thalos
     .AddAgent(architect));
 
 using var host = builder.Build();
+
+// The skill sync is an IHostedLifecycleService, so it only runs once the host is started: without this the store — and
+// therefore the <skills> catalogue in the agent's instructions — would stay empty.
+await host.StartAsync();
+
 var runtime = host.Services.GetRequiredService<IAgentRuntime>();
 var caller = new ConsoleCaller(Environment.UserName, roles: args.Contains("--developer", StringComparer.Ordinal) ? ["developer"] : []);
 
@@ -56,6 +69,7 @@ var session = await runtime.CreateSessionAsync(architect.Id, caller, Cancellatio
 if (session.IsFailure)
 {
     Console.Error.WriteLine(session.Error);
+    await host.StopAsync();
     return 1;
 }
 
@@ -106,6 +120,9 @@ while (true)
             case MemoryRecallFailedEvent rf:
                 Console.WriteLine($"  ⚠ memory recall failed: {rf.Code} (the turn continues without memories)");
                 break;
+            case SkillCatalogueFailedEvent e:
+                Console.WriteLine($"  ⚠ skill catalogue unavailable ({e.Code}); the turn continues without it");
+                break;
             default:
                 break;
         }
@@ -114,6 +131,7 @@ while (true)
     Console.WriteLine();
 }
 
+await host.StopAsync();
 return 0;
 
 namespace Thalos.Sample

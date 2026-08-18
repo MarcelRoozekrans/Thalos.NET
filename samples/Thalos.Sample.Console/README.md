@@ -4,7 +4,29 @@ A minimal REPL: one `Architect` agent backed by Anthropic Claude, scanned by AI.
 [roslyn-codelens](https://github.com/MarcelRoozekrans/roslyn-codelens-mcp) MCP server exposed as `roslyn__*` tools.
 Mutating tools (`roslyn__apply_*`, `roslyn__rename_*`) are gated behind a `developer` policy. Long-term memory
 (`Thalos.NET.Memory`) is enabled with the in-memory store and no embedding generator, so the `memory__*` tools work but
-recall finds nothing (see the note below).
+recall finds nothing (see the note below). Skills (`Thalos.NET.Skills`) are enabled too, with one procedure document in
+`skills/`.
+
+## Skills
+
+`skills/console-help/SKILL.md` is a real skill: `UseSkills` syncs it into the in-memory `ISkillStore` at start-up and
+appends the `<skills>` catalogue (its name and description, one line) to the agent's instructions on every turn, and the
+agent reads the body with `skills__load`. `Skills = ["*"]` on the agent definition is what opts it in — unlike `Tools`,
+the default is *empty*. The sync is one-way and there is no file watcher, so **edit the file and restart** to pick up a
+change. Because this sample registers no embedding generator the index is `UnavailableSkillIndex`: the catalogue is
+unaffected, but `skills__search` answers that search is unavailable and points the model back at the catalogue — which is
+what a host without embeddings genuinely looks like, so it is shown rather than hidden. Both are visible in the first two
+log lines of a run:
+
+```
+info: Thalos.Skills.SkillThalosBuilderExtensions[564]
+      No IEmbeddingGenerator<string, Embedding<float>> is registered; skills__search is unavailable and the <skills> catalogue is the only way in
+info: Thalos.Skills.SkillSyncService[560]
+      Skill sync: 1 scanned, 1 upserted, 0 unchanged, 0 skipped, 0 deactivated
+```
+
+The sync runs in `IHostedLifecycleService.StartingAsync`, so the sample calls `await host.StartAsync()` before the first
+turn (and `StopAsync()` on the way out) — building the host is not enough to run hosted services.
 
 ## Prerequisites
 
@@ -42,20 +64,25 @@ Try:
 - `Remember that I prefer xUnit over NUnit.` — the model calls `memory__remember`; you will see `✎ stored …` (or
   `⧗ stored … but not indexed`, because this sample registers no embedding generator — recall stays empty until one is
   wired: `builder.Services.AddSingleton<IEmbeddingGenerator<string, Embedding<float>>>(…)` before `AddThalos`).
+- `How do I answer questions about this sample?` — the `console-help` skill is already in the model's `<skills>`
+  catalogue, so it calls `⚙ skills__load {"name":"console-help"}` and answers from the procedure. Ask it to *search* for
+  a skill instead and it is told search is unavailable (no embedding generator), with the catalogue as the fallback.
 
 `/quit` or `/exit` (or Ctrl+Z / Ctrl+D) ends the session.
 
 ## What to look at
 
 - `Program.cs` — the whole wiring is one `AddThalos(...)` call: `UseAnthropic(configuration)`, `UseAISentinel(...)`,
-  `UseInMemorySessionStore()`, `UseMemory()`, `AddMcpServersFromFile(...)`, `RequireToolPolicy(...)`,
+  `UseInMemorySessionStore()`, `UseMemory()`, `UseSkills(...)`, `AddMcpServersFromFile(...)`, `RequireToolPolicy(...)`,
   `AddPolicy<DeveloperPolicy>()`, `AddAgent(...)`.
+- `skills/console-help/SKILL.md` — the frontmatter grammar (`name`, `description`, optional `tags: [a, b]`, all at
+  column 0 and single-line) followed by the markdown body the agent reads.
 - `DeveloperPolicy` — a plain ZeroAlloc.Authorization `[Policy("developer")]`; Thalos looks it up by name and enforces it
   at the tool boundary, before the tool runs.
 - `ConsoleCaller` — the `ISecurityContext` the channel supplies with every turn. Thalos never infers the caller.
-- The event switch — `TextDeltaEvent`, `ToolCallStartedEvent`, `ToolCallFinishedEvent`, `UsageEvent`, `TurnFailedEvent` and
-  the memory events (`MemoryRecalledEvent`, `MemoryStoredEvent`, `MemoryIndexPendingEvent`, `MemoryRecallFailedEvent`) are
-  the same events a web channel would forward as SSE.
+- The event switch — `TextDeltaEvent`, `ToolCallStartedEvent`, `ToolCallFinishedEvent`, `UsageEvent`, `TurnFailedEvent`,
+  the memory events (`MemoryRecalledEvent`, `MemoryStoredEvent`, `MemoryIndexPendingEvent`, `MemoryRecallFailedEvent`) and
+  `SkillCatalogueFailedEvent` are the same events a web channel would forward as SSE.
 
 ## Security note: AI.Sentinel needs an embedding generator
 

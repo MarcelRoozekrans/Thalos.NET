@@ -14,12 +14,13 @@ A Hermes-style, ZeroAlloc-native agent framework for .NET, built on
 |---|---|---|
 | `Thalos.NET.Abstractions` | Ports (`IAgentRuntime`, `IAgentSessionStore`, `IToolSource`, `IChatClientProvider`, …), models, typed ids, `AgentError` | ZeroAlloc.*, `Microsoft.Extensions.AI.Abstractions` |
 | `Thalos.NET` | Runtime: agent factory, tool catalog + authorization, session state machine, in-memory store, `AddThalos(...)` | Abstractions, `Microsoft.Agents.AI` |
-| `Thalos.NET.Testing` | `ScriptedChatClient`, `RecordingNotificationPublisher`, reusable `IAgentSessionStore` contract tests + `MemoryStoreContractTests`, `MemoryIndexContractTests`, `HashedBagOfWordsEmbeddingGenerator` (ships xunit + AwesomeAssertions references by design) | Thalos.NET, Thalos.NET.Memory |
+| `Thalos.NET.Testing` | `ScriptedChatClient`, `RecordingNotificationPublisher`, reusable `IAgentSessionStore` contract tests + `MemoryStoreContractTests`, `MemoryIndexContractTests`, `SkillStoreContractTests`, `SkillIndexContractTests`, `HashedBagOfWordsEmbeddingGenerator` (ships xunit + AwesomeAssertions references by design) | Thalos.NET, Thalos.NET.Memory, Thalos.NET.Skills |
 | `Thalos.NET.Mcp` | MCP servers (stdio / http / sse, Claude Code-style `.mcp.json`) as tool sources | Thalos.NET, `ModelContextProtocol` |
 | `Thalos.NET.Anthropic` | Anthropic Claude chat-client provider | Thalos.NET, `Anthropic` |
 | `Thalos.NET.Sentinel` | AI.Sentinel scanning at the model boundary, quarantine → `AgentError`; scans recalled memories | Thalos.NET, `AI.Sentinel` |
 | `Thalos.NET.Memory` | Curated long-term memory: `IMemoryStore`/`IMemoryIndex`/`IMemoryService`, auto-recall `AIContextProvider`, `memory__*` tools, in-memory implementations | Thalos.NET |
 | `Thalos.NET.Memory.RagNet` | pgvector index via Rag.NET `PgVectorStore` (net10.0 only) | Thalos.NET.Memory, `Rag.NET.VectorStores.PgVector` |
+| `Thalos.NET.Skills` | Agent-scoped procedure documents: `SKILL.md` files synced into an `ISkillStore`, an always-present catalogue, `skills__*` tools, in-process cosine search | Thalos.NET |
 
 Targets `net8.0` and `net10.0` (`Thalos.NET.Memory.RagNet`: `net10.0` only, like Rag.NET).
 
@@ -32,6 +33,7 @@ services.AddThalos(thalos => thalos
     .UseInMemorySessionStore()
     .UseMemory(o => o.SharedOwnerId = "myapp")         // long-term memory: auto-recall + memory__* tools (see below)
     .UseRagNetMemory(connectionString, 768)            // pgvector index; needs an IEmbeddingGenerator<string, Embedding<float>> in DI
+    .UseSkills(o => o.Roots.Add(Path.Combine(AppContext.BaseDirectory, "skills")))   // SKILL.md procedures (see below)
     .AddMcpServersFromFile(Path.Combine(AppContext.BaseDirectory, ".mcp.json"))
     .RequireToolPolicy("roslyn__apply_*", "developer")
     .AddPolicy<DeveloperPolicy>()                      // any ZeroAlloc.Authorization [Policy("developer")]
@@ -40,7 +42,8 @@ services.AddThalos(thalos => thalos
         Id = AgentId.Parse("01ARZ3NDEKTSV4RRFFQ69G5FAV", null),
         Name = "Architect",
         Instructions = "You are a senior .NET architect. Use the roslyn tools to answer precisely.",
-        Tools = ["roslyn__*", "memory__*"],
+        Tools = ["roslyn__*", "memory__*", "skills__*"],
+        Skills = ["*"],                                // glob allow-list over skill names; the default is empty
     }));
 
 var runtime = provider.GetRequiredService<IAgentRuntime>();
@@ -144,12 +147,109 @@ in `memory__recall`/`memory__list` results — is scanned by AI.Sentinel's detec
 is dropped and a `MemoryQuarantinedEvent` (`"<Severity>: <DetectorId>"`) is raised. `AgentError.Detail` never carries raw
 exception, SQL or provider text.
 
+## Skills
+
+`Thalos.NET.Skills` gives an agent a library of **procedures**: named markdown documents, authored in git, whose titles the
+agent always sees and whose bodies it pulls into context when one applies ("how we cut a release", "how to add an EF Core
+migration in this repo"). A skill is a document the model reads, not a workflow the framework executes — the model still
+does the work with its normal tools. It is opt-in: `.UseSkills(...)` on the `ThalosBuilder` (options from a delegate, or
+`UseSkills(configuration)` to bind the `Thalos:Skills` section).
+
+**Two stages.** A compact catalogue — one `- name: description` line per skill the agent may load — is appended to the
+agent's instructions on *every* turn, so the token cost is bounded and predictable; bodies are pulled on demand with
+`skills__load`. `SkillOptions.Catalogue.MaxChars` (default 2000) caps the block.
+
+**The files.** Every root is scanned one level deep for `<root>/<name>/SKILL.md` and `<root>/<name>.md`; deeper folders are
+ignored and a `SKILL.md` directly in a root is an error.
+
+````markdown
+---
+name: release
+description: How we cut a release of this repository.
+tags: [release, ci]
+---
+
+# Cutting a release
+
+1. …
+````
+
+The frontmatter grammar is a deliberately strict **subset of YAML**, hand-written — the package takes no YAML dependency.
+Keys sit at column 0 and are only `name` and `description` (both required) and `tags` (optional); values are single-line
+scalars, plain or quoted (a double-quoted value recognises only the escaped quote and the escaped backslash; a
+single-quoted value doubles the quote); `tags` must be a **flow sequence**, `tags: [a, b]`. Everything else is a load error
+naming the file: any indentation, block scalars and anchors (`|`, `>`, `&`, `*`, …), block sequences (`- item` lines),
+unknown or duplicate keys, a missing or unterminated `---` fence, and a `name` that disagrees with the file or folder it
+came from. Path-derived names are case-*normalised*, not case-checked, so folder `Release` with `name: release` loads while
+folder `release` with `name: releases` does not. The body is kept verbatim, with line endings normalised to LF.
+
+Limits: name `^[a-z][a-z0-9_-]{0,63}$`, description ≤ 300 characters, body ≤ 64 KiB, whole file ≤ 256 KiB (rejected from its
+length, never read), at most 10 tags of at most 32 characters (trimmed, lower-cased, de-duplicated).
+
+**Per agent.** `AgentDefinition.Skills` is a glob allow-list over skill names, exactly as `Tools` is over qualified tool
+names — but unlike `Tools` **the default is empty**, because the catalogue costs tokens on every turn: an agent opts in with
+`Skills = ["*"]` or `Skills = ["release", "dotnet-*"]`. An agent with no globs gets no block and no context provider at all.
+The block ends with an explicit overflow line when the budget runs out — truncation is never silent:
+
+```
+<skills note="procedures you may load with skills__load">
+- dotnet-migrations: How to add an EF Core migration in this solution.
+- release: How we cut a release of this repository.
+… and 3 more (use skills__search)
+</skills>
+```
+
+**Tools.** The `skills` tool source exposes `skills__load(name)` — the whole body wrapped in `<skill name="…">` … `</skill>`
+— and `skills__search(query, topK?)`, which returns ranked `name: description` rows and **never a body**. Both are scoped to
+the turn's agent, and a name outside its globs answers **byte-identically** to a name that never existed, was retired or
+failed to parse, so an agent cannot probe what other agents can do. Search asks the index for a fixed ceiling of 20 hits,
+filters those by the agent's globs and *then* clamps to `topK` (1..20, default `SkillOptions.Search.TopK` = 5, minimum score
+`Search.MinScore` = 0.3), so a higher-scoring skill belonging to another agent can never shorten this agent's result list.
+`SkillOptions.ExposeTools = false` hides both tools host-wide; otherwise `AgentDefinition.Tools` globs and
+`RequireToolPolicy` gate them like any other tool.
+
+**Start-up sync.** `SkillSyncService` runs once in `IHostedLifecycleService.StartingAsync`, before any other hosted service,
+and is strictly one-way: the files are the source of truth and nothing is ever written back to disk. It scans the roots **in
+the configured order** (on a duplicate name the first root wins and the loser is logged), skips a file whose SHA-256 is
+unchanged, deactivates skills whose files have disappeared (the row survives, but the skill leaves every catalogue and can
+no longer be loaded) and republishes the catalogue and the index. A malformed file is logged and skipped — one bad skill
+must never stop a host. A **store** failure is fatal and fails the host start: an agent silently missing its procedures is
+worse than a host that will not start. A configured root that does not exist is deliberately *not* a configuration error; it
+is logged and the library is left alone, because a path typo must never retire every skill. What *is* validated at host
+start: `Catalogue.MaxChars` ≥ 0, `Search.TopK` ≥ 1, `Search.MinScore` in [0, 1] (roots are only trimmed, made absolute and
+de-duplicated). There is no `WatchFiles`, so **editing a skill needs a restart** — on purpose: changing a procedure the agent
+has already loaded mid-run would be worse. `InMemorySkillStore` ships for tests and small hosts; a production host plugs its
+own with `UseSkillStore<T>()` (verified by `SkillStoreContractTests` in `Thalos.NET.Testing`) and an index with
+`UseSkillIndex<T>()` — either may be called before or after `UseSkills`, and the custom type wins in both orders.
+`SkillOptions.Enabled = false` and `SyncOnStartup = false` are runtime switches, not registration ones: the services stay
+registered and each one turns itself off, so the flags can come from configuration that is not read until the provider is built.
+
+**Degradation.** Without an `IEmbeddingGenerator<string, Embedding<float>>` in DI the index is `UnavailableSkillIndex`: the
+host still starts, the sync still stores everything, the catalogue still works, and `skills__search` answers with a plain
+sentence saying search is unavailable and pointing back at the catalogue. Skills never depend on an embedding backend being
+up; an index failure during the sync is logged and degrades search only.
+
+**Events** on the turn stream and the `AgentEventHub`: `skill-catalogue-failed` (`SkillCatalogueFailedEvent`: the
+`AgentErrorCode`). Rendering the catalogue never fails a turn — the error is logged, the event is raised, and the turn
+proceeds without a block.
+
+**Security — the trust boundary is different from memory's.** Skill bodies are **not** passed through
+`IUntrustedContentScanner`, unlike recalled memories, and that is deliberate: they come from git, not from model output. The
+one defence that does apply is neutralisation — every `<skill`/`<skills` spelling inside a body or a description is escaped,
+so a skill can never close or forge the block — and that defends the prompt's *structure*, not its content. **Whoever can
+merge a `SKILL.md` can steer the agent**, which is the same trust boundary as merging code: review skill changes like code.
+`AgentError.Detail` never carries raw file or exception text; a load error names the root-relative source path and a reason,
+never a line of the file.
+
+**Deliberately out of scope in 0.3.0** (decisions, not omissions): hot-reload; agent-authored or agent-edited skills;
+versioning beyond the content hash; usage analytics; a UI; per-skill authorization policies — the globs are the only gate.
+
 ## Local development against Daedalus
 
 Until the packages are on nuget.org, consumers (Daedalus, phase 1.1) build from a local folder feed:
 
 ```powershell
-pwsh scripts/pack-local.ps1          # → C:\Projects\Prive\.nuget-local\Thalos.NET*.0.2.0-local.<timestamp>.nupkg
+pwsh scripts/pack-local.ps1          # → C:\Projects\Prive\.nuget-local\Thalos.NET*.0.3.0-local.<timestamp>.nupkg
 ```
 
 The script prints the exact version. In the consuming repo:
@@ -169,14 +269,15 @@ The script prints the exact version. In the consuming repo:
 `Directory.Packages.props` (central package management):
 ```xml
 <ItemGroup>
-  <PackageVersion Include="Thalos.NET.Abstractions"  Version="0.2.0-local.20260817120000" />
-  <PackageVersion Include="Thalos.NET"               Version="0.2.0-local.20260817120000" />
-  <PackageVersion Include="Thalos.NET.Testing"       Version="0.2.0-local.20260817120000" />
-  <PackageVersion Include="Thalos.NET.Mcp"           Version="0.2.0-local.20260817120000" />
-  <PackageVersion Include="Thalos.NET.Anthropic"     Version="0.2.0-local.20260817120000" />
-  <PackageVersion Include="Thalos.NET.Sentinel"      Version="0.2.0-local.20260817120000" />
-  <PackageVersion Include="Thalos.NET.Memory"        Version="0.2.0-local.20260817120000" />
-  <PackageVersion Include="Thalos.NET.Memory.RagNet" Version="0.2.0-local.20260817120000" />
+  <PackageVersion Include="Thalos.NET.Abstractions"  Version="0.3.0-local.20260818120000" />
+  <PackageVersion Include="Thalos.NET"               Version="0.3.0-local.20260818120000" />
+  <PackageVersion Include="Thalos.NET.Testing"       Version="0.3.0-local.20260818120000" />
+  <PackageVersion Include="Thalos.NET.Mcp"           Version="0.3.0-local.20260818120000" />
+  <PackageVersion Include="Thalos.NET.Anthropic"     Version="0.3.0-local.20260818120000" />
+  <PackageVersion Include="Thalos.NET.Sentinel"      Version="0.3.0-local.20260818120000" />
+  <PackageVersion Include="Thalos.NET.Memory"        Version="0.3.0-local.20260818120000" />
+  <PackageVersion Include="Thalos.NET.Memory.RagNet" Version="0.3.0-local.20260818120000" />
+  <PackageVersion Include="Thalos.NET.Skills"        Version="0.3.0-local.20260818120000" />
 </ItemGroup>
 ```
 
@@ -200,8 +301,8 @@ Same setup as [Rag.NET](https://github.com/MarcelRoozekrans/Rag.NET); the runboo
   nothing is hand-edited. Stable versions only — no prereleases are published.
 - Releases are cut by [release-please](.github/workflows/release-please.yml) from conventional commits (enforced on
   PRs by commitlint): dispatch → review/merge the release PR → dispatch → `vX.Y.Z` tag + GitHub release.
-- CI (`.github/workflows/ci.yml`) builds and tests on Ubuntu and Windows on every push/PR, packs and validates the eight
+- CI (`.github/workflows/ci.yml`) builds and tests on Ubuntu and Windows on every push/PR, packs and validates the nine
   packages (per-package TFM check: `Thalos.NET.Memory.RagNet` ships `net10.0` only), and rehearses the nuget.org push against a local feed. Publishing to nuget.org is a manual dispatch with
   `publish_to_nuget=true` on the tagged release commit, using nuget.org Trusted Publishing (no stored API key).
 
-Status: **0.2.0 — API is unstable until 1.0.**
+Status: **0.3.0 — API is unstable until 1.0.**
