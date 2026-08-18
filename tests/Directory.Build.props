@@ -15,7 +15,7 @@
     <PackageReference Include="NSubstitute" />
     <PackageReference Include="coverlet.collector" />
     <Using Include="Xunit" />
-    <!-- AwesomeAssertions 7.x still ships the FluentAssertions namespace (renamed to AwesomeAssertions only in 9.x) -->
-    <Using Include="FluentAssertions" />
+    <!-- AwesomeAssertions 9.x renamed its namespace from FluentAssertions to AwesomeAssertions -->
+    <Using Include="AwesomeAssertions" />
   </ItemGroup>
 </Project>

@@ -152,19 +152,19 @@ jobs:
             # Rag.NET is net10.0-only, so its adapter ships one lib folder; every other package ships both TFMs.
             tfms="net8.0 net10.0"; [ "$id" = "Thalos.NET.Memory.RagNet" ] && tfms="net10.0"
             for must in "README.md" "logo.png"; do
-              echo "$listing" | grep -q " $must" || { echo "::error::$pkg lacks $must"; failed=1; }
+              grep -q " $must" <<< "$listing" || { echo "::error::$pkg lacks $must"; failed=1; }
             done
             for tfm in $tfms; do
               for must in "lib/$tfm/$id.dll" "lib/$tfm/$id.xml"; do
-                echo "$listing" | grep -q " $must" || { echo "::error::$pkg lacks $must"; failed=1; }
+                grep -q " $must" <<< "$listing" || { echo "::error::$pkg lacks $must"; failed=1; }
               done
             done
-            echo "$listing" | grep -q "runtimeconfig.json" && { echo "::error::$pkg ships a runtimeconfig.json"; failed=1; }
+            grep -q "runtimeconfig.json" <<< "$listing" && { echo "::error::$pkg ships a runtimeconfig.json"; failed=1; }
             nuspec=$(unzip -p "$pkg" "$id.nuspec")
-            echo "$nuspec" | grep -q "<version>$PACKAGE_VERSION</version>" || { echo "::error::$pkg nuspec version is not $PACKAGE_VERSION"; failed=1; }
-            echo "$nuspec" | grep -q "<license type=\"expression\">MIT</license>" || { echo "::error::$pkg lacks the MIT licence expression"; failed=1; }
-            echo "$nuspec" | grep -q "<repository " || { echo "::error::$pkg lacks repository metadata (SourceLink)"; failed=1; }
-            echo "$nuspec" | grep -q "Package Description" && { echo "::error::$pkg has the default description"; failed=1; }
+            grep -q "<version>$PACKAGE_VERSION</version>" <<< "$nuspec" || { echo "::error::$pkg nuspec version is not $PACKAGE_VERSION"; failed=1; }
+            grep -q "<license type=\"expression\">MIT</license>" <<< "$nuspec" || { echo "::error::$pkg lacks the MIT licence expression"; failed=1; }
+            grep -q "<repository " <<< "$nuspec" || { echo "::error::$pkg lacks repository metadata (SourceLink)"; failed=1; }
+            grep -q "Package Description" <<< "$nuspec" && { echo "::error::$pkg has the default description"; failed=1; }
             echo "ok: $pkg"
           done
           count=$(ls *.nupkg | wc -l)
