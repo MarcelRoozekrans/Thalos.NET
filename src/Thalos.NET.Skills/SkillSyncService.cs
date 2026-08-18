@@ -24,12 +24,14 @@ namespace Thalos.Skills;
 /// </remarks>
 /// <param name="store">Where the parsed documents land; the source of truth, and a failure writing it is fatal.</param>
 /// <param name="index">The search cache, refilled from the store on every run; a failure here only degrades <c>skills__search</c>.</param>
+/// <param name="catalogue">The rendered <c>&lt;skills&gt;</c> block, republished from the store's active set on every run.</param>
 /// <param name="options">Supplies <see cref="SkillOptions.Roots"/>, <see cref="SkillOptions.Enabled"/> and <see cref="SkillOptions.SyncOnStartup"/>.</param>
 /// <param name="clock">Stamps <see cref="SkillDocument.UpdatedAt"/> on everything this run writes.</param>
 /// <param name="logger">Optional; a null logger is used when the host registered none.</param>
 public sealed partial class SkillSyncService(
     ISkillStore store,
     ISkillIndex index,
+    SkillCatalogue catalogue,
     IOptions<SkillOptions> options,
     TimeProvider clock,
     ILogger<SkillSyncService>? logger = null) : IHostedLifecycleService
@@ -199,22 +201,22 @@ public sealed partial class SkillSyncService(
             return Result<SkillSyncReport, AgentError>.Failure(swept.Error);
         }
 
-        await RefreshIndexAsync(seen, known, ct).ConfigureAwait(false);
+        await PublishAsync(seen, known, ct).ConfigureAwait(false);
 
         LogSynced(_logger, scan.Documents.Count, upserted, unchanged, scan.Skipped, deactivated);
         return Result<SkillSyncReport, AgentError>.Success(new SkillSyncReport(scan.Documents.Count, upserted, unchanged, scan.Skipped, deactivated));
     }
 
     /// <summary>
-    /// Refills the index from the store's active set and drops the vectors of skills that just disappeared. The index is a
-    /// rebuildable cache that does not survive the process while the store does, so the content-hash skip governs the store
-    /// upsert only: every active skill is re-embedded on every run, or a restart over an unmodified repository would leave
+    /// Republishes the store's active set to the catalogue and the index, and drops the vectors of skills that just disappeared.
+    /// Both are rebuildable caches that do not survive the process while the store does, so the content-hash skip governs the
+    /// store upsert only: every active skill is re-published on every run, or a restart over an unmodified repository would leave
     /// <c>skills__search</c> with nothing to search. Best effort throughout — a failure is logged and only degrades search.
     /// </summary>
     /// <param name="seen">Every name that loaded this run.</param>
     /// <param name="known">Everything the store held before this run, active and inactive.</param>
     /// <param name="ct">Cancels the embedding calls.</param>
-    private async ValueTask RefreshIndexAsync(List<SkillName> seen, Dictionary<SkillName, SkillDocument> known, CancellationToken ct)
+    private async ValueTask PublishAsync(List<SkillName> seen, Dictionary<SkillName, SkillDocument> known, CancellationToken ct)
     {
         foreach (var (name, skill) in known)
         {
@@ -234,6 +236,9 @@ public sealed partial class SkillSyncService(
             LogIndexFailed(_logger, active.Error.ToString());
             return;
         }
+
+        // Before the index upsert on purpose: a broken embedding generator must not stop the catalogue from refreshing.
+        catalogue.Set(active.Value, options.Value.Catalogue.MaxChars);
 
         var indexed = await index.UpsertAsync(active.Value, ct).ConfigureAwait(false);
         if (indexed.IsFailure)

@@ -75,11 +75,11 @@ public sealed class SkillSyncIndexTests
         var options = Roots(folder.Root);
 
         // the first sync fills a store that survives the process; the index of that process does not
-        await new SkillSyncService(store, UnavailableSkillIndex.Instance, Options.Create(options), clock).SyncAsync(CancellationToken.None);
+        await new SkillSyncService(store, UnavailableSkillIndex.Instance, new SkillCatalogue(), Options.Create(options), clock).SyncAsync(CancellationToken.None);
         store.Upserts.Should().Equal(["release"]);
 
         var index = new RecordingSkillIndex(new InMemorySkillIndex(new HashedBagOfWordsEmbeddingGenerator(512)));
-        var second = await new SkillSyncService(store, index, Options.Create(options), clock).SyncAsync(CancellationToken.None);
+        var second = await new SkillSyncService(store, index, new SkillCatalogue(), Options.Create(options), clock).SyncAsync(CancellationToken.None);
 
         second.Value.Unchanged.Should().Be(1, "the file did not change, so the store upsert is skipped");
         store.Upserts.Should().Equal(["release"], "the hash skip still spares the store on the second sync");
@@ -96,7 +96,7 @@ public sealed class SkillSyncIndexTests
         folder.WriteFlatSkill("notes", "house notes about the codebase");
         var clock = Clock();
         var index = new RecordingSkillIndex(new InMemorySkillIndex(new HashedBagOfWordsEmbeddingGenerator(512)));
-        var sync = new SkillSyncService(new InMemorySkillStore(clock), index, Options.Create(Roots(folder.Root)), clock);
+        var sync = new SkillSyncService(new InMemorySkillStore(clock), index, new SkillCatalogue(), Options.Create(Roots(folder.Root)), clock);
         await sync.SyncAsync(CancellationToken.None);
 
         folder.Delete("notes.md");
@@ -121,7 +121,7 @@ public sealed class SkillSyncIndexTests
         var options = Roots(folder.Root);
         var index = new RecordingSkillIndex(UnavailableSkillIndex.Instance) { OnUpsert = _ => AgentError.SkillSearchUnavailable("no embeddings today") };
         var store = new RecordingSkillStore(new InMemorySkillStore(clock));
-        var sync = new SkillSyncService(store, index, Options.Create(options), clock, log);
+        var sync = new SkillSyncService(store, index, new SkillCatalogue(), Options.Create(options), clock, log);
 
         var result = await sync.SyncAsync(CancellationToken.None);
 
@@ -130,7 +130,7 @@ public sealed class SkillSyncIndexTests
         log.Entries.Should().Contain(e => e.EventId == 563 && e.Level == LogLevel.Warning);
 
         using var host = new HostBuilder().ConfigureServices(services =>
-            services.AddSingleton<IHostedService>(new SkillSyncService(new InMemorySkillStore(Clock()), index, Options.Create(options), Clock(), log))).Build();
+            services.AddSingleton<IHostedService>(new SkillSyncService(new InMemorySkillStore(Clock()), index, new SkillCatalogue(), Options.Create(options), Clock(), log))).Build();
         await host.StartAsync(CancellationToken.None);
         await host.StopAsync(CancellationToken.None);
     }
@@ -146,7 +146,7 @@ public sealed class SkillSyncIndexTests
         await index.UpsertAsync([SkillModelTests.Doc("planted", "how we cut and publish a release")], CancellationToken.None);
         index.UpsertBatches.Clear();
 
-        var result = await new SkillSyncService(store, index, Options.Create(Roots(missing)), clock).SyncAsync(CancellationToken.None);
+        var result = await new SkillSyncService(store, index, new SkillCatalogue(), Options.Create(Roots(missing)), clock).SyncAsync(CancellationToken.None);
 
         result.IsSuccess.Should().BeTrue();
         index.UpsertBatches.Should().BeEmpty();
