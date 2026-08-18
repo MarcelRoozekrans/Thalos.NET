@@ -15,7 +15,7 @@
     <PackageVersion Include="ZeroAlloc.Analyzers" Version="1.5.0" />
 
     <!-- Agent framework + AI abstractions -->
-    <PackageVersion Include="Microsoft.Agents.AI" Version="1.17.0" />
+    <PackageVersion Include="Microsoft.Agents.AI" Version="1.18.0" />
     <PackageVersion Include="Microsoft.Extensions.AI" Version="10.9.0" />
     <PackageVersion Include="Microsoft.Extensions.AI.Abstractions" Version="10.9.0" />
     <PackageVersion Include="ModelContextProtocol" Version="2.2.0" />
