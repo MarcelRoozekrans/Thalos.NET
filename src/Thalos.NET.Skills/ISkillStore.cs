@@ -6,7 +6,7 @@ namespace Thalos.Skills;
 /// <summary>
 /// Persistence for skill documents (no vectors). Implementations must be safe for concurrent use. Tags are persisted
 /// normalised (<see cref="SkillRules.NormalizeTags"/>) by <see cref="UpsertAsync"/>, so reads always return the canonical
-/// form. The store is written only by <c>SkillSyncService</c> — files are the source of truth and no agent may write here.
+/// form. The store is written only by <see cref="SkillSyncService"/> — files are the source of truth and no agent may write here.
 /// The contract is enforced by <c>Thalos.Testing.SkillStoreContractTests</c>.
 /// </summary>
 [Instrument("thalos", PublicProxy = true)]
@@ -27,7 +27,7 @@ public interface ISkillStore
     /// <summary>
     /// Sets <see cref="SkillDocument.IsActive"/> false and stamps <c>UpdatedAt</c> for every currently active skill whose name is
     /// <em>not</em> in <paramref name="seen"/>; already-inactive rows are untouched. <paramref name="seen"/> is a set (duplicates
-    /// count once). An empty list deactivates everything — the caller decides whether that is meant (<c>SkillSyncService</c>
+    /// count once). An empty list deactivates everything — the caller decides whether that is meant (<see cref="SkillSyncService"/>
     /// refuses to when every root was unreadable).
     /// </summary>
     [Trace("thalos.skills.deactivate-missing")]
