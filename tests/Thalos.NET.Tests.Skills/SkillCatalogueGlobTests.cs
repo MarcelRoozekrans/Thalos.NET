@@ -178,4 +178,26 @@ public sealed class SkillCatalogueGlobTests
         index.UpsertBatches.Should().ContainSingle("the index was asked and refused");
         catalogue.Render(["*"]).Should().Contain("- release: How we cut a release.", "the catalogue is published before the index upsert, so a broken backend cannot blank it");
     }
+    /// <summary>
+    /// <c>AgentDefinition.Skills</c> is an unvalidated list, so a glob may contain the cache key's separator
+    /// or be empty. With a merely-separated key, ["release", "dotnet-testing"] and the single glob
+    /// "release\u001Fdotnet-testing" produced the same key and shared one cache entry — one agent's catalogue
+    /// served to another, or (if the forged set rendered first) a real agent silently losing its own.
+    /// </summary>
+    [Fact]
+    public void A_glob_containing_the_key_separator_cannot_forge_another_glob_sets_cache_entry()
+    {
+        var catalogue = Loaded();
+
+        var real = catalogue.Render(["release", "dotnet-testing"]);
+        var forged = catalogue.Render(["release\u001Fdotnet-testing"]);
+        var emptyThenReal = catalogue.Render(["", "release"]);
+        var forgedEmpty = catalogue.Render(["\u001Frelease"]);
+
+        Listed(real).Should().Equal(["dotnet-testing", "release"]);
+        forged.Should().BeNull("one glob containing a separator matches no skill name");
+        Listed(emptyThenReal).Should().Equal(["release"]);
+        forgedEmpty.Should().BeNull("no skill name contains a control character");
+    }
+
 }

@@ -111,8 +111,21 @@ public sealed class SkillCatalogue
         return sb.Append(SkillBlock.CatalogueClose).ToString();
     }
 
-    // U+001F (unit separator) cannot occur in a glob, so joined keys are unambiguous.
-    private static string CacheKey(IReadOnlyList<string> globs) => string.Join('\u001F', globs);
+    // Length-prefixed, not merely separated. AgentDefinition.Skills is an unvalidated
+    // IReadOnlyList<string>, so a glob may contain any character including the separator itself:
+    // ["release", "dotnet-*"] and the single glob "release\u001Fdotnet-*" would otherwise share one
+    // cache entry, and with it one agent's catalogue. Prefixing the count and each length makes the
+    // encoding injective whatever the globs contain.
+    private static string CacheKey(IReadOnlyList<string> globs)
+    {
+        var sb = new StringBuilder().Append(globs.Count);
+        for (var i = 0; i < globs.Count; i++)
+        {
+            sb.Append('\u001F').Append(globs[i].Length).Append('\u001F').Append(globs[i]);
+        }
+
+        return sb.ToString();
+    }
 
     private sealed record Snapshot(IReadOnlyList<SkillDocument> Skills, int MaxChars);
 }
