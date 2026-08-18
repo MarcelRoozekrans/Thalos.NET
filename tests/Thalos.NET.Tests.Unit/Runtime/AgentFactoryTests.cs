@@ -303,4 +303,17 @@ public sealed class AgentFactoryTests
         var b = (await h.Factory.GetOrCreateAsync(def with { Memory = new AgentMemorySettings { TopK = 2 } }, default)).Value;
         b.Should().NotBeSameAs(a);
     }
+
+    [Fact]
+    public async Task Changing_the_skill_globs_rebuilds_the_agent()
+    {
+        var h = Build();
+        var def = Def() with { Skills = ["release"] };
+        var first = (await h.Factory.GetOrCreateAsync(def, default)).Value;
+        var same = (await h.Factory.GetOrCreateAsync(def with { Skills = ["release"] }, default)).Value;
+        same.Should().BeSameAs(first, "an equal definition reuses the cached agent");
+
+        var rebuilt = (await h.Factory.GetOrCreateAsync(def with { Skills = ["release", "dotnet-*"] }, default)).Value;
+        rebuilt.Should().NotBeSameAs(first, "a changed skill glob list must rebuild the agent");
+    }
 }
