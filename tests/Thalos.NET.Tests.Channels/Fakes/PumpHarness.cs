@@ -52,7 +52,7 @@ public sealed class PumpHarness : IDisposable
         Runtime.RunTurnStreamingAsync(Arg.Any<AgentTurnRequest>(), Arg.Any<CancellationToken>())
             .Returns(call => Emit(call.Arg<AgentTurnRequest>(), call.Arg<CancellationToken>()));
 
-        Pump = new ChannelPump([Channel, Channel.Secondary], [Channel], Runtime, Catalog, Map,
+        Pump = new ChannelPump([Channel], [Channel], Runtime, Catalog, Map,
             Options.Create(new ChannelOptions { DefaultAgent = "daedalus", FlushInterval = TimeSpan.Zero }),
             Clock, NullLogger<ChannelPump>.Instance);
     }

@@ -107,15 +107,11 @@ public sealed class ChannelPumpCommandTests
     [Fact]
     public async Task Slash_cancel_stops_a_running_turn_and_the_channel_keeps_reading()
     {
-        // Proves the /cancel fix end-to-end: cancelling a genuinely in-flight turn must not tear down the read
-        // loop that HandleAsync runs on — if it did, the message sent after /cancel below would never be handled
-        // and this test would time out rather than fail an assertion.
-        //
-        // /cancel is sent on Channel.Secondary rather than Channel itself: a single source's own reader loop
-        // handles its own messages strictly in order, so it can never dequeue a /cancel for a turn it is itself
-        // still blocked running. Only a second, concurrently-running reader loop targeting the same
-        // (ChannelId, ConversationId) can actually deliver /cancel while the first is still inside a turn — which
-        // is exactly the scenario the pump's lock around its /cancel registry exists for.
+        // Proves the /cancel fix end-to-end, from a SINGLE source: the read loop now starts an ordinary turn
+        // without waiting for it, so it stays free to read the next message — including /cancel — while that turn
+        // is still open. Cancelling a genuinely in-flight turn must not tear down the read loop either: if it did,
+        // the message sent after /cancel below would never be handled and this test would time out rather than
+        // fail an assertion.
         var h = new PumpHarness();
         var gate = h.BlockNextTurn();
 
@@ -127,7 +123,7 @@ public sealed class ChannelPumpCommandTests
             await h.StartAndSend("blocking message");
             await WaitUntilAsync(() => h.Notices().Count >= 1);
 
-            h.Channel.SendOnSecondary("/cancel");
+            h.Channel.Send("/cancel");
             await WaitUntilAsync(() => h.Notices().Any(n => n.Contains("Cancelled", StringComparison.Ordinal)));
 
             h.Notices().Should().Contain(n => n.Contains("Cancelled", StringComparison.Ordinal));
@@ -140,6 +136,35 @@ public sealed class ChannelPumpCommandTests
         finally
         {
             // A failing assertion above must not leave the blocked fake turn hanging and the suite stuck with it.
+            gate.TrySetResult();
+        }
+    }
+
+    [Fact]
+    public async Task A_second_message_during_a_running_turn_gets_the_busy_notice()
+    {
+        // Edge 4, now reachable at the pump level: the read loop no longer blocks on a turn, so a second message
+        // for the SAME conversation is dequeued while the first is still running, and StartTurnAsync's own
+        // _running check reports Busy without starting a second turn — rather than a queued backlog the operator
+        // never sees.
+        var h = new PumpHarness();
+        var gate = h.BlockNextTurn();
+
+        try
+        {
+            await h.StartAndSend("blocking message");
+            await WaitUntilAsync(() => h.Notices().Count >= 1);
+
+            h.Channel.Send("second message");
+            await WaitUntilAsync(() => h.Notices().Any(n => n.Contains("Still working", StringComparison.Ordinal)));
+
+            h.Notices().Should().Contain(n => n.Contains("Still working", StringComparison.Ordinal));
+
+            // Only the first message's turn ever reached the runtime — the second was refused before that.
+            h.Runtime.Received(1).RunTurnStreamingAsync(Arg.Any<AgentTurnRequest>(), Arg.Any<CancellationToken>());
+        }
+        finally
+        {
             gate.TrySetResult();
         }
     }

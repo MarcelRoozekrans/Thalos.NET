@@ -54,8 +54,15 @@ public sealed class ChannelPumpTurnTests
             .Returns(ThrowingStream(), Stream(sessionId, turnId));
 
         using var pump = Build(channel, runtime);
+
+        // Different conversations: ordinary messages are no longer serialised by the read loop (see ChannelPump.
+        // StartTurnAsync — fixed to stop /cancel and the busy notice being unreachable) — a second message for the
+        // SAME conversation as a still-registered turn now gets Busy instead of running. This test has always been
+        // about the read loop surviving a bad message for whatever comes after it, not about same-conversation
+        // ordering, so the second message uses its own conversation to keep that assertion deterministic rather
+        // than racing the unrelated per-conversation collision.
         channel.Send("this one blows up");
-        channel.Send("this one should still land");
+        channel.Send("this one should still land", new ConversationId("other-conversation"));
         await pump.StartAsync(default);
         await WaitForTerminal(channel);
         channel.Complete();

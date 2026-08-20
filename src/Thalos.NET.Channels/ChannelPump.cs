@@ -7,7 +7,11 @@ namespace Thalos.Channels;
 /// <summary>
 /// Hosts every registered <see cref="IChannelSource"/>: reads inbound messages, binds them to agent sessions and
 /// renders each turn back through the <see cref="IChannelAdapter"/> whose <c>ChannelId</c> matches. One reader loop
-/// per source; messages within a conversation are handled in order.
+/// per source. A slash-command is handled inline on that loop (commands are fast, and the loop must stay
+/// responsive), but an ordinary message starts its turn WITHOUT the loop waiting for it — the loop that is parked
+/// inside a turn can never dequeue the next message, which would make <c>/cancel</c> and the busy notice
+/// unreachable for exactly the conversation that needs them. A second ordinary message for a conversation that
+/// already has a turn running gets <see cref="ChannelNotices.Busy"/> immediately rather than queuing behind it.
 /// </summary>
 public sealed partial class ChannelPump(
     IEnumerable<IChannelSource> sources,
@@ -38,6 +42,13 @@ public sealed partial class ChannelPump(
     /// </summary>
     private readonly Dictionary<(string ChannelId, string ConversationId), CancellationTokenSource> _running = [];
 
+    /// <summary>
+    /// Every turn task currently in flight, so shutdown can drain them instead of abandoning them mid-write to a
+    /// channel. Guarded by the same lock as <see cref="_running"/>; swept of already-completed entries whenever a
+    /// new turn starts, since nothing else removes an individual entry once its turn finishes.
+    /// </summary>
+    private readonly List<Task> _turnTasks = [];
+
     /// <inheritdoc />
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -48,6 +59,27 @@ public sealed partial class ChannelPump(
         }
 
         await Task.WhenAll(_sources.Select(s => PumpAsync(s, stoppingToken))).ConfigureAwait(false);
+
+        // Every reader loop just ended (shutdown, or every source failed). Any turn started before that has its
+        // token linked to stoppingToken, so it is already unwinding on its own — wait for that rather than let
+        // BackgroundService's stop abandon it mid-write to a channel or mid-call to the runtime. RunTrackedTurnAsync
+        // never lets an exception escape, so this can never fault.
+        await DrainRunningTurnsAsync().ConfigureAwait(false);
+    }
+
+    /// <summary>Awaits a snapshot of every still-in-flight turn task. Called once, after every reader loop has ended.</summary>
+    private async Task DrainRunningTurnsAsync()
+    {
+        Task[] snapshot;
+        lock (_running)
+        {
+            snapshot = [.. _turnTasks];
+        }
+
+        if (snapshot.Length > 0)
+        {
+            await Task.WhenAll(snapshot).ConfigureAwait(false);
+        }
     }
 
     private async Task PumpAsync(IChannelSource source, CancellationToken ct)
@@ -129,42 +161,93 @@ public sealed partial class ChannelPump(
                 break;
         }
 
-        var binding = await ResolveAsync(message, adapter, ct).ConfigureAwait(false);
-        if (binding is null)
-        {
-            return;
-        }
-
-        await RunTrackedTurnAsync(message, binding, adapter, ct).ConfigureAwait(false);
+        await StartTurnAsync(message, adapter, ct).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Runs one turn under a token registered in <see cref="_running"/> so <c>/cancel</c> can abort it. A
-    /// cancellation the operator asked for (not pump shutdown) is swallowed right here: the per-message catch in
-    /// <see cref="PumpAsync"/> deliberately excludes <see cref="OperationCanceledException"/> — that exclusion is
-    /// what lets a real shutdown unwind as a clean exit — so letting a <c>/cancel</c>-triggered one escape
-    /// <see cref="HandleAsync"/> would tear down that channel's whole read loop over a single stopped turn.
+    /// Starts an ordinary turn WITHOUT waiting for it to finish, so <see cref="PumpAsync"/>'s read loop returns to
+    /// reading the next message immediately — a loop parked inside a turn can never dequeue <c>/cancel</c>, or a
+    /// second message for the same conversation, for exactly the turn that needs interrupting. If this
+    /// conversation already has a turn running, nothing new starts: <see cref="ChannelNotices.Busy"/> is reported
+    /// right here. This is edge 4 firing at the pump level; the runtime-level <see cref="AgentErrorCode.SessionBusy"/>
+    /// handling in <see cref="HandleLifecycleFailureAsync"/> stays in place as a backstop for a genuine cross-source
+    /// race (two different reader loops racing to start a turn for the same conversation), but for the common case —
+    /// one source, a second message while the first is still running — this check is what actually fires.
     /// </summary>
-    private async Task RunTrackedTurnAsync(InboundMessage message, ConversationBinding binding, IChannelAdapter adapter, CancellationToken ct)
+    private async Task StartTurnAsync(InboundMessage message, IChannelAdapter adapter, CancellationToken ct)
     {
         var key = (message.ChannelId, message.ConversationId.Value);
-        using var turnCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        CancellationTokenSource? turnCts = null;
 
         lock (_running)
         {
-            _running[key] = turnCts;
+            if (!_running.ContainsKey(key))
+            {
+                turnCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                _running[key] = turnCts;
+            }
         }
 
+        if (turnCts is null)
+        {
+            await NotifyAsync(adapter, SessionId.New(), ChannelNotices.Busy, ct).ConfigureAwait(false);
+            return;
+        }
+
+        var turnTask = RunTrackedTurnAsync(message, adapter, key, turnCts, ct);
+        lock (_running)
+        {
+            _turnTasks.RemoveAll(t => t.IsCompleted);
+            _turnTasks.Add(turnTask);
+        }
+    }
+
+    /// <summary>
+    /// Resolves and runs one turn under the token registered in <see cref="_running"/> so <c>/cancel</c> can abort
+    /// it. This task is launched by <see cref="StartTurnAsync"/> and deliberately never awaited by the read loop, so
+    /// no exception of any kind may escape it — an unobserved fault on a task nobody awaits is exactly the
+    /// silent-death failure <see cref="PumpAsync"/>'s per-message catch exists to prevent for the loop itself; every
+    /// path here ends in a log, a notice, or quiet completion, never an unhandled throw.
+    /// </summary>
+    private async Task RunTrackedTurnAsync(
+        InboundMessage message, IChannelAdapter adapter, (string ChannelId, string ConversationId) key, CancellationTokenSource turnCts, CancellationToken ct)
+    {
         try
         {
-            await RunTurnAsync(message, binding, adapter, turnCts.Token).ConfigureAwait(false);
+            var binding = await ResolveAsync(message, adapter, turnCts.Token).ConfigureAwait(false);
+            if (binding is null)
+            {
+                return;
+            }
+
+            try
+            {
+                await RunTurnAsync(message, binding, adapter, turnCts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                // /cancel, not shutdown: cancelling turnCts alone (ct itself is untouched) is how the operator
+                // aborts a running turn without tearing down the read loop that started it.
+                await NotifyAsync(adapter, binding.SessionId, ChannelNotices.Cancelled, ct).ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            await NotifyAsync(adapter, binding.SessionId, ChannelNotices.Cancelled, ct).ConfigureAwait(false);
+            // Cancelled before a binding existed (during resolution/session creation) — nothing to route the
+            // notice against yet, so use a fresh id the same way ResolveAsync's own failure notices do.
+            await NotifyAsync(adapter, SessionId.New(), ChannelNotices.Cancelled, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Real pump shutdown (ct itself is cancelled) — end quietly, same as the read loop's own shutdown path.
+        }
+        catch (Exception ex)
+        {
+            LogHandleFailed(_logger, message.ChannelId, ex);
         }
         finally
         {
+            turnCts.Dispose();
             lock (_running)
             {
                 _running.Remove(key);
