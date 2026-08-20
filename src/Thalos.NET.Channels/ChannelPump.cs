@@ -62,12 +62,17 @@ public sealed partial class ChannelPump(
 
         // Every reader loop just ended (shutdown, or every source failed). Any turn started before that has its
         // token linked to stoppingToken, so it is already unwinding on its own — wait for that rather than let
-        // BackgroundService's stop abandon it mid-write to a channel or mid-call to the runtime. RunTrackedTurnAsync
-        // never lets an exception escape, so this can never fault.
+        // BackgroundService's stop abandon it mid-write to a channel or mid-call to the runtime.
         await DrainRunningTurnsAsync().ConfigureAwait(false);
     }
 
-    /// <summary>Awaits a snapshot of every still-in-flight turn task. Called once, after every reader loop has ended.</summary>
+    /// <summary>
+    /// Awaits every still-in-flight turn task individually, observing (and logging) a fault on any one of them
+    /// rather than discarding it. <see cref="RunTrackedTurnAsync"/> is written so its returned task should never
+    /// actually fault — but "should never" is not "cannot": if that guarantee is ever broken by a future change,
+    /// this is what stands between an unobserved fault and a silent <see cref="TaskScheduler.UnobservedTaskException"/>
+    /// once the garbage collector drops the last reference to it, rather than this method's own claim doing that job.
+    /// </summary>
     private async Task DrainRunningTurnsAsync()
     {
         Task[] snapshot;
@@ -76,9 +81,16 @@ public sealed partial class ChannelPump(
             snapshot = [.. _turnTasks];
         }
 
-        if (snapshot.Length > 0)
+        foreach (var task in snapshot)
         {
-            await Task.WhenAll(snapshot).ConfigureAwait(false);
+            try
+            {
+                await task.ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                LogUnexpectedTurnFault(_logger, ex);
+            }
         }
     }
 
@@ -197,21 +209,60 @@ public sealed partial class ChannelPump(
         var turnTask = RunTrackedTurnAsync(message, adapter, key, turnCts, ct);
         lock (_running)
         {
-            _turnTasks.RemoveAll(t => t.IsCompleted);
+            _turnTasks.RemoveAll(t =>
+            {
+                if (!t.IsCompleted)
+                {
+                    return false;
+                }
+
+                ObserveIfFaulted(t);
+                return true;
+            });
             _turnTasks.Add(turnTask);
+        }
+    }
+
+    /// <summary>Whether a turn is currently registered as running for this conversation. Test-only hook; not part of the public contract.</summary>
+    internal bool IsTurnRunning(string channelId, ConversationId conversationId)
+    {
+        lock (_running)
+        {
+            return _running.ContainsKey((channelId, conversationId.Value));
+        }
+    }
+
+    /// <summary>
+    /// Logs (and thereby observes) a completed task's fault instead of letting the last reference to it disappear
+    /// untouched, which is what produces a <see cref="TaskScheduler.UnobservedTaskException"/> once the garbage
+    /// collector runs. Defense in depth: <see cref="RunTrackedTurnAsync"/> is written so its task should never
+    /// actually fault, but a blind <c>RemoveAll</c>/discard would silently rely on that being airtight forever.
+    /// </summary>
+    private void ObserveIfFaulted(Task task)
+    {
+        if (task.IsFaulted && task.Exception is { } ex)
+        {
+            LogUnexpectedTurnFault(_logger, ex);
         }
     }
 
     /// <summary>
     /// Resolves and runs one turn under the token registered in <see cref="_running"/> so <c>/cancel</c> can abort
     /// it. This task is launched by <see cref="StartTurnAsync"/> and deliberately never awaited by the read loop, so
-    /// no exception of any kind may escape it — an unobserved fault on a task nobody awaits is exactly the
+    /// no exception of any kind may escape it by design — an unobserved fault on a task nobody awaits is exactly the
     /// silent-death failure <see cref="PumpAsync"/>'s per-message catch exists to prevent for the loop itself; every
-    /// path here ends in a log, a notice, or quiet completion, never an unhandled throw.
+    /// path here ends in a log, a notice, or quiet completion, never an unhandled throw. The notice sent from inside
+    /// a catch block is itself guarded (<see cref="TryNotifyAsync"/>): a throwing adapter must not be the one thing
+    /// that slips past all of this.
     /// </summary>
     private async Task RunTrackedTurnAsync(
         InboundMessage message, IChannelAdapter adapter, (string ChannelId, string ConversationId) key, CancellationTokenSource turnCts, CancellationToken ct)
     {
+        // Yields before doing anything else, so starting a turn is non-blocking for the read loop by construction —
+        // not merely because everything this method calls happens to await before doing real work. A pathologically
+        // synchronous runtime implementation could otherwise still run entirely inline on the caller's stack.
+        await Task.Yield();
+
         try
         {
             var binding = await ResolveAsync(message, adapter, turnCts.Token).ConfigureAwait(false);
@@ -228,14 +279,14 @@ public sealed partial class ChannelPump(
             {
                 // /cancel, not shutdown: cancelling turnCts alone (ct itself is untouched) is how the operator
                 // aborts a running turn without tearing down the read loop that started it.
-                await NotifyAsync(adapter, binding.SessionId, ChannelNotices.Cancelled, ct).ConfigureAwait(false);
+                await TryNotifyAsync(adapter, binding.SessionId, ChannelNotices.Cancelled, message.ChannelId, ct).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             // Cancelled before a binding existed (during resolution/session creation) — nothing to route the
             // notice against yet, so use a fresh id the same way ResolveAsync's own failure notices do.
-            await NotifyAsync(adapter, SessionId.New(), ChannelNotices.Cancelled, ct).ConfigureAwait(false);
+            await TryNotifyAsync(adapter, SessionId.New(), ChannelNotices.Cancelled, message.ChannelId, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -252,6 +303,24 @@ public sealed partial class ChannelPump(
             {
                 _running.Remove(key);
             }
+        }
+    }
+
+    /// <summary>
+    /// Delivers a notice from inside exception-handling code in <see cref="RunTrackedTurnAsync"/>, where there is
+    /// nowhere further "up" for a further exception to be caught — so this swallows and logs absolutely anything
+    /// the notify itself throws (including <see cref="OperationCanceledException"/>), rather than letting a
+    /// misbehaving <see cref="IChannelAdapter"/> be the one path out of that method that was left unguarded.
+    /// </summary>
+    private async Task TryNotifyAsync(IChannelAdapter adapter, SessionId sessionId, string text, string channelId, CancellationToken ct)
+    {
+        try
+        {
+            await NotifyAsync(adapter, sessionId, text, ct).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            LogHandleFailed(_logger, channelId, ex);
         }
     }
 
@@ -560,4 +629,7 @@ public sealed partial class ChannelPump(
 
     [LoggerMessage(EventId = 607, Level = LogLevel.Warning, Message = "Channel {ChannelId} asked the runtime to close a session and it refused: {Code}; the local binding is cleared regardless")]
     private static partial void LogCloseSessionFailed(ILogger logger, string channelId, AgentErrorCode code);
+
+    [LoggerMessage(EventId = 608, Level = LogLevel.Critical, Message = "A turn task faulted after its own exception handling was supposed to prevent that; this is a bug")]
+    private static partial void LogUnexpectedTurnFault(ILogger logger, Exception ex);
 }

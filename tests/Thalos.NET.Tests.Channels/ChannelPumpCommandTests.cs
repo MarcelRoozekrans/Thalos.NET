@@ -128,6 +128,12 @@ public sealed class ChannelPumpCommandTests
 
             h.Notices().Should().Contain(n => n.Contains("Cancelled", StringComparison.Ordinal));
 
+            // Cancelled is delivered from inside RunTrackedTurnAsync's catch, BEFORE its own finally unregisters
+            // the conversation from the pump's /cancel-and-busy registry. Sending the follow-up immediately after
+            // observing Cancelled would race that registry entry and could get Busy instead of a real turn —
+            // wait for the unregistration too before sending it.
+            await WaitUntilAsync(() => !h.Pump.IsTurnRunning(h.Channel.ChannelId, h.Channel.Conversation));
+
             // The read loop must have survived: a later ordinary message is still handled to completion.
             var completedBefore = h.Channel.Delivered.OfType<TurnCompletedEvent>().Count();
             await h.SendAndSettle("hello again");
@@ -162,6 +168,123 @@ public sealed class ChannelPumpCommandTests
 
             // Only the first message's turn ever reached the runtime — the second was refused before that.
             h.Runtime.Received(1).RunTurnStreamingAsync(Arg.Any<AgentTurnRequest>(), Arg.Any<CancellationToken>());
+        }
+        finally
+        {
+            gate.TrySetResult();
+        }
+    }
+
+    [Fact]
+    public async Task A_command_that_throws_is_caught_by_the_read_loop_and_logged()
+    {
+        // Targets PumpAsync's own per-message catch specifically. Command dispatch is the one path still awaited
+        // inline on the read loop (see HandleAsync/StartTurnAsync) — an ordinary message's failure now runs on a
+        // detached task PumpAsync never awaits, so THIS is the only remaining path that still proves the read
+        // loop's own catch is reachable and doing its job, rather than every failure in the suite going through
+        // RunTrackedTurnAsync's catch instead.
+        var h = new PumpHarness();
+
+        // Configured as ONE call with two funcs, not a throwing config followed by a second .Returns(...) to
+        // "reset" it: NSubstitute records a property's .Returns(...) by invoking the getter, which would replay
+        // the already-configured throw before the new configuration could ever attach. The first access throws;
+        // every access after that returns the real list.
+        h.Catalog.Agents.Returns(
+            _ => throw new InvalidOperationException("simulated catalogue failure"),
+            _ => [h.DefaultAgent, h.OtherAgent]);
+
+        // SendAndSettle cannot be used: AgentsAsync throws before ever calling NotifyAsync, so nothing is ever
+        // delivered for this message — the log entry is the only observable signal.
+        await h.StartAndSend("/agents");
+        await WaitUntilAsync(() => h.Logger.Entries.Any(e => e.EventId.Id == 605));
+
+        h.Logger.Entries.Should().Contain(e => e.EventId.Id == 605);
+
+        // The read loop survived: the catalogue no longer throws on this second access, so a later /agents still
+        // gets handled.
+        await h.SendAndSettle("/agents");
+        h.Notices().Should().Contain(n => n.Contains("daedalus", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task An_ordinary_turn_that_throws_is_caught_by_the_launched_task_and_logged()
+    {
+        // Targets RunTrackedTurnAsync's own catch-all specifically. An ordinary message's turn runs on a task the
+        // read loop never awaits (that is the whole point of Task 9 round 2), so PumpAsync's per-message catch
+        // cannot see this failure at all — RunTrackedTurnAsync's own catch-all, and the log entry it writes, are
+        // the only thing standing between a raw exception here and a turn that silently vanishes.
+        var h = new PumpHarness();
+        h.NextTurnThrows();
+
+        // SendAndSettle cannot be used: a throwing turn never delivers anything either.
+        await h.StartAndSend("this blows up");
+        await WaitUntilAsync(() => h.Logger.Entries.Any(e => e.EventId.Id == 605));
+
+        h.Logger.Entries.Should().Contain(e => e.EventId.Id == 605);
+        h.Channel.Delivered.OfType<TurnFailedEvent>().Should().BeEmpty();
+        h.Channel.Delivered.OfType<TurnCompletedEvent>().Should().BeEmpty();
+
+        // The read loop survived: a later ordinary message still runs a turn to completion.
+        await h.SendAndSettle("hello again");
+        h.Channel.Delivered.OfType<TurnCompletedEvent>().Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task A_notify_that_throws_while_reporting_a_cancellation_is_caught_and_logged()
+    {
+        // Targets the INNER cancellation catch (cancelled while RunTurnAsync is actually running, the common
+        // /cancel case) — its own TryNotifyAsync call is nested inside RunTrackedTurnAsync's outer try, so even
+        // without its own guard a throw here happens to be safety-netted by the method's outer catch (Exception ex)
+        // — see the OUTER-catch test below for the site that has no such net at all.
+        var h = new PumpHarness();
+        var gate = h.BlockNextTurn();
+
+        try
+        {
+            await h.StartAndSend("blocking message");
+            await WaitUntilAsync(() => h.Notices().Count >= 1);
+
+            // The very next DeliverAsync call is the Cancelled notice itself.
+            h.Channel.NextDeliverThrows(new InvalidOperationException("simulated adapter failure delivering Cancelled"));
+            h.Channel.Send("/cancel");
+
+            await WaitUntilAsync(() => h.Logger.Entries.Any(e => e.EventId.Id == 605));
+            h.Logger.Entries.Should().Contain(e => e.EventId.Id == 605);
+
+            // The read loop survived: a later ordinary message still runs a turn to completion.
+            await h.SendAndSettle("hello again");
+            h.Channel.Delivered.OfType<TurnCompletedEvent>().Should().ContainSingle();
+        }
+        finally
+        {
+            gate.TrySetResult();
+        }
+    }
+
+    [Fact]
+    public async Task A_notify_that_throws_while_cancelled_during_resolution_is_caught_and_logged()
+    {
+        // Targets the OUTER cancellation catch specifically — this is the exact site the review named: cancelled
+        // during ResolveAsync, before a binding exists. This catch has NO further enclosing catch within
+        // RunTrackedTurnAsync — if its own TryNotifyAsync call were unguarded and the adapter threw, the detached
+        // task would fault with nothing to observe it, unlike the inner-catch case above.
+        var h = new PumpHarness();
+        var gate = h.BlockNextSessionCreation();
+
+        try
+        {
+            await h.StartAndSend("first ever message");
+            await WaitUntilAsync(() => h.Pump.IsTurnRunning(h.Channel.ChannelId, h.Channel.Conversation));
+
+            h.Channel.NextDeliverThrows(new InvalidOperationException("simulated adapter failure delivering Cancelled"));
+            h.Channel.Send("/cancel");
+
+            await WaitUntilAsync(() => h.Logger.Entries.Any(e => e.EventId.Id == 605));
+            h.Logger.Entries.Should().Contain(e => e.EventId.Id == 605);
+
+            // The read loop survived: a later ordinary message still runs a turn to completion.
+            await h.SendAndSettle("hello again");
+            h.Channel.Delivered.OfType<TurnCompletedEvent>().Should().ContainSingle();
         }
         finally
         {

@@ -7,6 +7,7 @@ namespace Thalos.Tests.Channels.Fakes;
 public sealed class FakeChannel : IChannelSource, IChannelAdapter
 {
     private readonly Channel<InboundMessage> _inbound = Channel.CreateUnbounded<InboundMessage>();
+    private Exception? _nextDeliverThrows;
 
     /// <inheritdoc />
     public string ChannelId => "fake";
@@ -30,12 +31,21 @@ public sealed class FakeChannel : IChannelSource, IChannelAdapter
     /// <summary>Completes the inbound stream, so a reader loop over <see cref="ReadAsync"/> finishes.</summary>
     public void Complete() => _inbound.Writer.TryComplete();
 
+    /// <summary>Makes the NEXT call to <see cref="DeliverAsync"/> throw <paramref name="ex"/> instead of recording the event.</summary>
+    public void NextDeliverThrows(Exception ex) => _nextDeliverThrows = ex;
+
     /// <inheritdoc />
     public IAsyncEnumerable<InboundMessage> ReadAsync(CancellationToken ct) => _inbound.Reader.ReadAllAsync(ct);
 
     /// <inheritdoc />
     public ValueTask DeliverAsync(SessionId sessionId, AgentEvent agentEvent, CancellationToken ct)
     {
+        if (_nextDeliverThrows is { } ex)
+        {
+            _nextDeliverThrows = null;
+            throw ex;
+        }
+
         lock (Delivered)
         {
             Delivered.Add(agentEvent);

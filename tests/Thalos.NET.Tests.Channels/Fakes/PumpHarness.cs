@@ -1,5 +1,4 @@
 using System.Runtime.CompilerServices;
-using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
@@ -12,8 +11,10 @@ namespace Thalos.Tests.Channels.Fakes;
 public sealed class PumpHarness : IDisposable
 {
     private AgentErrorCode? _nextFailure;
+    private bool _nextTurnThrows;
     private bool _started;
     private TaskCompletionSource? _blockingGate;
+    private TaskCompletionSource? _blockingSessionGate;
 
     public FakeChannel Channel { get; } = new();
 
@@ -41,24 +42,39 @@ public sealed class PumpHarness : IDisposable
 
     public IAgentCatalog Catalog { get; } = Substitute.For<IAgentCatalog>();
 
+    /// <summary>
+    /// Captures every log call the pump makes instead of discarding it (<see cref="Microsoft.Extensions.Logging.Abstractions.NullLogger{T}"/>
+    /// would). A turn now runs on a detached task nothing else awaits, so the log is the only observable signal
+    /// that its own exception handling actually fired — a test asserting on delivered events alone cannot tell.
+    /// </summary>
+    public CapturingLogger<ChannelPump> Logger { get; } = new();
+
     public ChannelPump Pump { get; }
 
     public PumpHarness()
     {
         Catalog.Agents.Returns([DefaultAgent, OtherAgent]);
         Runtime.CreateSessionAsync(Arg.Any<AgentId>(), Arg.Any<ZeroAlloc.Authorization.ISecurityContext>(), Arg.Any<CancellationToken>())
-            .Returns(_ => Result<SessionId, AgentError>.Success(SessionId.New()));
+            .Returns(call => CreateSessionResult(call.Arg<CancellationToken>()));
 
         Runtime.RunTurnStreamingAsync(Arg.Any<AgentTurnRequest>(), Arg.Any<CancellationToken>())
             .Returns(call => Emit(call.Arg<AgentTurnRequest>(), call.Arg<CancellationToken>()));
 
         Pump = new ChannelPump([Channel], [Channel], Runtime, Catalog, Map,
             Options.Create(new ChannelOptions { DefaultAgent = "daedalus", FlushInterval = TimeSpan.Zero }),
-            Clock, NullLogger<ChannelPump>.Instance);
+            Clock, Logger);
     }
 
     /// <summary>Makes the next turn fail with <paramref name="code"/> instead of completing.</summary>
     public void NextTurnFails(AgentErrorCode code) => _nextFailure = code;
+
+    /// <summary>
+    /// Makes the NEXT turn started against this harness throw a raw exception mid-stream, instead of failing
+    /// through the normal <see cref="TurnFailedEvent"/> lifecycle path <see cref="NextTurnFails"/> models. This is
+    /// what a genuinely buggy tool or provider call looks like to <c>RunTrackedTurnAsync</c>'s own catch-all, as
+    /// opposed to a <see cref="AgentErrorCode"/> the runtime reports on purpose.
+    /// </summary>
+    public void NextTurnThrows() => _nextTurnThrows = true;
 
     /// <summary>
     /// Makes the NEXT turn started against this harness deliver its first event and then block — still "running",
@@ -71,6 +87,19 @@ public sealed class PumpHarness : IDisposable
     {
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         _blockingGate = gate;
+        return gate;
+    }
+
+    /// <summary>
+    /// Makes the NEXT <c>CreateSessionAsync</c> call — i.e. the next implicit-bind or idle-rollover resolution —
+    /// block until the returned source completes. Lets a test cancel /cancel WHILE resolution is still in
+    /// progress, before any binding exists, rather than only while an already-resolved turn is running. Callers
+    /// must complete the source (ideally in a <c>finally</c>) even on test failure.
+    /// </summary>
+    public TaskCompletionSource BlockNextSessionCreation()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _blockingSessionGate = gate;
         return gate;
     }
 
@@ -110,6 +139,14 @@ public sealed class PumpHarness : IDisposable
 
         Channel.Send(text);
         await WaitForDeliveryAsync(before).ConfigureAwait(false);
+
+        // The first delivery is not the same as "done": an ordinary message's turn runs on a detached task (see
+        // ChannelPump.StartTurnAsync), and its Cancelled/terminal notice is sent from inside RunTrackedTurnAsync's
+        // catch BEFORE its own finally clears the conversation from the pump's /cancel-and-busy registry. A test
+        // that calls SendAndSettle again right after would otherwise race that registry entry and could get Busy
+        // instead of a real turn. Waiting for it to clear here makes every SendAndSettle call in this file safe to
+        // follow immediately with another one, without each test having to reason about that window itself.
+        await WaitForNotRunningAsync().ConfigureAwait(false);
     }
 
     /// <summary>
@@ -153,11 +190,53 @@ public sealed class PumpHarness : IDisposable
         throw new TimeoutException("the pump never delivered a response to the message within 5s");
     }
 
+    // Polls Pump.IsTurnRunning (internal, test-only) rather than Delivered: a command message never registers in
+    // _running at all, so this resolves immediately for those, and only actually waits for an ordinary message's
+    // detached turn task to finish removing itself.
+    private async Task WaitForNotRunningAsync()
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (!Pump.IsTurnRunning(Channel.ChannelId, Channel.Conversation))
+            {
+                return;
+            }
+
+            await Task.Delay(10).ConfigureAwait(false);
+        }
+
+        throw new TimeoutException("the pump never finished the turn (conversation still registered as running) within 5s");
+    }
+
+    // NSubstitute's ValueTask<T> support only takes a SYNCHRONOUS Func<CallInfo, T> (no async/Task/ValueTask
+    // overload exists for it), so a genuinely awaited gate is not an option here the way BlockNextTurn's Emit
+    // uses one. Blocking the calling (thread-pool) thread instead still lets cancellation interrupt it exactly
+    // like a real await would: WaitAsync(ct).GetAwaiter().GetResult() observes ct and throws synchronously,
+    // unwound by the caller exactly the same way an awaited OperationCanceledException would be.
+    private Result<SessionId, AgentError> CreateSessionResult(CancellationToken ct)
+    {
+        if (_blockingSessionGate is { } gate)
+        {
+            _blockingSessionGate = null;
+            gate.Task.WaitAsync(ct).GetAwaiter().GetResult();
+        }
+
+        return Result<SessionId, AgentError>.Success(SessionId.New());
+    }
+
     // ct is honoured (not just accepted) so a blocked turn (see BlockNextTurn) reacts to /cancel exactly as a real
     // streaming call would — without this, cancelling the linked token would have no observable effect on the fake.
     private async IAsyncEnumerable<AgentEvent> Emit(AgentTurnRequest request, [EnumeratorCancellation] CancellationToken ct)
     {
         var turnId = TurnId.New();
+        if (_nextTurnThrows)
+        {
+            _nextTurnThrows = false;
+            await Task.Yield();
+            throw new InvalidOperationException("simulated failure while streaming a turn");
+        }
+
         if (_nextFailure is { } code)
         {
             _nextFailure = null;
