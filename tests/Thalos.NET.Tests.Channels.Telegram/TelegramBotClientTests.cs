@@ -6,7 +6,7 @@ namespace Thalos.Tests.Channels.Telegram;
 public sealed class TelegramBotClientTests
 {
     private static TelegramBotClient Build(StubHandler handler) =>
-        new(new HttpClient(handler) { BaseAddress = new Uri("https://api.telegram.org/") }, "TOKEN", TimeProvider.System);
+        new(new HttpClient(handler) { BaseAddress = new Uri("https://api.telegram.org/") }, "TOKEN");
 
     [Fact]
     public async Task The_token_is_in_the_path_and_never_in_a_query_string()
@@ -26,6 +26,21 @@ public sealed class TelegramBotClientTests
 
         var updates = await Build(handler).GetUpdatesAsync(0, 50, default);
         updates.Should().ContainSingle().Which.UpdateId.Should().Be(9);
+    }
+
+    [Fact]
+    public async Task SendMessage_returns_the_parsed_message_on_success()
+    {
+        // Task 17 sends a message, keeps the returned message_id, and edits that message in place to stream the
+        // reply — this is the exact shape it depends on: a non-zero id and the text round-tripping correctly.
+        var handler = new StubHandler(StubHandler.Json("""
+        {"ok":true,"result":{"message_id":123,"text":"hello there","chat":{"id":42,"type":"private"}}}
+        """));
+
+        var message = await Build(handler).SendMessageAsync(42, "hello there", null, default);
+
+        message.MessageId.Should().Be(123);
+        message.Text.Should().Be("hello there");
     }
 
     [Fact]

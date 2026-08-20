@@ -13,37 +13,30 @@ namespace Thalos.Channels.Telegram;
 /// Hand-rolled over <see cref="HttpClient"/> rather than a generated REST client: this package targets <c>net8.0</c> as well as
 /// <c>net10.0</c>, and the alternative in this codebase (<c>ZeroAlloc.Rest</c>) is <c>net10.0</c>-only. Every call is serialized
 /// and deserialized through the source-generated <see cref="TelegramJsonContext"/>, never through a reflection-based
-/// <see cref="JsonSerializer"/> overload, so the package stays AOT-friendly.
+/// <see cref="JsonSerializer"/> overload, so the package stays AOT-friendly. This client is a pure transport: it issues a
+/// request and maps the response. Poll cadence, backoff and honouring <see cref="TelegramApiException.RetryAfter"/> are the
+/// caller's concern; socket-level timeouts are <see cref="HttpClient"/>'s.
 /// </remarks>
 public sealed class TelegramBotClient
 {
     private const string NotModifiedFragment = "message is not modified";
 
-    // getUpdates asks Telegram to hold the connection open for up to timeoutSeconds waiting for new updates. That request-level
-    // deadline is bounded independently of HttpClient.Timeout (via TimeProvider, so it is deterministic under test) with a margin
-    // to allow for network latency around Telegram's own wait.
-    private static readonly TimeSpan LongPollMargin = TimeSpan.FromSeconds(10);
-
     private readonly HttpClient _httpClient;
     private readonly string _token;
-    private readonly TimeProvider _timeProvider;
 
     /// <summary>Creates a client that issues Bot API calls for <paramref name="token"/> through <paramref name="httpClient"/>.</summary>
     /// <param name="httpClient">The client requests are sent with. Its <see cref="HttpClient.BaseAddress"/> should be the Bot API host.</param>
     /// <param name="token">The bot token. Embedded in the request path per Telegram's convention; never logged or echoed into an exception message.</param>
-    /// <param name="timeProvider">The clock used to bound long-poll requests. Pass <see cref="TimeProvider.System"/> in production.</param>
-    public TelegramBotClient(HttpClient httpClient, string token, TimeProvider timeProvider)
+    public TelegramBotClient(HttpClient httpClient, string token)
     {
         ArgumentNullException.ThrowIfNull(httpClient);
         ArgumentException.ThrowIfNullOrWhiteSpace(token);
-        ArgumentNullException.ThrowIfNull(timeProvider);
 
         _httpClient = httpClient;
         _token = token;
-        _timeProvider = timeProvider;
     }
 
-    /// <summary>Long-polls <c>getUpdates</c> for updates after <paramref name="offset"/>, waiting up to <paramref name="timeoutSeconds"/> for one to arrive.</summary>
+    /// <summary>Long-polls <c>getUpdates</c> for updates after <paramref name="offset"/>, asking Telegram to wait up to <paramref name="timeoutSeconds"/> for one to arrive.</summary>
     /// <param name="offset">The lowest update id not yet acknowledged; Telegram returns only updates at or after it.</param>
     /// <param name="timeoutSeconds">How many seconds Telegram should hold the request open waiting for new updates.</param>
     /// <param name="ct">A token to cancel the wait.</param>
@@ -51,16 +44,13 @@ public sealed class TelegramBotClient
     /// <exception cref="TelegramApiException">Telegram reported a failure.</exception>
     public async Task<IReadOnlyList<TelegramUpdate>> GetUpdatesAsync(long offset, int timeoutSeconds, CancellationToken ct)
     {
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds) + LongPollMargin, _timeProvider);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, deadline.Token);
-
         var request = new GetUpdatesRequest(offset, timeoutSeconds);
         return await CallAsync(
             "getUpdates",
             request,
             TelegramJsonContext.Default.GetUpdatesRequest,
             TelegramJsonContext.Default.TelegramResponseUpdateArray,
-            linked.Token).ConfigureAwait(false);
+            ct).ConfigureAwait(false);
     }
 
     /// <summary>Sends a new message via <c>sendMessage</c>.</summary>
