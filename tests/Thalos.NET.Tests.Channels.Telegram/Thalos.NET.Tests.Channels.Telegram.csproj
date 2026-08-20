@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Thalos.NET.Channels.Telegram\Thalos.NET.Channels.Telegram.csproj" />
+  </ItemGroup>
+</Project>
