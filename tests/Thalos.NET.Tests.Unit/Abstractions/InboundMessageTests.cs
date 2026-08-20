@@ -31,4 +31,12 @@ public sealed class InboundMessageTests
         var message = new InboundMessage("console", new ConversationId("console"), "hi", AnonymousSecurityContext.Instance, null);
         message.ExternalMessageId.Should().BeNull();
     }
+
+    [Fact]
+    public void A_defaulted_ConversationId_has_an_empty_value_not_a_null_one()
+    {
+        // A record struct cannot prevent `default`; the map keys a dictionary on Value, so it must never be null.
+        default(ConversationId).Value.Should().BeEmpty();
+        default(ConversationId).ToString().Should().BeEmpty();
+    }
 }

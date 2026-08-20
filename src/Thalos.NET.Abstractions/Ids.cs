@@ -34,6 +34,18 @@ public readonly partial record struct MemoryId;
 /// <param name="Value">The channel-supplied conversation identifier, taken as-is.</param>
 public readonly record struct ConversationId(string Value)
 {
+    private readonly string? _rawValue = Value;
+
+    /// <summary>
+    /// The channel-supplied conversation identifier. Never null: a record struct cannot reject <c>default</c>, so a
+    /// defaulted instance normalizes to <see cref="string.Empty"/> on read rather than relying on constructor validation.
+    /// </summary>
+    public string Value
+    {
+        get => _rawValue ?? string.Empty;
+        init => _rawValue = value;
+    }
+
     /// <summary>Returns the wrapped conversation identifier.</summary>
     public override string ToString() => Value;
 }
