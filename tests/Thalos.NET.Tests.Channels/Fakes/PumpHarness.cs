@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.Extensions.Time.Testing;
@@ -12,6 +13,7 @@ public sealed class PumpHarness : IDisposable
 {
     private AgentErrorCode? _nextFailure;
     private bool _started;
+    private TaskCompletionSource? _blockingGate;
 
     public FakeChannel Channel { get; } = new();
 
@@ -48,15 +50,29 @@ public sealed class PumpHarness : IDisposable
             .Returns(_ => Result<SessionId, AgentError>.Success(SessionId.New()));
 
         Runtime.RunTurnStreamingAsync(Arg.Any<AgentTurnRequest>(), Arg.Any<CancellationToken>())
-            .Returns(call => Emit(call.Arg<AgentTurnRequest>()));
+            .Returns(call => Emit(call.Arg<AgentTurnRequest>(), call.Arg<CancellationToken>()));
 
-        Pump = new ChannelPump([Channel], [Channel], Runtime, Catalog, Map,
+        Pump = new ChannelPump([Channel, Channel.Secondary], [Channel], Runtime, Catalog, Map,
             Options.Create(new ChannelOptions { DefaultAgent = "daedalus", FlushInterval = TimeSpan.Zero }),
             Clock, NullLogger<ChannelPump>.Instance);
     }
 
     /// <summary>Makes the next turn fail with <paramref name="code"/> instead of completing.</summary>
     public void NextTurnFails(AgentErrorCode code) => _nextFailure = code;
+
+    /// <summary>
+    /// Makes the NEXT turn started against this harness deliver its first event and then block — still "running",
+    /// still registered against the pump's <c>/cancel</c> registry — until the returned source is completed. Lets a
+    /// test drive a genuinely in-flight turn (for mid-turn <c>/cancel</c>), rather than the fake's normal
+    /// instantaneous completion. Callers must complete the source (ideally in a <c>finally</c>) even on test
+    /// failure, or the pump's background turn is left blocked forever.
+    /// </summary>
+    public TaskCompletionSource BlockNextTurn()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _blockingGate = gate;
+        return gate;
+    }
 
     /// <summary>Every plain-text body the pump delivered, in order.</summary>
     public IReadOnlyList<string> Notices()
@@ -96,6 +112,25 @@ public sealed class PumpHarness : IDisposable
         await WaitForDeliveryAsync(before).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Starts the pump (if not already started, same guard as <see cref="SendAndSettle"/>) and enqueues
+    /// <paramref name="text"/> WITHOUT waiting for any delivery. For a turn set up with <see cref="BlockNextTurn"/>,
+    /// <see cref="SendAndSettle"/> cannot be used to synchronise on "the turn is now running and blocked" — its
+    /// first event can be (and is) delivered before the turn actually blocks, so waiting on delivery alone would
+    /// race the very thing the caller wants to observe. Callers should instead poll <see cref="Notices"/> or
+    /// <see cref="Channel"/>.<see cref="FakeChannel.Delivered"/> for the specific event they are waiting on.
+    /// </summary>
+    public async Task StartAndSend(string text)
+    {
+        if (!_started)
+        {
+            await Pump.StartAsync(default).ConfigureAwait(false);
+            _started = true;
+        }
+
+        Channel.Send(text);
+    }
+
     // Polls instead of a fixed delay: the pump delivers on its own reader-loop task, so a fixed sleep is either
     // too short (flaky) or wastefully long. A deadline turns "the pump never delivered" into a clear timeout
     // instead of a hang.
@@ -118,7 +153,9 @@ public sealed class PumpHarness : IDisposable
         throw new TimeoutException("the pump never delivered a response to the message within 5s");
     }
 
-    private async IAsyncEnumerable<AgentEvent> Emit(AgentTurnRequest request)
+    // ct is honoured (not just accepted) so a blocked turn (see BlockNextTurn) reacts to /cancel exactly as a real
+    // streaming call would — without this, cancelling the linked token would have no observable effect on the fake.
+    private async IAsyncEnumerable<AgentEvent> Emit(AgentTurnRequest request, [EnumeratorCancellation] CancellationToken ct)
     {
         var turnId = TurnId.New();
         if (_nextFailure is { } code)
@@ -129,9 +166,15 @@ public sealed class PumpHarness : IDisposable
         }
 
         yield return new TextDeltaEvent(request.SessionId, turnId, "ok");
+
+        if (_blockingGate is { } gate)
+        {
+            _blockingGate = null;
+            await gate.Task.WaitAsync(ct).ConfigureAwait(false);
+        }
+
         yield return new TurnCompletedEvent(request.SessionId, turnId,
             new AgentTurnResult(turnId, request.SessionId, "ok", default, [], TimeSpan.Zero));
-        await Task.CompletedTask;
     }
 
     public void Dispose() => Pump.Dispose();

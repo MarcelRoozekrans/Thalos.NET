@@ -91,4 +91,74 @@ public sealed class ChannelPumpCommandTests
         h.Notices().Should().Contain(n => n.Contains("/new", StringComparison.Ordinal) && n.Contains("/cancel", StringComparison.Ordinal));
         h.Runtime.DidNotReceive().RunTurnStreamingAsync(Arg.Any<AgentTurnRequest>(), Arg.Any<CancellationToken>());
     }
+
+    [Fact]
+    public async Task Slash_cancel_with_nothing_running_reports_that_and_touches_nothing()
+    {
+        var h = new PumpHarness();
+        await h.SendAndSettle("/cancel");
+
+        h.Notices().Should().Contain(n => n.Contains("Nothing is running", StringComparison.Ordinal));
+        h.Runtime.DidNotReceive().RunTurnStreamingAsync(Arg.Any<AgentTurnRequest>(), Arg.Any<CancellationToken>());
+        await h.Runtime.DidNotReceive().CreateSessionAsync(Arg.Any<AgentId>(), Arg.Any<ZeroAlloc.Authorization.ISecurityContext>(), Arg.Any<CancellationToken>());
+        await h.Runtime.DidNotReceive().CloseSessionAsync(Arg.Any<SessionId>(), Arg.Any<ZeroAlloc.Authorization.ISecurityContext>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task Slash_cancel_stops_a_running_turn_and_the_channel_keeps_reading()
+    {
+        // Proves the /cancel fix end-to-end: cancelling a genuinely in-flight turn must not tear down the read
+        // loop that HandleAsync runs on — if it did, the message sent after /cancel below would never be handled
+        // and this test would time out rather than fail an assertion.
+        //
+        // /cancel is sent on Channel.Secondary rather than Channel itself: a single source's own reader loop
+        // handles its own messages strictly in order, so it can never dequeue a /cancel for a turn it is itself
+        // still blocked running. Only a second, concurrently-running reader loop targeting the same
+        // (ChannelId, ConversationId) can actually deliver /cancel while the first is still inside a turn — which
+        // is exactly the scenario the pump's lock around its /cancel registry exists for.
+        var h = new PumpHarness();
+        var gate = h.BlockNextTurn();
+
+        try
+        {
+            // SendAndSettle cannot be used here: it returns after the FIRST delivery, which for a blocked turn is
+            // exactly the delta below, delivered before the turn actually blocks on the gate. Racing "settled"
+            // against "blocked" is the wrong thing to synchronise on, so send directly and poll for the delta.
+            await h.StartAndSend("blocking message");
+            await WaitUntilAsync(() => h.Notices().Count >= 1);
+
+            h.Channel.SendOnSecondary("/cancel");
+            await WaitUntilAsync(() => h.Notices().Any(n => n.Contains("Cancelled", StringComparison.Ordinal)));
+
+            h.Notices().Should().Contain(n => n.Contains("Cancelled", StringComparison.Ordinal));
+
+            // The read loop must have survived: a later ordinary message is still handled to completion.
+            var completedBefore = h.Channel.Delivered.OfType<TurnCompletedEvent>().Count();
+            await h.SendAndSettle("hello again");
+            await WaitUntilAsync(() => h.Channel.Delivered.OfType<TurnCompletedEvent>().Skip(completedBefore).Any());
+        }
+        finally
+        {
+            // A failing assertion above must not leave the blocked fake turn hanging and the suite stuck with it.
+            gate.TrySetResult();
+        }
+    }
+
+    // Polls instead of a fixed delay for the same reason PumpHarness.WaitForDeliveryAsync does: the pump runs on
+    // its own background task, so a fixed sleep is either flaky (too short) or wastefully slow (too long).
+    private static async Task WaitUntilAsync(Func<bool> condition)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (DateTime.UtcNow < deadline)
+        {
+            if (condition())
+            {
+                return;
+            }
+
+            await Task.Delay(10).ConfigureAwait(false);
+        }
+
+        throw new TimeoutException("condition was not met within 5s");
+    }
 }

@@ -264,7 +264,12 @@ public sealed partial class ChannelPump(
         await NotifyAsync(adapter, SessionId.New(), text, ct).ConfigureAwait(false);
     }
 
-    /// <summary>Cancels the turn running for this conversation, or reports there is none. Touches only <see cref="_running"/>.</summary>
+    /// <summary>
+    /// Cancels the turn running for this conversation, or reports there is none. Touches only <see cref="_running"/>.
+    /// The lookup and the cancel are two separate steps, so the turn can finish — and <see cref="RunTrackedTurnAsync"/>
+    /// can remove and dispose its token — in the gap between them; that race is reported the same as "nothing is
+    /// running" rather than surfacing an <see cref="ObjectDisposedException"/> to the operator as an error.
+    /// </summary>
     private async Task CancelRunningAsync(InboundMessage message, IChannelAdapter adapter, CancellationToken ct)
     {
         var key = (message.ChannelId, message.ConversationId.Value);
@@ -274,13 +279,23 @@ public sealed partial class ChannelPump(
             _running.TryGetValue(key, out running);
         }
 
-        if (running is null)
+        var nothingToCancel = running is null;
+        if (running is not null)
         {
-            await NotifyAsync(adapter, SessionId.New(), ChannelNotices.NothingToCancel, ct).ConfigureAwait(false);
-            return;
+            try
+            {
+                running.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+                nothingToCancel = true;
+            }
         }
 
-        running.Cancel();
+        if (nothingToCancel)
+        {
+            await NotifyAsync(adapter, SessionId.New(), ChannelNotices.NothingToCancel, ct).ConfigureAwait(false);
+        }
     }
 
     /// <summary>
