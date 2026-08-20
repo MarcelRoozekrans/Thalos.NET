@@ -63,4 +63,25 @@ public sealed class ConsoleChannelTests
 
         output.ToString().Should().Be("done\n");
     }
+
+    [Fact]
+    public async Task Adapter_starts_the_next_turn_clean_after_the_previous_turn_completed()
+    {
+        var output = new StringWriter();
+        var adapter = new ConsoleChannelAdapter(output);
+        var sessionId = SessionId.New();
+        var turnOneId = TurnId.New();
+        var turnTwoId = TurnId.New();
+
+        await adapter.DeliverAsync(sessionId, new TextDeltaEvent(sessionId, turnOneId, "Hel"), default);
+        await adapter.DeliverAsync(sessionId, new TextDeltaEvent(sessionId, turnOneId, "Hello"), default);
+        await adapter.DeliverAsync(sessionId, new TurnCompletedEvent(sessionId, turnOneId,
+            new AgentTurnResult(turnOneId, sessionId, "Hello", default, [], TimeSpan.Zero)), default);
+
+        // "He" is a prefix of turn 1's "Hello", not an extension of it. If the completed-turn reset were dropped,
+        // this delta would be diffed against turn 1's leftover "Hello" instead of starting clean.
+        await adapter.DeliverAsync(sessionId, new TextDeltaEvent(sessionId, turnTwoId, "He"), default);
+
+        output.ToString().Should().Be("Hello\nHe");
+    }
 }
