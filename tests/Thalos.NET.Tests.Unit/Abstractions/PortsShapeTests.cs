@@ -14,7 +14,8 @@ public sealed class PortsShapeTests
             .Select(t => t.Name).ToArray();
 
         ports.Should().Contain(["IAgentRuntime", "IAgentSessionStore", "IAgentCatalog", "IToolSource",
-            "IChatClientProvider", "IChatClientDecorator", "IToolAuthorizer", "IAgentNotificationPublisher", "IChannelAdapter"]);
+            "IChatClientProvider", "IChatClientDecorator", "IToolAuthorizer", "IAgentNotificationPublisher", "IChannelAdapter",
+            "IChannelSource"]);
     }
 
     [Fact]
