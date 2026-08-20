@@ -10,7 +10,7 @@ public sealed class TelegramDtoTests
     {
         const string json = """
         {"ok":true,"result":[{"update_id":11,"message":{"message_id":5,"text":"hi",
-        "chat":{"id":42,"type":"private"},"from":{"id":7,"is_bot":false}}}]}
+        "chat":{"id":42,"type":"private"},"from":{"id":7,"is_bot":true}}}]}
         """;
 
         var response = JsonSerializer.Deserialize(json, TelegramJsonContext.Default.TelegramResponseUpdateArray);
@@ -19,10 +19,12 @@ public sealed class TelegramDtoTests
         response.Result.Should().ContainSingle();
         var update = response.Result![0];
         update.UpdateId.Should().Be(11);
-        update.Message!.Text.Should().Be("hi");
+        update.Message!.MessageId.Should().Be(5);
+        update.Message.Text.Should().Be("hi");
         update.Message.Chat.Id.Should().Be(42);
         update.Message.Chat.Type.Should().Be("private");
         update.Message.From!.Id.Should().Be(7);
+        update.Message.From.IsBot.Should().BeTrue();
     }
 
     [Fact]
@@ -36,6 +38,7 @@ public sealed class TelegramDtoTests
 
         response!.Ok.Should().BeFalse();
         response.ErrorCode.Should().Be(429);
+        response.Description.Should().Be("Too Many Requests");
         response.Parameters!.RetryAfter.Should().Be(7);
     }
 
