@@ -37,6 +37,36 @@ public sealed class ChannelPumpTurnTests
             Arg.Any<CancellationToken>());
     }
 
+    [Fact]
+    public async Task A_message_that_throws_does_not_end_the_channel_read_loop()
+    {
+        var channel = new FakeChannel();
+        var sessionId = SessionId.New();
+        var turnId = TurnId.New();
+
+        var runtime = Substitute.For<IAgentRuntime>();
+        runtime.CreateSessionAsync(Arg.Any<AgentId>(), Arg.Any<ZeroAlloc.Authorization.ISecurityContext>(), Arg.Any<CancellationToken>())
+            .Returns(Result<SessionId, AgentError>.Success(sessionId));
+
+        // First call's stream throws mid-enumeration (simulating a bad message); the second returns normally.
+        // NSubstitute stays on the last configured value for any further calls.
+        runtime.RunTurnStreamingAsync(Arg.Any<AgentTurnRequest>(), Arg.Any<CancellationToken>())
+            .Returns(ThrowingStream(), Stream(sessionId, turnId));
+
+        using var pump = Build(channel, runtime);
+        channel.Send("this one blows up");
+        channel.Send("this one should still land");
+        await pump.StartAsync(default);
+        await WaitForTerminal(channel);
+        channel.Complete();
+        await pump.StopAsync(default);
+
+        // The first message's failure must not have ended the read loop: the second message still ran a turn
+        // and delivered its terminal event, and no event at all came out of the first (failed) message.
+        channel.Delivered.OfType<TurnCompletedEvent>().Should().ContainSingle();
+        runtime.Received(2).RunTurnStreamingAsync(Arg.Any<AgentTurnRequest>(), Arg.Any<CancellationToken>());
+    }
+
     private static async IAsyncEnumerable<AgentEvent> Stream(SessionId sessionId, TurnId turnId)
     {
         yield return new TextDeltaEvent(sessionId, turnId, "it ");
@@ -44,6 +74,21 @@ public sealed class ChannelPumpTurnTests
         yield return new TurnCompletedEvent(sessionId, turnId,
             new AgentTurnResult(turnId, sessionId, "it changed", default, [], TimeSpan.Zero));
         await Task.CompletedTask;
+    }
+
+    // Throws once enumeration starts. The `foreach` over an always-empty array (never entered at runtime) is what
+    // makes the compiler treat this as an iterator method; a bare `throw` with no `yield` anywhere would not compile
+    // as an IAsyncEnumerable<T>, and a trailing `yield break` after an unconditional throw would be unreachable code
+    // (a build error here, since warnings are errors).
+    private static async IAsyncEnumerable<AgentEvent> ThrowingStream()
+    {
+        foreach (var never in Array.Empty<AgentEvent>())
+        {
+            yield return never;
+        }
+
+        await Task.Yield();
+        throw new InvalidOperationException("simulated failure while streaming a turn");
     }
 
     private static ChannelPump Build(FakeChannel channel, IAgentRuntime runtime)

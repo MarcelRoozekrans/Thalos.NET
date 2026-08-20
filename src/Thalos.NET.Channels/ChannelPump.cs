@@ -54,12 +54,26 @@ public sealed partial class ChannelPump(
         {
             await foreach (var message in source.ReadAsync(ct).ConfigureAwait(false))
             {
-                await HandleAsync(message, adapter, ct).ConfigureAwait(false);
+                try
+                {
+                    await HandleAsync(message, adapter, ct).ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    // One bad message must not end the channel. A dead pump loop is invisible until process
+                    // shutdown, and for a single-operator bot that reads as "the agent stopped answering".
+                    LogHandleFailed(_logger, source.ChannelId, ex);
+                }
             }
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
             // normal shutdown
+        }
+        catch (Exception ex)
+        {
+            // The source itself died, so this loop is over — but siblings keep pumping. Never fail silently.
+            LogSourceFailed(_logger, source.ChannelId, ex);
         }
     }
 
@@ -176,4 +190,10 @@ public sealed partial class ChannelPump(
 
     [LoggerMessage(EventId = 604, Level = LogLevel.Error, Message = "No agent is registered under the name {Name}; check Thalos:Channels:DefaultAgent against the agent catalogue")]
     private static partial void LogUnknownAgent(ILogger logger, string name);
+
+    [LoggerMessage(EventId = 605, Level = LogLevel.Error, Message = "Channel {ChannelId} failed handling a message; the channel keeps reading")]
+    private static partial void LogHandleFailed(ILogger logger, string channelId, Exception ex);
+
+    [LoggerMessage(EventId = 606, Level = LogLevel.Critical, Message = "Channel {ChannelId} source loop ended with an error; that channel is no longer reading")]
+    private static partial void LogSourceFailed(ILogger logger, string channelId, Exception ex);
 }
