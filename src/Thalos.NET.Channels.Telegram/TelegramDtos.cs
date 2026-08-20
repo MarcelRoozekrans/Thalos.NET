@@ -39,3 +39,26 @@ public sealed record TelegramChat(long Id, string Type);
 /// <param name="Id">The user's identifier.</param>
 /// <param name="IsBot">Whether the user is a bot.</param>
 public sealed record TelegramUser(long Id, bool IsBot);
+
+/// <summary>The request body for <c>getUpdates</c>.</summary>
+/// <param name="Offset">The lowest update id the caller has not yet acknowledged.</param>
+/// <param name="Timeout">How many seconds Telegram should hold the request open waiting for new updates.</param>
+internal sealed record GetUpdatesRequest(long Offset, int Timeout);
+
+/// <summary>The request body for <c>sendMessage</c>.</summary>
+/// <param name="ChatId">The destination chat.</param>
+/// <param name="Text">The message text.</param>
+/// <param name="ParseMode">The formatting mode applied to <paramref name="Text"/>, or <see langword="null"/> for plain text.</param>
+internal sealed record SendMessageRequest(long ChatId, string Text, string? ParseMode);
+
+/// <summary>The request body for <c>editMessageText</c>.</summary>
+/// <param name="ChatId">The chat the message belongs to.</param>
+/// <param name="MessageId">The message to edit.</param>
+/// <param name="Text">The replacement text.</param>
+/// <param name="ParseMode">The formatting mode applied to <paramref name="Text"/>, or <see langword="null"/> for plain text.</param>
+internal sealed record EditMessageTextRequest(long ChatId, long MessageId, string Text, string? ParseMode);
+
+/// <summary>The request body for <c>sendChatAction</c>.</summary>
+/// <param name="ChatId">The chat to show the action in.</param>
+/// <param name="Action">The action to display, e.g. <c>"typing"</c>.</param>
+internal sealed record SendChatActionRequest(long ChatId, string Action);
