@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Thalos.Channels</RootNamespace>
+    <PackageId>Thalos.NET.Channels</PackageId>
+    <Description>Channel hosting for Thalos.NET: a ChannelPump that binds inbound IChannelSource messages to agent sessions, command handling, delta coalescing, and an in-box console channel.</Description>
+    <PackageTags>agents;channels;chat;cli;microsoft-agent-framework;zeroalloc</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.Binder" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Options" />
+    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" />
+    <PackageReference Include="ZeroAlloc.Validation" />
+    <PackageReference Include="ZeroAlloc.Validation.Generator" PrivateAssets="all" />
+    <PackageReference Include="ZeroAlloc.Telemetry" />
+    <PackageReference Include="ZeroAlloc.Inject" />
+    <PackageReference Include="ZeroAlloc.Inject.Generator" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Channels" />
+  </ItemGroup>
+</Project>
