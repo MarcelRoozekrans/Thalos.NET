@@ -1,5 +1,3 @@
-using System.Globalization;
-
 namespace Thalos.Channels;
 
 /// <summary>Options for channel hosting, bound from <see cref="SectionName"/>.</summary>
@@ -33,18 +31,16 @@ public sealed class ChannelOptions
             return "DefaultAgent must not be blank.";
         }
 
+        // Plain interpolation, not string.Create(CultureInfo.InvariantCulture, …): TimeSpan formats culture-invariantly,
+        // so the wrapper is redundant and MA0185 rejects it. Skills uses string.Create because it interpolates a double.
         if (o.IdleTimeout <= TimeSpan.Zero)
         {
-#pragma warning disable MA0185
-            return string.Create(CultureInfo.InvariantCulture, $"IdleTimeout must be greater than zero (was {o.IdleTimeout}).");
-#pragma warning restore MA0185
+            return $"IdleTimeout must be greater than zero (was {o.IdleTimeout}).";
         }
 
         if (o.FlushInterval < TimeSpan.Zero)
         {
-#pragma warning disable MA0185
-            return string.Create(CultureInfo.InvariantCulture, $"FlushInterval must not be negative (was {o.FlushInterval}).");
-#pragma warning restore MA0185
+            return $"FlushInterval must not be negative (was {o.FlushInterval}).";
         }
 
         return null;
