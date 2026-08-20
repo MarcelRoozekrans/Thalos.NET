@@ -17,4 +17,31 @@ public static class ChannelNotices
 
     /// <summary>Shown when <c>Thalos:Channels:DefaultAgent</c> names an agent the catalogue does not have.</summary>
     public const string UnknownDefaultAgent = "I am misconfigured: the default agent does not exist. /agents lists what is registered.";
+
+    /// <summary>Shown when /new names an agent the catalogue does not have.</summary>
+    public const string UnknownAgent = "I do not have an agent by that name. /agents lists the ones I do.";
+
+    /// <summary>Shown for /status when nothing is bound.</summary>
+    public const string NoSession = "No active session. Send a message, or /new to start one.";
+
+    /// <summary>Shown for a slash-prefixed word that is not a command.</summary>
+    public const string UnknownCommand = "I do not know that command. /help lists the ones I do.";
+
+    /// <summary>The /help body.</summary>
+    public const string Help =
+        "/new [agent] — start a fresh session\n" +
+        "/end — close the current session\n" +
+        "/status — what session am I in\n" +
+        "/agents — list available agents\n" +
+        "/cancel — stop the running turn\n" +
+        "/help — this list";
+
+    /// <summary>Shown for /cancel when no turn is running.</summary>
+    public const string NothingToCancel = "Nothing is running.";
+
+    /// <summary>Shown after /cancel actually stopped a running turn.</summary>
+    public const string Cancelled = "Cancelled.";
+
+    /// <summary>Shown after /end closes the bound session.</summary>
+    public const string SessionEnded = "Session ended.";
 }

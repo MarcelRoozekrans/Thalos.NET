@@ -30,6 +30,14 @@ public sealed partial class ChannelPump(
     private readonly TimeProvider _clock = clock;
     private readonly ILogger<ChannelPump> _logger = logger;
 
+    /// <summary>
+    /// The <see cref="CancellationTokenSource"/> backing the turn currently running for each (channel, conversation),
+    /// so <c>/cancel</c> can abort it. Guarded by a lock rather than a concurrent dictionary: one source's reader loop
+    /// handles its own messages strictly in order, but every source's loop shares this one instance, and
+    /// <see cref="Dictionary{TKey,TValue}"/> is not safe for concurrent access even across disjoint keys.
+    /// </summary>
+    private readonly Dictionary<(string ChannelId, string ConversationId), CancellationTokenSource> _running = [];
+
     /// <inheritdoc />
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -77,16 +85,202 @@ public sealed partial class ChannelPump(
         }
     }
 
+    /// <summary>
+    /// Dispatches one inbound message: a recognised slash-command is handled here and never reaches the model — an
+    /// unrecognised one is refused the same way, because forwarding a typo'd command as a prompt is the exact
+    /// failure <see cref="ChannelCommand.Parse"/> exists to prevent. Anything else is an ordinary turn.
+    /// </summary>
     private async Task HandleAsync(InboundMessage message, IChannelAdapter adapter, CancellationToken ct)
     {
-        // Task 9 replaces this with command dispatch; for now every message is a turn.
+        var command = ChannelCommand.Parse(message.Text);
+
+        switch (command.Kind)
+        {
+            case ChannelCommandKind.Help:
+                await NotifyAsync(adapter, SessionId.New(), ChannelNotices.Help, ct).ConfigureAwait(false);
+                return;
+
+            case ChannelCommandKind.Unknown:
+                await NotifyAsync(adapter, SessionId.New(), ChannelNotices.UnknownCommand, ct).ConfigureAwait(false);
+                return;
+
+            case ChannelCommandKind.Cancel:
+                await CancelRunningAsync(message, adapter, ct).ConfigureAwait(false);
+                return;
+
+            case ChannelCommandKind.New:
+                await StartNewAsync(message, adapter, command.Argument, ct).ConfigureAwait(false);
+                return;
+
+            case ChannelCommandKind.End:
+                await EndAsync(message, adapter, ct).ConfigureAwait(false);
+                return;
+
+            case ChannelCommandKind.Status:
+                await StatusAsync(message, adapter, ct).ConfigureAwait(false);
+                return;
+
+            case ChannelCommandKind.Agents:
+                await AgentsAsync(adapter, ct).ConfigureAwait(false);
+                return;
+
+            case ChannelCommandKind.None:
+            default:
+                break;
+        }
+
         var binding = await ResolveAsync(message, adapter, ct).ConfigureAwait(false);
         if (binding is null)
         {
             return;
         }
 
-        await RunTurnAsync(message, binding, adapter, ct).ConfigureAwait(false);
+        await RunTrackedTurnAsync(message, binding, adapter, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Runs one turn under a token registered in <see cref="_running"/> so <c>/cancel</c> can abort it. A
+    /// cancellation the operator asked for (not pump shutdown) is swallowed right here: the per-message catch in
+    /// <see cref="PumpAsync"/> deliberately excludes <see cref="OperationCanceledException"/> — that exclusion is
+    /// what lets a real shutdown unwind as a clean exit — so letting a <c>/cancel</c>-triggered one escape
+    /// <see cref="HandleAsync"/> would tear down that channel's whole read loop over a single stopped turn.
+    /// </summary>
+    private async Task RunTrackedTurnAsync(InboundMessage message, ConversationBinding binding, IChannelAdapter adapter, CancellationToken ct)
+    {
+        var key = (message.ChannelId, message.ConversationId.Value);
+        using var turnCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+
+        lock (_running)
+        {
+            _running[key] = turnCts;
+        }
+
+        try
+        {
+            await RunTurnAsync(message, binding, adapter, turnCts.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            await NotifyAsync(adapter, binding.SessionId, ChannelNotices.Cancelled, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (_running)
+            {
+                _running.Remove(key);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Starts a fresh session, optionally against a named agent. Resolution happens before anything else is
+    /// touched: an unknown name must refuse and leave the current binding exactly as it was, because a typo would
+    /// otherwise silently destroy a live session the operator was still using.
+    /// </summary>
+    private async Task StartNewAsync(InboundMessage message, IChannelAdapter adapter, string? agentName, CancellationToken ct)
+    {
+        var existing = await _conversations.GetAsync(message.ChannelId, message.ConversationId, ct).ConfigureAwait(false);
+        var current = existing.IsSuccess ? existing.Value : null;
+
+        if (ResolveAgent(agentName ?? _options.DefaultAgent) is not { } definition)
+        {
+            await NotifyAsync(adapter, current?.SessionId ?? SessionId.New(), ChannelNotices.UnknownAgent, ct).ConfigureAwait(false);
+            return;
+        }
+
+        if (current is not null)
+        {
+            var closed = await _runtime.CloseSessionAsync(current.SessionId, message.Caller, ct).ConfigureAwait(false);
+            if (closed.IsFailure)
+            {
+                LogCloseSessionFailed(_logger, message.ChannelId, closed.Error.Code);
+            }
+        }
+
+        await CreateAndBindAsync(message, adapter, definition.Id, $"Started a new session with {definition.Name}.", ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Closes and unbinds the current session. Unbinds even when <see cref="IAgentRuntime.CloseSessionAsync"/>
+    /// fails: <see cref="AgentErrorCode.SessionNotFound"/> or <see cref="AgentErrorCode.SessionClosed"/> mean the
+    /// runtime already agrees there is nothing left to close, and <see cref="AgentErrorCode.SessionBusy"/> means a
+    /// turn is still finishing on a session the operator explicitly asked to leave — refusing to unbind in either
+    /// case would strand the operator with a session they cannot get back into except by waiting out the idle
+    /// timeout, which is a worse outcome than an orphaned session finishing quietly in the background.
+    /// </summary>
+    private async Task EndAsync(InboundMessage message, IChannelAdapter adapter, CancellationToken ct)
+    {
+        var existing = await _conversations.GetAsync(message.ChannelId, message.ConversationId, ct).ConfigureAwait(false);
+        var binding = existing.IsSuccess ? existing.Value : null;
+
+        if (binding is null)
+        {
+            await NotifyAsync(adapter, SessionId.New(), ChannelNotices.NoSession, ct).ConfigureAwait(false);
+            return;
+        }
+
+        var closed = await _runtime.CloseSessionAsync(binding.SessionId, message.Caller, ct).ConfigureAwait(false);
+        if (closed.IsFailure)
+        {
+            LogCloseSessionFailed(_logger, message.ChannelId, closed.Error.Code);
+        }
+
+        await _conversations.UnbindAsync(message.ChannelId, message.ConversationId, ct).ConfigureAwait(false);
+        await NotifyAsync(adapter, binding.SessionId, ChannelNotices.SessionEnded, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Reports the bound session without creating one: an unbound conversation gets <see cref="ChannelNotices.NoSession"/>
+    /// and the map is left untouched, because a status check that has the side effect of starting a session would be
+    /// a trap for an operator just checking in. The agent is reported by <see cref="AgentDefinition.Name"/>, never
+    /// by <see cref="AgentId"/> — a ULID means nothing to a human reading it in a chat.
+    /// </summary>
+    private async Task StatusAsync(InboundMessage message, IChannelAdapter adapter, CancellationToken ct)
+    {
+        var existing = await _conversations.GetAsync(message.ChannelId, message.ConversationId, ct).ConfigureAwait(false);
+        var binding = existing.IsSuccess ? existing.Value : null;
+
+        if (binding is null)
+        {
+            await NotifyAsync(adapter, SessionId.New(), ChannelNotices.NoSession, ct).ConfigureAwait(false);
+            return;
+        }
+
+        var agentName = _catalog.TryGet(binding.AgentId, out var definition) ? definition.Name : "an unknown agent";
+        await NotifyAsync(adapter, binding.SessionId, $"Bound to {agentName}. Last activity {binding.LastActivityAt:u}.", ct)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Lists the registered agents by <see cref="AgentDefinition.Name"/> (with <see cref="AgentDefinition.Description"/>
+    /// when set) — never by <see cref="AgentId"/>, which renders as a 26-character ULID that is useless to a human.
+    /// </summary>
+    private async Task AgentsAsync(IChannelAdapter adapter, CancellationToken ct)
+    {
+        var lines = _catalog.Agents.Select(a =>
+            string.IsNullOrEmpty(a.Description) ? a.Name : $"{a.Name} — {a.Description}");
+        var text = "Available agents:\n" + string.Join('\n', lines);
+
+        await NotifyAsync(adapter, SessionId.New(), text, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>Cancels the turn running for this conversation, or reports there is none. Touches only <see cref="_running"/>.</summary>
+    private async Task CancelRunningAsync(InboundMessage message, IChannelAdapter adapter, CancellationToken ct)
+    {
+        var key = (message.ChannelId, message.ConversationId.Value);
+        CancellationTokenSource? running;
+        lock (_running)
+        {
+            _running.TryGetValue(key, out running);
+        }
+
+        if (running is null)
+        {
+            await NotifyAsync(adapter, SessionId.New(), ChannelNotices.NothingToCancel, ct).ConfigureAwait(false);
+            return;
+        }
+
+        running.Cancel();
     }
 
     /// <summary>
@@ -265,4 +459,7 @@ public sealed partial class ChannelPump(
 
     [LoggerMessage(EventId = 606, Level = LogLevel.Critical, Message = "Channel {ChannelId} source loop ended with an error; that channel is no longer reading")]
     private static partial void LogSourceFailed(ILogger logger, string channelId, Exception ex);
+
+    [LoggerMessage(EventId = 607, Level = LogLevel.Warning, Message = "Channel {ChannelId} asked the runtime to close a session and it refused: {Code}; the local binding is cleared regardless")]
+    private static partial void LogCloseSessionFailed(ILogger logger, string channelId, AgentErrorCode code);
 }
