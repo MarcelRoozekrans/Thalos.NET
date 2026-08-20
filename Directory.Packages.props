@@ -19,7 +19,7 @@
     <PackageVersion Include="Microsoft.Extensions.AI" Version="10.9.0" />
     <PackageVersion Include="Microsoft.Extensions.AI.Abstractions" Version="10.9.0" />
     <PackageVersion Include="ModelContextProtocol" Version="2.2.0" />
-    <PackageVersion Include="Anthropic" Version="12.41.0" />
+    <PackageVersion Include="Anthropic" Version="12.42.0" />
     <PackageVersion Include="AI.Sentinel" Version="2.0.1" />
     <!-- Rag.NET (net10.0 only) — confined to Thalos.NET.Memory.RagNet -->
     <PackageVersion Include="Rag.NET.Abstractions" Version="0.1.0" />
