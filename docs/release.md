@@ -65,6 +65,25 @@ packages) needs the same empty commit as step 1 with `Release-As: 0.2.0` before 
 the patch, so 0.3.0 used the same `Release-As: 0.3.0` empty commit as 0.2.0 did. `pack-validate` expects
 the nine ids and `Thalos.NET.Skills` on both TFMs.
 
+0.4.0 ships eleven packages (`Thalos.NET.Channels` and `Thalos.NET.Channels.Telegram` join the nine of 0.3.x, both
+on `net8.0` and `net10.0`). **`ci.yml`'s `pack-validate` job (the `expected` package list and both `-eq 9` package
+counts) has not been updated for the two new packages as of this commit** — that must happen before `pack-validate`
+can pass on this branch; see the Task 20 report for the exact lines.
+
+**The 0.4.0 release PR needs a manual changelog addition, the same way 0.3.0's did.** `IChannelAdapter.DeliverAsync`
+was re-keyed from `SessionId` to `ConversationId` in a `refactor(channels)!:` commit whose footer reads `BREAKING:
+…` rather than the conventional-commits `BREAKING CHANGE: …` keyword release-please's parser looks for. The `!`
+still forces a minor bump and a "⚠ BREAKING CHANGES" heading with the commit's own subject line, but the two-sentence
+rationale in that commit's body will not be pulled into the generated `CHANGELOG.md` entry automatically. 0.3.0 hit
+the equivalent gap — a squash merge collapsing many commits into one loses the texture a consumer needs — and it was
+fixed by pushing one extra `docs:` commit onto the release PR before merging it (see `806f612`, "chore(main): release
+0.3.0"). Do the same for 0.4.0: add a short commit (or hand-edit the release PR's `CHANGELOG.md`) stating plainly that
+`IChannelAdapter.DeliverAsync` now takes a `ConversationId` instead of a `SessionId`, why (an adapter addresses a
+conversation, and most operator notices have no session), and that this is acceptable pre-1.0 because the 0.3.0
+interface had no implementations anywhere in the repository. The full explanation already lives in
+[`README.md`](../README.md#breaking-change-ichanneladapterdeliverasync-now-takes-a-conversationid) — the release PR
+only needs to carry it into `CHANGELOG.md`, not restate it from scratch.
+
 ## Local development against a consumer (Daedalus)
 
 `scripts/pack-local.ps1` packs `0.3.0-local.<timestamp>` (the `VersionPrefix` in `Directory.Build.props`) into `C:\Projects\Prive\.nuget-local`

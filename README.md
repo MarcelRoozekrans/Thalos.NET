@@ -21,6 +21,8 @@ A Hermes-style, ZeroAlloc-native agent framework for .NET, built on
 | `Thalos.NET.Memory` | Curated long-term memory: `IMemoryStore`/`IMemoryIndex`/`IMemoryService`, auto-recall `AIContextProvider`, `memory__*` tools, in-memory implementations | Thalos.NET |
 | `Thalos.NET.Memory.RagNet` | pgvector index via Rag.NET `PgVectorStore` (net10.0 only) | Thalos.NET.Memory, `Rag.NET.VectorStores.PgVector` |
 | `Thalos.NET.Skills` | Agent-scoped procedure documents: `SKILL.md` files synced into an `ISkillStore`, an always-present catalogue, `skills__*` tools, in-process cosine search | Thalos.NET |
+| `Thalos.NET.Channels` | Channel hosting: `ChannelPump` binds inbound `IChannelSource` messages to agent sessions, the six chat commands, delta coalescing, an in-box console channel | Thalos.NET |
+| `Thalos.NET.Channels.Telegram` | Telegram Bot API transport: a source (`getUpdates` long-poll, three admission gates) and an adapter (MarkdownV2, message splitting, edited streaming) for `Thalos.NET.Channels` | Thalos.NET.Channels |
 
 Targets `net8.0` and `net10.0` (`Thalos.NET.Memory.RagNet`: `net10.0` only, like Rag.NET).
 
@@ -247,6 +249,46 @@ never a line of the file.
 
 **Deliberately out of scope in 0.3.0** (decisions, not omissions): hot-reload; agent-authored or agent-edited skills;
 versioning beyond the content hash; usage analytics; a UI; per-skill authorization policies — the globs are the only gate.
+
+## Channels
+
+`Thalos.NET.Channels` turns Thalos into something a human can talk to over a real transport — a terminal, a chat app
+— instead of only a library called from your own request handler. It hosts a `ChannelPump` (an `IHostedService`)
+that reads every registered `IChannelSource`, binds each inbound message to an agent session through
+`IConversationMap`, dispatches the six chat commands, coalesces streamed model output onto a per-channel cadence,
+and renders it back through the matching `IChannelAdapter`. It is opt-in: `.UseChannels(...)` (or the
+`IConfiguration` overload, binding `Thalos:Channels`), plus at least one channel — `.AddConsoleChannel()` ships in
+the same package; `Thalos.NET.Channels.Telegram` adds a Telegram Bot API transport as a separate package. Full quick
+starts, configuration, the six commands and package-specific operational notes live in each package's own README:
+[`Thalos.NET.Channels`](src/Thalos.NET.Channels/README.md),
+[`Thalos.NET.Channels.Telegram`](src/Thalos.NET.Channels.Telegram/README.md).
+
+**The four lifecycle edges.** A conversation is unbound (first message — bound implicitly, no notice), or bound and
+either fresh, idle (rolls onto a new session after `IdleTimeout`, with a notice), busy (a turn is already running —
+the new message gets `ChannelNotices.Busy` immediately, never queued) or dead (the runtime no longer recognises the
+session — unbound, and the operator is asked to resend, deliberately not auto-retried).
+
+**Commands never reach the model.** `ChannelCommand.Parse` recognises `/new [agent]`, `/end`, `/status`, `/agents`,
+`/cancel` and `/help`; a slash-prefixed word that is not one of these is refused the same way, so a mistyped command
+is never forwarded to the model as a prompt.
+
+### Breaking change: `IChannelAdapter.DeliverAsync` now takes a `ConversationId`
+
+`Thalos.NET.Abstractions` 0.3.0 shipped `IChannelAdapter` as a declared seam with **no implementations anywhere in
+the repository** — Phase 1.1's own note called it out explicitly: "Phase 1.1 defines the seam only." Its
+`DeliverAsync` took a `SessionId`. Building the first real implementations against it (the console channel, then
+Telegram) showed that was the wrong key: an adapter addresses a *conversation* — a chat, a socket, a terminal — not
+a session, and most of what a channel has to say (`/help`, an unrecognised command, "still working on the previous
+message", "that session had already ended") belongs to a conversation that has no session at all, or no longer does
+by the time the notice is sent. A session-keyed seam could only deliver those by inventing an id that resolves to
+nothing, which is exactly what an early draft did — and Telegram, resolving a chat from that invented id, found
+nothing and dropped every one of them silently.
+
+`DeliverAsync` is now keyed on `ConversationId`; the delivered `AgentEvent` still carries its own `SessionId` for an
+adapter that wants to correlate a delivery with a session. Because the previous signature had zero implementations
+to migrate, this break is accepted pre-1.0 without a deprecation path — there was nothing running against it to
+break. Anyone who wrote a custom `IChannelAdapter` against the 0.3.0 signature needs to re-key it on
+`ConversationId` before upgrading to 0.4.0.
 
 ## Local development against Daedalus
 
