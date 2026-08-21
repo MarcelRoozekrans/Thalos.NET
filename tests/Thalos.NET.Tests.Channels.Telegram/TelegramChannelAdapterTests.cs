@@ -366,7 +366,10 @@ public sealed class TelegramChannelAdapterTests
 
         try
         {
-            await reached;
+            // Timed out rather than awaited bare: if the marker ever stops matching (a body format change),
+            // the handler never blocks, "reached" never completes, and a bare await would hang the run forever
+            // instead of failing it.
+            await reached.WaitAsync(TimeSpan.FromSeconds(10));
             var notice = h.Adapter.DeliverAsync(
                 Chat, new TextDeltaEvent(default, TurnId.New(), ChannelNotices.Busy), CancellationToken.None).AsTask();
 
@@ -408,7 +411,8 @@ public sealed class TelegramChannelAdapterTests
 
         try
         {
-            await reached;
+            // Same reason as the test above: a marker that stops matching must fail, not hang.
+            await reached.WaitAsync(TimeSpan.FromSeconds(10));
 
             // A global gate would park this until chat 42 completes, which it cannot do until we release it —
             // the WaitAsync turns that deadlock into a timeout failure rather than a hung test run.
