@@ -9,6 +9,8 @@
     <ProjectReference Include="..\..\src\Thalos.NET.Memory.RagNet\Thalos.NET.Memory.RagNet.csproj" />
     <ProjectReference Include="..\..\src\Thalos.NET.Skills\Thalos.NET.Skills.csproj" />
     <ProjectReference Include="..\..\src\Thalos.NET.Testing\Thalos.NET.Testing.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Channels\Thalos.NET.Channels.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Channels.Telegram\Thalos.NET.Channels.Telegram.csproj" />
     <PackageReference Include="TngTech.ArchUnitNET.xUnit" />
   </ItemGroup>
 </Project>

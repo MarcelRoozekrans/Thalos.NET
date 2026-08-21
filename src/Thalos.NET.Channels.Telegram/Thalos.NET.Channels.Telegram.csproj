@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Thalos.Channels.Telegram</RootNamespace>
+    <PackageId>Thalos.NET.Channels.Telegram</PackageId>
+    <Description>Telegram Bot API transport for Thalos.NET.Channels: a source, an adapter and MarkdownV2 rendering that connect Telegram chats to the channel pump.</Description>
+    <PackageTags>agents;channels;telegram;chat;microsoft-agent-framework;zeroalloc</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Thalos.NET.Channels\Thalos.NET.Channels.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Channels.Telegram" />
+  </ItemGroup>
+</Project>

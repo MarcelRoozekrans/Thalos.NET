@@ -65,6 +65,27 @@ packages) needs the same empty commit as step 1 with `Release-As: 0.2.0` before 
 the patch, so 0.3.0 used the same `Release-As: 0.3.0` empty commit as 0.2.0 did. `pack-validate` expects
 the nine ids and `Thalos.NET.Skills` on both TFMs.
 
+0.4.0 ships eleven packages (`Thalos.NET.Channels` and `Thalos.NET.Channels.Telegram` join the nine of 0.3.x, both
+on `net8.0` and `net10.0`). `ci.yml`'s `pack-validate` job (the `expected` package list and both package-count
+checks) is updated for the two new packages; both were also verified locally by running the job's exact validation
+logic against a real pack of each (README.md, logo.png, both TFMs' dll/xml, no runtimeconfig.json, MIT licence
+expression, repository metadata, non-default description — all present for both).
+
+**The 0.4.0 changelog note for the `IChannelAdapter.DeliverAsync` re-key does not need a manual release-PR step.**
+`IChannelAdapter.DeliverAsync` was re-keyed from `SessionId` to `ConversationId` in `2bc8431`
+(`refactor(channels)!: key IChannelAdapter on the conversation, not the session`), whose footer reads `BREAKING:
+…` rather than the conventional-commits `BREAKING CHANGE: …` keyword release-please's parser matches note text
+against. The `!` already forces the correct minor bump pre-1.0 and a "⚠ BREAKING CHANGES" heading using the commit's
+own subject line — that part was never at risk. What was at risk was the two-sentence rationale, which a
+`BREAKING:`-only footer would not carry into the generated entry. Rather than leave that as a step for whoever cuts
+the release PR to remember (which is exactly the gap 0.3.0 hit — see `806f612`, "chore(main): release 0.3.0", whose
+extra `docs:` commit patched a thin generated entry by hand after the fact), an empty commit already sits on this
+branch carrying a properly-keyworded `BREAKING CHANGE: …` footer with that same explanation. release-please scans the
+whole commit range for a package, not just squash-merge headers, so it will pick this up the same way it would a
+non-empty commit. The full explanation also lives in
+[`README.md`](../README.md#breaking-change-ichanneladapterdeliverasync-now-takes-a-conversationid) for a human reading
+the package itself, independent of what release-please renders.
+
 ## Local development against a consumer (Daedalus)
 
 `scripts/pack-local.ps1` packs `0.3.0-local.<timestamp>` (the `VersionPrefix` in `Directory.Build.props`) into `C:\Projects\Prive\.nuget-local`
