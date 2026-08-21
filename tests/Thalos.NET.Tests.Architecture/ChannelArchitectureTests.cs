@@ -52,8 +52,16 @@ public sealed class ChannelArchitectureTests
         referenced.Should().NotContain(ChannelsTelegramAssembly.GetName().Name!);
     }
 
+    /// <summary>
+    /// Scope, precisely: this inspects only the <c>PackageReference</c> elements written directly in
+    /// <c>Thalos.NET.Channels.csproj</c> via a plain <c>XDocument.Load</c> — that call does not resolve MSBuild
+    /// <c>Import</c>s, so it cannot see (and does not claim to see) packages that reach this project through
+    /// <c>Directory.Build.props</c> or any other imported file. Those are a separate, real source of packages that
+    /// flow into Channels; see <c>Repo_wide_package_references_that_reach_Channels_are_build_time_private</c> below
+    /// for the rule that covers them.
+    /// </summary>
     [Fact]
-    public void Channels_declares_no_direct_package_reference_outside_Microsoft_Extensions_or_ZeroAlloc()
+    public void Channels_leaf_csproj_declares_no_direct_package_reference_outside_Microsoft_Extensions_or_ZeroAlloc()
     {
         // Deliberately over the DIRECT <PackageReference> items in the csproj, not the transitive assembly closure:
         // Thalos.NET.Channels project-references Thalos.NET, which itself pulls in Microsoft.Agents.AI, so a rule
@@ -72,6 +80,39 @@ public sealed class ChannelArchitectureTests
         packageReferences.Should().OnlyContain(name =>
             name!.StartsWith("Microsoft.Extensions.", StringComparison.Ordinal)
             || name.StartsWith("ZeroAlloc.", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Companion to the leaf-csproj rule above, covering what that one structurally cannot see. The repo root
+    /// <c>Directory.Build.props</c> is auto-imported by every project, Thalos.NET.Channels included (it has no
+    /// <c>Directory.Build.props</c> of its own to override it), and today declares <c>Meziantou.Analyzer</c>,
+    /// <c>Roslynator.Analyzers</c>, <c>ZeroAlloc.Analyzers</c> and <c>Microsoft.SourceLink.GitHub</c> as repo-wide
+    /// <c>PackageReference</c>s. Most of those do not match <c>Microsoft.Extensions.*</c>/<c>ZeroAlloc.*</c> by name,
+    /// yet none of them reach a consumer, because every one is declared <c>PrivateAssets="all"</c>. THAT attribute —
+    /// not the leaf csproj — is what actually keeps Channels' consumer-facing footprint narrow today, and nothing
+    /// checked it until now: a future repo-wide package added via <c>Directory.Build.props</c> without
+    /// <c>PrivateAssets="all"</c> would leak into every packed dependency list, Channels' included, while the rule
+    /// above stayed green throughout, having never seen it.
+    /// </summary>
+    [Fact]
+    public void Repo_wide_package_references_that_reach_Channels_are_build_time_private()
+    {
+        var buildPropsPath = Path.Combine(RepoRoot(), "Directory.Build.props");
+        File.Exists(buildPropsPath).Should().BeTrue($"expected to find {buildPropsPath}");
+
+        var repoWideReferences = XDocument.Load(buildPropsPath).Descendants("PackageReference").ToArray();
+
+        // A rule over an empty set would pass vacuously; Directory.Build.props declares analyzer/SourceLink tooling
+        // today, so this proves the candidate set the assertion below runs over is not empty.
+        repoWideReferences.Should().NotBeEmpty("Directory.Build.props should declare the repo-wide analyzer/tooling packages");
+
+        var notPrivate = repoWideReferences
+            .Where(e => !string.Equals(e.Attribute("PrivateAssets")?.Value, "all", StringComparison.OrdinalIgnoreCase))
+            .Select(e => e.Attribute("Include")?.Value)
+            .ToArray();
+
+        notPrivate.Should().BeEmpty(
+            "every PackageReference in Directory.Build.props reaches every project including Thalos.NET.Channels, so it must be PrivateAssets all or it leaks into that package's consumer-facing dependency list");
     }
 
     [Fact]
