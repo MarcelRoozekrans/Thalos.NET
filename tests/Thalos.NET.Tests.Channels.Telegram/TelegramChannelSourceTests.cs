@@ -6,7 +6,7 @@ namespace Thalos.Tests.Channels.Telegram;
 
 public sealed class TelegramChannelSourceTests
 {
-    private static TelegramChannelSource Build(StubHandler handler, params long[] allowed)
+    private static TelegramChannelSource Build(StubHandler handler, bool enabled = true, params long[] allowed)
     {
         // Two-arg constructor: the client is a pure transport and owns no timing (see Task 13).
         var client = new TelegramBotClient(
@@ -15,6 +15,7 @@ public sealed class TelegramChannelSourceTests
         return new TelegramChannelSource(client, new TelegramOptions
         {
             BotToken = "T",
+            Enabled = enabled,
             AllowedUserIds = [.. allowed],
             PrincipalId = "telegram:test",
             Roles = [],
@@ -22,7 +23,7 @@ public sealed class TelegramChannelSourceTests
     }
 
     private static (TelegramChannelSource Source, CapturingLogger<TelegramChannelSource> Logger) BuildWithCapturingLogger(
-        StubHandler handler, params long[] allowed)
+        StubHandler handler, bool enabled = true, params long[] allowed)
     {
         var client = new TelegramBotClient(
             new HttpClient(handler) { BaseAddress = new Uri("https://api.telegram.org/") }, "T");
@@ -31,6 +32,7 @@ public sealed class TelegramChannelSourceTests
         var source = new TelegramChannelSource(client, new TelegramOptions
         {
             BotToken = "T",
+            Enabled = enabled,
             AllowedUserIds = [.. allowed],
             PrincipalId = "telegram:test",
             Roles = [],
@@ -236,5 +238,26 @@ public sealed class TelegramChannelSourceTests
         // still fails hard against a zero-delay spin, which would issue orders of magnitude more requests in the
         // same window.
         pollCount.Should().BeLessThanOrEqualTo(50);
+    }
+
+    /// <summary>
+    /// <see cref="TelegramOptions.Enabled"/> = false must mean ZERO Bot API calls, not "poll and drop everything" —
+    /// a disabled channel that still hammered <c>getUpdates</c> forever would be a much worse failure than simply
+    /// not being pumped, and "no messages were yielded" alone cannot tell the two apart. The handler is primed to
+    /// return a real update if asked, specifically so that an implementation which polls once and then discards
+    /// the result would still be caught by <see cref="StubHandler.Requests"/> being non-empty, even though it would
+    /// also pass a weaker "yielded nothing" assertion.
+    /// </summary>
+    [Fact]
+    public async Task Disabled_channel_never_calls_getUpdates()
+    {
+        var handler = new StubHandler(StubHandler.Json(Update(1, userId: 7)));
+        var (source, logger) = BuildWithCapturingLogger(handler, enabled: false, allowed: 7);
+
+        var messages = await Drain(source, expected: 1); // never satisfied; Drain times out and returns empty
+
+        messages.Should().BeEmpty();
+        handler.Requests.Should().BeEmpty("Enabled: false must mean no Bot API call is ever made, not a poll whose result is silently dropped");
+        logger.EventIds.Should().Contain(708);
     }
 }

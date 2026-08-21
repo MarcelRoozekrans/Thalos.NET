@@ -96,6 +96,10 @@ public static class TelegramThalosBuilderExtensions
 
         // Poll pair: HttpClient.Timeout tracks the CONFIGURED PollTimeoutSeconds (not just its default), so a host
         // that raises it does not silently break long polling again.
+        // Trade-off, recorded once: both clients below are plain singleton HttpClients (a fixed SocketsHttpHandler
+        // for the process's lifetime), not IHttpClientFactory-managed ones — so neither rotates its handler on a
+        // DNS change the way AddHttpClient's periodic rotation would. Acceptable for one stable host
+        // (api.telegram.org); revisit if that ever stops being true.
         services.TryAddKeyedSingleton<HttpClient>(PollClientKey, (sp, _) => new HttpClient
         {
             BaseAddress = new Uri(ApiBaseAddress),

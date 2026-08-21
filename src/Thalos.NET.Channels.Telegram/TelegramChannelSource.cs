@@ -23,6 +23,11 @@ namespace Thalos.Channels.Telegram;
 /// call is made. This matches the only way this type is actually used: <c>ChannelPump</c> calls <see cref="ReadAsync"/>
 /// once per source and keeps that one stream running for the process's lifetime.
 /// </para>
+/// <para>
+/// <b><see cref="TelegramOptions.Enabled"/></b> is checked once, right after the single-consumer claim and before
+/// any network call: when false, <see cref="ReadAsync"/> completes on the spot — zero calls to <c>getUpdates</c>,
+/// ever — rather than polling and discarding what comes back.
+/// </para>
 /// </remarks>
 public sealed partial class TelegramChannelSource : IChannelSource
 {
@@ -129,6 +134,17 @@ public sealed partial class TelegramChannelSource : IChannelSource
                 "TelegramChannelSource.ReadAsync supports exactly one enumeration for the lifetime of the " +
                 "instance. A second call — concurrent or sequential, even after the first was cancelled — would " +
                 "race or silently resume the shared offset/backoff state instead of starting fresh.");
+        }
+
+        if (!_options.Enabled)
+        {
+            // TelegramOptions.Enabled is a RUNTIME switch, not a registration one (see the remarks on
+            // TelegramThalosBuilderExtensions.AddTelegramChannel and on TelegramOptions.Enabled itself): the source
+            // is always registered, and turns itself off here — before any network call, so this enumeration
+            // completes with ZERO calls to getUpdates. The pump's own `await foreach` over this then simply ends,
+            // which is what "not pumped" means in practice.
+            LogDisabled(_logger);
+            yield break;
         }
 
         while (!ct.IsCancellationRequested)
@@ -334,6 +350,9 @@ public sealed partial class TelegramChannelSource : IChannelSource
 
     [LoggerMessage(EventId = 701, Level = LogLevel.Warning, Message = "Telegram asked us to slow down; waiting {RetryAfter} before the next getUpdates")]
     private static partial void LogFloodControl(ILogger logger, TimeSpan retryAfter);
+
+    [LoggerMessage(EventId = 708, Level = LogLevel.Information, Message = "TelegramOptions.Enabled is false; this source is idle and getUpdates is never called")]
+    private static partial void LogDisabled(ILogger logger);
 
     [LoggerMessage(EventId = 702, Level = LogLevel.Error, Message = "getUpdates failed; backing off {Backoff} before retrying")]
     private static partial void LogPollFailed(ILogger logger, Exception ex, TimeSpan backoff);

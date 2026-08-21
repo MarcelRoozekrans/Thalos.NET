@@ -9,7 +9,13 @@ public sealed class TelegramOptions
     /// <summary>Configuration section these options bind from.</summary>
     public const string SectionName = "Thalos:Channels:Telegram";
 
-    /// <summary>Runtime switch. When false the channel is not registered as a pumped source.</summary>
+    /// <summary>
+    /// A runtime switch, not a registration one: <c>TelegramChannelSource</c> and <c>TelegramChannelAdapter</c> are
+    /// always registered by <c>AddTelegramChannel</c> — this flag is not read until the provider is built, so a
+    /// host can bind it from configuration (mirrors <c>ChannelOptions.Enabled</c> and <c>SkillOptions.Enabled</c>).
+    /// When false, <c>TelegramChannelSource.ReadAsync</c> completes immediately without ever calling
+    /// <c>getUpdates</c> — no Bot API call is made and nothing is pumped.
+    /// </summary>
     public bool Enabled { get; set; } = true;
 
     /// <summary>The bot token issued by <c>@BotFather</c>, used to authenticate every Bot API call.</summary>
