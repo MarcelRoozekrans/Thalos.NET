@@ -36,4 +36,13 @@ jobs:
       - name: Create or update the release pull request
         uses: googleapis/release-please-action@v5
         with:
-          release-type: simple
+          # Manifest mode. Passing `release-type` here instead would run the action in its legacy
+          # single-package mode, which ignores release-please-config.json entirely — and with it
+          # bump-minor-pre-major, the setting whose whole job is to keep a breaking change on 0.x at
+          # a minor bump. That was the configuration until 2026-08-21, so the config file had never
+          # taken effect: the first release carrying a breaking change proposed 1.0.0 rather than
+          # 0.4.0, and every earlier feature had silently taken a minor bump instead of the patch
+          # bump-patch-for-minor-pre-major asks for. Name the files explicitly rather than relying on
+          # the defaults, so the link between workflow and config is visible here.
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
