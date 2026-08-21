@@ -21,6 +21,24 @@ public sealed class TelegramChannelSourceTests
         }, Microsoft.Extensions.Logging.Abstractions.NullLogger<TelegramChannelSource>.Instance);
     }
 
+    private static (TelegramChannelSource Source, CapturingLogger<TelegramChannelSource> Logger) BuildWithCapturingLogger(
+        StubHandler handler, params long[] allowed)
+    {
+        var client = new TelegramBotClient(
+            new HttpClient(handler) { BaseAddress = new Uri("https://api.telegram.org/") }, "T");
+
+        var logger = new CapturingLogger<TelegramChannelSource>();
+        var source = new TelegramChannelSource(client, new TelegramOptions
+        {
+            BotToken = "T",
+            AllowedUserIds = [.. allowed],
+            PrincipalId = "telegram:test",
+            Roles = [],
+        }, logger);
+
+        return (source, logger);
+    }
+
     // Not a raw interpolated string literal: the JSON below has a run of consecutive closing braces (see the tail,
     // after "is_bot":false) too long for a $$ raw literal to disambiguate without an unreadable pile of $ signs, so
     // this uses an ordinary interpolated string with every literal brace doubled instead.
@@ -103,8 +121,10 @@ public sealed class TelegramChannelSourceTests
 
         messages.Should().HaveCount(2);
 
-        // The second getUpdates must ask for 12 — proving the ack for the first batch happened before that
-        // batch's message was yielded and processed, not after.
+        // This only shows the offset advanced to 12 by the time request 2 was sent — NOT that the ack happened
+        // before message 1 was yielded rather than after. Both orderings send offset=12 on request 2 (an
+        // ack-after-yield implementation resumes at the yield, advances the offset, THEN polls again), so this
+        // assertion cannot tell them apart; see the ordering test immediately below for the assertion that can.
         handler.Requests.Should().Contain(r => r.Contains("\"offset\":12", StringComparison.Ordinal));
     }
 
@@ -128,25 +148,57 @@ public sealed class TelegramChannelSourceTests
     }
 
     [Fact]
-    public async Task A_malformed_batch_is_skipped_and_the_loop_survives_to_deliver_the_next_valid_message()
+    public async Task A_malformed_batch_is_skipped_by_its_own_guards_not_by_the_backstop_catch()
     {
         // First batch: a null array element (Telegram sending garbage) and an update whose message has no "chat"
         // at all — both are shapes System.Text.Json will happily produce despite TelegramMessage.Chat and
-        // TelegramChat.Type being annotated non-nullable; nothing enforces that at runtime. Neither may crash
-        // ReadAsync — both must be skipped like any other admission-gate failure, and the channel must go on to
-        // deliver the next real message rather than dying with it.
+        // TelegramChat.Type being annotated non-nullable; nothing enforces that at runtime.
+        //
+        // The loop surviving and later delivering a valid message is NOT, by itself, proof that the individual
+        // null guards fired: ProcessBatch's defensive backstop catch (event 707) would produce the exact same
+        // observable outcome — this batch skipped, later messages still delivered — if either guard were removed
+        // by a future regression, since the resulting NullReferenceException would just be caught there instead.
+        // Only the logged event ids can tell "dropped by its own guard" apart from "blew up and got caught".
+        //
+        // Draining far past what this scenario can legitimately produce (only two valid updates are queued; every
+        // request after that gets StubHandler's default empty response) also makes the message-count assertion
+        // meaningful: the run exhausts on the CTS timeout rather than stopping the instant *anything* arrives, so
+        // an extra, spurious message slipping out of the malformed batch would change the asserted count.
         const string malformedBatch =
             """{"ok":true,"result":[null,{"update_id":5,"message":{"message_id":9,"text":"hi","from":{"id":7,"is_bot":false}}}]}""";
 
         var handler = new StubHandler(
             StubHandler.Json(malformedBatch),
-            StubHandler.Json(Update(6, userId: 7)));
+            StubHandler.Json(Update(6, userId: 7)),
+            StubHandler.Json(Update(7, userId: 7)));
 
-        var source = Build(handler, allowed: 7);
-        var messages = await Drain(source, 1);
+        var (source, logger) = BuildWithCapturingLogger(handler, allowed: 7);
+        var messages = await Drain(source, expected: 100);
 
-        messages.Should().ContainSingle();
-        messages[0].ConversationId.Value.Should().Be("42");
-        messages[0].Text.Should().Be("hi");
+        messages.Should().HaveCount(2);
+        messages[0].ExternalMessageId.Should().Be("1");
+        messages[1].ExternalMessageId.Should().Be("1");
+
+        logger.EventIds.Should().NotContain(707); // the backstop catch never fired
+        logger.EventIds.Should().Contain(706); // the null array element was dropped by its own guard
+        logger.EventIds.Should().Contain(704); // the chat-less update was dropped by the private-chat gate
+    }
+
+    [Fact]
+    public async Task A_second_enumeration_of_the_same_source_is_rejected()
+    {
+        var source = Build(new StubHandler(StubHandler.Json(Update(1, userId: 7))), allowed: 7);
+        await Drain(source, 1);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        var secondEnumeration = async () =>
+        {
+            await foreach (var _ in source.ReadAsync(cts.Token))
+            {
+                break;
+            }
+        };
+
+        await secondEnumeration.Should().ThrowAsync<InvalidOperationException>();
     }
 }

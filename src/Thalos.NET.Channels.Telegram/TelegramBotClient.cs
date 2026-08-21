@@ -171,10 +171,21 @@ public sealed class TelegramBotClient
         return (response, httpResponse.StatusCode);
     }
 
+    /// <summary>
+    /// The largest <see cref="TelegramApiException.RetryAfter"/> this client will ever report, regardless of what
+    /// a response's <c>parameters.retry_after</c> says. That field is attacker-influenced — it comes verbatim from
+    /// whatever answered the HTTP request — and an unclamped value (negative, or absurdly large) fed straight into
+    /// <see cref="TimeSpan.FromSeconds(double)"/> and then a caller's <c>Task.Delay</c> can throw
+    /// <see cref="ArgumentOutOfRangeException"/> well outside anything a network response should be able to trigger.
+    /// </summary>
+    private const int MaxRetryAfterSeconds = 300;
+
     private static TelegramApiException ToException<TResult>(TelegramResponse<TResult> response, HttpStatusCode statusCode)
     {
         var errorCode = response.ErrorCode ?? (int)statusCode;
-        var retryAfter = response.Parameters?.RetryAfter is { } seconds ? TimeSpan.FromSeconds(seconds) : (TimeSpan?)null;
+        var retryAfter = response.Parameters?.RetryAfter is { } seconds
+            ? TimeSpan.FromSeconds(Math.Clamp(seconds, 0, MaxRetryAfterSeconds))
+            : (TimeSpan?)null;
         return new TelegramApiException(errorCode, response.Description, retryAfter);
     }
 }

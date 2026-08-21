@@ -57,6 +57,35 @@ public sealed class TelegramBotClientTests
     }
 
     [Fact]
+    public async Task A_negative_retry_after_is_clamped_to_zero_rather_than_reaching_TimeSpan_negative()
+    {
+        // parameters.retry_after comes verbatim from whatever answered the HTTP request — attacker-influenced, not
+        // a value Telegram's own well-behaved API would ever actually send. A raw -1 fed into TimeSpan.FromSeconds
+        // and then a caller's Task.Delay would throw ArgumentOutOfRangeException outside this client entirely.
+        var handler = new StubHandler(StubHandler.Json(
+            """{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":-1}}""",
+            System.Net.HttpStatusCode.TooManyRequests));
+
+        var act = async () => await Build(handler).SendMessageAsync(42, "hi", null, default);
+
+        (await act.Should().ThrowAsync<TelegramApiException>())
+            .Which.RetryAfter.Should().Be(TimeSpan.Zero);
+    }
+
+    [Fact]
+    public async Task An_absurdly_large_retry_after_is_clamped_to_the_documented_ceiling()
+    {
+        var handler = new StubHandler(StubHandler.Json(
+            """{"ok":false,"error_code":429,"description":"Too Many Requests","parameters":{"retry_after":999999999}}""",
+            System.Net.HttpStatusCode.TooManyRequests));
+
+        var act = async () => await Build(handler).SendMessageAsync(42, "hi", null, default);
+
+        (await act.Should().ThrowAsync<TelegramApiException>())
+            .Which.RetryAfter.Should().Be(TimeSpan.FromSeconds(300));
+    }
+
+    [Fact]
     public async Task A_400_parse_failure_throws_with_the_error_code_so_the_adapter_can_retry_as_plain_text()
     {
         var handler = new StubHandler(StubHandler.Json(

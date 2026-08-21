@@ -13,6 +13,16 @@ namespace Thalos.Channels.Telegram;
 /// <remarks>
 /// <see cref="TelegramBotClient"/> is a pure transport: it owns no timing. Poll cadence, flood-control backoff and
 /// transport-failure resilience are this type's responsibility, described alongside <see cref="ReadAsync"/> below.
+/// <para>
+/// <b>Single-consumer.</b> The Telegram offset and backoff live in one instance field (<see cref="_state"/>) rather
+/// than a variable local to one <see cref="ReadAsync"/> call, so that <see cref="CurrentOffset"/> has something to
+/// read from outside the stream. That means an instance supports exactly one enumeration of <see cref="ReadAsync"/>
+/// over its whole lifetime — concurrently or sequentially, even a second attempt after the first was cancelled —
+/// because a second enumeration would either race that shared state or silently resume mid-stream instead of
+/// starting fresh. A second attempt throws <see cref="InvalidOperationException"/> immediately, before any network
+/// call is made. This matches the only way this type is actually used: <c>ChannelPump</c> calls <see cref="ReadAsync"/>
+/// once per source and keeps that one stream running for the process's lifetime.
+/// </para>
 /// </remarks>
 public sealed partial class TelegramChannelSource : IChannelSource
 {
@@ -33,6 +43,14 @@ public sealed partial class TelegramChannelSource : IChannelSource
     private readonly TelegramOptions _options;
     private readonly ILogger<TelegramChannelSource> _logger;
     private readonly PollState _state = new();
+
+    /// <summary>
+    /// 0 until <see cref="ReadAsync"/>'s first <c>MoveNextAsync</c> claims it via <see cref="Interlocked.Exchange(ref int, int)"/>;
+    /// never reset afterwards. Enforces the single-consumer contract documented on this type: a second claim attempt
+    /// — whether truly concurrent or merely sequential after the first enumeration ended — observes a non-zero value
+    /// and throws rather than racing or silently resuming <see cref="_state"/>.
+    /// </summary>
+    private int _enumerationStarted;
 
     /// <summary>Creates a source that polls through <paramref name="client"/> using <paramref name="options"/>.</summary>
     /// <param name="client">The Bot API transport. Its token must match <paramref name="options"/>'s <c>BotToken</c>.</param>
@@ -105,6 +123,14 @@ public sealed partial class TelegramChannelSource : IChannelSource
     /// </remarks>
     public async IAsyncEnumerable<InboundMessage> ReadAsync([EnumeratorCancellation] CancellationToken ct)
     {
+        if (Interlocked.Exchange(ref _enumerationStarted, 1) != 0)
+        {
+            throw new InvalidOperationException(
+                "TelegramChannelSource.ReadAsync supports exactly one enumeration for the lifetime of the " +
+                "instance. A second call — concurrent or sequential, even after the first was cancelled — would " +
+                "race or silently resume the shared offset/backoff state instead of starting fresh.");
+        }
+
         while (!ct.IsCancellationRequested)
         {
             var updates = await PollAsync(ct).ConfigureAwait(false);
@@ -113,21 +139,24 @@ public sealed partial class TelegramChannelSource : IChannelSource
                 yield break;
             }
 
-            if (updates.Count == 0)
-            {
-                if (!await DelayAsync(MinPollInterval, ct).ConfigureAwait(false))
-                {
-                    yield break;
-                }
-
-                continue;
-            }
-
-            var accepted = ProcessBatch(updates);
+            var offsetBeforeBatch = _state.Offset;
+            var accepted = updates.Count == 0 ? [] : ProcessBatch(updates);
 
             foreach (var message in accepted)
             {
                 yield return message;
+            }
+
+            if (_state.Offset == offsetBeforeBatch)
+            {
+                // Either the batch was empty, or every update in it was unreadable (e.g. a bare JSON null) so
+                // AdvanceOffset had nothing to advance past — either way, the next poll would return the identical
+                // body. Apply the same floor that protects the empty case so a batch shaped like this cannot spin
+                // the CPU either.
+                if (!await DelayAsync(MinPollInterval, ct).ConfigureAwait(false))
+                {
+                    yield break;
+                }
             }
         }
     }
@@ -260,7 +289,15 @@ public sealed partial class TelegramChannelSource : IChannelSource
         }
     }
 
-    /// <summary>Waits for <paramref name="delay"/>, returning <see langword="false"/> instead of throwing when <paramref name="ct"/> fires meanwhile.</summary>
+    /// <summary>
+    /// Waits for <paramref name="delay"/>, returning <see langword="false"/> instead of throwing when
+    /// <paramref name="ct"/> fires meanwhile. Also swallows <see cref="ArgumentOutOfRangeException"/>: every caller
+    /// in this type either sources <paramref name="delay"/> from a value already clamped by
+    /// <see cref="TelegramBotClient"/> (flood-control) or computed internally (backoff, <see cref="MinPollInterval"/>),
+    /// but this is attacker-influenced data one call removed — belt and braces, so a value <see cref="Task.Delay(TimeSpan, CancellationToken)"/>
+    /// itself rejects is treated as "nothing to wait for" and the caller retries immediately, rather than becoming
+    /// the one exception that escapes <see cref="ReadAsync"/> and ends the channel for good.
+    /// </summary>
     private static async Task<bool> DelayAsync(TimeSpan delay, CancellationToken ct)
     {
         try
@@ -271,6 +308,10 @@ public sealed partial class TelegramChannelSource : IChannelSource
         catch (OperationCanceledException)
         {
             return false;
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return true;
         }
     }
 
