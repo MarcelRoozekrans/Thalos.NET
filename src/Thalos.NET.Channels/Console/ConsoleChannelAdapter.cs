@@ -4,6 +4,9 @@ namespace Thalos.Channels.Console;
 /// Writes turn output to a <see cref="TextWriter"/>. The pump renders cumulatively, so this adapter prints only the
 /// suffix it has not printed yet — a terminal cannot edit what it already emitted.
 /// </summary>
+/// <remarks>
+/// The conversation id is ignored: a console has exactly one, and there is only one stream to write it to.
+/// </remarks>
 public sealed class ConsoleChannelAdapter(TextWriter writer) : IChannelAdapter
 {
     private string _printed = string.Empty;
@@ -12,7 +15,7 @@ public sealed class ConsoleChannelAdapter(TextWriter writer) : IChannelAdapter
     public string ChannelId => "console";
 
     /// <inheritdoc />
-    public async ValueTask DeliverAsync(SessionId sessionId, AgentEvent agentEvent, CancellationToken ct)
+    public async ValueTask DeliverAsync(ConversationId conversationId, AgentEvent agentEvent, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(agentEvent);
 

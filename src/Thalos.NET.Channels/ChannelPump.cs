@@ -141,11 +141,11 @@ public sealed partial class ChannelPump(
         switch (command.Kind)
         {
             case ChannelCommandKind.Help:
-                await NotifyAsync(adapter, SessionId.New(), ChannelNotices.Help, ct).ConfigureAwait(false);
+                await NotifyAsync(adapter, message.ConversationId, default, ChannelNotices.Help, ct).ConfigureAwait(false);
                 return;
 
             case ChannelCommandKind.Unknown:
-                await NotifyAsync(adapter, SessionId.New(), ChannelNotices.UnknownCommand, ct).ConfigureAwait(false);
+                await NotifyAsync(adapter, message.ConversationId, default, ChannelNotices.UnknownCommand, ct).ConfigureAwait(false);
                 return;
 
             case ChannelCommandKind.Cancel:
@@ -165,7 +165,7 @@ public sealed partial class ChannelPump(
                 return;
 
             case ChannelCommandKind.Agents:
-                await AgentsAsync(adapter, ct).ConfigureAwait(false);
+                await AgentsAsync(message, adapter, ct).ConfigureAwait(false);
                 return;
 
             case ChannelCommandKind.None:
@@ -202,7 +202,7 @@ public sealed partial class ChannelPump(
 
         if (turnCts is null)
         {
-            await NotifyAsync(adapter, SessionId.New(), ChannelNotices.Busy, ct).ConfigureAwait(false);
+            await NotifyAsync(adapter, message.ConversationId, default, ChannelNotices.Busy, ct).ConfigureAwait(false);
             return;
         }
 
@@ -279,14 +279,14 @@ public sealed partial class ChannelPump(
             {
                 // /cancel, not shutdown: cancelling turnCts alone (ct itself is untouched) is how the operator
                 // aborts a running turn without tearing down the read loop that started it.
-                await TryNotifyAsync(adapter, binding.SessionId, ChannelNotices.Cancelled, message.ChannelId, ct).ConfigureAwait(false);
+                await TryNotifyAsync(adapter, message.ConversationId, binding.SessionId, ChannelNotices.Cancelled, message.ChannelId, ct).ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            // Cancelled before a binding existed (during resolution/session creation) — nothing to route the
-            // notice against yet, so use a fresh id the same way ResolveAsync's own failure notices do.
-            await TryNotifyAsync(adapter, SessionId.New(), ChannelNotices.Cancelled, message.ChannelId, ct).ConfigureAwait(false);
+            // Cancelled before a binding existed (during resolution/session creation), so there is no session to
+            // name — but the conversation to answer in was known from the inbound message all along.
+            await TryNotifyAsync(adapter, message.ConversationId, default, ChannelNotices.Cancelled, message.ChannelId, ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -312,11 +312,12 @@ public sealed partial class ChannelPump(
     /// the notify itself throws (including <see cref="OperationCanceledException"/>), rather than letting a
     /// misbehaving <see cref="IChannelAdapter"/> be the one path out of that method that was left unguarded.
     /// </summary>
-    private async Task TryNotifyAsync(IChannelAdapter adapter, SessionId sessionId, string text, string channelId, CancellationToken ct)
+    private async Task TryNotifyAsync(
+        IChannelAdapter adapter, ConversationId conversationId, SessionId sessionId, string text, string channelId, CancellationToken ct)
     {
         try
         {
-            await NotifyAsync(adapter, sessionId, text, ct).ConfigureAwait(false);
+            await NotifyAsync(adapter, conversationId, sessionId, text, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -336,7 +337,7 @@ public sealed partial class ChannelPump(
 
         if (ResolveAgent(agentName ?? _options.DefaultAgent) is not { } definition)
         {
-            await NotifyAsync(adapter, current?.SessionId ?? SessionId.New(), ChannelNotices.UnknownAgent, ct).ConfigureAwait(false);
+            await NotifyAsync(adapter, message.ConversationId, current?.SessionId ?? default, ChannelNotices.UnknownAgent, ct).ConfigureAwait(false);
             return;
         }
 
@@ -367,7 +368,7 @@ public sealed partial class ChannelPump(
 
         if (binding is null)
         {
-            await NotifyAsync(adapter, SessionId.New(), ChannelNotices.NoSession, ct).ConfigureAwait(false);
+            await NotifyAsync(adapter, message.ConversationId, default, ChannelNotices.NoSession, ct).ConfigureAwait(false);
             return;
         }
 
@@ -378,7 +379,11 @@ public sealed partial class ChannelPump(
         }
 
         await _conversations.UnbindAsync(message.ChannelId, message.ConversationId, ct).ConfigureAwait(false);
-        await NotifyAsync(adapter, binding.SessionId, ChannelNotices.SessionEnded, ct).ConfigureAwait(false);
+
+        // Addressed to the CONVERSATION, which outlives the binding that was just removed. Keyed on the session,
+        // this notice was unroutable by construction — the adapter would look the session up, find nothing, and
+        // drop the one message telling the operator their /end actually worked.
+        await NotifyAsync(adapter, message.ConversationId, binding.SessionId, ChannelNotices.SessionEnded, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -394,12 +399,12 @@ public sealed partial class ChannelPump(
 
         if (binding is null)
         {
-            await NotifyAsync(adapter, SessionId.New(), ChannelNotices.NoSession, ct).ConfigureAwait(false);
+            await NotifyAsync(adapter, message.ConversationId, default, ChannelNotices.NoSession, ct).ConfigureAwait(false);
             return;
         }
 
         var agentName = _catalog.TryGet(binding.AgentId, out var definition) ? definition.Name : "an unknown agent";
-        await NotifyAsync(adapter, binding.SessionId, $"Bound to {agentName}. Last activity {binding.LastActivityAt:u}.", ct)
+        await NotifyAsync(adapter, message.ConversationId, binding.SessionId, $"Bound to {agentName}. Last activity {binding.LastActivityAt:u}.", ct)
             .ConfigureAwait(false);
     }
 
@@ -407,13 +412,13 @@ public sealed partial class ChannelPump(
     /// Lists the registered agents by <see cref="AgentDefinition.Name"/> (with <see cref="AgentDefinition.Description"/>
     /// when set) — never by <see cref="AgentId"/>, which renders as a 26-character ULID that is useless to a human.
     /// </summary>
-    private async Task AgentsAsync(IChannelAdapter adapter, CancellationToken ct)
+    private async Task AgentsAsync(InboundMessage message, IChannelAdapter adapter, CancellationToken ct)
     {
         var lines = _catalog.Agents.Select(a =>
             string.IsNullOrEmpty(a.Description) ? a.Name : $"{a.Name} — {a.Description}");
         var text = "Available agents:\n" + string.Join('\n', lines);
 
-        await NotifyAsync(adapter, SessionId.New(), text, ct).ConfigureAwait(false);
+        await NotifyAsync(adapter, message.ConversationId, default, text, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -446,7 +451,7 @@ public sealed partial class ChannelPump(
 
         if (nothingToCancel)
         {
-            await NotifyAsync(adapter, SessionId.New(), ChannelNotices.NothingToCancel, ct).ConfigureAwait(false);
+            await NotifyAsync(adapter, message.ConversationId, default, ChannelNotices.NothingToCancel, ct).ConfigureAwait(false);
         }
     }
 
@@ -472,7 +477,7 @@ public sealed partial class ChannelPump(
         if (ResolveAgent(_options.DefaultAgent) is not { } definition)
         {
             LogUnknownAgent(_logger, _options.DefaultAgent);
-            await NotifyAsync(adapter, SessionId.New(), ChannelNotices.UnknownDefaultAgent, ct).ConfigureAwait(false);
+            await NotifyAsync(adapter, message.ConversationId, default, ChannelNotices.UnknownDefaultAgent, ct).ConfigureAwait(false);
             return null;
         }
 
@@ -497,15 +502,27 @@ public sealed partial class ChannelPump(
 
         if (notice is not null)
         {
-            await NotifyAsync(adapter, binding.SessionId, notice, ct).ConfigureAwait(false);
+            await NotifyAsync(adapter, binding.ConversationId, binding.SessionId, notice, ct).ConfigureAwait(false);
         }
 
         return binding;
     }
 
-    /// <summary>Delivers a plain operator notice (not model output) through the adapter as a synthetic text delta.</summary>
-    private static async Task NotifyAsync(IChannelAdapter adapter, SessionId sessionId, string text, CancellationToken ct) =>
-        await adapter.DeliverAsync(sessionId, new TextDeltaEvent(sessionId, TurnId.New(), text), ct).ConfigureAwait(false);
+    /// <summary>
+    /// Delivers a plain operator notice (not model output) through the adapter as a synthetic text delta, addressed
+    /// to the conversation it belongs to.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="sessionId"/> is <c>default</c> for every notice that has no session to speak of — <c>/help</c>,
+    /// an unknown command, the busy notice, an unbound <c>/status</c>. It used to be <c>SessionId.New()</c>, back when
+    /// <see cref="IChannelAdapter.DeliverAsync"/> was keyed on the session and some value simply had to be supplied; a
+    /// fabricated id that resolves to nothing is strictly worse than an absent one, because an adapter cannot tell the
+    /// two apart and has to drop the notice. A fresh <see cref="TurnId"/> is still minted per notice on purpose: it is
+    /// what tells an editing adapter (Telegram) that this is its own message, not a re-render of the previous one.
+    /// </remarks>
+    private static async Task NotifyAsync(
+        IChannelAdapter adapter, ConversationId conversationId, SessionId sessionId, string text, CancellationToken ct) =>
+        await adapter.DeliverAsync(conversationId, new TextDeltaEvent(sessionId, TurnId.New(), text), ct).ConfigureAwait(false);
 
     /// <summary>
     /// Resolves a configured or operator-typed agent NAME to its definition. <c>AgentId</c> is a ULID, so configuration
@@ -562,7 +579,7 @@ public sealed partial class ChannelPump(
             case TextDeltaEvent delta:
                 if (coalescer.TryAppend(delta.Text, out var render) && render is not null)
                 {
-                    await adapter.DeliverAsync(binding.SessionId,
+                    await adapter.DeliverAsync(binding.ConversationId,
                         new TextDeltaEvent(delta.SessionId, delta.TurnId, render), ct).ConfigureAwait(false);
                 }
 
@@ -572,7 +589,7 @@ public sealed partial class ChannelPump(
                 coalescer.SetActivity(started.ToolName);
                 if (coalescer.TryAppend(string.Empty, out var toolRender) && toolRender is not null)
                 {
-                    await adapter.DeliverAsync(binding.SessionId,
+                    await adapter.DeliverAsync(binding.ConversationId,
                         new TextDeltaEvent(started.SessionId, started.TurnId, toolRender), ct).ConfigureAwait(false);
                 }
 
@@ -584,7 +601,7 @@ public sealed partial class ChannelPump(
 
             default:
                 // Terminal and informational events pass through untouched; the adapter decides how to show them.
-                await adapter.DeliverAsync(binding.SessionId, agentEvent, ct).ConfigureAwait(false);
+                await adapter.DeliverAsync(binding.ConversationId, agentEvent, ct).ConfigureAwait(false);
                 break;
         }
     }
@@ -600,12 +617,16 @@ public sealed partial class ChannelPump(
     {
         if (failed.Error.Code == AgentErrorCode.SessionBusy)
         {
-            await NotifyAsync(adapter, binding.SessionId, ChannelNotices.Busy, ct).ConfigureAwait(false);
+            await NotifyAsync(adapter, message.ConversationId, binding.SessionId, ChannelNotices.Busy, ct).ConfigureAwait(false);
             return false;
         }
 
         await _conversations.UnbindAsync(message.ChannelId, message.ConversationId, ct).ConfigureAwait(false);
-        await NotifyAsync(adapter, binding.SessionId, ChannelNotices.Rebound, ct).ConfigureAwait(false);
+
+        // Same shape as EndAsync: the binding is gone by the time this is sent, so only the conversation can carry
+        // it. This is the notice that asks the operator to resend — silently dropping it is how a message appears
+        // to vanish with no explanation at all.
+        await NotifyAsync(adapter, message.ConversationId, binding.SessionId, ChannelNotices.Rebound, ct).ConfigureAwait(false);
         return true;
     }
 

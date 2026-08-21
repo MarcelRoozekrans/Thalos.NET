@@ -292,6 +292,80 @@ public sealed class ChannelPumpCommandTests
         }
     }
 
+    [Fact]
+    public async Task A_notice_with_no_session_is_still_addressed_to_the_conversation_that_asked()
+    {
+        // The defect this exists for: every operator notice used to be delivered against SessionId.New(), a
+        // fabricated id bound to nothing. An adapter that has to resolve a chat from that id (Telegram) found
+        // nothing and dropped the notice, so /help, /agents, the busy notice and "session ended" were all silence.
+        // The conversation is what an adapter can actually address, and it is known here without any lookup.
+        var h = new PumpHarness();
+        await h.SendAndSettle("/help");
+
+        // /help binds nothing — the point being that answering it must not require a session to exist.
+        (await h.Map.GetAsync("fake", h.Channel.Conversation, default)).Value.Should().BeNull();
+
+        lock (h.Channel.Delivered)
+        {
+            h.Channel.DeliveredTo.Should().Equal(h.Channel.Conversation);
+            h.Channel.Delivered.OfType<TextDeltaEvent>().Should().ContainSingle()
+                .Which.Text.Should().Be(ChannelNotices.Help);
+        }
+    }
+
+    [Fact]
+    public async Task A_notice_with_no_session_carries_no_session_id_rather_than_a_fabricated_one()
+    {
+        var h = new PumpHarness();
+        await h.SendAndSettle("/help");
+
+        // `default` is the assertion, not a placeholder: the old code put SessionId.New() here, so this fails
+        // against it. An absent session is honest — an adapter can see there is nothing to correlate — where a
+        // freshly minted id is indistinguishable from a real session that has simply gone missing.
+        lock (h.Channel.Delivered)
+        {
+            h.Channel.Delivered.OfType<TextDeltaEvent>().Should().ContainSingle()
+                .Which.SessionId.Should().Be(default(SessionId));
+        }
+    }
+
+    [Fact]
+    public async Task The_rebound_notice_reaches_the_operator_after_the_binding_is_cleared()
+    {
+        // HandleLifecycleFailureAsync unbinds and THEN notifies, so at the moment this notice is sent there is no
+        // binding left to resolve a session through — it was unroutable by construction on a session-keyed seam.
+        // It is also the notice that asks the operator to resend, so dropping it makes a message vanish silently.
+        var h = new PumpHarness();
+        await h.SendAndSettle("hello");
+
+        h.NextTurnFails(AgentErrorCode.SessionNotFound);
+        await h.SendAndSettle("hello again");
+
+        (await h.Map.GetAsync("fake", h.Channel.Conversation, default)).Value.Should().BeNull();
+        h.Notices().Should().Contain(ChannelNotices.Rebound);
+
+        lock (h.Channel.Delivered)
+        {
+            h.Channel.DeliveredTo.Should().AllBeEquivalentTo(h.Channel.Conversation);
+        }
+    }
+
+    [Fact]
+    public async Task The_session_ended_notice_reaches_the_operator_after_the_binding_is_cleared()
+    {
+        // Same shape as the rebound case: EndAsync unbinds before it notifies.
+        var h = new PumpHarness();
+        await h.SendAndSettle("hello");
+        await h.SendAndSettle("/end");
+
+        h.Notices().Should().Contain(ChannelNotices.SessionEnded);
+
+        lock (h.Channel.Delivered)
+        {
+            h.Channel.DeliveredTo.Should().AllBeEquivalentTo(h.Channel.Conversation);
+        }
+    }
+
     // Polls instead of a fixed delay for the same reason PumpHarness.WaitForDeliveryAsync does: the pump runs on
     // its own background task, so a fixed sleep is either flaky (too short) or wastefully slow (too long).
     private static async Task WaitUntilAsync(Func<bool> condition)

@@ -12,12 +12,6 @@ public interface IConversationMap
     /// <summary>The binding for <paramref name="conversationId"/> on <paramref name="channelId"/>, or null when unbound.</summary>
     ValueTask<Result<ConversationBinding?, AgentError>> GetAsync(string channelId, ConversationId conversationId, CancellationToken ct);
 
-    /// <summary>
-    /// The binding currently serving <paramref name="sessionId"/>, or null when none is. Outbound adapters need this:
-    /// <see cref="IChannelAdapter.DeliverAsync"/> is handed a <see cref="SessionId"/> but must address a conversation.
-    /// </summary>
-    ValueTask<Result<ConversationBinding?, AgentError>> GetBySessionAsync(SessionId sessionId, CancellationToken ct);
-
     /// <summary>Creates or replaces the binding.</summary>
     ValueTask<UnitResult<AgentError>> BindAsync(ConversationBinding binding, CancellationToken ct);
 

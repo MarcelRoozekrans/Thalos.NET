@@ -169,9 +169,6 @@ public sealed class ChannelDependencyInjectionTests
         public ValueTask<Result<ConversationBinding?, AgentError>> GetAsync(string channelId, ConversationId conversationId, CancellationToken ct) =>
             new(Result<ConversationBinding?, AgentError>.Success(null));
 
-        public ValueTask<Result<ConversationBinding?, AgentError>> GetBySessionAsync(SessionId sessionId, CancellationToken ct) =>
-            new(Result<ConversationBinding?, AgentError>.Success(null));
-
         public ValueTask<UnitResult<AgentError>> BindAsync(ConversationBinding binding, CancellationToken ct) =>
             new(UnitResult<AgentError>.Success());
 

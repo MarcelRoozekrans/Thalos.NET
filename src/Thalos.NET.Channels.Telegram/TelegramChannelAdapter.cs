@@ -12,11 +12,11 @@ namespace Thalos.Channels.Telegram;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Addressing.</b> <see cref="DeliverAsync"/> is handed a <see cref="SessionId"/>, not a chat id, so the chat is
-/// resolved on every delivery through <see cref="IConversationMap.GetBySessionAsync"/>. The adapter deliberately
-/// keeps no private session-to-chat map: that would be a second source of truth, and it would go stale the moment a
-/// conversation is rebound. A session with no binding (unbound mid-turn, or a synthetic id that was never bound) is
-/// logged and dropped.
+/// <b>Addressing.</b> The <see cref="ConversationId"/> <em>is</em> the Telegram chat id — that is exactly what
+/// <c>TelegramChannelSource</c> puts in it — so a delivery needs no lookup and cannot fail to resolve. This is why
+/// the seam is keyed on the conversation: an operator notice (<c>/help</c>, "still working", "that session had
+/// already ended") belongs to a chat and often to no session at all, and a session-keyed seam could only address
+/// those by inventing an id that resolves to nothing, which meant dropping them.
 /// </para>
 /// <para>
 /// <b>Nothing escapes.</b> The pump calls this from inside a running turn, and an exception thrown here would end
@@ -25,9 +25,9 @@ namespace Thalos.Channels.Telegram;
 /// the unescaped text.
 /// </para>
 /// <para>
-/// <b>Thread safety.</b> Per-turn state is keyed by <see cref="SessionId"/> in a concurrent dictionary, because
-/// several conversations can be mid-turn at once. Within one session the pump's turn loop delivers strictly in
-/// order, so a state entry itself is only ever touched by one delivery at a time.
+/// <b>Thread safety.</b> Per-turn state is keyed by <see cref="ConversationId"/> in a concurrent dictionary, because
+/// several conversations can be mid-turn at once. Within one conversation the pump runs at most one turn at a time,
+/// so a state entry itself is only ever touched by one delivery at a time.
 /// </para>
 /// </remarks>
 public sealed partial class TelegramChannelAdapter : IChannelAdapter
@@ -37,36 +37,31 @@ public sealed partial class TelegramChannelAdapter : IChannelAdapter
     private const string TypingAction = "typing";
 
     /// <summary>
-    /// The shortest gap between two <c>sendChatAction</c> calls for one session. Telegram's "typing…" indicator
+    /// The shortest gap between two <c>sendChatAction</c> calls for one conversation. Telegram's "typing…" indicator
     /// lasts about five seconds, so refreshing it a little sooner keeps it alive across a slow turn — while a render
     /// (which can arrive several times a second) never triggers one of its own.
     /// </summary>
     private static readonly TimeSpan TypingInterval = TimeSpan.FromSeconds(4);
 
     private readonly TelegramBotClient _client;
-    private readonly IConversationMap _conversations;
     private readonly TimeProvider _clock;
     private readonly ILogger<TelegramChannelAdapter> _logger;
-    private readonly ConcurrentDictionary<SessionId, TurnState> _turns = new();
+    private readonly ConcurrentDictionary<ConversationId, TurnState> _turns = new();
 
     /// <summary>Creates an adapter that renders turns through <paramref name="client"/>.</summary>
     /// <param name="client">The Bot API transport used to send, edit and show typing.</param>
-    /// <param name="conversations">The map every delivery resolves its chat id through.</param>
     /// <param name="clock">The clock the typing-indicator throttle measures against.</param>
     /// <param name="logger">Where dropped deliveries and Telegram failures are reported.</param>
     public TelegramChannelAdapter(
         TelegramBotClient client,
-        IConversationMap conversations,
         TimeProvider clock,
         ILogger<TelegramChannelAdapter> logger)
     {
         ArgumentNullException.ThrowIfNull(client);
-        ArgumentNullException.ThrowIfNull(conversations);
         ArgumentNullException.ThrowIfNull(clock);
         ArgumentNullException.ThrowIfNull(logger);
 
         _client = client;
-        _conversations = conversations;
         _clock = clock;
         _logger = logger;
     }
@@ -75,31 +70,31 @@ public sealed partial class TelegramChannelAdapter : IChannelAdapter
     public string ChannelId => ChannelName;
 
     /// <summary>
-    /// How many sessions currently have per-turn state. Test-only hook, the same shape as
+    /// How many conversations currently have per-turn state. Test-only hook, the same shape as
     /// <c>ChannelPump.IsTurnRunning</c> and <see cref="TelegramChannelSource.CurrentOffset"/>: releasing the state
     /// on a terminal event is invisible from the outside, because <see cref="StateFor"/>'s turn-id reset would
     /// produce the identical sequence of Bot API calls for the next turn either way. Only a test reading this can
     /// tell "the entry was released" from "the entry was reused", and the difference is whether this dictionary
     /// grows for the lifetime of the process.
     /// </summary>
-    internal int TrackedSessions => _turns.Count;
+    internal int TrackedConversations => _turns.Count;
 
     /// <summary>
-    /// Renders <paramref name="agentEvent"/> into the Telegram chat bound to <paramref name="sessionId"/>. Never
-    /// throws for a delivery failure of any kind — an unbound session, a malformed chat id, a Telegram error or a
-    /// transport fault is logged and the delivery is dropped, because the pump calls this from inside a turn and one
-    /// escaping exception would take the whole channel down with it.
+    /// Renders <paramref name="agentEvent"/> into the Telegram chat identified by <paramref name="conversationId"/>.
+    /// Never throws for a delivery failure of any kind — a malformed chat id, a Telegram error or a transport fault
+    /// is logged and the delivery is dropped, because the pump calls this from inside a turn and one escaping
+    /// exception would take the whole channel down with it.
     /// </summary>
-    /// <param name="sessionId">The session whose bound conversation the event belongs to.</param>
+    /// <param name="conversationId">The Telegram chat id, as a string, exactly as <c>TelegramChannelSource</c> supplied it.</param>
     /// <param name="agentEvent">The event to render. Text deltas re-render the turn's message; terminal events render once more and end it.</param>
     /// <param name="ct">A token to cancel the Bot API calls.</param>
-    public async ValueTask DeliverAsync(SessionId sessionId, AgentEvent agentEvent, CancellationToken ct)
+    public async ValueTask DeliverAsync(ConversationId conversationId, AgentEvent agentEvent, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(agentEvent);
 
         try
         {
-            await DeliverCoreAsync(sessionId, agentEvent, ct).ConfigureAwait(false);
+            await DeliverCoreAsync(conversationId, agentEvent, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -110,27 +105,29 @@ public sealed partial class TelegramChannelAdapter : IChannelAdapter
         }
     }
 
-    /// <summary>Composes the body this event renders (if any), resolves the chat, and publishes it.</summary>
-    private async Task DeliverCoreAsync(SessionId sessionId, AgentEvent agentEvent, CancellationToken ct)
+    /// <summary>Composes the body this event renders (if any), reads the chat id off the conversation, and publishes it.</summary>
+    private async Task DeliverCoreAsync(ConversationId conversationId, AgentEvent agentEvent, CancellationToken ct)
     {
-        if (Compose(sessionId, agentEvent) is not { } body)
+        if (Compose(conversationId, agentEvent) is not { } body)
         {
             // Usage, memory and tool events are the pump's business, not the chat's — rendering them would
-            // overwrite the reply the operator is reading. Resolved before the map is touched: an event that
-            // renders nothing must not cost a lookup either.
+            // overwrite the reply the operator is reading.
             return;
         }
 
-        if (await ResolveChatAsync(sessionId, ct).ConfigureAwait(false) is not { } chatId)
+        if (!long.TryParse(conversationId.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var chatId))
         {
+            // Only reachable if a non-Telegram conversation id is routed here, which would be a pump wiring bug —
+            // a drop with a log, never a throw, because this runs inside a turn.
+            LogUnparsableChatId(_logger, conversationId.Value);
             return;
         }
 
-        await RenderAsync(sessionId, chatId, agentEvent.TurnId, body, IsTerminal(agentEvent), ct).ConfigureAwait(false);
+        await RenderAsync(conversationId, chatId, agentEvent.TurnId, body, IsTerminal(agentEvent), ct).ConfigureAwait(false);
     }
 
     /// <summary>The text <paramref name="agentEvent"/> should put on screen, or null when it renders nothing.</summary>
-    private string? Compose(SessionId sessionId, AgentEvent agentEvent) => agentEvent switch
+    private string? Compose(ConversationId conversationId, AgentEvent agentEvent) => agentEvent switch
     {
         // The pump coalesces deltas and re-sends the whole accumulated body each time, so Text is the full render.
         TextDeltaEvent delta => delta.Text,
@@ -138,7 +135,7 @@ public sealed partial class TelegramChannelAdapter : IChannelAdapter
         // The buffered result, not the last delta: the final flush can otherwise be suppressed by the coalescer.
         TurnCompletedEvent completed => completed.Result.Text,
 
-        TurnFailedEvent failed => Failure(sessionId, failed),
+        TurnFailedEvent failed => Failure(conversationId, failed),
         _ => null,
     };
 
@@ -149,51 +146,15 @@ public sealed partial class TelegramChannelAdapter : IChannelAdapter
     /// The body a failed turn renders: the error above nothing, or below whatever the turn had already streamed.
     /// Replacing a partial answer with a bare error would throw away output the operator can still use.
     /// </summary>
-    private string Failure(SessionId sessionId, TurnFailedEvent failed)
+    private string Failure(ConversationId conversationId, TurnFailedEvent failed)
     {
         // Plain interpolation, not string.Create(InvariantCulture, …): both holes are culture-invariant (an enum
         // name and a string), which is what MA0185 asks for here.
         var notice = $"⚠ The turn failed ({failed.Error.Code}): {failed.Error.Message}";
 
-        return _turns.TryGetValue(sessionId, out var state) && state.TurnId == failed.TurnId && state.Text.Length > 0
+        return _turns.TryGetValue(conversationId, out var state) && state.TurnId == failed.TurnId && state.Text.Length > 0
             ? state.Text + "\n\n" + notice
             : notice;
-    }
-
-    /// <summary>
-    /// The Telegram chat currently serving <paramref name="sessionId"/>, or null when there is nothing to deliver
-    /// to. Three ways that happens, each logged and each a drop rather than a throw: the session is unbound (the
-    /// conversation ended mid-turn, or the pump synthesised a session id for a notice), the binding belongs to a
-    /// different channel, or its conversation id is not a Telegram chat id at all.
-    /// </summary>
-    private async Task<long?> ResolveChatAsync(SessionId sessionId, CancellationToken ct)
-    {
-        var result = await _conversations.GetBySessionAsync(sessionId, ct).ConfigureAwait(false);
-        if (result.IsFailure)
-        {
-            LogMapFailed(_logger, result.Error.Code);
-            return null;
-        }
-
-        if (result.Value is not { } binding)
-        {
-            LogUnboundSession(_logger, sessionId.ToString());
-            return null;
-        }
-
-        if (!string.Equals(binding.ChannelId, ChannelName, StringComparison.Ordinal))
-        {
-            LogForeignChannel(_logger, sessionId.ToString(), binding.ChannelId);
-            return null;
-        }
-
-        if (!long.TryParse(binding.ConversationId.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var chatId))
-        {
-            LogUnparsableChatId(_logger, binding.ConversationId.Value);
-            return null;
-        }
-
-        return chatId;
     }
 
     /// <summary>
@@ -202,9 +163,9 @@ public sealed partial class TelegramChannelAdapter : IChannelAdapter
     /// is retried once as plain text, which is the only fallback and is never attempted twice.
     /// </summary>
     private async Task RenderAsync(
-        SessionId sessionId, long chatId, TurnId turnId, string body, bool terminal, CancellationToken ct)
+        ConversationId conversationId, long chatId, TurnId turnId, string body, bool terminal, CancellationToken ct)
     {
-        var state = StateFor(sessionId, turnId);
+        var state = StateFor(conversationId, turnId);
 
         if (!terminal)
         {
@@ -228,7 +189,7 @@ public sealed partial class TelegramChannelAdapter : IChannelAdapter
 
         if (terminal)
         {
-            _turns.TryRemove(sessionId, out _);
+            _turns.TryRemove(conversationId, out _);
         }
     }
 
@@ -300,9 +261,9 @@ public sealed partial class TelegramChannelAdapter : IChannelAdapter
     /// (a cancelled turn, a runtime that ended its stream early) — without it, the next answer would silently
     /// overwrite the last one.
     /// </summary>
-    private TurnState StateFor(SessionId sessionId, TurnId turnId)
+    private TurnState StateFor(ConversationId conversationId, TurnId turnId)
     {
-        var state = _turns.GetOrAdd(sessionId, static (_, turn) => new TurnState(turn), turnId);
+        var state = _turns.GetOrAdd(conversationId, static (_, turn) => new TurnState(turn), turnId);
         if (state.TurnId != turnId)
         {
             state.Restart(turnId);
@@ -311,7 +272,7 @@ public sealed partial class TelegramChannelAdapter : IChannelAdapter
         return state;
     }
 
-    /// <summary>What one session's in-flight turn owns in the chat: the messages it renders into and their last body.</summary>
+    /// <summary>What one conversation's in-flight turn owns in the chat: the messages it renders into and their last body.</summary>
     private sealed class TurnState(TurnId turnId)
     {
         /// <summary>The turn these messages belong to; a different one means the state is stale.</summary>
@@ -336,14 +297,10 @@ public sealed partial class TelegramChannelAdapter : IChannelAdapter
         }
     }
 
-    [LoggerMessage(EventId = 710, Level = LogLevel.Warning, Message = "No conversation is bound to session {SessionId}; the delivery is dropped rather than sent to the wrong chat")]
-    private static partial void LogUnboundSession(ILogger logger, string sessionId);
-
+    // 710, 712 and 717 were the "cannot resolve a chat from this session" drops. Re-keying DeliverAsync on the
+    // conversation deleted the lookup that produced them; the ids are retired rather than reused.
     [LoggerMessage(EventId = 711, Level = LogLevel.Error, Message = "Conversation id {ConversationId} is not a Telegram chat id; the delivery is dropped")]
     private static partial void LogUnparsableChatId(ILogger logger, string conversationId);
-
-    [LoggerMessage(EventId = 712, Level = LogLevel.Warning, Message = "Session {SessionId} is bound to channel {ChannelId}, not telegram; the delivery is dropped")]
-    private static partial void LogForeignChannel(ILogger logger, string sessionId, string channelId);
 
     [LoggerMessage(EventId = 713, Level = LogLevel.Error, Message = "Telegram refused the render as plain text too; this render is dropped and the turn continues")]
     private static partial void LogRenderDropped(ILogger logger);
@@ -356,7 +313,4 @@ public sealed partial class TelegramChannelAdapter : IChannelAdapter
 
     [LoggerMessage(EventId = 716, Level = LogLevel.Debug, Message = "Refreshing the typing indicator failed; the render is unaffected")]
     private static partial void LogTypingFailed(ILogger logger, Exception ex);
-
-    [LoggerMessage(EventId = 717, Level = LogLevel.Error, Message = "The conversation map could not resolve the session ({Code}); the delivery is dropped")]
-    private static partial void LogMapFailed(ILogger logger, AgentErrorCode code);
 }

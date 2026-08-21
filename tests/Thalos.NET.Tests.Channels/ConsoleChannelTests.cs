@@ -41,10 +41,11 @@ public sealed class ConsoleChannelTests
         var output = new StringWriter();
         var adapter = new ConsoleChannelAdapter(output);
         var sessionId = SessionId.New();
+        var conversationId = new ConversationId("c1");
         var turnId = TurnId.New();
 
-        await adapter.DeliverAsync(sessionId, new TextDeltaEvent(sessionId, turnId, "Hello"), default);
-        await adapter.DeliverAsync(sessionId, new TextDeltaEvent(sessionId, turnId, "Hello world"), default);
+        await adapter.DeliverAsync(conversationId, new TextDeltaEvent(sessionId, turnId, "Hello"), default);
+        await adapter.DeliverAsync(conversationId, new TextDeltaEvent(sessionId, turnId, "Hello world"), default);
 
         output.ToString().Should().Be("Hello world");
     }
@@ -55,10 +56,11 @@ public sealed class ConsoleChannelTests
         var output = new StringWriter();
         var adapter = new ConsoleChannelAdapter(output);
         var sessionId = SessionId.New();
+        var conversationId = new ConversationId("c1");
         var turnId = TurnId.New();
 
-        await adapter.DeliverAsync(sessionId, new TextDeltaEvent(sessionId, turnId, "done"), default);
-        await adapter.DeliverAsync(sessionId, new TurnCompletedEvent(sessionId, turnId,
+        await adapter.DeliverAsync(conversationId, new TextDeltaEvent(sessionId, turnId, "done"), default);
+        await adapter.DeliverAsync(conversationId, new TurnCompletedEvent(sessionId, turnId,
             new AgentTurnResult(turnId, sessionId, "done", default, [], TimeSpan.Zero)), default);
 
         output.ToString().Should().Be("done\n");
@@ -70,17 +72,18 @@ public sealed class ConsoleChannelTests
         var output = new StringWriter();
         var adapter = new ConsoleChannelAdapter(output);
         var sessionId = SessionId.New();
+        var conversationId = new ConversationId("c1");
         var turnOneId = TurnId.New();
         var turnTwoId = TurnId.New();
 
-        await adapter.DeliverAsync(sessionId, new TextDeltaEvent(sessionId, turnOneId, "Hel"), default);
-        await adapter.DeliverAsync(sessionId, new TextDeltaEvent(sessionId, turnOneId, "Hello"), default);
-        await adapter.DeliverAsync(sessionId, new TurnCompletedEvent(sessionId, turnOneId,
+        await adapter.DeliverAsync(conversationId, new TextDeltaEvent(sessionId, turnOneId, "Hel"), default);
+        await adapter.DeliverAsync(conversationId, new TextDeltaEvent(sessionId, turnOneId, "Hello"), default);
+        await adapter.DeliverAsync(conversationId, new TurnCompletedEvent(sessionId, turnOneId,
             new AgentTurnResult(turnOneId, sessionId, "Hello", default, [], TimeSpan.Zero)), default);
 
         // "He" is a prefix of turn 1's "Hello", not an extension of it. If the completed-turn reset were dropped,
         // this delta would be diffed against turn 1's leftover "Hello" instead of starting clean.
-        await adapter.DeliverAsync(sessionId, new TextDeltaEvent(sessionId, turnTwoId, "He"), default);
+        await adapter.DeliverAsync(conversationId, new TextDeltaEvent(sessionId, turnTwoId, "He"), default);
 
         output.ToString().Should().Be("Hello\nHe");
     }

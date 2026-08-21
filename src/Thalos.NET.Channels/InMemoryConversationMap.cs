@@ -16,21 +16,6 @@ public sealed class InMemoryConversationMap : IConversationMap
     }
 
     /// <inheritdoc />
-    public ValueTask<Result<ConversationBinding?, AgentError>> GetBySessionAsync(SessionId sessionId, CancellationToken ct)
-    {
-        // Linear over the live conversations: there is one per chat, and a host has a handful.
-        foreach (var binding in _bindings.Values)
-        {
-            if (binding.SessionId == sessionId)
-            {
-                return new(Result<ConversationBinding?, AgentError>.Success(binding));
-            }
-        }
-
-        return new(Result<ConversationBinding?, AgentError>.Success(null));
-    }
-
-    /// <inheritdoc />
     public ValueTask<UnitResult<AgentError>> BindAsync(ConversationBinding binding, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(binding);

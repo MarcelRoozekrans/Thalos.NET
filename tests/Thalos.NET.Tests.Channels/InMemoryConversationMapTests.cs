@@ -55,23 +55,9 @@ public sealed class InMemoryConversationMapTests
         otherChannel.Value.Should().BeNull();
     }
 
-    [Fact]
-    public async Task GetBySession_finds_the_conversation_an_adapter_must_answer()
-    {
-        var map = new InMemoryConversationMap();
-        var binding = Binding();
-        await map.BindAsync(binding, default);
-
-        var found = await map.GetBySessionAsync(binding.SessionId, default);
-        found.Value!.ConversationId.Value.Should().Be("42");
-    }
-
-    [Fact]
-    public async Task GetBySession_returns_null_for_a_session_no_conversation_is_serving()
-    {
-        var map = new InMemoryConversationMap();
-        (await map.GetBySessionAsync(SessionId.New(), default)).Value.Should().BeNull();
-    }
+    // GetBySession_* lived here: a reverse session→conversation lookup added purely so a session-keyed
+    // IChannelAdapter.DeliverAsync could find a chat to answer in. Re-keying that seam on ConversationId removed
+    // its only caller, and the method went with it — so did these two tests.
 
     [Fact]
     public async Task Unbind_removes_it_and_is_idempotent()

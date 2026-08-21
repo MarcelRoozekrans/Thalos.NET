@@ -15,6 +15,13 @@ public sealed class FakeChannel : IChannelSource, IChannelAdapter
     /// <summary>Every event delivered to this adapter, in delivery order.</summary>
     public List<AgentEvent> Delivered { get; } = [];
 
+    /// <summary>
+    /// The conversation each entry of <see cref="Delivered"/> was addressed to, same order and same length. Kept
+    /// alongside rather than folded in, so existing assertions on <see cref="Delivered"/> are untouched. Guarded by
+    /// the same lock; read it inside <c>lock (Delivered)</c>.
+    /// </summary>
+    public List<ConversationId> DeliveredTo { get; } = [];
+
     /// <summary>The single conversation this fake uses for every message it sends.</summary>
     public ConversationId Conversation { get; } = new("c1");
 
@@ -38,7 +45,7 @@ public sealed class FakeChannel : IChannelSource, IChannelAdapter
     public IAsyncEnumerable<InboundMessage> ReadAsync(CancellationToken ct) => _inbound.Reader.ReadAllAsync(ct);
 
     /// <inheritdoc />
-    public ValueTask DeliverAsync(SessionId sessionId, AgentEvent agentEvent, CancellationToken ct)
+    public ValueTask DeliverAsync(ConversationId conversationId, AgentEvent agentEvent, CancellationToken ct)
     {
         if (_nextDeliverThrows is { } ex)
         {
@@ -49,6 +56,7 @@ public sealed class FakeChannel : IChannelSource, IChannelAdapter
         lock (Delivered)
         {
             Delivered.Add(agentEvent);
+            DeliveredTo.Add(conversationId);
         }
 
         return ValueTask.CompletedTask;
