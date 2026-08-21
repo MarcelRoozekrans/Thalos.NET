@@ -201,4 +201,40 @@ public sealed class TelegramChannelSourceTests
 
         await secondEnumeration.Should().ThrowAsync<InvalidOperationException>();
     }
+
+    [Fact]
+    public async Task A_batch_that_never_advances_the_offset_is_rate_limited_not_spun()
+    {
+        // {"result":[null]} is non-empty (Count == 1) but AdvanceOffset has nothing to advance past — this is
+        // exactly the shape Finding E (round 2 of this task's review) fixed: applying MinPollInterval only when the
+        // batch was EMPTY left a non-empty, non-advancing batch free to re-poll at zero delay. Fed this shape
+        // forever, a source without that fix would pin a core for as long as the channel stays up. This is the
+        // only fixture in the suite that is non-empty yet never advances the offset — the malformed-batch test
+        // above advances past update 5, so it cannot exercise this branch.
+        var responses = Enumerable.Range(0, 60)
+            .Select(_ => StubHandler.Json("""{"ok":true,"result":[null]}"""))
+            .ToArray();
+        var handler = new StubHandler(responses);
+        var source = Build(handler, allowed: 7);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        try
+        {
+            await foreach (var _ in source.ReadAsync(cts.Token))
+            {
+                // No message can ever arrive from this fixture; enumerating just runs the loop out the clock so
+                // the request count below reflects how many polls actually happened in the window.
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+
+        var pollCount = handler.Requests.Count(r => r.StartsWith("/botT/getUpdates", StringComparison.Ordinal));
+
+        // ~10 polls are expected over 2s at the 200ms floor. 50 is a generous ceiling for a loaded machine, yet
+        // still fails hard against a zero-delay spin, which would issue orders of magnitude more requests in the
+        // same window.
+        pollCount.Should().BeLessThanOrEqualTo(50);
+    }
 }
