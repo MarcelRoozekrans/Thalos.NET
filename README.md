@@ -272,6 +272,24 @@ session — unbound, and the operator is asked to resend, deliberately not auto-
 `/cancel` and `/help`; a slash-prefixed word that is not one of these is refused the same way, so a mistyped command
 is never forwarded to the model as a prompt.
 
+### Telegram: read this before you deploy it
+
+`Thalos.NET.Channels.Telegram` puts a phone-reachable path in front of an agent that can hold tools, so its
+defaults are deliberately restrictive. Full detail lives in
+[the package README](src/Thalos.NET.Channels.Telegram/README.md) — this is the minimum a consumer must know before
+running it:
+
+- **Security.** Only private chats are served. A sender not in `AllowedUserIds` is dropped **silently — never
+  answered** — replying at all would confirm to a prober that the bot exists. An **empty `AllowedUserIds` is a
+  startup failure**, never "allow everyone". Every accepted sender is attributed to one configured
+  `ConfiguredSecurityContext` (`PrincipalId` + `Roles`) — nothing Telegram-derived (user id, username) reaches
+  authorization. The recommended `Roles` is an **empty set**: roles only matter to a policy that checks one, and
+  the absence of `developer`/`admin` is what stops a bot reachable from a phone from mutating a repository.
+- **Operational.** Telegram's `getUpdates` refuses a second concurrent poller against one bot token — run **exactly
+  one instance** per `BotToken`. Delivery is **at-most-once by design**: the update offset is acknowledged before
+  the turn runs, so a crash mid-turn loses that message rather than silently re-running a turn that may already
+  have written a memory or touched a repository.
+
 ### Breaking change: `IChannelAdapter.DeliverAsync` now takes a `ConversationId`
 
 `Thalos.NET.Abstractions` 0.3.0 shipped `IChannelAdapter` as a declared seam with **no implementations anywhere in
