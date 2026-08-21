@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.0.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.3.0...v1.0.0) (2026-08-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* **channels:** note keyword.
+
+### Features
+
+* **channels:** Thalos.NET.Channels and Thalos.NET.Channels.Telegram ([#41](https://github.com/MarcelRoozekrans/Thalos.NET/issues/41)) ([9bf872c](https://github.com/MarcelRoozekrans/Thalos.NET/commit/9bf872caa5bc0b763af3dfd4646754267c20bfd0))
+
 ## [0.3.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.2.0...v0.3.0) (2026-08-18)
 
 
