@@ -26,8 +26,14 @@ namespace Thalos.Channels.Telegram;
 /// </para>
 /// <para>
 /// <b>Thread safety.</b> Per-turn state is keyed by <see cref="ConversationId"/> in a concurrent dictionary, because
-/// several conversations can be mid-turn at once. Within one conversation the pump runs at most one turn at a time,
-/// so a state entry itself is only ever touched by one delivery at a time.
+/// several conversations can be mid-turn at once. Deliveries to ONE conversation are serialised by a per-conversation
+/// gate, and that is load-bearing rather than belt-and-braces: the pump sends operator notices from its reader loop
+/// while a turn streams on a detached task, so two deliveries genuinely do race for the same conversation. Without
+/// the gate a notice could clear <c>MessageIds</c> in the window between the bounds check and the indexer inside
+/// <see cref="PublishAsync"/> — an <see cref="ArgumentOutOfRangeException"/>, which does not match that method's
+/// <c>400</c>-only filter, so it would land in <see cref="DeliverAsync"/>'s catch-all and DROP the render. When the
+/// dropped render is the terminal one, the agent's final answer never reaches the chat at all. Deliveries to
+/// DIFFERENT conversations never contend: each has its own gate.
 /// </para>
 /// </remarks>
 public sealed partial class TelegramChannelAdapter : IChannelAdapter
@@ -47,6 +53,14 @@ public sealed partial class TelegramChannelAdapter : IChannelAdapter
     private readonly TimeProvider _clock;
     private readonly ILogger<TelegramChannelAdapter> _logger;
     private readonly ConcurrentDictionary<ConversationId, TurnState> _turns = new();
+
+    /// <summary>
+    /// One gate per conversation, so deliveries to the same chat run one at a time while different chats stay fully
+    /// parallel. Entries are never removed: a conversation id is a stable Telegram chat, so this is bounded by the
+    /// number of chats the bot ever serves (a handful), not by turns or sessions — and removing a gate that another
+    /// delivery is at that moment waiting on is exactly the bug this type is trying not to have.
+    /// </summary>
+    private readonly ConcurrentDictionary<ConversationId, SemaphoreSlim> _gates = new();
 
     /// <summary>Creates an adapter that renders turns through <paramref name="client"/>.</summary>
     /// <param name="client">The Bot API transport used to send, edit and show typing.</param>
@@ -80,7 +94,8 @@ public sealed partial class TelegramChannelAdapter : IChannelAdapter
     internal int TrackedConversations => _turns.Count;
 
     /// <summary>
-    /// Renders <paramref name="agentEvent"/> into the Telegram chat identified by <paramref name="conversationId"/>.
+    /// Renders <paramref name="agentEvent"/> into the Telegram chat identified by <paramref name="conversationId"/>,
+    /// serialised against any other delivery to that same conversation.
     /// Never throws for a delivery failure of any kind — a malformed chat id, a Telegram error or a transport fault
     /// is logged and the delivery is dropped, because the pump calls this from inside a turn and one escaping
     /// exception would take the whole channel down with it.
@@ -92,16 +107,31 @@ public sealed partial class TelegramChannelAdapter : IChannelAdapter
     {
         ArgumentNullException.ThrowIfNull(agentEvent);
 
+        var gate = _gates.GetOrAdd(conversationId, static _ => new SemaphoreSlim(1, 1));
+
+        // Tracked separately from the acquisition itself: releasing a semaphore that was never taken (because the
+        // wait was cancelled) would hand a second delivery a permit that does not exist.
+        var held = false;
+
         try
         {
+            await gate.WaitAsync(ct).ConfigureAwait(false);
+            held = true;
             await DeliverCoreAsync(conversationId, agentEvent, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             // Deliberately catches everything, OperationCanceledException included: the pump observes cancellation
             // through the runtime's own event stream, and there is no caller above this one that may be allowed to
-            // see a throw from a channel adapter.
+            // see a throw from a channel adapter. The gate wait is inside this guard for the same reason.
             LogDeliveryFailed(_logger, ex);
+        }
+        finally
+        {
+            if (held)
+            {
+                gate.Release();
+            }
         }
     }
 

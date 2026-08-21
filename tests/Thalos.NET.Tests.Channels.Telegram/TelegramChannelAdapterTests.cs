@@ -343,4 +343,91 @@ public sealed class TelegramChannelAdapterTests
         h.Bodies[3].Should().Contain("\"chat_id\":99");
         h.Bodies[4].Should().Contain("\"chat_id\":42").And.Contain("\"message_id\":11").And.Contain("first chat again");
     }
+
+    [Fact]
+    public async Task A_notice_racing_an_in_flight_turn_on_the_same_conversation_costs_neither_message()
+    {
+        // The pump sends notices from its reader loop while a turn streams on a detached task, so these two
+        // genuinely overlap on one conversation. Unsynchronised, the notice's Restart() clears MessageIds while
+        // the turn is parked mid-publish between chunk 0 and chunk 1 — and the turn's render is corrupted or, if
+        // the bounds check and the indexer straddle the clear, dropped outright by the catch-all.
+        var h = Build(Acted(), Message(1), Message(2), Message(1), Message(2), Acted(), Message(3), Message(4));
+        var turn = TurnId.New();
+
+        // Two chunks, so the publish loop has an await in the middle of it to be interrupted in.
+        var first = new string('a', 4096) + new string('b', 400);
+        var second = first + new string('c', 100);
+
+        await h.Adapter.DeliverAsync(Chat, Delta(turn, first), CancellationToken.None);
+
+        // Hold the turn inside the edit of its FIRST chunk; the notice is issued while that call is outstanding.
+        var (reached, release) = h.Handler.BlockNextRequestContaining("\"message_id\":1");
+        var rendering = h.Adapter.DeliverAsync(Chat, Delta(turn, second), CancellationToken.None).AsTask();
+
+        try
+        {
+            await reached;
+            var notice = h.Adapter.DeliverAsync(
+                Chat, new TextDeltaEvent(default, TurnId.New(), ChannelNotices.Busy), CancellationToken.None).AsTask();
+
+            release.SetResult();
+            await rendering;
+            await notice;
+        }
+        finally
+        {
+            release.TrySetResult();
+        }
+
+        // The turn ends AFTER the notice interrupted it; its final answer must still arrive.
+        await h.Adapter.DeliverAsync(Chat, Completed(turn, "the final answer"), CancellationToken.None);
+
+        // Strictly serialised: the turn finishes editing both of its chunks before the notice sends anything.
+        h.Methods.Should().Equal(
+            "sendChatAction", "sendMessage", "sendMessage",
+            "editMessageText", "editMessageText",
+            "sendChatAction", "sendMessage",
+            "sendMessage");
+
+        h.Bodies[6].Should().Contain(ChannelNotices.Busy[..20]);
+        h.Bodies[7].Should().Contain("the final answer");
+
+        // Nothing was dropped: every drop path in this adapter logs, so an empty log is the assertion.
+        h.Log.EventIds.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Two_conversations_deliver_concurrently_so_the_gate_is_not_global()
+    {
+        var h = Build(Acted(), Message(1), Acted(), Message(2));
+
+        // Chat 42 is held inside sendMessage for the whole of chat 99's delivery. The marker is the message text,
+        // not the chat id — the chat id also appears in that conversation's sendChatAction body.
+        var (reached, release) = h.Handler.BlockNextRequestContaining("slow chat");
+        var blocked = h.Adapter.DeliverAsync(Chat, Delta(TurnId.New(), "slow chat"), CancellationToken.None).AsTask();
+
+        try
+        {
+            await reached;
+
+            // A global gate would park this until chat 42 completes, which it cannot do until we release it —
+            // the WaitAsync turns that deadlock into a timeout failure rather than a hung test run.
+            await h.Adapter.DeliverAsync(OtherChat, Delta(TurnId.New(), "fast chat"), CancellationToken.None)
+                .AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            release.TrySetResult();
+        }
+
+        await blocked;
+
+        // Every delivery has been awaited by now, so nothing is still writing to the handler.
+        {
+            h.Bodies.Should().Contain(b => b.Contains("\"chat_id\":99", StringComparison.Ordinal) && b.Contains("fast chat", StringComparison.Ordinal));
+            h.Bodies.Should().Contain(b => b.Contains("\"chat_id\":42", StringComparison.Ordinal) && b.Contains("slow chat", StringComparison.Ordinal));
+        }
+
+        h.Log.EventIds.Should().BeEmpty();
+    }
 }
