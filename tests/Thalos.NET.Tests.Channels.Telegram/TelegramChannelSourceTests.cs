@@ -107,4 +107,46 @@ public sealed class TelegramChannelSourceTests
         // batch's message was yielded and processed, not after.
         handler.Requests.Should().Contain(r => r.Contains("\"offset\":12", StringComparison.Ordinal));
     }
+
+    [Fact]
+    public async Task The_offset_advances_before_the_message_is_yielded_not_after()
+    {
+        // The request-body assertion above cannot, by itself, distinguish ack-before-yield from ack-after-yield:
+        // an ack-after-yield implementation resumes at the yield, advances the offset, THEN polls again — so
+        // request 2 would carry offset 12 either way. The only observable difference between the two orderings is
+        // whether the offset has already moved by the time the FIRST message reaches the consumer, before a
+        // second poll is even requested — which is exactly what this reads via the internal test hook.
+        var handler = new StubHandler(StubHandler.Json(Update(11, userId: 7)));
+        var source = Build(handler, allowed: 7);
+
+        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await using var enumerator = source.ReadAsync(cts.Token).GetAsyncEnumerator();
+
+        (await enumerator.MoveNextAsync()).Should().BeTrue();
+
+        source.CurrentOffset.Should().Be(12);
+    }
+
+    [Fact]
+    public async Task A_malformed_batch_is_skipped_and_the_loop_survives_to_deliver_the_next_valid_message()
+    {
+        // First batch: a null array element (Telegram sending garbage) and an update whose message has no "chat"
+        // at all — both are shapes System.Text.Json will happily produce despite TelegramMessage.Chat and
+        // TelegramChat.Type being annotated non-nullable; nothing enforces that at runtime. Neither may crash
+        // ReadAsync — both must be skipped like any other admission-gate failure, and the channel must go on to
+        // deliver the next real message rather than dying with it.
+        const string malformedBatch =
+            """{"ok":true,"result":[null,{"update_id":5,"message":{"message_id":9,"text":"hi","from":{"id":7,"is_bot":false}}}]}""";
+
+        var handler = new StubHandler(
+            StubHandler.Json(malformedBatch),
+            StubHandler.Json(Update(6, userId: 7)));
+
+        var source = Build(handler, allowed: 7);
+        var messages = await Drain(source, 1);
+
+        messages.Should().ContainSingle();
+        messages[0].ConversationId.Value.Should().Be("42");
+        messages[0].Text.Should().Be("hi");
+    }
 }
