@@ -66,23 +66,25 @@ the patch, so 0.3.0 used the same `Release-As: 0.3.0` empty commit as 0.2.0 did.
 the nine ids and `Thalos.NET.Skills` on both TFMs.
 
 0.4.0 ships eleven packages (`Thalos.NET.Channels` and `Thalos.NET.Channels.Telegram` join the nine of 0.3.x, both
-on `net8.0` and `net10.0`). **`ci.yml`'s `pack-validate` job (the `expected` package list and both `-eq 9` package
-counts) has not been updated for the two new packages as of this commit** — that must happen before `pack-validate`
-can pass on this branch; see the Task 20 report for the exact lines.
+on `net8.0` and `net10.0`). `ci.yml`'s `pack-validate` job (the `expected` package list and both package-count
+checks) is updated for the two new packages; both were also verified locally by running the job's exact validation
+logic against a real pack of each (README.md, logo.png, both TFMs' dll/xml, no runtimeconfig.json, MIT licence
+expression, repository metadata, non-default description — all present for both).
 
-**The 0.4.0 release PR needs a manual changelog addition, the same way 0.3.0's did.** `IChannelAdapter.DeliverAsync`
-was re-keyed from `SessionId` to `ConversationId` in a `refactor(channels)!:` commit whose footer reads `BREAKING:
-…` rather than the conventional-commits `BREAKING CHANGE: …` keyword release-please's parser looks for. The `!`
-still forces a minor bump and a "⚠ BREAKING CHANGES" heading with the commit's own subject line, but the two-sentence
-rationale in that commit's body will not be pulled into the generated `CHANGELOG.md` entry automatically. 0.3.0 hit
-the equivalent gap — a squash merge collapsing many commits into one loses the texture a consumer needs — and it was
-fixed by pushing one extra `docs:` commit onto the release PR before merging it (see `806f612`, "chore(main): release
-0.3.0"). Do the same for 0.4.0: add a short commit (or hand-edit the release PR's `CHANGELOG.md`) stating plainly that
-`IChannelAdapter.DeliverAsync` now takes a `ConversationId` instead of a `SessionId`, why (an adapter addresses a
-conversation, and most operator notices have no session), and that this is acceptable pre-1.0 because the 0.3.0
-interface had no implementations anywhere in the repository. The full explanation already lives in
-[`README.md`](../README.md#breaking-change-ichanneladapterdeliverasync-now-takes-a-conversationid) — the release PR
-only needs to carry it into `CHANGELOG.md`, not restate it from scratch.
+**The 0.4.0 changelog note for the `IChannelAdapter.DeliverAsync` re-key does not need a manual release-PR step.**
+`IChannelAdapter.DeliverAsync` was re-keyed from `SessionId` to `ConversationId` in `2bc8431`
+(`refactor(channels)!: key IChannelAdapter on the conversation, not the session`), whose footer reads `BREAKING:
+…` rather than the conventional-commits `BREAKING CHANGE: …` keyword release-please's parser matches note text
+against. The `!` already forces the correct minor bump pre-1.0 and a "⚠ BREAKING CHANGES" heading using the commit's
+own subject line — that part was never at risk. What was at risk was the two-sentence rationale, which a
+`BREAKING:`-only footer would not carry into the generated entry. Rather than leave that as a step for whoever cuts
+the release PR to remember (which is exactly the gap 0.3.0 hit — see `806f612`, "chore(main): release 0.3.0", whose
+extra `docs:` commit patched a thin generated entry by hand after the fact), an empty commit already sits on this
+branch carrying a properly-keyworded `BREAKING CHANGE: …` footer with that same explanation. release-please scans the
+whole commit range for a package, not just squash-merge headers, so it will pick this up the same way it would a
+non-empty commit. The full explanation also lives in
+[`README.md`](../README.md#breaking-change-ichanneladapterdeliverasync-now-takes-a-conversationid) for a human reading
+the package itself, independent of what release-please renders.
 
 ## Local development against a consumer (Daedalus)
 

@@ -142,7 +142,7 @@ jobs:
         run: |
           set -euo pipefail
           cd artifacts/packages
-          expected="Thalos.NET Thalos.NET.Abstractions Thalos.NET.Testing Thalos.NET.Mcp Thalos.NET.Anthropic Thalos.NET.Sentinel Thalos.NET.Memory Thalos.NET.Memory.RagNet Thalos.NET.Skills"
+          expected="Thalos.NET Thalos.NET.Abstractions Thalos.NET.Testing Thalos.NET.Mcp Thalos.NET.Anthropic Thalos.NET.Sentinel Thalos.NET.Memory Thalos.NET.Memory.RagNet Thalos.NET.Skills Thalos.NET.Channels Thalos.NET.Channels.Telegram"
           failed=0
           for id in $expected; do
             pkg="$id.$PACKAGE_VERSION.nupkg"; sym="$id.$PACKAGE_VERSION.snupkg"
@@ -168,7 +168,7 @@ jobs:
             echo "ok: $pkg"
           done
           count=$(ls *.nupkg | wc -l)
-          [ "$count" -eq 9 ] || { echo "::error::expected 9 packages, found $count"; failed=1; }
+          [ "$count" -eq 11 ] || { echo "::error::expected 11 packages, found $count"; failed=1; }
           exit $failed
 
       # Rehearse the push: same command shape as the release (quoted glob, --skip-duplicate) against a
@@ -180,7 +180,7 @@ jobs:
           feed="$RUNNER_TEMP/rehearsal-feed"; mkdir -p "$feed"
           dotnet nuget push "artifacts/packages/*.nupkg" --source "$feed" --skip-duplicate
           dotnet nuget push "artifacts/packages/*.nupkg" --source "$feed" --skip-duplicate
-          [ "$(ls "$feed" | wc -l)" -eq 9 ] || { echo "::error::rehearsal feed does not hold 9 packages"; exit 1; }
+          [ "$(ls "$feed" | wc -l)" -eq 11 ] || { echo "::error::rehearsal feed does not hold 11 packages"; exit 1; }
 
       - name: Upload packages
         uses: actions/upload-artifact@v7
