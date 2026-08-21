@@ -5,7 +5,16 @@
 
 ### ⚠ BREAKING CHANGES
 
-* **channels:** note keyword.
+* **abstractions:** `IChannelAdapter.DeliverAsync` is re-keyed from `SessionId` to `ConversationId`.
+  An adapter addresses a *conversation* — a chat, a socket, a terminal — and most of what a channel
+  must say (`/help`, an unknown command, the busy notice, "that session had already ended") belongs
+  to a conversation with **no** session, or none by the time the notice is sent. The session-keyed
+  seam could only carry those by inventing a `SessionId` bound to nothing, which an adapter then
+  failed to resolve and dropped **silently** — every operator notice lost. A `ConversationId` comes
+  from the `InboundMessage` the channel produced, or from the binding.
+  `IConversationMap.GetBySessionAsync`, which existed only to serve the old key, is **removed**.
+  0.3.0 shipped `IChannelAdapter` as a declared seam with zero implementations, so nothing was
+  running against the old signature.
 
 ### Features
 
