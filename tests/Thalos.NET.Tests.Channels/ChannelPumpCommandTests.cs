@@ -38,8 +38,33 @@ public sealed class ChannelPumpCommandTests
 
         await h.SendAndSettle("/new nosuchagent");
 
-        h.Notices().Should().Contain(n => n.Contains("/agents", StringComparison.Ordinal));
+        // The exact notice, not merely "something mentioning /agents": UnknownAgent and UnknownDefaultAgent both
+        // say /agents, and the whole point of the pair is that they blame different people. A name the operator
+        // typed is the operator's typo, so it must NOT log 604 either — that id means "DefaultAgent is wrong".
+        h.Notices().Should().Contain(ChannelNotices.UnknownAgent);
+        h.Logger.Entries.Should().NotContain(e => e.EventId.Id == 604);
         (await h.Map.GetAsync("fake", h.Channel.Conversation, default)).Value!.SessionId.Should().Be(before);
+    }
+
+    [Fact]
+    public async Task Bare_slash_new_with_an_unresolvable_DefaultAgent_reports_a_misconfiguration_and_logs_604()
+    {
+        // A bare /new falls back to Thalos:Channels:DefaultAgent. When THAT does not resolve, nobody typed a bad
+        // name — the host is misconfigured — so telling the operator "I do not have an agent by that name" points
+        // them at a mistake they did not make, and staying silent in the log leaves the one person who can fix it
+        // with nothing. ResolveAsync already reports it this way on the identical condition; this is the same
+        // condition reached through the other door.
+        var h = new PumpHarness();
+        h.Catalog.Agents.Returns([]);
+
+        await h.SendAndSettle("/new");
+
+        h.Notices().Should().Contain(ChannelNotices.UnknownDefaultAgent);
+        h.Notices().Should().NotContain(ChannelNotices.UnknownAgent);
+        h.Logger.Entries.Should().Contain(e => e.EventId.Id == 604);
+
+        // Nothing was closed or rebound: an unresolvable agent must leave the conversation exactly as it was.
+        (await h.Map.GetAsync("fake", h.Channel.Conversation, default)).Value.Should().BeNull();
     }
 
     [Fact]
@@ -248,8 +273,13 @@ public sealed class ChannelPumpCommandTests
             h.Channel.NextDeliverThrows(new InvalidOperationException("simulated adapter failure delivering Cancelled"));
             h.Channel.Send("/cancel");
 
-            await WaitUntilAsync(() => h.Logger.Entries.Any(e => e.EventId.Id == 605));
-            h.Logger.Entries.Should().Contain(e => e.EventId.Id == 605);
+            // 609, not 605: TryNotifyAsync has its own event id, so "the adapter could not deliver a notice" is
+            // distinguishable in a log store from "handling the message blew up". Asserting 605 here would pass
+            // just as well if this failure were routed through the generic handler, which is the whole point of
+            // giving it an id of its own.
+            await WaitUntilAsync(() => h.Logger.Entries.Any(e => e.EventId.Id == 609));
+            h.Logger.Entries.Should().Contain(e => e.EventId.Id == 609);
+            h.Logger.Entries.Should().NotContain(e => e.EventId.Id == 605);
 
             // The read loop survived: a later ordinary message still runs a turn to completion.
             await h.SendAndSettle("hello again");
@@ -279,8 +309,13 @@ public sealed class ChannelPumpCommandTests
             h.Channel.NextDeliverThrows(new InvalidOperationException("simulated adapter failure delivering Cancelled"));
             h.Channel.Send("/cancel");
 
-            await WaitUntilAsync(() => h.Logger.Entries.Any(e => e.EventId.Id == 605));
-            h.Logger.Entries.Should().Contain(e => e.EventId.Id == 605);
+            // 609, not 605: TryNotifyAsync has its own event id, so "the adapter could not deliver a notice" is
+            // distinguishable in a log store from "handling the message blew up". Asserting 605 here would pass
+            // just as well if this failure were routed through the generic handler, which is the whole point of
+            // giving it an id of its own.
+            await WaitUntilAsync(() => h.Logger.Entries.Any(e => e.EventId.Id == 609));
+            h.Logger.Entries.Should().Contain(e => e.EventId.Id == 609);
+            h.Logger.Entries.Should().NotContain(e => e.EventId.Id == 605);
 
             // The read loop survived: a later ordinary message still runs a turn to completion.
             await h.SendAndSettle("hello again");

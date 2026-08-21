@@ -34,7 +34,7 @@ public sealed class ChannelOptionsTests
     }
 
     [Fact]
-    public void FlushInterval_may_be_zero_because_the_console_flushes_every_delta()
+    public void FlushInterval_may_be_zero_to_render_every_delta()
     {
         ChannelOptions.Describe(new ChannelOptions { DefaultAgent = "a", FlushInterval = TimeSpan.Zero })
             .Should().BeNull();

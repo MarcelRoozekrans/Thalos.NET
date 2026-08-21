@@ -3,10 +3,16 @@ using System.Text;
 namespace Thalos.Channels;
 
 /// <summary>
-/// Accumulates streamed text and decides when a channel should re-render it. Rate-limited transports set a positive
-/// flush interval; the console sets zero and renders every delta. Renders that would repeat the previous one are
-/// suppressed, because an unchanged edit is an error on Telegram rather than a no-op.
+/// Accumulates streamed text and decides when a channel should re-render it. The interval is the single, host-wide
+/// <see cref="ChannelOptions.FlushInterval"/>: there is no per-channel cadence, so a positive value (the default is
+/// one second) suppresses the renders falling inside it for EVERY channel, the console included. Renders that would
+/// repeat the previous one are suppressed too, because an unchanged edit is an error on Telegram rather than a no-op.
 /// </summary>
+/// <remarks>
+/// Consequently the last delta an adapter receives is not the answer: whatever streams in during the final interval
+/// never renders. <see cref="Flush"/> would produce that residue, but the pump does not call it — adapters read the
+/// complete text off <c>TurnCompletedEvent.Result</c> instead, which is authoritative and needs no coalescer state.
+/// </remarks>
 /// <remarks>Not thread-safe: one coalescer serves one turn, driven by one loop.</remarks>
 public sealed class DeltaCoalescer(TimeSpan flushInterval, TimeProvider clock)
 {

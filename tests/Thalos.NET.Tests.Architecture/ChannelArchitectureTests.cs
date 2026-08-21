@@ -83,7 +83,12 @@ public sealed class ChannelArchitectureTests
     }
 
     /// <summary>
-    /// Companion to the leaf-csproj rule above, covering what that one structurally cannot see. The repo root
+    /// Companion to the leaf-csproj rule above, covering the repo-wide references that one structurally cannot see —
+    /// and covering only those. Scope, precisely: between them the two rules read <c>PackageReference</c> elements
+    /// out of <c>Thalos.NET.Channels.csproj</c> and the root <c>Directory.Build.props</c> and nothing else, so a
+    /// <c>GlobalPackageReference</c> in <c>Directory.Packages.props</c> — which reaches every project just as surely,
+    /// and which this repo does not use today — would slip past both, as would a package added from any other
+    /// imported <c>.props</c>/<c>.targets</c> file. The repo root
     /// <c>Directory.Build.props</c> is auto-imported by every project, Thalos.NET.Channels included (it has no
     /// <c>Directory.Build.props</c> of its own to override it), and today declares <c>Meziantou.Analyzer</c>,
     /// <c>Roslynator.Analyzers</c>, <c>ZeroAlloc.Analyzers</c> and <c>Microsoft.SourceLink.GitHub</c> as repo-wide

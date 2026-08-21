@@ -44,8 +44,11 @@ await host.StartAsync();   // ChannelPump is an IHostedLifecycleService particip
   conversation binds implicitly (its first message) or a bare `/new` names no agent.
 - **`IdleTimeout`** — how long a bound conversation may sit before the next message rolls it onto a fresh session.
   The operator is told when this happens; a silent rollover would make the agent look amnesiac after a long gap.
-- **`FlushInterval`** — the minimum spacing between two outbound renders of one running turn. `0` renders every
-  delta (what the console channel wants); a channel with its own rate budget (Telegram) sets it higher.
+- **`FlushInterval`** — the minimum spacing between two outbound renders of one running turn. It is **one host-wide
+  setting, not a per-channel one**: every registered channel shares this value. `0` renders every delta; the default
+  `00:00:01` is what keeps a rate-limited transport (Telegram) inside its per-chat budget, and it suppresses the
+  trailing renders of every turn on every channel as a consequence. That is why an adapter must render the terminal
+  event from `TurnCompletedEvent.Result.Text` rather than relying on the last delta it was sent.
 
 ## The four lifecycle edges
 
@@ -100,3 +103,20 @@ for the full rationale if you are upgrading a custom adapter from before this pa
 - **A dead `IChannelAdapter` cannot end a channel.** Every failure path in the pump logs and continues; one bad
   message, one throwing adapter or one closed session never stops the reader loop for that source, let alone the
   process.
+- **`FlushInterval` is host-wide, not per channel.** One value serves every registered channel, so with the default
+  `00:00:01` the renders that fall inside the last second of a turn never go out. Adapters must render the terminal
+  event from `TurnCompletedEvent.Result.Text`, which is the complete answer, rather than from the last delta.
+
+## Known limitations
+
+- **The console channel does not shut down until stdin produces a line.** `ConsoleChannelSource` reads with
+  `TextReader.ReadLineAsync(ct)`, and on `System.Console.In` that call does **not** observe the token: the default
+  `TextReader` implementation hands off to the blocking synchronous read, so a reader parked waiting for input stays
+  parked. Practically, pressing Ctrl+C with no pending input leaves `ChannelPump.ExecuteAsync` alive until the
+  host's shutdown timeout expires (`HostOptions.ShutdownTimeout`, 30 seconds by default) and the process is torn
+  down anyway — the delay is the whole symptom; nothing is lost or corrupted, and a channel that has a line to read
+  drains normally. A proper fix needs the read moved onto a dedicated thread that shutdown can simply abandon;
+  that is deliberately not done here. Hosts that care can shorten `ShutdownTimeout`, or press Enter.
+- **`DeltaCoalescer.Flush()` has no production caller.** It returns the residue the flush interval suppressed, which
+  is exactly the gap `TurnCompletedEvent.Result.Text` closes more reliably. It remains on the public surface for a
+  custom pump that wants it.

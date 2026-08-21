@@ -321,7 +321,10 @@ public sealed partial class ChannelPump(
         }
         catch (Exception ex)
         {
-            LogHandleFailed(_logger, channelId, ex);
+            // Its own id, not LogHandleFailed's 605: "the adapter could not deliver a NOTICE" and "handling the
+            // message blew up" ask the operator for different things — check the transport, versus read the
+            // exception on the turn — and sharing an id makes them indistinguishable in a log store.
+            LogNotifyFailed(_logger, channelId, ex);
         }
     }
 
@@ -335,9 +338,20 @@ public sealed partial class ChannelPump(
         var existing = await _conversations.GetAsync(message.ChannelId, message.ConversationId, ct).ConfigureAwait(false);
         var current = existing.IsSuccess ? existing.Value : null;
 
-        if (ResolveAgent(agentName ?? _options.DefaultAgent) is not { } definition)
+        // A bare /new falls back to DefaultAgent, so an unresolvable name there is a CONFIGURATION fault, not an
+        // operator typo: it must say so and it must log 604, exactly as ResolveAsync does on the same condition.
+        // Reporting UnknownAgent instead blames the operator for a name they never typed, and the silence in the
+        // log leaves the one person who can fix it with nothing to go on.
+        var named = !string.IsNullOrEmpty(agentName);
+        if (ResolveAgent(named ? agentName! : _options.DefaultAgent) is not { } definition)
         {
-            await NotifyAsync(adapter, message.ConversationId, current?.SessionId ?? default, ChannelNotices.UnknownAgent, ct).ConfigureAwait(false);
+            if (!named)
+            {
+                LogUnknownAgent(_logger, _options.DefaultAgent);
+            }
+
+            var notice = named ? ChannelNotices.UnknownAgent : ChannelNotices.UnknownDefaultAgent;
+            await NotifyAsync(adapter, message.ConversationId, current?.SessionId ?? default, notice, ct).ConfigureAwait(false);
             return;
         }
 
@@ -653,4 +667,7 @@ public sealed partial class ChannelPump(
 
     [LoggerMessage(EventId = 608, Level = LogLevel.Critical, Message = "A turn task faulted after its own exception handling was supposed to prevent that; this is a bug")]
     private static partial void LogUnexpectedTurnFault(ILogger logger, Exception ex);
+
+    [LoggerMessage(EventId = 609, Level = LogLevel.Error, Message = "Channel {ChannelId} could not deliver an operator notice; the notice is lost and the turn ends as it was going to")]
+    private static partial void LogNotifyFailed(ILogger logger, string channelId, Exception ex);
 }

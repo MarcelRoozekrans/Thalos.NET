@@ -16,8 +16,12 @@ public sealed class ChannelOptions
     public TimeSpan IdleTimeout { get; set; } = TimeSpan.FromHours(12);
 
     /// <summary>
-    /// Minimum spacing between outbound renders of a running turn. Zero means render every delta, which is what the
-    /// console does; Telegram sets a second to stay inside its per-chat rate budget.
+    /// Minimum spacing between outbound renders of a running turn. This is ONE host-wide setting shared by every
+    /// registered channel — there is no per-channel cadence, and nothing overrides it for a particular adapter.
+    /// Zero renders every delta; the default of one second is what keeps a rate-limited transport (Telegram allows
+    /// roughly one message per second per chat) inside its budget, at the cost of suppressing the trailing renders
+    /// of every turn on every channel. An adapter must therefore take the final body from the terminal event's own
+    /// result (<c>TurnCompletedEvent.Result.Text</c>) rather than from the last delta it happened to be sent.
     /// </summary>
     public TimeSpan FlushInterval { get; set; } = TimeSpan.FromSeconds(1);
 

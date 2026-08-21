@@ -255,7 +255,7 @@ versioning beyond the content hash; usage analytics; a UI; per-skill authorizati
 `Thalos.NET.Channels` turns Thalos into something a human can talk to over a real transport — a terminal, a chat app
 — instead of only a library called from your own request handler. It hosts a `ChannelPump` (an `IHostedService`)
 that reads every registered `IChannelSource`, binds each inbound message to an agent session through
-`IConversationMap`, dispatches the six chat commands, coalesces streamed model output onto a per-channel cadence,
+`IConversationMap`, dispatches the six chat commands, coalesces streamed model output onto one host-wide flush cadence,
 and renders it back through the matching `IChannelAdapter`. It is opt-in: `.UseChannels(...)` (or the
 `IConfiguration` overload, binding `Thalos:Channels`), plus at least one channel — `.AddConsoleChannel()` ships in
 the same package; `Thalos.NET.Channels.Telegram` adds a Telegram Bot API transport as a separate package. Full quick
@@ -285,6 +285,13 @@ running it:
   `ConfiguredSecurityContext` (`PrincipalId` + `Roles`) — nothing Telegram-derived (user id, username) reaches
   authorization. The recommended `Roles` is an **empty set**: roles only matter to a policy that checks one, and
   the absence of `developer`/`admin` is what stops a bot reachable from a phone from mutating a repository.
+- **Redact or disable HTTP-client instrumentation for `api.telegram.org`.** The Bot API carries the token in the
+  **URL path** (`https://api.telegram.org/bot<TOKEN>/getUpdates`), so any host that enables OpenTelemetry
+  HTTP-client instrumentation — or anything else subscribing to the `System.Net.Http` `ActivitySource` — records
+  the token in `url.full` on **every poll**, and long polling means one span every few seconds forever. Nothing in
+  this package can prevent that: the URL is what gets traced. Either filter the `api.telegram.org` host out of your
+  instrumentation, or scrub `url.full` for it in a span processor, before shipping traces anywhere they are stored.
+  This is the only path by which the bot token reaches a log or trace store.
 - **Operational.** Telegram's `getUpdates` refuses a second concurrent poller against one bot token — run **exactly
   one instance** per `BotToken`. Delivery is **at-most-once by design**: the update offset is acknowledged before
   the turn runs, so a crash mid-turn loses that message rather than silently re-running a turn that may already
@@ -307,6 +314,14 @@ adapter that wants to correlate a delivery with a session. Because the previous 
 to migrate, this break is accepted pre-1.0 without a deprecation path — there was nothing running against it to
 break. Anyone who wrote a custom `IChannelAdapter` against the 0.3.0 signature needs to re-key it on
 `ConversationId` before upgrading to 0.4.0.
+
+**Where a `ConversationId` comes from,** since the reverse lookup that used to answer that
+(`IConversationMap.GetBySessionAsync`) was deleted in the same change and there is nothing to replace it with: the
+channel mints it. An `IChannelSource` puts it on every `InboundMessage` it yields (`InboundMessage.ConversationId`)
+— for Telegram it *is* the chat id as a string, for the console it is the constant `ConsoleChannelSource.Conversation`
+— and the pump passes that same value straight through to `DeliverAsync`, so an adapter never has to derive it. It
+is also on the `ConversationBinding` returned by `IConversationMap.GetAsync(channelId, conversationId, ct)` if you
+need it alongside the session. An adapter's own addressing state should be keyed on it, not on `SessionId`.
 
 ## Local development against Daedalus
 
