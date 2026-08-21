@@ -45,7 +45,7 @@
 
     <!-- Analyzers / build -->
     <PackageVersion Include="Meziantou.Analyzer" Version="3.0.177" />
-    <PackageVersion Include="Roslynator.Analyzers" Version="4.16.1" />
+    <PackageVersion Include="Roslynator.Analyzers" Version="5.0.0" />
     <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.400" />
 
     <!-- Tests -->
