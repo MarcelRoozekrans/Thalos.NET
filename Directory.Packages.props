@@ -26,7 +26,7 @@
     <PackageVersion Include="Rag.NET.VectorStores.PgVector" Version="0.1.0" />
     <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.11" />
     <!-- container tests -->
-    <PackageVersion Include="Testcontainers.PostgreSql" Version="4.14.0" />
+    <PackageVersion Include="Testcontainers.PostgreSql" Version="4.15.0" />
     <PackageVersion Include="Npgsql" Version="10.0.3" />
 
     <!-- Microsoft.Extensions -->
