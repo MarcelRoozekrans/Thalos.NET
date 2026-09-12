@@ -8,8 +8,8 @@
     <PackageVersion Include="ZeroAlloc.AsyncEvents" Version="1.1.2" />
     <PackageVersion Include="ZeroAlloc.StateMachine" Version="1.5.2" />
     <PackageVersion Include="ZeroAlloc.Telemetry" Version="1.6.1" />
-    <PackageVersion Include="ZeroAlloc.Validation" Version="1.5.8" />
-    <PackageVersion Include="ZeroAlloc.Validation.Generator" Version="1.5.8" />
+    <PackageVersion Include="ZeroAlloc.Validation" Version="1.6.0" />
+    <PackageVersion Include="ZeroAlloc.Validation.Generator" Version="1.6.0" />
     <PackageVersion Include="ZeroAlloc.Inject" Version="1.7.3" />
     <PackageVersion Include="ZeroAlloc.Inject.Generator" Version="1.7.3" />
     <PackageVersion Include="ZeroAlloc.Analyzers" Version="1.5.0" />
