@@ -25,6 +25,7 @@
     <Project Path="tests/Thalos.NET.Tests.Memory/Thalos.NET.Tests.Memory.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Sentinel/Thalos.NET.Tests.Sentinel.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Skills/Thalos.NET.Tests.Skills.csproj" />
+    <Project Path="tests/Thalos.NET.Tests.Subagents/Thalos.NET.Tests.Subagents.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Unit/Thalos.NET.Tests.Unit.csproj" />
   </Folder>
 </Solution>
