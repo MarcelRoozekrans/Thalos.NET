@@ -15,6 +15,7 @@ public sealed class PumpHarness : IDisposable
     private bool _started;
     private TaskCompletionSource? _blockingGate;
     private TaskCompletionSource? _blockingSessionGate;
+    private AgentError? _nextSessionCreateFailure;
 
     public FakeChannel Channel { get; } = new();
 
@@ -76,6 +77,9 @@ public sealed class PumpHarness : IDisposable
 
     /// <summary>Makes the NEXT <c>BindAsync</c> call against the conversation map fail with <paramref name="error"/>.</summary>
     public void FailNextBind(AgentError error) => _conversationMap.FailNextBind(error);
+
+    /// <summary>Makes the NEXT <c>CreateSessionAsync</c> call against the runtime fail with <paramref name="error"/> instead of creating a session.</summary>
+    public void FailNextSessionCreate(AgentError error) => _nextSessionCreateFailure = error;
 
     /// <summary>Makes the next turn fail with <paramref name="code"/> instead of completing.</summary>
     public void NextTurnFails(AgentErrorCode code) => _nextFailure = code;
@@ -232,6 +236,12 @@ public sealed class PumpHarness : IDisposable
         {
             _blockingSessionGate = null;
             gate.Task.WaitAsync(ct).GetAwaiter().GetResult();
+        }
+
+        if (_nextSessionCreateFailure is { } error)
+        {
+            _nextSessionCreateFailure = null;
+            return Result<SessionId, AgentError>.Failure(error);
         }
 
         return Result<SessionId, AgentError>.Success(SessionId.New());

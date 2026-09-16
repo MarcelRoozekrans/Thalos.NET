@@ -505,7 +505,12 @@ public sealed partial class ChannelPump(
         var created = await _runtime.CreateSessionAsync(agentId, message.Caller, ct).ConfigureAwait(false);
         if (created.IsFailure)
         {
+            // Same rule as the BindAsync failure below: the operator is always told something. Both callers of
+            // this method either discard its return value entirely (StartNewAsync, the /new command) or just
+            // return on a null binding without a notice of their own (ResolveAsync's caller) — so the notice has
+            // to be sent from here, exactly once, or it is never sent at all.
             LogSessionFailed(_logger, message.ChannelId, created.Error.Code);
+            await NotifyAsync(adapter, message.ConversationId, default, ChannelNotices.SessionStartFailed, ct).ConfigureAwait(false);
             return null;
         }
 
@@ -516,7 +521,7 @@ public sealed partial class ChannelPump(
         if (bound.IsFailure)
         {
             LogBindFailed(_logger, message.ChannelId, bound.Error.Code);
-            await NotifyAsync(adapter, message.ConversationId, default, ChannelNotices.BindFailed, ct).ConfigureAwait(false);
+            await NotifyAsync(adapter, message.ConversationId, default, ChannelNotices.SessionStartFailed, ct).ConfigureAwait(false);
             return null;
         }
 

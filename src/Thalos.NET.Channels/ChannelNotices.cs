@@ -18,8 +18,12 @@ public static class ChannelNotices
     /// <summary>Shown when <c>Thalos:Channels:DefaultAgent</c> names an agent the catalogue does not have.</summary>
     public const string UnknownDefaultAgent = "I am misconfigured: the default agent does not exist. /agents lists what is registered.";
 
-    /// <summary>Shown when a freshly created session could not be persisted in the conversation map.</summary>
-    public const string BindFailed = "Could not start a session just now. Please try again.";
+    /// <summary>
+    /// Shown when starting a fresh session fails before there is anything to run a turn against — either the
+    /// runtime could not create the session, or the session was created but could not be persisted in the
+    /// conversation map. Both are the same experience to the operator: nothing happened, try again.
+    /// </summary>
+    public const string SessionStartFailed = "Could not start a session just now. Please try again.";
 
     /// <summary>Shown when /new names an agent the catalogue does not have.</summary>
     public const string UnknownAgent = "I do not have an agent by that name. /agents lists the ones I do.";
