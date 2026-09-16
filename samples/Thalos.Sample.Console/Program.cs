@@ -32,9 +32,11 @@ var architect = new AgentDefinition
 
 builder.Services.AddThalos(thalos => thalos
     .UseAnthropic(builder.Configuration)
-    // NOTE: AI.Sentinel 2.0.1's security detectors (prompt injection, jailbreak, exfiltration, …) are embedding-based.
-    // Without SentinelOptions.EmbeddingGenerator only the lexical/operational detectors run — this sample deliberately
-    // does not wire an embedding provider; a real host should (e.g. Ollama or OpenAI embeddings).
+    // NOTE: AI.Sentinel 2.3.0's security detectors are mostly semantic and return Clean without
+    // SentinelOptions.EmbeddingGenerator, leaving the lexical/operational detectors active. SEC-01 PromptInjection and
+    // SEC-05 Jailbreak are the exception: since 2.2.0 both carry a rule layer that catches unambiguous phrasings with no
+    // generator configured, so this sample is not defenceless — but paraphrased attempts still need embeddings. This
+    // sample deliberately does not wire an embedding provider; a real host should (e.g. Ollama or OpenAI embeddings).
     .UseAISentinel(o =>
     {
         o.OnCritical = SentinelAction.Quarantine;
