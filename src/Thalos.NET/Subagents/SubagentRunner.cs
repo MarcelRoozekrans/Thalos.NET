@@ -35,12 +35,11 @@ public sealed partial class SubagentRunner : ISubagentRunner
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        // Checked before any session is created: a session that will only ever be torn down for exceeding depth
-        // should never occupy a slot in the first place.
-        if (request.Depth > _options.MaxDepth)
+        // Both checks happen before any session is created: a session that will only ever be torn down for a bad
+        // request (too deep, or a deadline that can't be honoured) should never occupy a slot in the first place.
+        if (ValidateRequest(request, _options) is { } validationError)
         {
-            return Result<AgentTurnResult, AgentError>.Failure(
-                AgentError.SubagentDepthExceeded(request.Depth, _options.MaxDepth));
+            return Result<AgentTurnResult, AgentError>.Failure(validationError);
         }
 
         var created = await _runtime.CreateSessionAsync(request.AgentId, request.Caller, ct).ConfigureAwait(false);
@@ -88,6 +87,29 @@ public sealed partial class SubagentRunner : ISubagentRunner
                 LogCloseFailed(_logger, sessionId.ToString(), closed.Error.Code);
             }
         }
+    }
+
+    /// <summary>
+    /// Guards on <paramref name="request"/> that must fail before a session is created: exceeding the configured
+    /// nesting depth, and a deadline that isn't a positive <see cref="TimeSpan"/>. A non-positive deadline (zero,
+    /// negative, or the <c>-1ms</c> "infinite" sentinel that <see cref="SubagentBudget"/> has no way to request
+    /// deliberately) would otherwise reach <see cref="CancellationTokenSource"/> and throw
+    /// <see cref="ArgumentOutOfRangeException"/>; this codebase returns <see cref="AgentError"/> instead of letting
+    /// request data throw.
+    /// </summary>
+    private static AgentError? ValidateRequest(SubagentRunRequest request, SubagentOptions options)
+    {
+        if (request.Depth > options.MaxDepth)
+        {
+            return AgentError.SubagentDepthExceeded(request.Depth, options.MaxDepth);
+        }
+
+        if (request.Budget.Deadline <= TimeSpan.Zero)
+        {
+            return AgentError.Validation($"Subagent deadline must be positive; was {request.Budget.Deadline}.");
+        }
+
+        return null;
     }
 
     private async ValueTask<Result<AgentTurnResult, AgentError>> RunTurnAsync(
