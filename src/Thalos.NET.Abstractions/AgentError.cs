@@ -77,6 +77,15 @@ public enum AgentErrorCode
 
     /// <summary>Skill search is unavailable (no embedding generator or the index is down); the catalogue is still authoritative. HTTP 503.</summary>
     SkillSearchUnavailable,
+
+    /// <summary>A detached subagent run hit its token budget and was stopped.</summary>
+    SubagentBudgetExceeded,
+
+    /// <summary>A detached subagent run hit its deadline and was stopped.</summary>
+    SubagentDeadlineExceeded,
+
+    /// <summary>A detached subagent run was refused because it exceeded the configured nesting depth.</summary>
+    SubagentDepthExceeded,
 }
 
 /// <summary>
@@ -156,6 +165,18 @@ public readonly record struct AgentError(AgentErrorCode Code, string Message, st
 
     /// <summary><see cref="AgentErrorCode.SkillSearchUnavailable"/>; <paramref name="detail"/> is a diagnostic such as the exception type name.</summary>
     public static AgentError SkillSearchUnavailable(string message, string? detail = null) => new(AgentErrorCode.SkillSearchUnavailable, message, detail);
+
+    /// <summary><see cref="AgentErrorCode.SubagentBudgetExceeded"/>: the run exceeded <paramref name="maxTokens"/>.</summary>
+    public static AgentError SubagentBudgetExceeded(int maxTokens) =>
+        new(AgentErrorCode.SubagentBudgetExceeded, $"The subagent run exceeded its budget of {maxTokens} tokens.");
+
+    /// <summary><see cref="AgentErrorCode.SubagentDeadlineExceeded"/>: the run exceeded <paramref name="deadline"/>.</summary>
+    public static AgentError SubagentDeadlineExceeded(TimeSpan deadline) =>
+        new(AgentErrorCode.SubagentDeadlineExceeded, $"The subagent run exceeded its deadline of {deadline}.");
+
+    /// <summary><see cref="AgentErrorCode.SubagentDepthExceeded"/>: depth <paramref name="depth"/> exceeds <paramref name="max"/>.</summary>
+    public static AgentError SubagentDepthExceeded(int depth, int max) =>
+        new(AgentErrorCode.SubagentDepthExceeded, $"Subagent depth {depth} exceeds the configured maximum of {max}.");
 
     /// <summary><c>"{Code}: {Message}"</c>, with <c>" — {Detail}"</c> appended when <see cref="Detail"/> is set.</summary>
     public override string ToString() => Detail is null ? $"{Code}: {Message}" : $"{Code}: {Message} — {Detail}";
