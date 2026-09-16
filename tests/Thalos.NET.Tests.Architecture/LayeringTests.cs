@@ -18,11 +18,17 @@ public sealed class LayeringTests
     private static readonly Assembly MemoryAssembly = typeof(Thalos.Memory.MemoryService).Assembly;
     private static readonly Assembly RagNetAssembly = typeof(Thalos.Memory.RagNet.RagNetMemoryIndex).Assembly;
     private static readonly Assembly SkillsAssembly = typeof(Thalos.Skills.SkillCatalogue).Assembly;
+    private static readonly Assembly ChannelsAssembly = typeof(Thalos.Channels.ChannelPump).Assembly;
+    private static readonly Assembly ChannelsTelegramAssembly = typeof(Thalos.Channels.Telegram.TelegramChannelAdapter).Assembly;
     private static readonly Assembly TestingAssembly = typeof(Thalos.Testing.ScriptedChatClient).Assembly;
 
     // ArchUnitNET only knows the assemblies handed to LoadAssemblies: a rule over an assembly that is missing
-    // from this array matches zero types and passes vacuously. Every shipping assembly except Thalos.NET.Testing
-    // is here, and the reflective sweeps below walk the same array so the two can never drift apart.
+    // from this array matches zero types and passes vacuously. Thalos.NET.Testing is the one shipping assembly
+    // deliberately left out — it references xunit and AwesomeAssertions (see
+    // Shipping_assemblies_do_not_reference_test_frameworks below), so folding it into these production-layering
+    // rules would make every "does not depend on / reference" assertion about test frameworks trivially true for
+    // itself. Every other shipping assembly is here, and the reflective sweeps below walk this same array so it
+    // and the loaded set can never drift apart.
     private static readonly Assembly[] LoadedAssemblies =
     [
         AbstractionsAssembly,
@@ -33,6 +39,8 @@ public sealed class LayeringTests
         MemoryAssembly,
         RagNetAssembly,
         SkillsAssembly,
+        ChannelsAssembly,
+        ChannelsTelegramAssembly,
     ];
 
     private static readonly ArchUnitNET.Domain.Architecture Arch = new ArchLoader().LoadAssemblies(LoadedAssemblies).Build();
