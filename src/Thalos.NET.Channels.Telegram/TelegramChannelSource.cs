@@ -292,7 +292,7 @@ public sealed partial class TelegramChannelSource : IChannelSource
                 // Gate 2 — dropped silently, never answered. Logged here, server-side only — including the
                 // sender's own id, which is the entire value of this line — so an operator can see exactly who
                 // probed the bot without it ever confirming to that sender that anything is listening.
-                LogRejectedSender(_logger, update.UpdateId, message.From?.Id.ToString(CultureInfo.InvariantCulture) ?? "(none)");
+                LogRejectedSender(_logger, update.UpdateId, message.From?.Id);
                 continue;
             }
 
@@ -364,7 +364,7 @@ public sealed partial class TelegramChannelSource : IChannelSource
     private static partial void LogDroppedNonPrivate(ILogger logger, long updateId, string chatType);
 
     [LoggerMessage(EventId = 705, Level = LogLevel.Warning, Message = "Update {UpdateId} is from sender {SenderId}, outside AllowedUserIds; dropped silently, no reply sent")]
-    private static partial void LogRejectedSender(ILogger logger, long updateId, string senderId);
+    private static partial void LogRejectedSender(ILogger logger, long updateId, long? senderId);
 
     [LoggerMessage(EventId = 706, Level = LogLevel.Warning, Message = "getUpdates returned a null entry in its updates array; skipped")]
     private static partial void LogMalformedUpdate(ILogger logger);
