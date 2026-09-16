@@ -23,7 +23,7 @@
     <PackageVersion Include="AI.Sentinel" Version="2.3.0" />
     <!-- Rag.NET (net10.0 only) — confined to Thalos.NET.Memory.RagNet -->
     <PackageVersion Include="Rag.NET.Abstractions" Version="0.1.0" />
-    <PackageVersion Include="Rag.NET.VectorStores.PgVector" Version="0.1.0" />
+    <PackageVersion Include="Rag.NET.VectorStores.PgVector" Version="1.0.0" />
     <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.12" />
     <!-- container tests -->
     <PackageVersion Include="Testcontainers.PostgreSql" Version="4.15.0" />
