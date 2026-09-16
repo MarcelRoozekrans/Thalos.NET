@@ -1,5 +1,6 @@
 using AwesomeAssertions;
 using NSubstitute;
+using Thalos.Testing;
 using ZeroAlloc.Authorization;
 using ZeroAlloc.Results;
 
@@ -15,8 +16,7 @@ public class SubagentDepthTests
 
         var result = await harness.Build().RunAsync(SubagentRunnerHarness.Request(depth: 3));
 
-        result.IsFailure.Should().BeTrue();
-        result.Error.Code.Should().Be(AgentErrorCode.SubagentDepthExceeded);
+        result.ShouldBeFailureWith(AgentErrorCode.SubagentDepthExceeded);
         await harness.Runtime.DidNotReceive()
             .CreateSessionAsync(Arg.Any<AgentId>(), Arg.Any<ISecurityContext>(), Arg.Any<CancellationToken>());
     }

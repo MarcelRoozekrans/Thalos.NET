@@ -17,8 +17,14 @@ public sealed record SubagentRunRequest
     /// </summary>
     public required ISecurityContext Caller { get; init; }
 
-    /// <summary>Token and wall-clock ceilings. Defaults to <see cref="SubagentBudget.Default"/>.</summary>
-    public SubagentBudget Budget { get; init; } = SubagentBudget.Default;
+    /// <summary>
+    /// Token and wall-clock ceilings for this run. <see langword="null"/> means "use the host's configured default":
+    /// the runner resolves an omitted budget to <c>SubagentOptions.DefaultBudget</c>, so a value set here always wins
+    /// over the host default, never the other way around. Left <see langword="null"/> rather than defaulted to
+    /// <see cref="SubagentBudget.Default"/> here so a host-configured <c>DefaultBudget</c> is not silently shadowed by
+    /// this record's own default the moment a caller builds a request without naming a budget.
+    /// </summary>
+    public SubagentBudget? Budget { get; init; }
 
     /// <summary>
     /// Nesting depth; 0 for a run started by a host. Refused above <c>SubagentOptions.MaxDepth</c>. Nothing in

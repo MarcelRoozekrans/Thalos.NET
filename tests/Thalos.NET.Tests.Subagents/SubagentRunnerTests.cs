@@ -1,5 +1,8 @@
+using AwesomeAssertions;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using NSubstitute;
+using Thalos.Tests.Subagents.Fakes;
 using Thalos.Testing;
 using ZeroAlloc.Authorization;
 using ZeroAlloc.Results;
@@ -45,8 +48,7 @@ public class SubagentRunnerTests
 
         var result = await harness.Build().RunAsync(SubagentRunnerHarness.Request());
 
-        result.IsFailure.Should().BeTrue();
-        result.Error.Code.Should().Be(AgentErrorCode.ProviderError);
+        result.ShouldBeFailureWith(AgentErrorCode.ProviderError);
         await harness.Runtime.Received(1).CloseSessionAsync(sessionId, Arg.Any<ISecurityContext>(), Arg.Any<CancellationToken>());
     }
 
@@ -85,9 +87,38 @@ public class SubagentRunnerTests
 
         var result = await harness.Build().RunAsync(SubagentRunnerHarness.Request());
 
-        result.IsFailure.Should().BeTrue();
-        result.Error.Code.Should().Be(AgentErrorCode.AgentNotFound);
+        result.ShouldBeFailureWith(AgentErrorCode.AgentNotFound);
         await harness.Runtime.DidNotReceive().RunTurnAsync(Arg.Any<AgentTurnRequest>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task A_session_close_failure_is_logged_with_the_parent_session_id()
+    {
+        // SubagentRunRequest.ParentSessionId is documented as telemetry lineage but was never actually emitted
+        // anywhere. Wiring it into this existing failure log is the minimal fix: the close failure is genuinely
+        // unaffected (the run's own result carries the real outcome), but the parent lineage must now appear in the
+        // one place this runner already logs a failure.
+        var harness = SubagentRunnerHarness.Create();
+        var sessionId = SessionId.New();
+        var parentSessionId = SessionId.New();
+        var logger = new CapturingLogger<SubagentRunner>();
+        var expected = new AgentTurnResult(TurnId.New(), sessionId, "the answer", default, [], TimeSpan.FromSeconds(1));
+
+        harness.Runtime.CreateSessionAsync(Arg.Any<AgentId>(), Arg.Any<ISecurityContext>(), Arg.Any<CancellationToken>())
+               .Returns(Result<SessionId, AgentError>.Success(sessionId));
+        harness.Runtime.RunTurnAsync(Arg.Any<AgentTurnRequest>(), Arg.Any<CancellationToken>())
+               .Returns(Result<AgentTurnResult, AgentError>.Success(expected));
+        harness.Runtime.CloseSessionAsync(sessionId, Arg.Any<ISecurityContext>(), Arg.Any<CancellationToken>())
+               .Returns(UnitResult<AgentError>.Failure(AgentError.StoreError("boom")));
+
+        var request = SubagentRunnerHarness.Request() with { ParentSessionId = parentSessionId };
+        var result = await harness.Build(logger).RunAsync(request);
+
+        result.IsSuccess.Should().BeTrue("a close failure must not affect the run's own reported outcome");
+        logger.Entries.Should().ContainSingle(e =>
+            e.Level == LogLevel.Warning
+            && e.Message.Contains(sessionId.ToString(), StringComparison.Ordinal)
+            && e.Message.Contains(parentSessionId.ToString(), StringComparison.Ordinal));
     }
 
     [Fact]

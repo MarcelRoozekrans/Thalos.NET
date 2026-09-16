@@ -9,6 +9,10 @@ public sealed class SubagentOptions
     /// </summary>
     public int MaxDepth { get; set; } = 2;
 
-    /// <summary>Budget applied when a request does not carry one.</summary>
+    /// <summary>
+    /// Budget the runner applies when a <see cref="SubagentRunRequest"/> leaves <see cref="SubagentRunRequest.Budget"/>
+    /// <see langword="null"/>. A request that names its own budget always wins over this value — this is the fallback,
+    /// never an override.
+    /// </summary>
     public SubagentBudget DefaultBudget { get; set; } = SubagentBudget.Default;
 }

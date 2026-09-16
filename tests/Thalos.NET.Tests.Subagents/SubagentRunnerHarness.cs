@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Time.Testing;
 using NSubstitute;
 using ZeroAlloc.Authorization;
@@ -19,10 +20,19 @@ internal sealed class SubagentRunnerHarness
     /// <summary>Creates a harness with a fresh mock runtime, clock and default options.</summary>
     public static SubagentRunnerHarness Create() => new();
 
-    /// <summary>Builds the runner under test over this harness's <see cref="Runtime"/>, <see cref="Options"/> and <see cref="Time"/>.</summary>
-    public ISubagentRunner Build() => new SubagentRunner(Runtime, Options, Time, logger: null);
+    /// <summary>
+    /// Builds the runner under test over this harness's <see cref="Runtime"/>, <see cref="Options"/> and <see cref="Time"/>.
+    /// Pass <paramref name="logger"/> (e.g. a capturing fake) for tests asserting on emitted log calls; otherwise the
+    /// runner is built without one, matching how most tests here don't care about logging.
+    /// </summary>
+    public ISubagentRunner Build(ILogger<SubagentRunner>? logger = null) => new SubagentRunner(Runtime, Options, Time, logger);
 
-    /// <summary>A minimal <see cref="SubagentRunRequest"/>; override only the fields a test cares about.</summary>
+    /// <summary>
+    /// A minimal <see cref="SubagentRunRequest"/>; override only the fields a test cares about. <paramref name="budget"/>
+    /// defaults to <see langword="null"/>, not <see cref="SubagentBudget.Default"/>, matching the request's own
+    /// default: a test that wants a specific budget in play passes one explicitly, and a test that wants to prove the
+    /// harness's <see cref="Options"/>.DefaultBudget applies leaves it out.
+    /// </summary>
     public static SubagentRunRequest Request(
         AgentId? agentId = null, string task = "do the thing", int depth = 0, SubagentBudget? budget = null) =>
         new()
@@ -31,7 +41,7 @@ internal sealed class SubagentRunnerHarness
             Task = task,
             Caller = new StubCaller(),
             Depth = depth,
-            Budget = budget ?? SubagentBudget.Default,
+            Budget = budget,
         };
 
     private sealed class StubCaller : ISecurityContext

@@ -48,6 +48,8 @@ public sealed class LayeringTests
     private const string McpNamespace = @"^ModelContextProtocol(\.|$)";
     private const string RagNetNamespace = @"^Rag\.NET(\.|$)";
     private const string NpgsqlNamespace = @"^Npgsql(\.|$)";
+    private const string SagaNamespace = @"^ZeroAlloc\.Saga(\.|$)";
+    private const string SchedulingNamespace = @"^ZeroAlloc\.Scheduling(\.|$)";
 
     [Fact]
     public void Abstractions_do_not_depend_on_MAF_or_providers() =>
@@ -127,6 +129,36 @@ public sealed class LayeringTests
         Types().That().ResideInAssembly(MemoryAssembly)
             .Should().NotDependOnAnyTypesThat().ResideInAssembly(SkillsAssembly)
             .Check(Arch);
+
+    /// <summary>
+    /// D3 in the phase 1.5 design (docs/plans/2026-09-16-thalos-subagents-design.md, daedalus repo): Thalos ships the
+    /// <c>ISubagentRunner</c> primitive only. A saga store, a job store and their hosted services are host policy —
+    /// the consuming host (Daedalus) orchestrates with <c>ZeroAlloc.Saga</c> and <c>ZeroAlloc.Scheduling</c>; the
+    /// nuget package must never pull either in.
+    /// </summary>
+    [Fact]
+    public void Src_does_not_depend_on_saga_or_scheduling_orchestration() =>
+        Types().Should().NotDependOnAnyTypesThat().ResideInNamespaceMatching(SagaNamespace)
+            .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(SchedulingNamespace)
+            .Check(Arch);
+
+    /// <summary>
+    /// Stronger than the type-dependency rule above: a NotDependOn rule stays green while an unused package
+    /// reference sits in a csproj, so the package graph itself is asserted here too — mirrors
+    /// <see cref="Skills_do_not_reference_the_memory_packages_or_the_other_adapters"/>.
+    /// </summary>
+    [Fact]
+    public void Src_does_not_reference_the_saga_or_scheduling_packages()
+    {
+        for (var i = 0; i < LoadedAssemblies.Length; i++)
+        {
+            var referenced = Array.ConvertAll(LoadedAssemblies[i].GetReferencedAssemblies(), r => r.Name!);
+            referenced.Should().NotContain(name =>
+                name.StartsWith("ZeroAlloc.Saga", StringComparison.Ordinal)
+                || name.StartsWith("ZeroAlloc.Scheduling", StringComparison.Ordinal),
+                $"{LoadedAssemblies[i].GetName().Name} must not reference ZeroAlloc.Saga or ZeroAlloc.Scheduling");
+        }
+    }
 
     [Fact]
     public void Skills_do_not_reference_a_yaml_engine_or_any_third_party_parser()
