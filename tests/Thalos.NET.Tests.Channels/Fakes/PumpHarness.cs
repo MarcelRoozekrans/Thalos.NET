@@ -20,6 +20,13 @@ public sealed class PumpHarness : IDisposable
 
     public InMemoryConversationMap Map { get; } = new();
 
+    /// <summary>
+    /// What the pump actually talks to. Wraps <see cref="Map"/> so a test can make the next <c>BindAsync</c> call
+    /// fail via <see cref="FailNextBind"/> without a full <c>IConversationMap</c> substitute — every other test's
+    /// direct reads through <see cref="Map"/> keep working unchanged.
+    /// </summary>
+    private readonly ConversationMapProxy _conversationMap;
+
     public FakeTimeProvider Clock { get; } = new();
 
     public IAgentRuntime Runtime { get; } = Substitute.For<IAgentRuntime>();
@@ -60,10 +67,15 @@ public sealed class PumpHarness : IDisposable
         Runtime.RunTurnStreamingAsync(Arg.Any<AgentTurnRequest>(), Arg.Any<CancellationToken>())
             .Returns(call => Emit(call.Arg<AgentTurnRequest>(), call.Arg<CancellationToken>()));
 
-        Pump = new ChannelPump([Channel], [Channel], Runtime, Catalog, Map,
+        _conversationMap = new ConversationMapProxy(Map);
+
+        Pump = new ChannelPump([Channel], [Channel], Runtime, Catalog, _conversationMap,
             Options.Create(new ChannelOptions { DefaultAgent = "daedalus", FlushInterval = TimeSpan.Zero }),
             Clock, Logger);
     }
+
+    /// <summary>Makes the NEXT <c>BindAsync</c> call against the conversation map fail with <paramref name="error"/>.</summary>
+    public void FailNextBind(AgentError error) => _conversationMap.FailNextBind(error);
 
     /// <summary>Makes the next turn fail with <paramref name="code"/> instead of completing.</summary>
     public void NextTurnFails(AgentErrorCode code) => _nextFailure = code;
