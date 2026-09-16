@@ -16,7 +16,9 @@ namespace Thalos.Memory.RagNet;
 /// owner-wide), kind</c>. Rag.NET's metadata filter is AND-only containment, so a search runs one query per
 /// <see cref="MemoryScope.Partitions"/> entry — every filter carries <c>owner_id</c>, so a shared <c>rag_chunks</c> table can never
 /// leak across owners — and merges by best score. Errors: <see cref="PostgresException"/> → <see cref="AgentErrorCode.MemoryIndexFailed"/>
-/// (detail = SQL state), anything else → <see cref="AgentErrorCode.MemoryIndexUnavailable"/> (detail = exception type name).
+/// (detail = SQL state), anything else → <see cref="AgentErrorCode.MemoryIndexUnavailable"/> (detail = exception type name). Since Rag.NET 1.0.0
+/// this includes a store-dimension mismatch: <c>PgVectorStore</c> now throws <see cref="InvalidOperationException"/> for that case before
+/// Postgres is ever asked, so it never surfaces as a <see cref="PostgresException"/>/SQL state, only as MemoryIndexUnavailable.
 /// </summary>
 /// <remarks>
 /// <c>PgVectorStore.StoreAsync</c> upserts row by row without a transaction, so a failed batch may have been partially written; that is
@@ -135,8 +137,11 @@ public sealed partial class RagNetMemoryIndex(
     /// <inheritdoc />
     /// <remarks>
     /// Embeds a probe text (checks the generator, learns the dimensions), compares with <see cref="RagNetMemoryOptions.VectorDimensions"/>, then runs a
-    /// filtered search (checks the table). Never throws. A table whose <c>vector(N)</c> differs from the generator is only detected once it holds a row
-    /// (Postgres evaluates the distance operator per row) — the schema initializer's <c>InitializeAsync()</c> catches that case at startup.
+    /// filtered search (checks the table). Never throws. Since Rag.NET 1.0.0, <c>PgVectorStore</c> itself proactively detects a table whose
+    /// <c>vector(N)</c> differs from the store's configured dimensions and throws <see cref="InvalidOperationException"/> before Postgres is asked —
+    /// no row needs to exist and no <see cref="PostgresException"/>/SQL state is produced on that path, so <see cref="Map"/> reports it as
+    /// <see cref="AgentErrorCode.MemoryIndexUnavailable"/> (detail = <c>nameof(InvalidOperationException)</c>). The schema initializer's
+    /// <c>InitializeAsync()</c> still guards the same mismatch at startup.
     /// </remarks>
     public async ValueTask<Result<MemoryIndexHealth, AgentError>> ProbeAsync(CancellationToken ct)
     {

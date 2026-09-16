@@ -82,11 +82,14 @@ public sealed class RagNetPartitionTests(PgVectorFixture pg) : IAsyncLifetime
     }
 
     [Fact]
-    public async Task Probe_against_a_live_table_of_another_dimension_reports_unavailable_with_a_sql_state()
+    public async Task Probe_against_a_live_table_of_another_dimension_reports_unavailable_with_the_exception_type()
     {
         // the fixture table is vector(64) here; a 128-dim store + generator over it must not throw, just report.
-        // Postgres only evaluates <=> on existing rows, so an *empty* mismatched table probes as available — the schema
-        // initializer's InitializeAsync is the guard for that case; here one 64-dim row makes the mismatch observable.
+        // Since Rag.NET 1.0.0, PgVectorStore proactively detects that the table's vector(N) differs from the store's
+        // configured dimensions and throws InvalidOperationException before Postgres is ever asked — no row needs to
+        // exist for the mismatch to be observed, and no PostgresException/SQL state is produced on this path. Map()
+        // therefore reports it as MemoryIndexUnavailable with the exception type name as detail. One row is still
+        // upserted first because it is otherwise irrelevant to this scenario, not because it is required to trigger it.
         (await _index.UpsertAsync([Rec("alice", null, "tango uniform victor")], default)).IsSuccess.Should().BeTrue();
         using var store128 = new PgVectorStore(pg.ConnectionString, 128);
         using var bow128 = new HashedBagOfWordsEmbeddingGenerator(128);
@@ -95,12 +98,14 @@ public sealed class RagNetPartitionTests(PgVectorFixture pg) : IAsyncLifetime
         var health = await index.ProbeAsync(default);
         health.IsSuccess.Should().BeTrue();
         health.Value.Available.Should().BeFalse();
-        health.Value.Detail.Should().HaveLength(5, "the detail is the SQL state, not the message").And.NotContain("vector");
+        health.Value.Detail.Should().Be(nameof(InvalidOperationException), "Rag.NET's own dimension guard throws before Postgres is ever asked, so there is no SQL state on this path");
         health.Value.Dimensions.Should().BeNull();
 
+        // The same guard fires on write: StoreAsync hits the identical proactive InvalidOperationException, not a
+        // PostgresException, so the upsert is reported as MemoryIndexUnavailable too, not MemoryIndexFailed.
         var upsert = await index.UpsertAsync([Rec("alice", null, "quebec romeo sierra")], default);
         upsert.IsFailure.Should().BeTrue();
-        upsert.Error.Code.Should().Be(AgentErrorCode.MemoryIndexFailed);
-        upsert.Error.Detail.Should().HaveLength(5);
+        upsert.Error.Code.Should().Be(AgentErrorCode.MemoryIndexUnavailable);
+        upsert.Error.Detail.Should().Be(nameof(InvalidOperationException));
     }
 }
