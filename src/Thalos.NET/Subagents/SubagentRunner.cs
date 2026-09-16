@@ -52,7 +52,27 @@ public sealed partial class SubagentRunner : ISubagentRunner
         var sessionId = created.Value;
         try
         {
-            return await RunTurnAsync(request, sessionId, ct).ConfigureAwait(false);
+            // Two independent sources can end the turn: the caller's own token, and a deadline measured over the
+            // injected clock so tests can drive it without a real wall-clock wait. Linking them means either one
+            // stops RunTurnAsync; which one fired is recovered afterwards from deadlineSource/ct, since a cancelled
+            // linked token alone can't say which side tripped it.
+            using var deadlineSource = new CancellationTokenSource(request.Budget.Deadline, _time);
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, deadlineSource.Token);
+
+            var turn = await RunTurnAsync(request, sessionId, linked.Token).ConfigureAwait(false);
+
+            // deadlineSource.IsCancellationRequested is true only once the budget's wall-clock ceiling has actually
+            // elapsed; !ct.IsCancellationRequested rules out the case where the caller cancelled at (or after) the
+            // same moment the deadline would have fired anyway. Without that guard, a caller cancelling right at the
+            // deadline — the ordinary shape of a host shutdown — would be misreported as a runaway agent instead of
+            // a routine cancellation.
+            if (turn.IsFailure && deadlineSource.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                return Result<AgentTurnResult, AgentError>.Failure(
+                    AgentError.SubagentDeadlineExceeded(request.Budget.Deadline));
+            }
+
+            return turn;
         }
         finally
         {
@@ -91,7 +111,10 @@ public sealed partial class SubagentRunner : ISubagentRunner
         return turn;
     }
 
-    private static long TotalTokens(TurnUsage usage) => usage.InputTokens + usage.OutputTokens;
+    // Cast the first operand so the addition itself happens in long, not int-then-widen: the long return type alone
+    // does not stop the operands from overflowing as int before the result is ever assigned. Not reachable with real
+    // token counts, but the previous form was misleading about where the widening actually occurred.
+    private static long TotalTokens(TurnUsage usage) => (long)usage.InputTokens + usage.OutputTokens;
 
     [LoggerMessage(EventId = 800, Level = LogLevel.Warning,
         Message = "Closing detached session {SessionId} failed with {ErrorCode}; the run's own result is unaffected")]
