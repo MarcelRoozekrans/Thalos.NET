@@ -51,6 +51,29 @@ public class SubagentBudgetTests
         result.IsSuccess.Should().BeTrue();
     }
 
+    [Fact]
+    public async Task A_turn_landing_exactly_on_the_token_budget_succeeds()
+    {
+        // SubagentRunner compares with strict ">", so a run whose usage equals MaxTotalTokens exactly must be
+        // allowed. This pins that boundary against a future refactor flipping it to ">=".
+        var harness = SubagentRunnerHarness.Create();
+        var sessionId = SessionId.New();
+        var exactlyAtBudget = new AgentTurnResult(
+            TurnId.New(), sessionId, "answer", UsageOf(5_000), [], TimeSpan.FromSeconds(1));
+
+        harness.Runtime.CreateSessionAsync(Arg.Any<AgentId>(), Arg.Any<ISecurityContext>(), Arg.Any<CancellationToken>())
+               .Returns(Result<SessionId, AgentError>.Success(sessionId));
+        harness.Runtime.RunTurnAsync(Arg.Any<AgentTurnRequest>(), Arg.Any<CancellationToken>())
+               .Returns(Result<AgentTurnResult, AgentError>.Success(exactlyAtBudget));
+        harness.Runtime.CloseSessionAsync(sessionId, Arg.Any<ISecurityContext>(), Arg.Any<CancellationToken>())
+               .Returns(UnitResult<AgentError>.Success());
+
+        var request = SubagentRunnerHarness.Request(budget: new SubagentBudget(5_000, TimeSpan.FromMinutes(10)));
+        var result = await harness.Build().RunAsync(request);
+
+        result.IsSuccess.Should().BeTrue();
+    }
+
     // TurnUsage is (int InputTokens, int OutputTokens, string ModelId) — verified against
     // src/Thalos.NET.Abstractions/Turns/TurnUsage.cs. The third parameter is required.
     private static TurnUsage UsageOf(int totalTokens) => new(totalTokens, 0, "test-model");

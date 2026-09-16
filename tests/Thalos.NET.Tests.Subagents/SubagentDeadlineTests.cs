@@ -126,8 +126,14 @@ public class SubagentDeadlineTests
 
         var result = await harness.Build().RunAsync(request);
 
+        // IsFailure and Code == Validation are not load-bearing on their own: AgentErrorCode.Validation is enum
+        // member 0, so default(AgentError).Code is already Validation. With the guard reverted, the unconfigured
+        // NSubstitute mock returns default(Result<AgentTurnResult, AgentError>), and both assertions above would
+        // pass against a value the guard never produced. A default(AgentError) has a null Message, so asserting on
+        // the guard's actual message text cannot pass by struct luck the way the code/IsFailure checks can.
         result.IsFailure.Should().BeTrue();
         result.Error.Code.Should().Be(AgentErrorCode.Validation);
+        result.Error.Message.Should().Contain("Subagent deadline must be positive");
         await harness.Runtime.DidNotReceive().CreateSessionAsync(
             Arg.Any<AgentId>(), Arg.Any<ISecurityContext>(), Arg.Any<CancellationToken>());
     }
