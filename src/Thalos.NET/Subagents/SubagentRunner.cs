@@ -77,8 +77,21 @@ public sealed partial class SubagentRunner : ISubagentRunner
             .RunTurnAsync(new AgentTurnRequest(sessionId, request.Task, request.Caller), ct)
             .ConfigureAwait(false);
 
+        // Post-hoc only: RunTurnAsync is buffered and returns after the whole turn has already run, so there is no
+        // seam here to stop a turn mid-flight. This cannot halt a runaway turn already in progress — it converts an
+        // overspend into a reported failure and bounds what a subsequent step is told it may spend. A cap that stops
+        // a turn mid-flight would need to be pushed into the runtime's own round-trip loop; that is a larger change
+        // and out of scope here.
+        if (turn.IsSuccess && TotalTokens(turn.Value.Usage) > request.Budget.MaxTotalTokens)
+        {
+            return Result<AgentTurnResult, AgentError>.Failure(
+                AgentError.SubagentBudgetExceeded(request.Budget.MaxTotalTokens));
+        }
+
         return turn;
     }
+
+    private static long TotalTokens(TurnUsage usage) => usage.InputTokens + usage.OutputTokens;
 
     [LoggerMessage(EventId = 800, Level = LogLevel.Warning,
         Message = "Closing detached session {SessionId} failed with {ErrorCode}; the run's own result is unaffected")]
