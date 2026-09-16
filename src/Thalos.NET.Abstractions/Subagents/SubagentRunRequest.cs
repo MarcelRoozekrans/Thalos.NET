@@ -2,7 +2,7 @@ using ZeroAlloc.Authorization;
 
 namespace Thalos;
 
-/// <summary>One detached run: an agent, a task, and the identity it runs as. See <c>ISubagentRunner</c>.</summary>
+/// <summary>One detached run: an agent, a task, and the identity it runs as. See <see cref="ISubagentRunner"/>.</summary>
 public sealed record SubagentRunRequest
 {
     /// <summary>The agent to run. Resolved through <c>IAgentCatalog</c>; a subagent is an ordinary agent definition.</summary>
