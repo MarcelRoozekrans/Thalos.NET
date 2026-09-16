@@ -57,8 +57,12 @@ public sealed partial class SubagentRunner : ISubagentRunner
         finally
         {
             // Every path through the try, success or failure, ends here: a detached run has no live caller to notice
-            // and retry a stuck session, so this is the only place its slot gets freed.
-            var closed = await _runtime.CloseSessionAsync(sessionId, request.Caller, ct).ConfigureAwait(false);
+            // and retry a stuck session, so this is the only place its slot gets freed. CancellationToken.None is
+            // deliberate, not ct: a caller cancelling mid-turn is the normal reason a detached run fails, and
+            // ThalosAgentRuntime.CloseSessionAsync short-circuits on an already-cancelled token before it closes
+            // anything, which would leave the session Idle and indistinguishable from a live one until the idle
+            // timeout. Cleanup has to outlive cancellation of the operation it is cleaning up after.
+            var closed = await _runtime.CloseSessionAsync(sessionId, request.Caller, CancellationToken.None).ConfigureAwait(false);
             if (closed.IsFailure && _logger is not null)
             {
                 LogCloseFailed(_logger, sessionId.ToString(), closed.Error.Code);
