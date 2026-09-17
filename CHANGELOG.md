@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.5.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.4.0...v0.5.0) (2026-09-17)
+
+
+### Features
+
+* **subagents:** detached agent runs with depth, budget and deadline guards ([#99](https://github.com/MarcelRoozekrans/Thalos.NET/issues/99)) ([be07faf](https://github.com/MarcelRoozekrans/Thalos.NET/commit/be07faff2cb177f09e8e0d7c3262ef774427f411))
+
+
+### Bug Fixes
+
+* **tests:** unbreak main after the AI.Sentinel 2.3.0 and Rag.NET 1.0.0 bumps ([#100](https://github.com/MarcelRoozekrans/Thalos.NET/issues/100)) ([1147333](https://github.com/MarcelRoozekrans/Thalos.NET/commit/1147333da714509886fbf12f7aa5d5fa59b8bfde))
+
+
+### Miscellaneous Chores
+
+* set the release version ([edadac9](https://github.com/MarcelRoozekrans/Thalos.NET/commit/edadac9030d265f00c380ebe31c9cf77b5488732))
+
 ## [0.4.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.3.0...v0.4.0) (2026-08-21)
 
 
