@@ -9,9 +9,15 @@ name: Release Please
 # marks a commit as released. The maintainer merges the release PR, like every PR here — this
 # workflow only proposes.
 #
-# Manual dispatch only, deliberately: a workflow that opened a release PR on every push to main
-# would be proposing a release nobody asked for. Procedure: docs/release.md.
+# Runs on every push to main. An open release PR is a *proposal*, not a release: it accumulates the
+# changelog for the commits since the last tag and releases nothing until a maintainer merges it.
+# This was dispatch-only until 2026-09-17, on the reasoning that a push trigger would propose a
+# release nobody asked for — but the cost was that cutting a release took three dispatches, and
+# forgetting the first one left work sitting unreleased with nothing to show it. Dispatch is kept
+# alongside so the manual procedure still works unchanged. Procedure: docs/release.md.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 # release-please writes: the release PR (contents for the branch, pull-requests for the PR) and, on
@@ -25,24 +31,54 @@ jobs:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # release_created is true only on the run that follows a merged release PR — the run that
+    # creates the tag. The publish job below keys on it, so an ordinary push to main updates the
+    # release PR and stops there.
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       # release-type simple: the release PR maintains CHANGELOG.md and a version.txt; nothing in the
       # build consumes either — GitVersion derives the build's version from the tag this creates.
       # The version rules live in release-please-config.json: bump-minor-pre-major keeps a breaking
-      # change on 0.x at a minor bump instead of jumping to 1.0.0, and bump-patch-for-minor-pre-major
-      # keeps a feature at a patch. .release-please-manifest.json records the last released version.
-      # The first release's version is chosen, not derived: a `Release-As: x.y.z` footer on an empty
-      # commit overrides whatever the commits imply (docs/release.md).
+      # change on 0.x at a minor bump instead of jumping to 1.0.0, so pre-1.0 a feat: takes the minor
+      # and a fix: the patch. .release-please-manifest.json records the last released version.
+      # A `Release-As: x.y.z` footer on an empty commit still overrides whatever the commits imply,
+      # but it is now the exception rather than the rule — see docs/release.md.
       - name: Create or update the release pull request
+        id: release
         uses: googleapis/release-please-action@v5
         with:
           # Manifest mode. Passing `release-type` here instead would run the action in its legacy
           # single-package mode, which ignores release-please-config.json entirely — and with it
           # bump-minor-pre-major, the setting whose whole job is to keep a breaking change on 0.x at
           # a minor bump. That was the configuration until 2026-08-21, so the config file had never
-          # taken effect: the first release carrying a breaking change proposed 1.0.0 rather than
-          # 0.4.0, and every earlier feature had silently taken a minor bump instead of the patch
-          # bump-patch-for-minor-pre-major asks for. Name the files explicitly rather than relying on
-          # the defaults, so the link between workflow and config is visible here.
+          # taken effect and the first release carrying a breaking change proposed 1.0.0 rather than
+          # 0.4.0. Name the files explicitly rather than relying on the defaults, so the link
+          # between workflow and config is visible here.
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  # The last link: merging the release PR now publishes, with no dispatch.
+  #
+  # This calls ci.yml directly rather than letting the tag push trigger it. release-please pushes
+  # that tag with the default GITHUB_TOKEN, and GitHub will not start a workflow from an event that
+  # token created — a `push: tags` trigger on ci.yml would never fire, and would fail by doing
+  # nothing at all rather than by going red. A PAT would also work and was rejected: it means a
+  # long-lived stored credential with write access in a repository whose release design is
+  # deliberately Trusted Publishing with no stored key.
+  #
+  # ci.yml re-runs build-test on both operating systems and pack-validate before publish-nuget is
+  # allowed to start, and publish-nuget still refuses any commit that is not tagged v<version> and
+  # any prerelease. Those gates are unchanged; this only removes the human keystroke in front of
+  # them.
+  publish:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    uses: ./.github/workflows/ci.yml
+    with:
+      publish_to_nuget: true
+    permissions:
+      contents: read
+      id-token: write
+    secrets: inherit

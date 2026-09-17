@@ -12,10 +12,12 @@ Same design as [Rag.NET](https://github.com/MarcelRoozekrans/Rag.NET) and AdoNet
   those packages never leave the runner.
 - **release-please** (`.github/workflows/release-please.yml`, manifest mode:
   `release-please-config.json` + `.release-please-manifest.json`) proposes releases from conventional
-  commits and cuts the tag. Manual dispatch only.
+  commits and cuts the tag. Runs on every push to `main`, keeping a release pull request open and
+  current; manual dispatch is still accepted.
 - **Conventional commits** are enforced on pull requests by the `commitlint` job (`.commitlintrc.yml`).
-- **Publishing** is the `publish-nuget` job in `ci.yml`: manual dispatch with `publish_to_nuget=true`,
-  Trusted Publishing (no stored API key), gated on the full matrix and `pack-validate`.
+- **Publishing** is the `publish-nuget` job in `ci.yml`: Trusted Publishing (no stored API key), gated
+  on the full matrix and `pack-validate`. release-please calls it once it has cut the tag, so merging
+  the release PR publishes; a manual dispatch with `publish_to_nuget=true` does the same by hand.
 
 ## One-time setup
 
@@ -29,33 +31,53 @@ gh variable set NUGET_USER --repo MarcelRoozekrans/Thalos.NET --body "<nuget.org
 
 ## Cutting a release
 
+**Merge the release PR. That is the whole procedure.**
+
+Every push to `main` runs release-please, which keeps a pull request titled `chore(main): release
+X.Y.Z` open and up to date with the commits since the last tag. It proposes; it releases nothing.
+Merging it is the single deliberate act that cuts a release:
+
+1. Review the release PR — the changelog and the proposed version are its diff.
+2. Merge it, like every PR here.
+3. release-please creates the GitHub release and the `vX.Y.Z` tag, then calls `ci.yml` with
+   `publish_to_nuget=true`. `build-test` on both operating systems and `pack-validate` run first;
+   `publish-nuget` refuses to start until they are green, and refuses to push unless the commit is
+   tagged `vX.Y.Z` and the version is not a prerelease.
+4. Confirm the version is listed on nuget.org.
+
+Nothing to dispatch. If you need to drive it by hand anyway — re-running after an infrastructure
+flake, or publishing a tag whose automatic run failed — both workflows still accept a manual
+dispatch and behave exactly as they did before:
+
 ```bash
-# 1. First release only: release-please proposes 1.0.0 by default. Override with an empty commit
-#    carrying a Release-As footer before the first dispatch (already done for 0.1.0).
-git commit --allow-empty -m "chore: set the release version" -m "Release-As: 0.1.0"
-git push origin main
-
-# 2. Open the release PR — release-please reads the conventional commits since the last release
-#    and proposes the version they imply (CHANGELOG.md + version.txt on the PR branch).
-gh workflow run release-please.yml --ref main
-
-# 3. Review and merge the release PR ("chore(main): release X.Y.Z"), like every PR.
-
-# 4. Dispatch again: release-please sees the merged release PR and creates the GitHub release and
-#    the vX.Y.Z tag — the tag GitVersion derives the stable version from.
-gh workflow run release-please.yml --ref main
-
-# 5. Publish that exact commit: dispatch CI on the release tag with the publish input. build-test
-#    (both OS) and pack-validate run first; publish-nuget refuses to start until both are green, and
-#    refuses to push unless the checked-out commit is tagged vX.Y.Z (a prerelease or an untagged
-#    commit fails the gate). `--ref main` also works as long as main still points at the release commit.
-gh workflow run ci.yml --ref vX.Y.Z -f publish_to_nuget=true
+gh workflow run release-please.yml --ref main                  # propose, or cut the tag
+gh workflow run ci.yml --ref vX.Y.Z -f publish_to_nuget=true   # publish a tagged commit
 ```
 
-Pre-1.0 bump rules (`release-please-config.json`): a `feat!:`/`BREAKING CHANGE` bumps the minor
-(0.1.0 → 0.2.0), a `feat:` bumps the patch (0.1.0 → 0.1.1). Once 1.0.0 is cut those become
-major/minor as usual. Because `feat:` only bumps the patch, a deliberate minor (0.2.0 for the memory
-packages) needs the same empty commit as step 1 with `Release-As: 0.2.0` before the first dispatch.
+> **Why the publish is a `workflow_call` and not a `push: tags` trigger on `ci.yml`.**
+> release-please pushes the tag using the default `GITHUB_TOKEN`, and GitHub will not start a
+> workflow from an event that token created — its guard against workflows triggering themselves
+> forever. A tag trigger on `ci.yml` would never fire, and it would fail *silently*: no run, no
+> error, a release that quietly never reaches nuget.org. A PAT would lift the restriction and was
+> rejected, because it means a long-lived stored credential with write access in a repository whose
+> release design is deliberately Trusted Publishing with no stored key. Do not "simplify" the call
+> into a tag trigger.
+
+Pre-1.0 bump rules (`release-please-config.json`): `bump-minor-pre-major` keeps a `feat!:` /
+`BREAKING CHANGE` at a minor bump (0.4.0 → 0.5.0) instead of jumping to 1.0.0, a `feat:` takes the
+minor, and a `fix:` takes the patch. Once 1.0.0 is cut those become major/minor as usual.
+
+`bump-patch-for-minor-pre-major` was removed on 2026-09-17. It had held a `feat:` to a patch bump,
+which meant every deliberate minor — 0.1.0, 0.2.0, 0.3.0 and 0.5.0, in practice nearly every release
+this project has cut — needed a hand-written empty `Release-As:` commit to override it. Forgetting
+that commit did not fail; it proposed the wrong version. 0.5.0 would have shipped as 0.4.1.
+
+A `Release-As: x.y.z` footer on an empty commit still overrides the derived version, and is still
+the right tool for a genuinely chosen number — the first release, or an intentional jump:
+
+```bash
+git commit --allow-empty -m "chore: set the release version" -m "Release-As: 1.0.0"
+```
 
 0.2.0 ships eight packages (`Thalos.NET.Memory` and `Thalos.NET.Memory.RagNet` joined the six of 0.1.x);
 `pack-validate` checks the package list and each package's TFMs (`Thalos.NET.Memory.RagNet` is
