@@ -78,6 +78,12 @@ jobs:
     uses: ./.github/workflows/ci.yml
     with:
       publish_to_nuget: true
+      # The tag just created, not the caller's refs/heads/main. Without this the called run checks
+      # out whatever main points at now, which is a different commit the moment anything lands
+      # between the release commit and this run — and publish-nuget's tagged-commit gate then
+      # refuses. Observed on the very first release through this path: the pull request that added
+      # the path was itself the commit that raced ahead of the tag.
+      ref: ${{ needs.release-please.outputs.tag_name }}
     permissions:
       contents: read
       id-token: write

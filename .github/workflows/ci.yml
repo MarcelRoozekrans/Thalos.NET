@@ -26,6 +26,17 @@ on:
         description: "Push the packed packages to nuget.org (the release procedure; see docs/release.md)"
         type: boolean
         default: false
+      # A called workflow inherits the *caller's* ref, which on the release path is refs/heads/main —
+      # not the tag. Anything that lands on main between the release commit and this run then makes
+      # HEAD a different commit from the one release-please tagged, and publish-nuget's tagged-commit
+      # gate correctly refuses. It fails safe, but it fails: releasing would depend on main staying
+      # still. release-please passes its own tag_name here so every gate, the version derivation and
+      # the pack all run on the tagged commit itself. Empty on push and pull_request, where
+      # actions/checkout's own default is already right.
+      ref:
+        description: "Commit-ish to check out. Defaults to the event's own ref."
+        type: string
+        default: ""
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -48,6 +59,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v6
@@ -91,6 +104,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
 
       - name: Setup Node
@@ -113,6 +127,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.ref }}
           # GitVersion derives the version from history and refuses a shallow clone.
           fetch-depth: 0
 
@@ -223,6 +238,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
         with:
+          ref: ${{ inputs.ref }}
           fetch-depth: 0
 
       - name: Setup .NET
