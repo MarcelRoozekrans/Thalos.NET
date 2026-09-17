@@ -14,9 +14,12 @@ public static class SentinelThalosBuilderExtensions
     /// recalled memories before injecting them. Calling this twice is a no-op (the first configuration wins).
     /// </summary>
     /// <remarks>
-    /// AI.Sentinel 2.0.1's security detectors (prompt injection, jailbreak, exfiltration, …) are embedding-based: set
-    /// <see cref="SentinelOptions.EmbeddingGenerator"/> in <paramref name="configure"/>, otherwise they return Clean and only
-    /// the lexical/operational detectors are active (Sentinel warns per agent pipeline when it is first built).
+    /// AI.Sentinel 2.3.0's security detectors are mostly semantic: without <see cref="SentinelOptions.EmbeddingGenerator"/>
+    /// set in <paramref name="configure"/> they return Clean and only the lexical/operational detectors are active
+    /// (Sentinel warns per agent pipeline when it is first built). SEC-01 PromptInjection and SEC-05 Jailbreak are the
+    /// exception — both carry a rule layer that catches unambiguous phrasings with no generator configured; only
+    /// paraphrases need one. Set <see cref="SentinelOptions.EmbeddingGenerator"/> for full semantic coverage across
+    /// every detector, including paraphrased SEC-01/SEC-05 attempts.
     /// </remarks>
     public static ThalosBuilder UseAISentinel(this ThalosBuilder builder, Action<SentinelOptions>? configure = null)
     {

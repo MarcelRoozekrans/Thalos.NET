@@ -64,11 +64,15 @@ before the tool runs — not by inspecting the chat stream afterwards.
 
 A runnable REPL lives in [`samples/Thalos.Sample.Console`](samples/Thalos.Sample.Console/README.md).
 
-## Security: AI.Sentinel needs an embedding generator
+## Security: AI.Sentinel needs an embedding generator for full coverage
 
-AI.Sentinel 2.0.1's *security* detectors (prompt injection, jailbreak, exfiltration, …) are semantic. Without
-`SentinelOptions.EmbeddingGenerator` they return *Clean* and only the lexical/operational detectors run — `UseAISentinel()`
-with no embedding generator is **not** prompt-injection protection. Wire a real `IEmbeddingGenerator` (Ollama, OpenAI, …):
+Most of AI.Sentinel 2.3.0's *security* detectors (jailbreak roleplay, exfiltration, tool poisoning, …) are semantic.
+Without `SentinelOptions.EmbeddingGenerator` they return *Clean* and only the lexical/operational detectors run.
+`SEC-01 PromptInjection` and `SEC-05 Jailbreak` are the exception: both carry a rule layer that catches the unambiguous
+phrasings (`ignore all previous instructions`, `DAN mode`, …) with no embedding generator configured, so
+`UseAISentinel()` with no embedding generator is **not** protection-free — but it is also not full coverage, since only
+embeddings catch paraphrased attempts and the other semantic detectors. Wire a real `IEmbeddingGenerator` (Ollama,
+OpenAI, …) for complete protection:
 
 ```csharp
 .UseAISentinel(o =>

@@ -84,12 +84,18 @@ Try:
   the memory events (`MemoryRecalledEvent`, `MemoryStoredEvent`, `MemoryIndexPendingEvent`, `MemoryRecallFailedEvent`) and
   `SkillCatalogueFailedEvent` are the same events a web channel would forward as SSE.
 
-## Security note: AI.Sentinel needs an embedding generator
+## Security note: AI.Sentinel is stronger with an embedding generator
 
-AI.Sentinel 2.0.1's *security* detectors (prompt injection, jailbreak, data exfiltration, …) are semantic: they need
-`SentinelOptions.EmbeddingGenerator`. This sample does **not** wire one, so only the lexical/operational detectors run
-(Sentinel logs a warning when the pipeline is first built). A real host should supply an `IEmbeddingGenerator` (Ollama,
-OpenAI, …) in the `UseAISentinel(o => o.EmbeddingGenerator = …)` callback.
+Most of AI.Sentinel 2.3.0's *security* detectors are semantic: they need `SentinelOptions.EmbeddingGenerator` and return
+Clean without one, leaving the lexical/operational detectors active (Sentinel logs a warning when the pipeline is first
+built).
+
+Two are not. Since AI.Sentinel 2.2.0, **SEC-01 PromptInjection** and **SEC-05 Jailbreak** carry a rule layer that fires
+with no generator configured, so an unambiguous "ignore all previous instructions" style attempt is caught even in this
+sample. Paraphrased attempts, and every other security detector, still need embeddings.
+
+This sample does **not** wire a generator. A real host should supply an `IEmbeddingGenerator` (Ollama, OpenAI, …) in the
+`UseAISentinel(o => o.EmbeddingGenerator = …)` callback for full coverage.
 
 ## Manual smoke test
 
