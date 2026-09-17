@@ -16,6 +16,7 @@ public static class ThalosServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(services);
         services.AddOptions<ThalosOptions>();
+        services.TryAddSingleton(sp => sp.GetRequiredService<IOptions<ThalosOptions>>().Value.Subagents);
         services.TryAddSingleton(TimeProvider.System);
 
         var builder = new ThalosBuilder(services);

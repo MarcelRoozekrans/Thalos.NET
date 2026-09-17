@@ -15,10 +15,18 @@ public sealed class PumpHarness : IDisposable
     private bool _started;
     private TaskCompletionSource? _blockingGate;
     private TaskCompletionSource? _blockingSessionGate;
+    private AgentError? _nextSessionCreateFailure;
 
     public FakeChannel Channel { get; } = new();
 
     public InMemoryConversationMap Map { get; } = new();
+
+    /// <summary>
+    /// What the pump actually talks to. Wraps <see cref="Map"/> so a test can make the next <c>BindAsync</c> call
+    /// fail via <see cref="FailNextBind"/> without a full <c>IConversationMap</c> substitute — every other test's
+    /// direct reads through <see cref="Map"/> keep working unchanged.
+    /// </summary>
+    private readonly ConversationMapProxy _conversationMap;
 
     public FakeTimeProvider Clock { get; } = new();
 
@@ -60,10 +68,18 @@ public sealed class PumpHarness : IDisposable
         Runtime.RunTurnStreamingAsync(Arg.Any<AgentTurnRequest>(), Arg.Any<CancellationToken>())
             .Returns(call => Emit(call.Arg<AgentTurnRequest>(), call.Arg<CancellationToken>()));
 
-        Pump = new ChannelPump([Channel], [Channel], Runtime, Catalog, Map,
+        _conversationMap = new ConversationMapProxy(Map);
+
+        Pump = new ChannelPump([Channel], [Channel], Runtime, Catalog, _conversationMap,
             Options.Create(new ChannelOptions { DefaultAgent = "daedalus", FlushInterval = TimeSpan.Zero }),
             Clock, Logger);
     }
+
+    /// <summary>Makes the NEXT <c>BindAsync</c> call against the conversation map fail with <paramref name="error"/>.</summary>
+    public void FailNextBind(AgentError error) => _conversationMap.FailNextBind(error);
+
+    /// <summary>Makes the NEXT <c>CreateSessionAsync</c> call against the runtime fail with <paramref name="error"/> instead of creating a session.</summary>
+    public void FailNextSessionCreate(AgentError error) => _nextSessionCreateFailure = error;
 
     /// <summary>Makes the next turn fail with <paramref name="code"/> instead of completing.</summary>
     public void NextTurnFails(AgentErrorCode code) => _nextFailure = code;
@@ -220,6 +236,12 @@ public sealed class PumpHarness : IDisposable
         {
             _blockingSessionGate = null;
             gate.Task.WaitAsync(ct).GetAwaiter().GetResult();
+        }
+
+        if (_nextSessionCreateFailure is { } error)
+        {
+            _nextSessionCreateFailure = null;
+            return Result<SessionId, AgentError>.Failure(error);
         }
 
         return Result<SessionId, AgentError>.Success(SessionId.New());

@@ -505,14 +505,25 @@ public sealed partial class ChannelPump(
         var created = await _runtime.CreateSessionAsync(agentId, message.Caller, ct).ConfigureAwait(false);
         if (created.IsFailure)
         {
+            // Same rule as the BindAsync failure below: the operator is always told something. Both callers of
+            // this method either discard its return value entirely (StartNewAsync, the /new command) or just
+            // return on a null binding without a notice of their own (ResolveAsync's caller) — so the notice has
+            // to be sent from here, exactly once, or it is never sent at all.
             LogSessionFailed(_logger, message.ChannelId, created.Error.Code);
+            await NotifyAsync(adapter, message.ConversationId, default, ChannelNotices.SessionStartFailed, ct).ConfigureAwait(false);
             return null;
         }
 
         var binding = new ConversationBinding(
             message.ChannelId, message.ConversationId, created.Value, agentId, _clock.GetUtcNow());
 
-        await _conversations.BindAsync(binding, ct).ConfigureAwait(false);
+        var bound = await _conversations.BindAsync(binding, ct).ConfigureAwait(false);
+        if (bound.IsFailure)
+        {
+            LogBindFailed(_logger, message.ChannelId, bound.Error.Code);
+            await NotifyAsync(adapter, message.ConversationId, default, ChannelNotices.SessionStartFailed, ct).ConfigureAwait(false);
+            return null;
+        }
 
         if (notice is not null)
         {
@@ -670,4 +681,8 @@ public sealed partial class ChannelPump(
 
     [LoggerMessage(EventId = 609, Level = LogLevel.Error, Message = "Channel {ChannelId} could not deliver an operator notice; the notice is lost and the turn ends as it was going to")]
     private static partial void LogNotifyFailed(ILogger logger, string channelId, Exception ex);
+
+    [LoggerMessage(EventId = 610, Level = LogLevel.Error,
+        Message = "Binding a session on channel {ChannelId} failed with {ErrorCode}; the operator was told and the session was not bound")]
+    private static partial void LogBindFailed(ILogger logger, string channelId, AgentErrorCode errorCode);
 }

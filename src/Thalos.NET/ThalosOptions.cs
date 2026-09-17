@@ -16,4 +16,7 @@ public sealed class ThalosOptions
 
     /// <summary>Tool-pattern → authorization-policy bindings evaluated by <see cref="DefaultToolAuthorizer"/>.</summary>
     public IList<ToolPolicyBinding> ToolPolicies { get; } = [];
+
+    /// <summary>Ceilings applied to detached runs by <see cref="ISubagentRunner"/>.</summary>
+    public SubagentOptions Subagents { get; } = new();
 }

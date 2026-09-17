@@ -1,0 +1,54 @@
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Time.Testing;
+using NSubstitute;
+using ZeroAlloc.Authorization;
+
+namespace Thalos.Tests.Subagents;
+
+/// <summary>Builds a <see cref="SubagentRunner"/> over a substituted <see cref="IAgentRuntime"/> and a controllable clock.</summary>
+internal sealed class SubagentRunnerHarness
+{
+    /// <summary>The substituted runtime the runner under test delegates to; configure its returns per test.</summary>
+    public IAgentRuntime Runtime { get; } = Substitute.For<IAgentRuntime>();
+
+    /// <summary>Controllable clock passed to the runner; not advanced by <see cref="Build"/>, so tests own the timeline.</summary>
+    public FakeTimeProvider Time { get; } = new();
+
+    /// <summary>Ceilings the runner under test is built with; mutate before calling <see cref="Build"/> to test a limit.</summary>
+    public SubagentOptions Options { get; } = new();
+
+    /// <summary>Creates a harness with a fresh mock runtime, clock and default options.</summary>
+    public static SubagentRunnerHarness Create() => new();
+
+    /// <summary>
+    /// Builds the runner under test over this harness's <see cref="Runtime"/>, <see cref="Options"/> and <see cref="Time"/>.
+    /// Pass <paramref name="logger"/> (e.g. a capturing fake) for tests asserting on emitted log calls; otherwise the
+    /// runner is built without one, matching how most tests here don't care about logging.
+    /// </summary>
+    public ISubagentRunner Build(ILogger<SubagentRunner>? logger = null) => new SubagentRunner(Runtime, Options, Time, logger);
+
+    /// <summary>
+    /// A minimal <see cref="SubagentRunRequest"/>; override only the fields a test cares about. <paramref name="budget"/>
+    /// defaults to <see langword="null"/>, not <see cref="SubagentBudget.Default"/>, matching the request's own
+    /// default: a test that wants a specific budget in play passes one explicitly, and a test that wants to prove the
+    /// harness's <see cref="Options"/>.DefaultBudget applies leaves it out.
+    /// </summary>
+    public static SubagentRunRequest Request(
+        AgentId? agentId = null, string task = "do the thing", int depth = 0, SubagentBudget? budget = null) =>
+        new()
+        {
+            AgentId = agentId ?? AgentId.New(),
+            Task = task,
+            Caller = new StubCaller(),
+            Depth = depth,
+            Budget = budget,
+        };
+
+    private sealed class StubCaller : ISecurityContext
+    {
+        public string Id => "schedule:test";
+        public IReadOnlySet<string> Roles { get; } = new HashSet<string>(StringComparer.Ordinal) { "reader" };
+        public IReadOnlyDictionary<string, string> Claims { get; } =
+            new Dictionary<string, string>(StringComparer.Ordinal);
+    }
+}
