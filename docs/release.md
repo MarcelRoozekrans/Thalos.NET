@@ -40,9 +40,11 @@ Merging it is the single deliberate act that cuts a release:
 1. Review the release PR — the changelog and the proposed version are its diff.
 2. Merge it, like every PR here.
 3. release-please creates the GitHub release and the `vX.Y.Z` tag, then calls `ci.yml` with
-   `publish_to_nuget=true`. `build-test` on both operating systems and `pack-validate` run first;
-   `publish-nuget` refuses to start until they are green, and refuses to push unless the commit is
-   tagged `vX.Y.Z` and the version is not a prerelease.
+   `publish_to_nuget=true` **and the tag as the ref to check out** — so the gates, the version
+   derivation and the pack all run on the tagged commit, not on whatever `main` points at by then.
+   `build-test` on both operating systems and `pack-validate` run first; `publish-nuget` refuses to
+   start until they are green, and refuses to push unless the commit is tagged `vX.Y.Z` and the
+   version is not a prerelease.
 4. Confirm the version is listed on nuget.org.
 
 Nothing to dispatch. If you need to drive it by hand anyway — re-running after an infrastructure
