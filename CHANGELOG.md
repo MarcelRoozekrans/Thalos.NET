@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.5.0...v0.5.1) (2026-09-20)
+
+
+### Bug Fixes
+
+* **telegram:** resolve bot requests against the configured base address ([#120](https://github.com/MarcelRoozekrans/Thalos.NET/issues/120)) ([7a43da2](https://github.com/MarcelRoozekrans/Thalos.NET/commit/7a43da288247d12fab65b9c67ee1e54c3bcb549f))
+
 ## [0.5.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.4.0...v0.5.0) (2026-09-17)
 
 
