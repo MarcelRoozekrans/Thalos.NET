@@ -18,6 +18,28 @@ public sealed class TelegramBotClientTests
     }
 
     [Fact]
+    public async Task A_real_shaped_token_still_resolves_against_the_base_address()
+    {
+        // A Telegram token is "<digits>:<secret>". That colon is the whole point of this test: the string
+        // "bot<digits>:<secret>/getUpdates" parses as an ABSOLUTE uri whose scheme is "bot<digits>", because a
+        // scheme may be letters and digits followed by a colon. PostAsync's string overload applies BaseAddress
+        // only to a relative string, so a colon-bearing token silently bypassed api.telegram.org entirely and
+        // every call threw "The 'bot<digits>' scheme is not supported".
+        //
+        // Every other token fixture in this suite is colon-free - "TOKEN", "T", "cfg-token" - so all of them build
+        // a genuinely relative uri and none could ever have caught this. The shape of the fixture was the bug.
+        var handler = new StubHandler(StubHandler.Json("""{"ok":true,"result":[]}"""));
+        var client = new TelegramBotClient(
+            new HttpClient(handler) { BaseAddress = new Uri("https://api.telegram.org/") },
+            "8964793397:AAHrealShapedSecretPart");
+
+        await client.GetUpdatesAsync(0, 50, default);
+
+        handler.Requests[0].Should().StartWith("/bot8964793397:AAHrealShapedSecretPart/getUpdates",
+            "the request must resolve against BaseAddress rather than be treated as an absolute uri");
+    }
+
+    [Fact]
     public async Task GetUpdates_returns_the_parsed_updates()
     {
         var handler = new StubHandler(StubHandler.Json("""

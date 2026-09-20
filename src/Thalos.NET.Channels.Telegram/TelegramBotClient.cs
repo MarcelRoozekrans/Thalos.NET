@@ -162,7 +162,19 @@ public sealed class TelegramBotClient
         // The token belongs in the path, per Telegram's convention. It must never be logged and never appear in an exception
         // message: everything below reads only the parsed response body, never the request URI, when building failures.
         using var content = JsonContent.Create(request, requestTypeInfo);
-        using var httpResponse = await _httpClient.PostAsync($"bot{_token}/{method}", content, ct).ConfigureAwait(false);
+        // The "./" prefix is load-bearing, not tidiness. A Telegram token is "<digits>:<secret>", so the string
+        // "bot{token}/{method}" parses as an ABSOLUTE uri whose scheme is "bot<digits>" - a scheme may be letters
+        // and digits followed by a colon. PostAsync's string overload applies BaseAddress only to a relative
+        // string, so a colon-bearing token silently bypassed api.telegram.org and every call failed with
+        // "The 'bot<digits>' scheme is not supported" - which also put the token's leading digits into an
+        // exception message, contrary to the note above.
+        //
+        // "./" cannot begin a scheme, so the string parses as relative and BaseAddress is applied. Measured, not
+        // assumed: new Uri("bot<digits>:<secret>/m", UriKind.Relative) THROWS, and new Uri(base, "bot<digits>:...")
+        // silently returns the unbased uri - which is the bug itself. Only the "./" form resolves correctly.
+        using var httpResponse = await _httpClient
+            .PostAsync(new Uri($"./bot{_token}/{method}", UriKind.Relative), content, ct)
+            .ConfigureAwait(false);
         var body = await httpResponse.Content.ReadAsStreamAsync(ct).ConfigureAwait(false);
         await using var bodyDisposal = body.ConfigureAwait(false);
         var response = await JsonSerializer.DeserializeAsync(body, responseTypeInfo, ct).ConfigureAwait(false)
