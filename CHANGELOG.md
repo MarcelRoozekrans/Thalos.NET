@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.5.1...v0.6.0) (2026-09-21)
+
+
+### Features
+
+* **git:** add local git write capability for agents ([#142](https://github.com/MarcelRoozekrans/Thalos.NET/issues/142)) ([b944d7a](https://github.com/MarcelRoozekrans/Thalos.NET/commit/b944d7af0d1a57f36b08d63c20144a81f5ea4f68))
+
 ## [0.5.1](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.5.0...v0.5.1) (2026-09-20)
 
 
