@@ -23,6 +23,8 @@ A Hermes-style, ZeroAlloc-native agent framework for .NET, built on
 | `Thalos.NET.Skills` | Agent-scoped procedure documents: `SKILL.md` files synced into an `ISkillStore`, an always-present catalogue, `skills__*` tools, in-process cosine search | Thalos.NET |
 | `Thalos.NET.Channels` | Channel hosting: `ChannelPump` binds inbound `IChannelSource` messages to agent sessions, the six chat commands, delta coalescing, an in-box console channel | Thalos.NET |
 | `Thalos.NET.Channels.Telegram` | Telegram Bot API transport: a source (`getUpdates` long-poll, three admission gates) and an adapter (MarkdownV2, message splitting, edited streaming) for `Thalos.NET.Channels` | Thalos.NET.Channels |
+| `Thalos.NET.Git` | Local git write contract: `IGitWriteService` (create branch, commit, push), `IPullRequestPublisher`, `git__*` tools. No backend dependency, so a consumer who does not want a native libgit2 dependency can supply their own implementation | Thalos.NET |
+| `Thalos.NET.Git.LibGit2Sharp` | `IGitWriteService` implementation over LibGit2Sharp | Thalos.NET.Git, `LibGit2Sharp` |
 
 Targets `net8.0` and `net10.0` (`Thalos.NET.Memory.RagNet`: `net10.0` only, like Rag.NET).
 
