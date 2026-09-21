@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Thalos.Git.LibGit2Sharp</RootNamespace>
+    <PackageId>Thalos.NET.Git.LibGit2Sharp</PackageId>
+    <Description>LibGit2Sharp implementation of Thalos.NET.Git's IGitWriteService: create branch, commit, push over the native libgit2 backend. Isolated in its own package so consumers who do not want a native-binary dependency can implement Thalos.NET.Git's contract another way (git-CLI shell-out, hosted API).</Description>
+    <PackageTags>agents;git;version-control;libgit2sharp;microsoft-agent-framework;zeroalloc</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Thalos.NET.Git\Thalos.NET.Git.csproj" />
+    <PackageReference Include="LibGit2Sharp" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Git.LibGit2Sharp" />
+  </ItemGroup>
+</Project>

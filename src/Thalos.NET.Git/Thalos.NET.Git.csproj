@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Thalos.Git</RootNamespace>
+    <PackageId>Thalos.NET.Git</PackageId>
+    <Description>Local git write contract for Thalos.NET: IGitWriteService (create branch, commit, push) with no backend dependency, so a consumer can supply LibGit2Sharp (Thalos.NET.Git.LibGit2Sharp), a git-CLI shell-out, or a hosted API.</Description>
+    <PackageTags>agents;git;version-control;microsoft-agent-framework;zeroalloc</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />
+  </ItemGroup>
+</Project>

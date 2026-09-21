@@ -28,6 +28,8 @@
     <!-- container tests -->
     <PackageVersion Include="Testcontainers.PostgreSql" Version="4.15.0" />
     <PackageVersion Include="Npgsql" Version="10.0.3" />
+    <!-- native git backend — confined to Thalos.NET.Git.LibGit2Sharp -->
+    <PackageVersion Include="LibGit2Sharp" Version="0.31.0" />
 
     <!-- Microsoft.Extensions -->
     <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.12" />
