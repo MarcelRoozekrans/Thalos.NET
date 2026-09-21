@@ -21,6 +21,7 @@
     <Project Path="tests/Thalos.NET.Tests.Architecture/Thalos.NET.Tests.Architecture.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Channels/Thalos.NET.Tests.Channels.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Channels.Telegram/Thalos.NET.Tests.Channels.Telegram.csproj" />
+    <Project Path="tests/Thalos.NET.Tests.Git/Thalos.NET.Tests.Git.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Git.LibGit2Sharp/Thalos.NET.Tests.Git.LibGit2Sharp.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Mcp/Thalos.NET.Tests.Mcp.csproj" />
     <Project Path="tests/Thalos.NET.Tests.McpServer/Thalos.NET.Tests.McpServer.csproj" />
