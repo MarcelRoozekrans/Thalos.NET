@@ -12,5 +12,6 @@
     <ProjectReference Include="..\..\src\Thalos.NET.Channels\Thalos.NET.Channels.csproj" />
     <ProjectReference Include="..\..\src\Thalos.NET.Channels.Telegram\Thalos.NET.Channels.Telegram.csproj" />
     <PackageReference Include="TngTech.ArchUnitNET.xUnit" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
   </ItemGroup>
 </Project>
