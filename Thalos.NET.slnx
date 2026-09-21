@@ -7,6 +7,8 @@
     <Project Path="src/Thalos.NET.Anthropic/Thalos.NET.Anthropic.csproj" />
     <Project Path="src/Thalos.NET.Channels/Thalos.NET.Channels.csproj" />
     <Project Path="src/Thalos.NET.Channels.Telegram/Thalos.NET.Channels.Telegram.csproj" />
+    <Project Path="src/Thalos.NET.Git/Thalos.NET.Git.csproj" />
+    <Project Path="src/Thalos.NET.Git.LibGit2Sharp/Thalos.NET.Git.LibGit2Sharp.csproj" />
     <Project Path="src/Thalos.NET.Mcp/Thalos.NET.Mcp.csproj" />
     <Project Path="src/Thalos.NET.Memory.RagNet/Thalos.NET.Memory.RagNet.csproj" />
     <Project Path="src/Thalos.NET.Memory/Thalos.NET.Memory.csproj" />
@@ -19,6 +21,8 @@
     <Project Path="tests/Thalos.NET.Tests.Architecture/Thalos.NET.Tests.Architecture.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Channels/Thalos.NET.Tests.Channels.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Channels.Telegram/Thalos.NET.Tests.Channels.Telegram.csproj" />
+    <Project Path="tests/Thalos.NET.Tests.Git/Thalos.NET.Tests.Git.csproj" />
+    <Project Path="tests/Thalos.NET.Tests.Git.LibGit2Sharp/Thalos.NET.Tests.Git.LibGit2Sharp.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Mcp/Thalos.NET.Tests.Mcp.csproj" />
     <Project Path="tests/Thalos.NET.Tests.McpServer/Thalos.NET.Tests.McpServer.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Memory.RagNet/Thalos.NET.Tests.Memory.RagNet.csproj" />

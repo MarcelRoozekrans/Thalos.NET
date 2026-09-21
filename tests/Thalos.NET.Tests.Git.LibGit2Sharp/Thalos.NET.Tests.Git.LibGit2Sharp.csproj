@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Thalos.NET.Git.LibGit2Sharp\Thalos.NET.Git.LibGit2Sharp.csproj" />
+    <PackageReference Include="LibGit2Sharp" />
+  </ItemGroup>
+</Project>

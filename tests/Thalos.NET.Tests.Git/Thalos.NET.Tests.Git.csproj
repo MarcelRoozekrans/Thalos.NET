@@ -1,0 +1,5 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Thalos.NET.Git\Thalos.NET.Git.csproj" />
+  </ItemGroup>
+</Project>

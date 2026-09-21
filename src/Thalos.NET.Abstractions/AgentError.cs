@@ -86,6 +86,18 @@ public enum AgentErrorCode
 
     /// <summary>A detached subagent run was refused because it exceeded the configured nesting depth.</summary>
     SubagentDepthExceeded,
+
+    /// <summary>A local git write requested a branch that already exists. HTTP 409.</summary>
+    GitBranchAlreadyExists,
+
+    /// <summary>The given path is not a git repository (missing or has no <c>.git</c>). HTTP 404.</summary>
+    GitRepositoryNotFound,
+
+    /// <summary>A git push was rejected by the remote for lack of, or invalid, credentials. HTTP 401.</summary>
+    GitAuthenticationFailed,
+
+    /// <summary>A local git operation (branch, commit, push) failed for a reason other than the cases above. HTTP 502.</summary>
+    GitOperationFailed,
 }
 
 /// <summary>
@@ -177,6 +189,22 @@ public readonly record struct AgentError(AgentErrorCode Code, string Message, st
     /// <summary><see cref="AgentErrorCode.SubagentDepthExceeded"/>: depth <paramref name="depth"/> exceeds <paramref name="max"/>.</summary>
     public static AgentError SubagentDepthExceeded(int depth, int max) =>
         new(AgentErrorCode.SubagentDepthExceeded, $"Subagent depth {depth} exceeds the configured maximum of {max}.");
+
+    /// <summary><see cref="AgentErrorCode.GitBranchAlreadyExists"/> for <paramref name="branchName"/>.</summary>
+    public static AgentError GitBranchAlreadyExists(string branchName) =>
+        new(AgentErrorCode.GitBranchAlreadyExists, $"Branch '{branchName}' already exists.");
+
+    /// <summary><see cref="AgentErrorCode.GitRepositoryNotFound"/> for <paramref name="repositoryPath"/>.</summary>
+    public static AgentError GitRepositoryNotFound(string repositoryPath) =>
+        new(AgentErrorCode.GitRepositoryNotFound, $"'{repositoryPath}' is not a git repository.");
+
+    /// <summary><see cref="AgentErrorCode.GitAuthenticationFailed"/>; <paramref name="detail"/> is a diagnostic such as the exception type name.</summary>
+    public static AgentError GitAuthenticationFailed(string message, string? detail = null) =>
+        new(AgentErrorCode.GitAuthenticationFailed, message, detail);
+
+    /// <summary><see cref="AgentErrorCode.GitOperationFailed"/>; <paramref name="detail"/> is a diagnostic such as the exception type name.</summary>
+    public static AgentError GitOperationFailed(string message, string? detail = null) =>
+        new(AgentErrorCode.GitOperationFailed, message, detail);
 
     /// <summary><c>"{Code}: {Message}"</c>, with <c>" — {Detail}"</c> appended when <see cref="Detail"/> is set.</summary>
     public override string ToString() => Detail is null ? $"{Code}: {Message}" : $"{Code}: {Message} — {Detail}";
