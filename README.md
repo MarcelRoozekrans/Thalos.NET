@@ -26,7 +26,154 @@ A Hermes-style, ZeroAlloc-native agent framework for .NET, built on
 
 Targets `net8.0` and `net10.0` (`Thalos.NET.Memory.RagNet`: `net10.0` only, like Rag.NET).
 
-## Quick start
+## Core contracts
+
+Four ports carry almost all of the framework's own thinking about what an agent *is*. Everything else — the runtime
+implementation, the channel pump, the providers — is host machinery bolted around these. Signatures below are copied
+from source (`src/Thalos.NET.Abstractions/Ports/`), not reconstructed from usage; this is not a full API reference —
+read the XML docs on each member for the exact error-code contract.
+
+### `IAgentRuntime` — the front door
+
+```csharp
+public interface IAgentRuntime
+{
+    ValueTask<Result<SessionId, AgentError>> CreateSessionAsync(AgentId agentId, ISecurityContext caller, CancellationToken ct = default);
+    ValueTask<Result<AgentTurnResult, AgentError>> RunTurnAsync(AgentTurnRequest request, CancellationToken ct = default);
+    IAsyncEnumerable<AgentEvent> RunTurnStreamingAsync(AgentTurnRequest request, CancellationToken ct = default);
+    ValueTask<UnitResult<AgentError>> CloseSessionAsync(SessionId sessionId, ISecurityContext caller, CancellationToken ct = default);
+}
+```
+
+Channels (HTTP, CLI, Telegram, a future MCP host…) talk to nothing else. `CreateSessionAsync` opens an `Idle` session
+for `agentId`, owned by `caller.Id` (never inferred from a tool argument — always the `ISecurityContext`, a
+ZeroAlloc.Authorization type, that the channel supplies); unknown agent → `AgentErrorCode.AgentNotFound`. `RunTurnAsync` runs one turn
+and returns the buffered `AgentTurnResult` — final `Text`, summed `TurnUsage`, every `ToolCallSummary` in call order,
+and wall-clock `Elapsed`. `RunTurnStreamingAsync` runs the identical turn but yields `AgentEvent`s as they occur
+(`TextDeltaEvent`, `ToolCallStartedEvent`, `ToolCallFinishedEvent`, `UsageEvent`, plus the memory/skill events listed
+below), terminating in exactly one `TurnCompletedEvent` or `TurnFailedEvent`. `CloseSessionAsync` is terminal
+(`SessionState.Closed`); a session mid-turn refuses with `SessionBusy`, an already-closed one with `SessionClosed`.
+
+`AgentTurnRequest` is `(SessionId SessionId, [NotEmpty] string Text, ISecurityContext Caller)`
+(`src/Thalos.NET.Abstractions/Turns/AgentTurnRequest.cs`).
+
+### `ISubagentRunner` — a turn with no one holding the line open
+
+```csharp
+public interface ISubagentRunner
+{
+    ValueTask<Result<AgentTurnResult, AgentError>> RunAsync(SubagentRunRequest request, CancellationToken ct = default);
+}
+```
+
+Used for scheduled runs and orchestrated subagent steps — anything where nobody is watching a socket for the answer.
+It never streams: a live turn streams because a caller is watching it arrive, a detached one has no audience, so it
+returns the buffered result and the host decides how to deliver it (typically a transactional outbox). One call does
+all of: create a fresh session for `request.AgentId` owned by `request.Caller`, run exactly one turn with
+`request.Task`, close the session — on every path, success or failure. See [Subagents](#subagents) below for the
+guard behaviour (`SubagentRunRequest`, `SubagentBudget`, `SubagentOptions`).
+
+### `IChannelAdapter` — rendering a turn back to a transport
+
+```csharp
+public interface IChannelAdapter
+{
+    string ChannelId { get; }
+    ValueTask DeliverAsync(ConversationId conversationId, AgentEvent agentEvent, CancellationToken ct);
+}
+```
+
+**Keyed on `ConversationId`, not `SessionId`** — re-keyed in 0.4.0, a breaking change; see
+[the note below](#breaking-change-ichanneladapterdeliverasync-now-takes-a-conversationid) if you implemented this
+seam before then. An adapter can only address what it can actually reach — a chat, a socket, a terminal — and much of
+what it must say (`/help`, an unrecognised command, "still working on the previous message", "that session had
+already ended") belongs to a conversation that has no session at all. `agentEvent` still carries its own
+`AgentEvent.SessionId` for an adapter that wants to correlate a delivery with a session. `Thalos.NET.Channels`' own
+`ConsoleChannelAdapter` and `Thalos.NET.Channels.Telegram`'s `TelegramChannelAdapter` are the two shipped
+implementations — both diff against the previously-printed text so a `TurnCompletedEvent` (the authoritative,
+complete `AgentTurnResult.Text`) never duplicates what streamed deltas already rendered.
+
+### `IAgentCatalog` — registered agent definitions
+
+```csharp
+public interface IAgentCatalog
+{
+    IReadOnlyList<AgentDefinition> Agents { get; }
+    bool TryGet(AgentId id, [MaybeNullWhen(false)] out AgentDefinition definition);
+}
+```
+
+`AddThalos` registers `OptionsAgentCatalog` (`src/Thalos.NET/Agents/OptionsAgentCatalog.cs`) by default: a
+**start-up snapshot** of `ThalosOptions.Agents` — definitions are copied once at construction, so later changes to
+the bound options are not observed, and two definitions sharing an `Id` throw `InvalidOperationException` at
+construction. For reloadable agents, register your own `IAgentCatalog`; the agent factory value-compares
+`AgentDefinition`s, so swapping a definition rebuilds that agent cleanly on its next turn.
+
+`AgentDefinition` (`src/Thalos.NET.Abstractions/Agents/AgentDefinition.cs`) is the thing the catalog holds:
+`Id`, `Name` (≤ 64 chars), `Description`, `Instructions`, `Model`/`MaxOutputTokens` (null → provider default),
+`Tools` (glob allow-list over qualified tool names, default `["*"]`), `Skills` (glob allow-list over skill names,
+default **empty** — unlike `Tools`), and `Memory` (per-agent `AgentMemorySettings?`, null → host defaults).
+
+## Getting started
+
+### The smallest working agent
+
+No memory, no skills, no MCP tools, no Sentinel — one agent, one provider, one turn:
+
+```csharp
+using Microsoft.Extensions.DependencyInjection;
+using Thalos;
+using Thalos.Anthropic;
+using ZeroAlloc.Authorization;
+
+var services = new ServiceCollection();
+
+var agentId = AgentId.New();
+services.AddThalos(thalos => thalos
+    .UseAnthropic(o => o.ApiKey = Environment.GetEnvironmentVariable("ANTHROPIC_API_KEY"))
+    .UseInMemorySessionStore()
+    .AddAgent(new AgentDefinition
+    {
+        Id = agentId,
+        Name = "Hello",
+        Instructions = "You are a friendly assistant. Keep answers to one sentence.",
+    }));
+
+await using var provider = services.BuildServiceProvider();
+var runtime = provider.GetRequiredService<IAgentRuntime>();
+
+// ISecurityContext is a ZeroAlloc.Authorization type; a real host gets one from its own auth pipeline.
+var caller = new AnonymousCaller("local-user");
+
+var session = await runtime.CreateSessionAsync(agentId, caller);
+if (session.IsFailure)
+{
+    throw new InvalidOperationException(session.Error.ToString());
+}
+
+var turn = await runtime.RunTurnAsync(new AgentTurnRequest(session.Value, "Say hello.", caller));
+Console.WriteLine(turn.IsSuccess ? turn.Value.Text : turn.Error.ToString());
+
+await runtime.CloseSessionAsync(session.Value, caller);
+
+sealed class AnonymousCaller(string id) : ISecurityContext
+{
+    public string Id => id;
+    public IReadOnlySet<string> Roles { get; } = new HashSet<string>(StringComparer.Ordinal);
+    public IReadOnlyDictionary<string, string> Claims { get; } = new Dictionary<string, string>(StringComparer.Ordinal);
+}
+```
+
+`UseInMemorySessionStore()` forgets everything when the process ends — swap in a real `IAgentSessionStore` (verified
+by the reusable `SessionStoreContractTests` in `Thalos.NET.Testing`) for anything durable. No `ANTHROPIC_API_KEY` set
+→ `RunTurnAsync` returns `AgentErrorCode.ProviderError`, not a thrown exception: every Thalos boundary returns a
+`Result<T, AgentError>` (or `UnitResult<AgentError>`) rather than throwing for anything short of a programming error
+(a null argument, an invalid `AgentDefinition`).
+
+### Everything at once
+
+The full builder surface — provider, security scanning, memory, RAG-backed memory, skills, MCP tools, tool-policy
+authorization — chained on one agent:
 
 ```csharp
 services.AddThalos(thalos => thalos
@@ -254,6 +401,39 @@ never a line of the file.
 **Deliberately out of scope in 0.3.0** (decisions, not omissions): hot-reload; agent-authored or agent-edited skills;
 versioning beyond the content hash; usage analytics; a UI; per-skill authorization policies — the globs are the only gate.
 
+## Subagents
+
+`ISubagentRunner` (`Thalos.NET`, ships in the core package — no separate package needed) runs one detached agent
+turn: no live caller, so it never streams and the host decides how to deliver the buffered result. Two shapes use it
+today: host-scheduled runs, and orchestrated subagent steps — both are the same primitive triggered differently. The
+default implementation is `SubagentRunner` (`src/Thalos.NET/Subagents/SubagentRunner.cs`), registered automatically
+by `AddThalos`.
+
+**The request.** `SubagentRunRequest` (`src/Thalos.NET.Abstractions/Subagents/SubagentRunRequest.cs`):
+`AgentId` (resolved through `IAgentCatalog` — a subagent is an ordinary agent definition, nothing special), `Task`
+(the single user message of the single turn), `Caller` (the identity the run executes as — never inferred, since a
+detached run has no inbound request to derive one from; normally a narrow configured principal, not a human's own
+context), `Budget` (nullable — see below), `Depth` (0 for a host-started run; nothing in the framework increments
+this today, since sagas are compile-time and there is no recursion yet — it exists for a future in-turn delegation
+tool), and `ParentSessionId` (telemetry lineage only, never authorization).
+
+**The budget.** `SubagentBudget(int MaxTotalTokens, TimeSpan Deadline)` — both are hard stops, not hints: a detached
+run has no human watching it, so an unbounded loop spends real money with nobody to notice. `SubagentBudget.Default`
+is 50,000 tokens and 10 minutes. A budget on the request always wins over `SubagentOptions.DefaultBudget` (the host
+fallback, bound from configuration); `SubagentOptions.MaxDepth` defaults to 2.
+
+**A deadline stops work; a budget settles it.** The deadline is a stop signal aimed at work still in flight: once it
+fires, a linked cancellation token is cancelled and nothing further is spent chasing the turn. The token budget is
+evaluated only after the turn returns, against tokens already spent. The two can therefore disagree: a turn that
+races past its deadline and still comes back with a real result is reported as a **success** — the deadline had
+nothing left to stop, and the tokens it spent were already spent — but the runner logs a warning so "succeeded,
+arrived late" is at least observable rather than silently indistinguishable from an on-time success. The session is
+always closed, on every path including failure, using `CancellationToken.None` so a caller's own cancellation cannot
+leave a detached session stuck `Idle` until its timeout.
+
+**Failure modes**, all `AgentError`: unknown agent → `AgentNotFound`; over the token budget → `SubagentBudgetExceeded`;
+past the deadline → `SubagentDeadlineExceeded`; nested deeper than `SubagentOptions.MaxDepth` → `SubagentDepthExceeded`.
+
 ## Channels
 
 `Thalos.NET.Channels` turns Thalos into something a human can talk to over a real transport — a terminal, a chat app
@@ -329,11 +509,21 @@ need it alongside the session. An adapter's own addressing state should be keyed
 
 ## Local development against Daedalus
 
-Until the packages are on nuget.org, consumers (Daedalus, phase 1.1) build from a local folder feed:
+All eleven packages are published to nuget.org (Daedalus, the first consumer, pins released versions there). To try
+an unreleased change against a consumer before cutting a release, build from a local folder feed instead:
 
 ```powershell
 pwsh scripts/pack-local.ps1          # → C:\Projects\Prive\.nuget-local\Thalos.NET*.0.3.0-local.<timestamp>.nupkg
 ```
+
+> This `0.3.0-local.<timestamp>` is not a typo left over from an old release — it is what the script actually
+> produces today, on 0.5.1. `pack-local.ps1` runs `dotnet pack` with only `-p:VersionSuffix`, never invoking
+> GitVersion the way CI does (`ci.yml` computes `-p:Version` from `dotnet dotnet-gitversion`); with no `Version`
+> override, MSBuild falls back to `Directory.Build.props`'s `<VersionPrefix>0.3.0</VersionPrefix>` — itself unchanged
+> since three releases ago and never read by the real release pipeline. The script's own comment still says "nine
+> packages since 0.3.0". None of this affects a real release (GitVersion always wins there), but a locally-packed
+> feed genuinely carries `0.3.0-local.*` version numbers today; this is a documentation task, so the fix belongs in
+> a follow-up, not here.
 
 The script prints the exact version. In the consuming repo:
 
@@ -349,18 +539,22 @@ The script prints the exact version. In the consuming repo:
 </configuration>
 ```
 
-`Directory.Packages.props` (central package management):
+`Directory.Packages.props` (central package management) — pin every package the consumer references to the same
+local version the script just printed (see the callout above for why it starts with `0.3.0` and not the current
+`0.5.1`), for example:
 ```xml
 <ItemGroup>
-  <PackageVersion Include="Thalos.NET.Abstractions"  Version="0.3.0-local.20260818120000" />
-  <PackageVersion Include="Thalos.NET"               Version="0.3.0-local.20260818120000" />
-  <PackageVersion Include="Thalos.NET.Testing"       Version="0.3.0-local.20260818120000" />
-  <PackageVersion Include="Thalos.NET.Mcp"           Version="0.3.0-local.20260818120000" />
-  <PackageVersion Include="Thalos.NET.Anthropic"     Version="0.3.0-local.20260818120000" />
-  <PackageVersion Include="Thalos.NET.Sentinel"      Version="0.3.0-local.20260818120000" />
-  <PackageVersion Include="Thalos.NET.Memory"        Version="0.3.0-local.20260818120000" />
-  <PackageVersion Include="Thalos.NET.Memory.RagNet" Version="0.3.0-local.20260818120000" />
-  <PackageVersion Include="Thalos.NET.Skills"        Version="0.3.0-local.20260818120000" />
+  <PackageVersion Include="Thalos.NET.Abstractions"     Version="0.3.0-local.20260818120000" />
+  <PackageVersion Include="Thalos.NET"                  Version="0.3.0-local.20260818120000" />
+  <PackageVersion Include="Thalos.NET.Testing"          Version="0.3.0-local.20260818120000" />
+  <PackageVersion Include="Thalos.NET.Mcp"              Version="0.3.0-local.20260818120000" />
+  <PackageVersion Include="Thalos.NET.Anthropic"        Version="0.3.0-local.20260818120000" />
+  <PackageVersion Include="Thalos.NET.Sentinel"         Version="0.3.0-local.20260818120000" />
+  <PackageVersion Include="Thalos.NET.Memory"           Version="0.3.0-local.20260818120000" />
+  <PackageVersion Include="Thalos.NET.Memory.RagNet"    Version="0.3.0-local.20260818120000" />
+  <PackageVersion Include="Thalos.NET.Skills"           Version="0.3.0-local.20260818120000" />
+  <PackageVersion Include="Thalos.NET.Channels"         Version="0.3.0-local.20260818120000" />
+  <PackageVersion Include="Thalos.NET.Channels.Telegram" Version="0.3.0-local.20260818120000" />
 </ItemGroup>
 ```
 
@@ -384,8 +578,11 @@ Same setup as [Rag.NET](https://github.com/MarcelRoozekrans/Rag.NET); the runboo
   nothing is hand-edited. Stable versions only — no prereleases are published.
 - Releases are cut by [release-please](.github/workflows/release-please.yml) from conventional commits (enforced on
   PRs by commitlint): dispatch → review/merge the release PR → dispatch → `vX.Y.Z` tag + GitHub release.
-- CI (`.github/workflows/ci.yml`) builds and tests on Ubuntu and Windows on every push/PR, packs and validates the nine
-  packages (per-package TFM check: `Thalos.NET.Memory.RagNet` ships `net10.0` only), and rehearses the nuget.org push against a local feed. Publishing to nuget.org is a manual dispatch with
+- CI (`.github/workflows/ci.yml`) builds and tests on Ubuntu and Windows on every push/PR, packs and validates all
+  eleven packages (per-package TFM check: `Thalos.NET.Memory.RagNet` ships `net10.0` only), and rehearses the nuget.org push against a local feed. Publishing to nuget.org is a manual dispatch with
   `publish_to_nuget=true` on the tagged release commit, using nuget.org Trusted Publishing (no stored API key).
 
-Status: **0.3.0 — API is unstable until 1.0.**
+Status: **0.5.1 — API is unstable until 1.0.** 1.0 is deliberately deferred until Daedalus's Milestone 2 (a
+multi-agent manufacturing pipeline built on Thalos.NET) has exercised `IAgentRuntime`, `ISubagentRunner`,
+`IChannelAdapter` and `IAgentCatalog` under real multi-agent use and settled what, if anything, still needs to move —
+not because 1.0 is close.
