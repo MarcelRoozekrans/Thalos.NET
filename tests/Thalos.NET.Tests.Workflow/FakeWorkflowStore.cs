@@ -100,6 +100,18 @@ internal sealed class FakeWorkflowStore(IReadOnlyDictionary<(string Process, int
         return ValueTask.CompletedTask;
     }
 
+    public ValueTask<bool> FailStrandedAsync(Guid runId, long expectedSeq, string errorMessage, CancellationToken ct)
+    {
+        var run = _runs[runId];
+        if (run.CurrentSeq != expectedSeq || IsTerminal(run.Status))
+        {
+            return ValueTask.FromResult(false);
+        }
+
+        _runs[runId] = run with { Status = WorkflowStatus.Failed, LastError = errorMessage };
+        return ValueTask.FromResult(true);
+    }
+
     public ValueTask CancelAsync(Guid runId, string reason, CancellationToken ct)
     {
         var run = _runs[runId];

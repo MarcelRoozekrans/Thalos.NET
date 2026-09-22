@@ -337,6 +337,56 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         run.LastError.Should().Be("operator abort");
     }
 
+    // --- FailStrandedAsync -----------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task FailStrandedAsync_fails_the_run_when_the_seq_still_matches()
+    {
+        var runId = await _store.StartAsync("manufacture", 1, "c-stranded-fail", "implement", CancellationToken.None);
+
+        var failed = await _store.FailStrandedAsync(runId, expectedSeq: 1, "stranded", CancellationToken.None);
+
+        failed.Should().BeTrue();
+        var run = await _store.FindAsync(runId, CancellationToken.None);
+        run!.Status.Should().Be(WorkflowStatus.Failed);
+        run.LastError.Should().Be("stranded");
+    }
+
+    [Fact]
+    public async Task FailStrandedAsync_no_ops_instead_of_destroying_a_gate_a_concurrent_dispatch_just_parked()
+    {
+        // This is the regression FailStrandedAsync exists to close: a run the sweep read at seq 1 (Running)
+        // that a concurrent dispatcher completes into Awaiting before the sweep's own FailAsync-equivalent
+        // write lands. CompleteNodeAsync bumps current_seq to 2 on that transition — the sweep's stale
+        // expectedSeq: 1 must therefore no-op, not fail the gate it never should have touched.
+        var runId = await _store.StartAsync("approval", 1, "c-stranded-race", "start", CancellationToken.None);
+        var toGate = new WorkflowTransition("gate", WorkflowStatus.Awaiting, "ok", WorkflowEventKind.Awaiting);
+        await _store.CompleteNodeAsync(runId, seq: 1, toGate, new NodeResult(null, Empty), CancellationToken.None);
+
+        var failed = await _store.FailStrandedAsync(runId, expectedSeq: 1, "stranded", CancellationToken.None);
+
+        failed.Should().BeFalse("the run moved on to a different seq — this call must not overwrite whatever it became");
+        var run = await _store.FindAsync(runId, CancellationToken.None);
+        run!.Status.Should().Be(WorkflowStatus.Awaiting, "the gate the run parked at must survive completely untouched");
+        run.AwaitingSignal.Should().Be("ok");
+        run.LastError.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task FailStrandedAsync_no_ops_on_an_already_terminal_run()
+    {
+        var runId = await _store.StartAsync("manufacture", 1, "c-stranded-terminal", "implement", CancellationToken.None);
+        await _store.FailAsync(runId, "boom", CancellationToken.None);
+
+        // FailAsync never advances current_seq (see its own remarks), so the stranded sweep's snapshot would
+        // still show seq 1 here — the terminal-state guard, not the seq guard, is what must catch this case.
+        var failed = await _store.FailStrandedAsync(runId, expectedSeq: 1, "stranded", CancellationToken.None);
+
+        failed.Should().BeFalse();
+        var run = await _store.FindAsync(runId, CancellationToken.None);
+        run!.LastError.Should().Be("boom", "an already-terminal run's recorded error must not be overwritten");
+    }
+
     // --- FindStrandedAsync -----------------------------------------------------------------------------------
 
     [Fact]
@@ -367,6 +417,26 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         var stranded = await _store.FindStrandedAsync(TimeSpan.FromMinutes(10), CancellationToken.None);
 
         stranded.Select(r => r.Id).Should().NotContain(runId);
+    }
+
+    [Fact]
+    public async Task FindStrandedAsync_orders_the_most_stranded_run_first()
+    {
+        // Oldest-updated-first is what makes a backlog past the cap drain over successive sweeps true, rather
+        // than the same handful of runs winning the cap on every call while the rest starve forever. Nothing
+        // else in this suite pins the order, so a change to DESC (or no ORDER BY at all) would pass every other
+        // test here and still be wrong.
+        var oldestId = await _store.StartAsync("manufacture", 1, "c-order-oldest", "implement", CancellationToken.None);
+        var middleId = await _store.StartAsync("manufacture", 1, "c-order-middle", "implement", CancellationToken.None);
+        var newestId = await _store.StartAsync("manufacture", 1, "c-order-newest", "implement", CancellationToken.None);
+
+        await ExecuteAsync("UPDATE workflow_run SET updated_at = now() - interval '3 hours' WHERE id = @id", oldestId);
+        await ExecuteAsync("UPDATE workflow_run SET updated_at = now() - interval '2 hours' WHERE id = @id", middleId);
+        await ExecuteAsync("UPDATE workflow_run SET updated_at = now() - interval '1 hour' WHERE id = @id", newestId);
+
+        var stranded = await _store.FindStrandedAsync(TimeSpan.FromMinutes(10), CancellationToken.None);
+
+        stranded.Select(r => r.Id).Should().ContainInOrder(oldestId, middleId, newestId);
     }
 
     // --- helpers -----------------------------------------------------------------------------------------

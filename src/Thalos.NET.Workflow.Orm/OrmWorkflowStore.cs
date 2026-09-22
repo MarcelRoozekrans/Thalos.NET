@@ -221,6 +221,59 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
         // reason: two concurrent FailAsync calls on the same Running run both clear the terminal-state guard
         // above and would otherwise both attempt to insert at the same row.CurrentSeq. With the UPDATE first,
         // the loser throws WorkflowConcurrencyException here and never reaches the INSERT at all.
+        if (!await TryApplyFailedStatusAsync(connection, tx, runId, row, errorMessage, ct).ConfigureAwait(false))
+        {
+            throw new WorkflowConcurrencyException($"Workflow run '{runId}' was concurrently modified.");
+        }
+
+        await tx.CommitAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Unlike <see cref="FailAsync"/>, every guard here resolves to a no-op return, never a throw: a run this
+    /// method declines to touch — not found, already moved past <paramref name="expectedSeq"/>, or already
+    /// terminal — is not a failure of this call, it is this call correctly refusing to clobber state a
+    /// concurrent write already changed. The seq check is what actually protects a gate: <c>ApplyTransitionAsync</c>
+    /// bumps <c>current_seq</c> on every transition it applies, parking at a gate included, so a run that left
+    /// <paramref name="expectedSeq"/> between <see cref="FindStrandedAsync"/>'s snapshot and this call's own read
+    /// is a run this sweep must leave alone — whatever it became is somebody else's write to make, not this
+    /// one's to overwrite.
+    /// </remarks>
+    public async ValueTask<bool> FailStrandedAsync(Guid runId, long expectedSeq, string errorMessage, CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(errorMessage);
+
+        await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using var tx = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+
+        var row = await ReadRunRowAsync(connection, tx, runId, ct).ConfigureAwait(false);
+
+        // Not found, moved past expectedSeq (most importantly: completed into Awaiting at a gate between
+        // FindStrandedAsync's snapshot and this call's own read), or already terminal — every one of these is
+        // this sweep correctly declining to touch state a concurrent write already changed, never a throw.
+        if (row is null || row.CurrentSeq != expectedSeq || IsTerminal(row.Status))
+        {
+            return false;
+        }
+
+        // Same UPDATE-before-INSERT ordering as FailAsync, for the same defence-in-depth reason — but here a
+        // losing xmin check is just one more "moved on" case, not a broken invariant, so it also resolves to a
+        // no-op rather than a throw.
+        return await TryApplyFailedStatusAsync(connection, tx, runId, row, errorMessage, ct).ConfigureAwait(false)
+            && await CommitAndReturnTrueAsync(tx, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The xmin-checked <c>UPDATE ... SET status = 'Failed'</c> plus its paired event <c>INSERT</c>, shared by
+    /// <see cref="FailAsync"/> and <see cref="FailStrandedAsync"/> — both fail <paramref name="row"/> the same
+    /// way; only what a lost xmin race means to the caller differs (a throw versus a no-op), which is why this
+    /// returns a bool rather than deciding that itself. Does not commit <paramref name="tx"/> — the caller does,
+    /// once it has decided what a <see langword="false"/> result means for it.
+    /// </summary>
+    private static async Task<bool> TryApplyFailedStatusAsync(
+        NpgsqlConnection connection, NpgsqlTransaction tx, Guid runId, RunRow row, string errorMessage, CancellationToken ct)
+    {
         await using (var update = connection.CreateCommand())
         {
             update.Transaction = tx;
@@ -234,10 +287,9 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
             update.Parameters.AddWithValue("id", runId);
             update.Parameters.AddWithValue("expectedXmin", row.Xmin);
 
-            var affected = await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-            if (affected != 1)
+            if (await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false) != 1)
             {
-                throw new WorkflowConcurrencyException($"Workflow run '{runId}' was concurrently modified.");
+                return false;
             }
         }
 
@@ -248,7 +300,13 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
             outcome: null, variables: null, error: errorMessage,
             kind: nameof(WorkflowEventKind.Failed), ct).ConfigureAwait(false);
 
+        return true;
+    }
+
+    private static async Task<bool> CommitAndReturnTrueAsync(NpgsqlTransaction tx, CancellationToken ct)
+    {
         await tx.CommitAsync(ct).ConfigureAwait(false);
+        return true;
     }
 
     /// <inheritdoc/>
@@ -310,10 +368,16 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
     /// <summary>
     /// The most stranded runs <see cref="FindStrandedAsync"/> returns in one call. A dead-lettered dispatch
     /// message strands at most one run apiece, so an unbounded fleet backlog is not an expected shape — this
-    /// exists to cap a single sweep's work and its one open connection's lifetime, not to model an expected
-    /// steady-state count. Chosen generously above anything a healthy system should ever accumulate: a
-    /// consumer's periodic sweeper (see <see cref="WorkflowRunReconciler"/>) re-queries every tick, so a
-    /// backlog past this cap is simply worked off over a few extra ticks rather than lost.
+    /// exists to cap a single sweep's work (the burst of <see cref="FailStrandedAsync"/> calls a caller makes
+    /// off one result set) and its one open connection's lifetime, not to model an expected steady-state count.
+    /// The scan itself is bounded independently of this constant by migration 1003's partial index,
+    /// <c>ix_workflow_run_updated_at_running</c> (<c>ON workflow_run (updated_at) WHERE status = 'Running'</c>):
+    /// it covers exactly the rows this query's <c>WHERE</c> can match, so both the filter and the
+    /// <c>ORDER BY</c> below resolve to one index scan rather than a sequential scan over every run ever
+    /// started, terminal ones included. <see cref="MaxStrandedResults"/> is chosen generously above anything a
+    /// healthy system should ever accumulate: a consumer's periodic sweeper (see
+    /// <see cref="WorkflowRunReconciler"/>) re-queries every tick, so a backlog past this cap is simply worked
+    /// off over a few extra ticks rather than lost.
     /// </summary>
     private const int MaxStrandedResults = 500;
 
@@ -327,7 +391,8 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
         // and may sit there legitimately for days. Sweeping it out because nobody approved it quickly would
         // destroy exactly the work the gate exists to protect. Only Running — a node an in-flight dispatch
         // message was supposed to advance, and might now never will because that message dead-lettered — is a
-        // stranded-run candidate.
+        // stranded-run candidate. ix_workflow_run_updated_at_running (migration 1003) is a partial index over
+        // exactly this predicate, so this filter and the ORDER BY below are backed by one index scan.
         cmd.CommandText = SelectRunSql + " WHERE status = @running AND updated_at < @threshold ORDER BY updated_at ASC LIMIT @limit";
         cmd.Parameters.AddWithValue("running", nameof(WorkflowStatus.Running));
         cmd.Parameters.AddWithValue("threshold", DateTimeOffset.UtcNow - olderThan);

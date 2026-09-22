@@ -68,6 +68,21 @@ public interface IWorkflowStore
     /// <summary>Marks a run failed with <paramref name="errorMessage"/>, outside the normal node/outcome flow.</summary>
     ValueTask FailAsync(Guid runId, string errorMessage, CancellationToken ct);
 
+    /// <summary>
+    /// The seq-guarded counterpart to <see cref="FailAsync"/> that <see cref="WorkflowRunReconciler.SweepAsync"/>
+    /// uses instead of it. A run <see cref="FindStrandedAsync"/> reported at <paramref name="expectedSeq"/> can
+    /// legitimately move on — completed by a concurrent dispatcher, including into
+    /// <see cref="WorkflowStatus.Awaiting"/> at a gate — at any point between that query's snapshot and this
+    /// call actually reaching the row, and every such transition bumps <see cref="WorkflowRun.CurrentSeq"/>
+    /// (<see cref="CompleteNodeAsync"/> and <see cref="ResumeAsync"/> alike, unconditionally). This method fails
+    /// the run only if it is still at <paramref name="expectedSeq"/> at the moment of the write; otherwise it is
+    /// a no-op, not a throw and not a fight over the row — the run moved on to something this sweep has no
+    /// business overwriting, most importantly a gate it must never destroy. Also a no-op, like
+    /// <see cref="FailAsync"/>, when the run already reached a terminal state some other way. Returns whether
+    /// this call actually failed the run.
+    /// </summary>
+    ValueTask<bool> FailStrandedAsync(Guid runId, long expectedSeq, string errorMessage, CancellationToken ct);
+
     /// <summary>Cancels a run for <paramref name="reason"/> before it reaches a terminal node.</summary>
     ValueTask CancelAsync(Guid runId, string reason, CancellationToken ct);
 

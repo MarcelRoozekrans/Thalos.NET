@@ -1,6 +1,7 @@
 using Npgsql;
 using Thalos.Workflow;
 using Thalos.Workflow.Orm;
+using ZeroAlloc.Results;
 
 namespace Thalos.Tests.Workflow.Orm;
 
@@ -104,6 +105,43 @@ public sealed class WorkflowRunReconcilerTests(PostgresFixture pg) : IAsyncLifet
         (await _store.FindAsync(second, CancellationToken.None))!.Status.Should().Be(WorkflowStatus.Failed);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public async Task SweepAsync_rejects_a_non_positive_threshold(int seconds)
+    {
+        // At zero the store's "updated_at < threshold" predicate collapses to "updated_at < now()", which
+        // matches every Running run in the system regardless of how recently it progressed — the exact failure
+        // mode the falsifiability demonstration in task-7-report.md exercised manually before this guard
+        // existed. A negative value is equally nonsensical (a threshold in the future). Neither expresses any
+        // legitimate caller intent, so both are rejected before FindStrandedAsync is ever called.
+        var act = () => _reconciler.SweepAsync(TimeSpan.FromSeconds(seconds), CancellationToken.None).AsTask();
+
+        await act.Should().ThrowAsync<ArgumentOutOfRangeException>();
+    }
+
+    [Fact]
+    public async Task SweepAsync_does_not_let_one_runs_failure_abandon_the_rest_of_the_batch()
+    {
+        // Oldest-first ordering (see OrmWorkflowStoreTests.FindStrandedAsync_orders_the_most_stranded_run_first)
+        // means an unisolated throw on the first run would starve every run behind it forever — the same run
+        // would re-head every future sweep's batch. throwsOnId's FailStrandedAsync always throws for one
+        // specific run and delegates to the real store for every other call, simulating exactly that shape of
+        // infrastructure fault without needing to actually break the database mid-sweep.
+        var throwsId = await _store.StartAsync("manufacture", 1, "c-isolation-throws", "implement", CancellationToken.None);
+        var survivesId = await _store.StartAsync("manufacture", 1, "c-isolation-survives", "implement", CancellationToken.None);
+        await BackdateUpdatedAtAsync(throwsId, TimeSpan.FromHours(2));
+        await BackdateUpdatedAtAsync(survivesId, TimeSpan.FromHours(1));
+
+        var reconciler = new WorkflowRunReconciler(new ThrowsOnFailStrandedFor(_store, throwsId));
+
+        var terminated = await reconciler.SweepAsync(ProductionThreshold, CancellationToken.None);
+
+        terminated.Should().Be(1, "the throwing run must be skipped, not counted, but must not stop the survivor from being counted");
+        (await _store.FindAsync(throwsId, CancellationToken.None))!.Status.Should().Be(WorkflowStatus.Running, "the throwing call left this run exactly as FindStrandedAsync found it");
+        (await _store.FindAsync(survivesId, CancellationToken.None))!.Status.Should().Be(WorkflowStatus.Failed, "a later run in the same batch must still be terminated despite an earlier run's call throwing");
+    }
+
     private async Task BackdateUpdatedAtAsync(Guid runId, TimeSpan age)
     {
         await using var connection = new NpgsqlConnection(pg.ConnectionString);
@@ -112,5 +150,32 @@ public sealed class WorkflowRunReconcilerTests(PostgresFixture pg) : IAsyncLifet
         cmd.Parameters.AddWithValue("age", age);
         cmd.Parameters.AddWithValue("id", runId);
         await cmd.ExecuteNonQueryAsync();
+    }
+
+    /// <summary>Delegates every call to <paramref name="inner"/> except <see cref="FailStrandedAsync"/> for <paramref name="throwsForRunId"/>, which always throws — simulating an infrastructure fault on one run in a batch without needing to actually break the database mid-sweep.</summary>
+    private sealed class ThrowsOnFailStrandedFor(IWorkflowStore inner, Guid throwsForRunId) : IWorkflowStore
+    {
+        public ValueTask<Guid> StartAsync(string process, int version, string correlationKey, string startNode, CancellationToken ct) =>
+            inner.StartAsync(process, version, correlationKey, startNode, ct);
+
+        public ValueTask<WorkflowRun?> FindAsync(Guid runId, CancellationToken ct) => inner.FindAsync(runId, ct);
+
+        public ValueTask CompleteNodeAsync(Guid runId, long seq, WorkflowTransition transition, NodeResult result, CancellationToken ct) =>
+            inner.CompleteNodeAsync(runId, seq, transition, result, ct);
+
+        public ValueTask<Result> ResumeAsync(Guid runId, string signal, string? payload, CancellationToken ct) =>
+            inner.ResumeAsync(runId, signal, payload, ct);
+
+        public ValueTask FailAsync(Guid runId, string errorMessage, CancellationToken ct) => inner.FailAsync(runId, errorMessage, ct);
+
+        public ValueTask<bool> FailStrandedAsync(Guid runId, long expectedSeq, string errorMessage, CancellationToken ct) =>
+            runId == throwsForRunId
+                ? throw new InvalidOperationException("simulated infrastructure fault for one run in the batch")
+                : inner.FailStrandedAsync(runId, expectedSeq, errorMessage, ct);
+
+        public ValueTask CancelAsync(Guid runId, string reason, CancellationToken ct) => inner.CancelAsync(runId, reason, ct);
+
+        public ValueTask<IReadOnlyList<WorkflowRun>> FindStrandedAsync(TimeSpan olderThan, CancellationToken ct) =>
+            inner.FindStrandedAsync(olderThan, ct);
     }
 }

@@ -39,34 +39,63 @@ public sealed class WorkflowRunReconciler(IWorkflowStore store)
     /// <summary>
     /// Finds every run <see cref="IWorkflowStore.FindStrandedAsync"/> reports stranded for at least
     /// <paramref name="olderThan"/> and fails each one with a named reason, via
-    /// <see cref="IWorkflowStore.FailAsync"/> — which is already idempotent on a run that reached a terminal
-    /// state some other way between the query and this call. Returns the number of runs terminated, so a
-    /// caller's periodic host can log a non-zero sweep the way <c>Daedalus.Agents.Scheduling.ScheduleSweeperService</c>
-    /// logs a non-zero claim count.
+    /// <see cref="IWorkflowStore.FailStrandedAsync"/> — seq-guarded against the exact run
+    /// <see cref="IWorkflowStore.FindStrandedAsync"/> saw, so a run a concurrent dispatcher completes (including
+    /// into <see cref="WorkflowStatus.Awaiting"/> at a gate) between that query and this call's own write is
+    /// left untouched rather than clobbered. A single run's call throwing — an infrastructure fault, not one of
+    /// <see cref="IWorkflowStore.FailStrandedAsync"/>'s own documented no-op cases — is caught and skipped
+    /// rather than allowed to abandon every run still left in the batch: <see cref="IWorkflowStore.FindStrandedAsync"/>
+    /// orders oldest-first specifically so a backlog drains over successive calls, and letting one run's
+    /// exception starve that whole ordering would mean the same run re-heads every future sweep forever. A run
+    /// skipped this way costs nothing — the sweep is idempotent and picks it up again next tick. Returns the
+    /// number of runs terminated, so a caller's periodic host can log a non-zero sweep the way
+    /// <c>Daedalus.Agents.Scheduling.ScheduleSweeperService</c> logs a non-zero claim count.
     /// </summary>
     /// <param name="olderThan">
-    /// How long a run must have gone without progress to count as stranded. Must comfortably exceed the
-    /// longest duration a healthy node's agent turn is expected to run — an agent turn legitimately takes
-    /// minutes, and a threshold anywhere near that risks failing perfectly healthy work still in flight. The
-    /// value is entirely caller-supplied: this type hardcodes no default, the same way it hosts no timer of its
-    /// own — both are the consumer's call to make for its own workload.
+    /// How long a run must have gone without progress to count as stranded. Must be strictly positive — see the
+    /// guard below — and must comfortably exceed both the longest duration a healthy node's agent turn is
+    /// expected to run (an agent turn legitimately takes minutes) and the outbox's own retry-and-backoff window
+    /// for a message that is genuinely headed for dead-lettering: <c>updated_at</c> does not advance while a
+    /// dispatch message is still retrying, so a threshold sized only against agent-turn length can terminate a
+    /// run whose delivery would have succeeded on a later attempt. The value is entirely caller-supplied: this
+    /// type hardcodes no default, the same way it hosts no timer of its own — both are the consumer's call to
+    /// make for its own workload.
     /// </param>
     /// <param name="ct">Cancellation token.</param>
     /// <returns>The number of runs this sweep terminated.</returns>
+    /// <exception cref="ArgumentOutOfRangeException">
+    /// <paramref name="olderThan"/> is zero or negative. At zero the store's <c>updated_at &lt; threshold</c>
+    /// predicate becomes <c>updated_at &lt; now()</c>, which matches every <see cref="WorkflowStatus.Running"/>
+    /// run in the system, healthy and stranded alike — there is no legitimate caller intent this could express,
+    /// only a config binding that resolved to a zero default going unnoticed until it took the fleet down.
+    /// </exception>
     public async ValueTask<int> SweepAsync(TimeSpan olderThan, CancellationToken ct)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(olderThan, TimeSpan.Zero);
+
         var stranded = await _store.FindStrandedAsync(olderThan, ct).ConfigureAwait(false);
 
         var terminated = 0;
         foreach (var run in stranded)
         {
-            await _store.FailAsync(
-                run.Id,
-                $"stranded: run '{run.Id}' made no progress for at least {olderThan} while Running — its dispatch " +
-                "message most likely dead-lettered after exhausting the outbox's retry budget, leaving nothing " +
-                "left to advance it.",
-                ct).ConfigureAwait(false);
-            terminated++;
+            try
+            {
+                await _store.FailStrandedAsync(
+                    run.Id,
+                    run.CurrentSeq,
+                    $"stranded: run '{run.Id}' made no progress for at least {olderThan} while Running — its " +
+                    "dispatch message most likely dead-lettered after exhausting the outbox's retry budget, " +
+                    "leaving nothing left to advance it.",
+                    ct).ConfigureAwait(false);
+                terminated++;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // Isolation, not silence: FailStrandedAsync's own documented outcomes (not found, seq moved on,
+                // already terminal, lost the xmin race) all return false rather than throw, so a throw here is
+                // an infrastructure fault this run's turn hit — not a reason to abandon every run still queued
+                // behind it. Left for the next sweep, at no cost: still stranded until something terminates it.
+            }
         }
 
         return terminated;
