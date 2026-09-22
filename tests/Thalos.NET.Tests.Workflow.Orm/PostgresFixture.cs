@@ -39,8 +39,8 @@ public sealed class PostgresFixture : IAsyncLifetime
         await connection.OpenAsync();
         var asyncConnection = connection.AsAsync();
 
-        // Outbox schema first: OrmWorkflowStore.CompleteNodeAsync enqueues into it in the same transaction
-        // as the workflow tables that depend on it being present.
+        // Outbox schema first: OrmWorkflowStore.StartAsync and CompleteNodeAsync both enqueue into it in the
+        // same transaction as the workflow tables that depend on it being present.
         await new MigrationRunner(asyncConnection, OutboxOrmMigrations.Postgres, new PostgresMigrationDialect()).RunAsync(CancellationToken.None);
         await new MigrationRunner(asyncConnection, WorkflowOrmMigrations.Postgres, new PostgresMigrationDialect()).RunAsync(CancellationToken.None);
     }

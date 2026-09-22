@@ -84,9 +84,11 @@ public sealed class WorkflowRunReconciler(IWorkflowStore store)
                 if (await _store.FailStrandedAsync(
                     run.Id,
                     run.CurrentSeq,
-                    $"stranded: run '{run.Id}' made no progress for at least {olderThan} while Running — its " +
-                    "dispatch message most likely dead-lettered after exhausting the outbox's retry budget, " +
-                    "leaving nothing left to advance it.",
+                    $"stranded: run '{run.Id}' made no progress for at least {olderThan} while Running, so " +
+                    "nothing is advancing it. This sweep cannot tell why from the run row alone — a dispatch " +
+                    "message that dead-lettered after exhausting the outbox's retry budget and a node whose " +
+                    "dispatch was never enqueued look identical from here. Check the outbox's dead-letter " +
+                    "state for this run before concluding which it was.",
                     ct).ConfigureAwait(false))
                 {
                     terminated++;

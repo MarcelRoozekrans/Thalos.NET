@@ -73,9 +73,10 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
         synced.IsSuccess.Should().BeTrue(synced.IsFailure ? synced.Error : "");
 
         var runId = await _store.StartAsync("pipeline", 1, "c-reach", "implement", CancellationToken.None);
-        var dispatcher = NewDispatcher();
 
-        await dispatcher.DispatchAsync(new WorkflowDispatchMessage(runId, 1, "implement"), CancellationToken.None);
+        // No message is constructed here: StartAsync enqueued 'implement''s own dispatch, and the drain takes it
+        // off the table exactly as a host's outbox consumer would.
+        (await OutboxDrain.DispatchNextAsync(pg.ConnectionString, NewDispatcher())).Should().BeTrue("StartAsync must leave a dispatch for the start node in the outbox");
 
         var run = await _store.FindAsync(runId, CancellationToken.None);
         run!.Status.Should().NotBe(
@@ -105,7 +106,7 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
         (await _sync.SyncAsync(CancellationToken.None)).IsSuccess.Should().BeTrue();
         (await _definitions.GetActiveVersionAsync("pipeline", CancellationToken.None)).Should().Be(2, "the newer version is what new runs would start on");
 
-        await NewDispatcher().DispatchAsync(new WorkflowDispatchMessage(runId, 1, "implement"), CancellationToken.None);
+        (await OutboxDrain.DispatchNextAsync(pg.ConnectionString, NewDispatcher())).Should().BeTrue("StartAsync must leave a dispatch for the start node in the outbox");
 
         var run = await _store.FindAsync(runId, CancellationToken.None);
         run!.CurrentNode.Should().Be("done", "version 1's 'implement' routes to 'done'; landing on 'audit' would mean the run was silently moved onto version 2's graph");
@@ -126,7 +127,7 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
         var runId = await _store.StartAsync("pipeline", 7, "c-missing", "implement", CancellationToken.None);
         var dispatcher = NewDispatcher();
 
-        var dispatch = async () => await dispatcher.DispatchAsync(new WorkflowDispatchMessage(runId, 1, "implement"), CancellationToken.None);
+        var dispatch = async () => await OutboxDrain.DispatchNextAsync(pg.ConnectionString, dispatcher);
 
         await dispatch.Should().NotThrowAsync("an unresolvable definition is a node failure, not an infrastructure failure the outbox should retry");
 
@@ -156,12 +157,12 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
         (await _sync.SyncAsync(CancellationToken.None)).IsSuccess.Should().BeTrue();
 
         var runId = await _store.StartAsync("gated", 1, "c-gate-resume", "start", CancellationToken.None);
-        var dispatcher = NewDispatcher();
 
-        // Two dispatches to park the gate: the first completes 'start' and moves the run to 'gate'; the second,
-        // delivered for 'gate' itself, is what Advance parks at Awaiting.
-        await dispatcher.DispatchAsync(new WorkflowDispatchMessage(runId, 1, "start"), CancellationToken.None);
-        await dispatcher.DispatchAsync(new WorkflowDispatchMessage(runId, 2, "gate"), CancellationToken.None);
+        // Two dispatches park the gate: the first completes 'start' and moves the run to 'gate'; the second,
+        // enqueued by that very transition, is what Advance parks at Awaiting. Both come off the outbox — the
+        // drain stops on its own once the gate is parked, because a parked run enqueues nothing further.
+        var dispatched = await OutboxDrain.DrainAsync(pg.ConnectionString, NewDispatcher());
+        dispatched.Should().Be(2, "StartAsync enqueues 'start', and completing 'start' enqueues 'gate'");
 
         var parked = await _store.FindAsync(runId, CancellationToken.None);
         parked!.Status.Should().Be(WorkflowStatus.Awaiting, "the run must be parked before resume is meaningful. Error: {0}", parked.LastError ?? "<none>");

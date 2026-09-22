@@ -12,10 +12,11 @@ namespace Thalos.Tests.Workflow;
 /// <see cref="FakeSubagentRunner"/> (no real agent dispatch) throughout — Task 4's own suite already proves the
 /// real store's transactional behaviour, and dispatching a real subagent is explicitly out of scope here.
 /// </summary>
-public sealed class ConstrainedOutcomeTests
+public sealed class ConstrainedOutcomeTests : IAsyncLifetime
 {
     private static readonly AgentId ReviewerId = AgentId.New();
     private static readonly AgentId StarterId = AgentId.New();
+    private static readonly AgentId RelayerId = AgentId.New();
 
     /// <summary>
     /// <c>review</c> declares a closed outcome set and branches on it; <c>rework</c>/<c>done</c> are plain
@@ -63,11 +64,35 @@ public sealed class ConstrainedOutcomeTests
           done: { terminal: succeeded }
         """;
 
+    /// <summary>
+    /// The loop-back primitive as an executable graph: <c>work</c> is capped at three entries and always branches
+    /// to <c>relay</c>, which routes straight back to <c>work</c>. Two task nodes, not one task node and a bare
+    /// relay, because <see cref="ProcessValidator"/> requires every node to be exactly one of task, gate or
+    /// terminal — there is no pass-through node kind, so the cheapest possible loop still pays for a second
+    /// agent turn per lap. <c>relay</c> declares no outcomes, so its turn reports nothing and its unconditional
+    /// <c>next</c> is what re-enters the capped node and triggers the cap check.
+    /// </summary>
+    private const string CappedLoopDefYaml = """
+        process: capped-loop
+        version: 1
+        nodes:
+          work:
+            agent: reviewer
+            skill: code-review
+            outcomes: [again, finish]
+            branch: { again: relay, finish: shipped }
+            maxVisits: 3
+            onExceeded: exhausted
+          relay: { agent: relayer, skill: kick-off, next: work }
+          shipped: { terminal: succeeded }
+          exhausted: { terminal: failed }
+        """;
+
     private readonly FakeWorkflowStore _store;
     private readonly InMemoryProcessDefinitionStore _definitions;
     private readonly FakeSubagentRunner _runner;
     private readonly WorkflowNodeDispatcher _dispatcher;
-    private readonly Guid _runId = Guid.NewGuid();
+    private Guid _runId;
 
     public ConstrainedOutcomeTests()
     {
@@ -77,29 +102,64 @@ public sealed class ConstrainedOutcomeTests
         _definitions = new InMemoryProcessDefinitionStore()
             .Seed(DefYaml)
             .Seed(GateDefYaml)
-            .Seed(UnknownAgentDefYaml);
+            .Seed(UnknownAgentDefYaml)
+            .Seed(CappedLoopDefYaml);
 
         var resolver = new FakeWorkflowReferenceResolver(new Dictionary<string, AgentId>(StringComparer.Ordinal)
         {
             ["reviewer"] = ReviewerId,
             ["starter"] = StarterId,
+            ["relayer"] = RelayerId,
         });
 
         _store = new FakeWorkflowStore(_definitions);
         _runner = new FakeSubagentRunner();
         _dispatcher = new WorkflowNodeDispatcher(_store, _runner, resolver, _definitions, _ => new FakeSecurityContext("workflow-engine"));
+    }
 
-        _store.Seed(new WorkflowRun
+    /// <summary>
+    /// Starts the shared <c>gate-check</c> run through <see cref="IWorkflowStore.StartAsync"/> rather than seeding
+    /// a row directly, so its first dispatch message is one the store produced. No test here builds that message
+    /// itself: they take it off <see cref="FakeWorkflowStore.TakeNext"/>, which is the only shape in which a store
+    /// that stopped enqueuing would make these tests visibly do nothing.
+    /// </summary>
+    public async Task InitializeAsync() =>
+        _runId = await _store.StartAsync("gate-check", 1, "c-review", "review", CancellationToken.None);
+
+    public Task DisposeAsync() => Task.CompletedTask;
+
+    /// <summary>
+    /// Takes the next message the store enqueued and dispatches it. Returns false when the outbox is empty —
+    /// which, for a run that has parked or terminated, is the correct end of the line.
+    /// </summary>
+    private async Task<bool> DispatchNextAsync(Guid? runId = null)
+    {
+        if (_store.TakeNext(runId ?? _runId) is not { } message)
         {
-            Id = _runId,
-            Process = "gate-check",
-            ProcessVersion = 1,
-            CurrentNode = "review",
-            CurrentSeq = 1,
-            Status = WorkflowStatus.Running,
-            AwaitingSignal = null,
-            Visits = new Dictionary<string, int>(StringComparer.Ordinal) { ["review"] = 1 },
-        });
+            return false;
+        }
+
+        await _dispatcher.DispatchAsync(message, CancellationToken.None);
+        return true;
+    }
+
+    /// <summary>
+    /// Dispatches until the outbox empties — which happens exactly when the run parks at a gate or reaches a
+    /// terminal status, since those are the transitions that enqueue nothing. <paramref name="maxMessages"/> turns
+    /// a genuinely non-terminating process into a loud failure instead of a hung test run.
+    /// </summary>
+    private async Task<int> DrainAsync(Guid? runId = null, int maxMessages = 32)
+    {
+        var dispatched = 0;
+        while (await DispatchNextAsync(runId))
+        {
+            if (++dispatched > maxMessages)
+            {
+                throw new InvalidOperationException($"Dispatched more than {maxMessages} messages without the outbox emptying — the process under test does not terminate.");
+            }
+        }
+
+        return dispatched;
     }
 
     /// <summary>
@@ -157,7 +217,7 @@ public sealed class ConstrainedOutcomeTests
     {
         var captured = CaptureAgentInvocation();
 
-        await _dispatcher.DispatchAsync(new WorkflowDispatchMessage(_runId, 1, "review"), CancellationToken.None);
+        await DispatchNextAsync();
 
         captured.OutcomeToolSchema.Should().NotBeNull("the outcome must be a tool call, not parsed prose");
         captured.OutcomeToolSchema!.AllowedValues.Should().BeEquivalentTo(["approved", "rejected"]);
@@ -168,7 +228,7 @@ public sealed class ConstrainedOutcomeTests
     {
         GivenAgentReturns("approved, with some concerns");
 
-        await _dispatcher.DispatchAsync(new WorkflowDispatchMessage(_runId, 1, "review"), CancellationToken.None);
+        await DispatchNextAsync();
 
         var run = await _store.FindAsync(_runId, CancellationToken.None);
         run!.Status.Should().Be(WorkflowStatus.Failed);
@@ -186,46 +246,29 @@ public sealed class ConstrainedOutcomeTests
     [Fact]
     public async Task A_gate_arrival_parks_the_run_at_awaiting_instead_of_failing()
     {
-        var gateRunId = Guid.NewGuid();
-        _store.Seed(new WorkflowRun
-        {
-            Id = gateRunId,
-            Process = "approval-flow",
-            ProcessVersion = 1,
-            CurrentNode = "gate",
-            CurrentSeq = 1,
-            Status = WorkflowStatus.Running,
-            AwaitingSignal = null,
-            Visits = new Dictionary<string, int>(StringComparer.Ordinal) { ["start"] = 1, ["gate"] = 1 },
-        });
+        GivenAgentReturns("anything");  // 'start' declares no outcomes, so the reported value is ignored
+        var gateRunId = await _store.StartAsync("approval-flow", 1, "c-gate", "start", CancellationToken.None);
 
-        await _dispatcher.DispatchAsync(new WorkflowDispatchMessage(gateRunId, 1, "gate"), CancellationToken.None);
+        // Two messages, both produced by the store: StartAsync's dispatch for 'start', and the one completing
+        // 'start' enqueues for 'gate'. The drain stops on its own once the gate parks, because a transition to
+        // Awaiting enqueues nothing.
+        var dispatched = await DrainAsync(gateRunId);
 
+        dispatched.Should().Be(2, "StartAsync enqueues 'start', and completing 'start' enqueues 'gate'");
         var run = await _store.FindAsync(gateRunId, CancellationToken.None);
         run!.Status.Should().Be(WorkflowStatus.Awaiting);
         run.AwaitingSignal.Should().Be("human_approval");
         run.CurrentNode.Should().Be("gate");
-        _runner.CallCount.Should().Be(0, "a gate has no agent to run — it parks on Advance's own verdict alone");
+        _runner.CallCount.Should().Be(1, "'start' runs its agent; the gate has none and parks on Advance's own verdict alone");
     }
 
     /// <summary>Important fix: <c>agent:</c> is a human-authored name resolved through <see cref="IWorkflowReferenceResolver"/>, not a raw <see cref="AgentId"/>.</summary>
     [Fact]
     public async Task An_unresolvable_agent_name_fails_the_node_instead_of_throwing()
     {
-        var badRunId = Guid.NewGuid();
-        _store.Seed(new WorkflowRun
-        {
-            Id = badRunId,
-            Process = "bad-agent",
-            ProcessVersion = 1,
-            CurrentNode = "only",
-            CurrentSeq = 1,
-            Status = WorkflowStatus.Running,
-            AwaitingSignal = null,
-            Visits = new Dictionary<string, int>(StringComparer.Ordinal) { ["only"] = 1 },
-        });
+        var badRunId = await _store.StartAsync("bad-agent", 1, "c-bad-agent", "only", CancellationToken.None);
 
-        await _dispatcher.DispatchAsync(new WorkflowDispatchMessage(badRunId, 1, "only"), CancellationToken.None);
+        (await DispatchNextAsync(badRunId)).Should().BeTrue("StartAsync must enqueue the start node's dispatch");
 
         var run = await _store.FindAsync(badRunId, CancellationToken.None);
         run!.Status.Should().Be(WorkflowStatus.Failed);
@@ -237,7 +280,11 @@ public sealed class ConstrainedOutcomeTests
     [Fact]
     public async Task A_message_naming_the_wrong_node_fails_the_run_instead_of_acting_on_it()
     {
-        await _dispatcher.DispatchAsync(new WorkflowDispatchMessage(_runId, 1, "done"), CancellationToken.None);
+        // The real first message, corrupted in exactly one field — the node name — so the run's own seq still
+        // matches and the node-mismatch guard, not the seq guard, is what has to catch this.
+        var corrupted = _store.TakeNext(_runId)! with { Node = "done" };
+
+        await _dispatcher.DispatchAsync(corrupted, CancellationToken.None);
 
         var run = await _store.FindAsync(_runId, CancellationToken.None);
         run!.Status.Should().Be(WorkflowStatus.Failed);
@@ -251,7 +298,7 @@ public sealed class ConstrainedOutcomeTests
     {
         GivenAgentReturnsDisagreeingOutcomes("approved", "rejected");
 
-        await _dispatcher.DispatchAsync(new WorkflowDispatchMessage(_runId, 1, "review"), CancellationToken.None);
+        await DispatchNextAsync();
 
         var run = await _store.FindAsync(_runId, CancellationToken.None);
         run!.Status.Should().Be(WorkflowStatus.Failed);
@@ -264,25 +311,11 @@ public sealed class ConstrainedOutcomeTests
     {
         GivenAgentNeverReportsAnOutcome();
 
-        await _dispatcher.DispatchAsync(new WorkflowDispatchMessage(_runId, 1, "review"), CancellationToken.None);
+        await DispatchNextAsync();
 
         var run = await _store.FindAsync(_runId, CancellationToken.None);
         run!.Status.Should().Be(WorkflowStatus.Failed);
         run.LastError.Should().Contain("review").And.Contain("without calling").And.Contain(WorkflowNodeDispatcher.OutcomeToolName);
-    }
-
-    /// <summary>
-    /// Dispatches whatever node <see cref="_runId"/> is currently positioned at, reading its live
-    /// <c>CurrentSeq</c>/<c>CurrentNode</c> rather than a hard-coded one. A branch/next edge that lands on a
-    /// terminal node reports <see cref="WorkflowStatus.Running"/>, not the terminal status itself — the same
-    /// as production, where the store enqueues a fresh dispatch for that arrival — so reaching an actual
-    /// terminal <see cref="WorkflowStatus"/> takes two calls to this helper: one for <c>review</c>, one for
-    /// whichever terminal node it branched to.
-    /// </summary>
-    private async Task DispatchCurrentNodeAsync()
-    {
-        var run = await _store.FindAsync(_runId, CancellationToken.None);
-        await _dispatcher.DispatchAsync(new WorkflowDispatchMessage(_runId, run!.CurrentSeq, run.CurrentNode), CancellationToken.None);
     }
 
     [Fact]
@@ -290,16 +323,17 @@ public sealed class ConstrainedOutcomeTests
     {
         GivenAgentReturns("approved");
 
-        await DispatchCurrentNodeAsync(); // review -[approved]-> done (Running)
+        await DispatchNextAsync(); // review -[approved]-> done (Running), which enqueues 'done'
         var afterBranch = await _store.FindAsync(_runId, CancellationToken.None);
         afterBranch!.CurrentNode.Should().Be("done");
         afterBranch.Status.Should().Be(WorkflowStatus.Running);
 
-        await DispatchCurrentNodeAsync(); // done has no agent — Advance alone settles its terminal status
+        await DispatchNextAsync(); // done has no agent — Advance alone settles its terminal status
         var run = await _store.FindAsync(_runId, CancellationToken.None);
         run!.CurrentNode.Should().Be("done");
         run.Status.Should().Be(WorkflowStatus.Succeeded);
         _runner.CallCount.Should().Be(1, "the terminal node itself never runs an agent turn");
+        _store.OutboxCount.Should().Be(0, "a terminal transition enqueues nothing");
     }
 
     [Fact]
@@ -307,13 +341,49 @@ public sealed class ConstrainedOutcomeTests
     {
         GivenAgentReturns("rejected");
 
-        await DispatchCurrentNodeAsync(); // review -[rejected]-> rework (Running)
-        await DispatchCurrentNodeAsync(); // rework has no agent — Advance alone settles its terminal status
+        var dispatched = await DrainAsync(); // review -[rejected]-> rework, then rework settles Failed
 
+        dispatched.Should().Be(2, "one dispatch for 'review' and one for the 'rework' arrival it enqueued");
         var run = await _store.FindAsync(_runId, CancellationToken.None);
         run!.CurrentNode.Should().Be("rework");
         run.Status.Should().Be(WorkflowStatus.Failed);
         _runner.CallCount.Should().Be(1, "the terminal node itself never runs an agent turn");
+    }
+
+    /// <summary>
+    /// The loop-back primitive driven end to end, with the counts coming from the store's own visit increments
+    /// rather than from a hand-built <see cref="WorkflowRun.Visits"/> dictionary. Every other cap test constructs
+    /// the visit count it wants and calls <see cref="WorkflowInterpreter.Advance"/> once, which proves the
+    /// comparison and nothing about whether a run actually going round a loop produces those counts — and this is
+    /// the primitive most able to burn money, so "runs exactly three times" needs to be a fact about the system,
+    /// not about a trace someone wrote down. Turns red if the store stops incrementing on entry, if
+    /// <c>ApplyCap</c> stops checking the resolved target, or if the comparison drifts by one in either
+    /// direction: a cap that fired a lap early would leave <c>reviewerTurns</c> at two, one late at four.
+    /// </summary>
+    [Fact]
+    public async Task A_capped_loop_runs_its_node_exactly_maxVisits_times_and_then_takes_onExceeded()
+    {
+        var reviewerTurns = 0;
+        _runner.NextResult = request =>
+        {
+            if (request.AgentId == ReviewerId)
+            {
+                reviewerTurns++;
+            }
+
+            // 'again' is the looping branch; 'relay' declares no outcomes, so the value is ignored on its turn.
+            return Result<AgentTurnResult, AgentError>.Success(TurnResultReporting("again"));
+        };
+
+        var loopRunId = await _store.StartAsync("capped-loop", 1, "c-loop", "work", CancellationToken.None);
+
+        await DrainAsync(loopRunId);
+
+        reviewerTurns.Should().Be(3, "maxVisits: 3 bounds entries to 'work' at three, so its agent runs three times and never a fourth");
+        var run = await _store.FindAsync(loopRunId, CancellationToken.None);
+        run!.CurrentNode.Should().Be("exhausted", "the fourth entry is intercepted and redirected to the cap's onExceeded target");
+        run.Status.Should().Be(WorkflowStatus.Failed, "'exhausted' is a terminal: failed node");
+        run.Visits["work"].Should().Be(3, "the store's own increments are what the cap counted — not a value this test supplied");
     }
 
     /// <summary>
@@ -325,14 +395,18 @@ public sealed class ConstrainedOutcomeTests
     public async Task A_redelivered_message_with_a_stale_seq_is_dropped_silently()
     {
         GivenAgentReturns("approved");
-        await DispatchCurrentNodeAsync(); // review -[approved]-> done
-        await DispatchCurrentNodeAsync(); // done settles Succeeded
+
+        // Keep the store's own first message so it can be re-delivered verbatim below. Dispatching a copy of a
+        // message the store really produced is what makes this a redelivery rather than a hand-made stand-in.
+        var firstMessage = _store.TakeNext(_runId)!;
+        await _dispatcher.DispatchAsync(firstMessage, CancellationToken.None); // review -[approved]-> done
+        await DispatchNextAsync();                                             // done settles Succeeded
         var completedRun = await _store.FindAsync(_runId, CancellationToken.None);
         completedRun!.Status.Should().Be(WorkflowStatus.Succeeded);
         _runner.CallCount.Should().Be(1);
 
-        // Redelivery of the original message (seq 1, node "review") after the run has long since moved past it.
-        await _dispatcher.DispatchAsync(new WorkflowDispatchMessage(_runId, 1, "review"), CancellationToken.None);
+        // Redelivery of that same first message after the run has long since moved past it.
+        await _dispatcher.DispatchAsync(firstMessage, CancellationToken.None);
 
         _runner.CallCount.Should().Be(1, "a stale seq must be dropped before the subagent runner is ever called again");
         var run = await _store.FindAsync(_runId, CancellationToken.None);
@@ -350,7 +424,7 @@ public sealed class ConstrainedOutcomeTests
     public async Task Dispatching_the_same_message_twice_reaches_the_subagent_runner_only_once()
     {
         GivenAgentReturns("approved");
-        var message = new WorkflowDispatchMessage(_runId, 1, "review");
+        var message = _store.TakeNext(_runId)!;
 
         await _dispatcher.DispatchAsync(message, CancellationToken.None);
         await _dispatcher.DispatchAsync(message, CancellationToken.None);
@@ -368,7 +442,7 @@ public sealed class ConstrainedOutcomeTests
     {
         _runner.NextResult = _ => Result<AgentTurnResult, AgentError>.Failure(AgentError.ProviderError("model unavailable"));
 
-        await _dispatcher.DispatchAsync(new WorkflowDispatchMessage(_runId, 1, "review"), CancellationToken.None);
+        await DispatchNextAsync();
 
         var run = await _store.FindAsync(_runId, CancellationToken.None);
         run!.Status.Should().Be(WorkflowStatus.Failed);

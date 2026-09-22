@@ -9,10 +9,12 @@ namespace Thalos.Workflow.Orm;
 
 /// <summary>
 /// PostgreSQL-backed <see cref="IWorkflowStore"/>: raw ADO.NET (no EF Core) over <c>workflow_run</c> and the
-/// append-only <c>workflow_run_event</c>, with the post-transition dispatch message enqueued through
+/// append-only <c>workflow_run_event</c>, with each dispatch message enqueued through
 /// <c>ZeroAlloc.Outbox.Orm.OrmOutboxStore</c> in the same <see cref="System.Data.Common.DbTransaction"/> as the
-/// event append and the run update — one commit or none, so a run never records a transition without the work
-/// behind its new node also scheduled, and never schedules that work without the transition having landed.
+/// event append and the run write — one commit or none, so a run never records a position without the work
+/// behind that node also scheduled, and never schedules that work without the write having landed. That holds
+/// from the very first node: <see cref="StartAsync"/> enqueues its start node's dispatch on the transaction that
+/// inserts the run, so there is no state in which a started run exists with an empty outbox.
 /// </summary>
 /// <remarks>
 /// Concurrency is optimistic on PostgreSQL's built-in <c>xmin</c> system column, not a hand-rolled version
@@ -83,32 +85,14 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         await using var tx = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
 
         var id = Guid.NewGuid();
-        var visitsJson = JsonSerializer.Serialize(new Dictionary<string, int>(StringComparer.Ordinal) { [startNode] = 1 });
-
-        int inserted;
-        await using (var insert = connection.CreateCommand())
-        {
-            insert.Transaction = tx;
-            insert.CommandText = """
-                INSERT INTO workflow_run (id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error)
-                VALUES (@id, @process, @version, @correlationKey, @currentNode, @currentSeq, @status, NULL, @visits::jsonb, '{}'::jsonb, NULL)
-                ON CONFLICT (correlation_key) DO NOTHING
-                """;
-            insert.Parameters.AddWithValue("id", id);
-            insert.Parameters.AddWithValue("process", process);
-            insert.Parameters.AddWithValue("version", version);
-            insert.Parameters.AddWithValue("correlationKey", correlationKey);
-            insert.Parameters.AddWithValue("currentNode", startNode);
-            insert.Parameters.AddWithValue("currentSeq", InitialCurrentSeq);
-            insert.Parameters.AddWithValue("status", nameof(WorkflowStatus.Running));
-            insert.Parameters.AddWithValue("visits", visitsJson);
-            inserted = await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
-        }
+        var inserted = await InsertRunAsync(connection, tx, id, process, version, correlationKey, startNode, ct).ConfigureAwait(false);
 
         if (inserted == 0)
         {
-            // Idempotent lookup: a run for this correlation key is already in flight. Return its id rather
-            // than create a duplicate — no event is appended, because no new run was entered.
+            // Idempotent lookup: a run for this correlation key already exists. Return its id rather than
+            // create a duplicate — no event is appended, because no new run was entered, and no dispatch is
+            // enqueued either: the run this returns is at whatever seq its own progress has reached, so a
+            // message minted here would be a second delivery for a node something else already scheduled.
             await using var select = connection.CreateCommand();
             select.Transaction = tx;
             select.CommandText = "SELECT id FROM workflow_run WHERE correlation_key = @correlationKey";
@@ -125,8 +109,45 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             outcome: null, variables: null, error: null,
             kind: nameof(WorkflowEventKind.Entered), ct).ConfigureAwait(false);
 
+        // The start node's own dispatch, on this same transaction. Without it a run created through this API
+        // reaches Running with nothing in the outbox and nothing that will ever dispatch its start node — it
+        // would simply sit there until a stranded-run sweep terminated it. Enqueuing here rather than leaving
+        // it to a caller means the run row, the seeded event and the first dispatch all commit or all roll
+        // back: there is no window in which a run exists without the work behind its first node scheduled, and
+        // none in which that work is scheduled against a run that was never written.
+        await EnqueueDispatchAsync(connection, tx, id, InitialCurrentSeq, startNode, ct).ConfigureAwait(false);
+
         await tx.CommitAsync(ct).ConfigureAwait(false);
         return id;
+    }
+
+    /// <summary>
+    /// <see cref="StartAsync"/>'s <c>INSERT</c>, split out only to keep that method inside the analyzer's length
+    /// limit. Returns the number of rows inserted: one for a genuinely new run, zero when
+    /// <c>ON CONFLICT (correlation_key) DO NOTHING</c> found the key already taken — which is how
+    /// <see cref="StartAsync"/> tells the two paths apart without a separate probing read.
+    /// </summary>
+    private static async Task<int> InsertRunAsync(
+        NpgsqlConnection connection, NpgsqlTransaction tx, Guid id,
+        string process, int version, string correlationKey, string startNode, CancellationToken ct)
+    {
+        await using var insert = connection.CreateCommand();
+        insert.Transaction = tx;
+        insert.CommandText = """
+            INSERT INTO workflow_run (id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error)
+            VALUES (@id, @process, @version, @correlationKey, @currentNode, @currentSeq, @status, NULL, @visits::jsonb, '{}'::jsonb, NULL)
+            ON CONFLICT (correlation_key) DO NOTHING
+            """;
+        insert.Parameters.AddWithValue("id", id);
+        insert.Parameters.AddWithValue("process", process);
+        insert.Parameters.AddWithValue("version", version);
+        insert.Parameters.AddWithValue("correlationKey", correlationKey);
+        insert.Parameters.AddWithValue("currentNode", startNode);
+        insert.Parameters.AddWithValue("currentSeq", InitialCurrentSeq);
+        insert.Parameters.AddWithValue("status", nameof(WorkflowStatus.Running));
+        insert.Parameters.AddWithValue("visits", JsonSerializer.Serialize(new Dictionary<string, int>(StringComparer.Ordinal) { [startNode] = 1 }));
+
+        return await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
 
     /// <inheritdoc/>
@@ -427,9 +448,13 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         // message was supposed to advance, and might now never will because that message dead-lettered — is a
         // stranded-run candidate. ix_workflow_run_updated_at_running (migration 1003) is a partial index over
         // exactly this predicate, so this filter and the ORDER BY below are backed by one index scan.
-        cmd.CommandText = SelectRunSql + " WHERE status = @running AND updated_at < @threshold ORDER BY updated_at ASC LIMIT @limit";
+        // The threshold is computed from now() — the server clock — not from DateTimeOffset.UtcNow. updated_at
+        // is written by the server's own now(), so comparing it against a client-computed instant subtracts two
+        // readings of different clocks: an app host running a few minutes fast would find healthy, just-updated
+        // runs older than its own threshold and terminate them. Only the interval crosses the wire.
+        cmd.CommandText = SelectRunSql + " WHERE status = @running AND updated_at < now() - @olderThan::interval ORDER BY updated_at ASC LIMIT @limit";
         cmd.Parameters.AddWithValue("running", nameof(WorkflowStatus.Running));
-        cmd.Parameters.AddWithValue("threshold", DateTimeOffset.UtcNow - olderThan);
+        cmd.Parameters.AddWithValue("olderThan", olderThan);
         cmd.Parameters.AddWithValue("limit", MaxStrandedResults);
 
         var results = new List<WorkflowRun>();

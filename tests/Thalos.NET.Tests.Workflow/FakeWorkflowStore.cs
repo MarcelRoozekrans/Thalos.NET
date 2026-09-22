@@ -8,12 +8,44 @@ namespace Thalos.Tests.Workflow;
 /// transaction, concurrency and durability behaviour is already proven by Task 4's own suite against a real
 /// PostgreSQL instance; this fake exists only so <see cref="WorkflowNodeDispatcher"/> can be tested in a unit
 /// project with no Postgres and no Docker. It reproduces the parts of <see cref="IWorkflowStore"/>'s documented
-/// contract the dispatcher tests actually exercise — the seq-checked completion, the visits-on-entry rule, and
-/// idempotent terminal calls — not the full ORM implementation's atomicity guarantees.
+/// contract the dispatcher tests actually exercise — the seq-checked completion, the visits-on-entry rule, the
+/// dispatch enqueued for every transition that leaves a run Running (including the one <c>StartAsync</c> owes its
+/// start node), and idempotent terminal calls — not the full ORM implementation's atomicity guarantees.
 /// </summary>
+/// <remarks>
+/// The in-memory outbox below is a list of queued messages and nothing more: no retry, no backoff, no
+/// dead-lettering, no redelivery of its own. It exists so a test can drive a run the way production does — take
+/// the message the store actually enqueued and hand it to the dispatcher — instead of constructing that message
+/// itself. A hand-built first message is precisely what let a store that never enqueued one look like it worked.
+/// </remarks>
 internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : IWorkflowStore
 {
     private readonly Dictionary<Guid, WorkflowRun> _runs = [];
+    private readonly List<WorkflowDispatchMessage> _outbox = [];
+
+    /// <summary>How many dispatch messages are waiting to be taken, across every run.</summary>
+    public int OutboxCount => _outbox.Count;
+
+    /// <summary>
+    /// Takes the oldest queued dispatch message for <paramref name="runId"/>, or <see langword="null"/> when that
+    /// run has none waiting. One store holds every test's runs, so taking is filtered by run rather than strictly
+    /// FIFO across all of them — a real outbox consumer sees one shared table too, and the run id is exactly what
+    /// tells one run's work from another's.
+    /// </summary>
+    public WorkflowDispatchMessage? TakeNext(Guid runId)
+    {
+        for (var i = 0; i < _outbox.Count; i++)
+        {
+            if (_outbox[i].RunId == runId)
+            {
+                var message = _outbox[i];
+                _outbox.RemoveAt(i);
+                return message;
+            }
+        }
+
+        return null;
+    }
 
     public ValueTask<Guid> StartAsync(string process, int version, string correlationKey, string startNode, CancellationToken ct)
     {
@@ -30,6 +62,9 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
             Visits = new Dictionary<string, int>(StringComparer.Ordinal) { [startNode] = 1 },
         };
 
+        // The start node's own dispatch, exactly as OrmWorkflowStore.StartAsync enqueues it. A fake that skipped
+        // this would put these tests back to supplying a message production never produced.
+        _outbox.Add(new WorkflowDispatchMessage(id, 1, startNode));
         return ValueTask.FromResult(id);
     }
 
@@ -54,6 +89,7 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
         }
 
         _runs[runId] = Apply(run, seq, transition, result.Variables);
+        EnqueueIfRunning(_runs[runId], transition);
         return ValueTask.CompletedTask;
     }
 
@@ -90,7 +126,22 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
         }
 
         _runs[runId] = Apply(run, run.CurrentSeq, transition.Value, variables);
+        EnqueueIfRunning(_runs[runId], transition.Value);
         return Result.Success();
+    }
+
+    /// <summary>
+    /// Mirrors <c>OrmWorkflowStore.ApplyTransitionAsync</c>'s enqueue condition: a transition that leaves the run
+    /// <see cref="WorkflowStatus.Running"/> schedules the node it landed on, and one that parks or terminates
+    /// schedules nothing. <paramref name="updated"/> is read for the post-transition seq rather than recomputing
+    /// it, so the queued message always names the seq a dispatcher's own guard will compare against.
+    /// </summary>
+    private void EnqueueIfRunning(WorkflowRun updated, WorkflowTransition transition)
+    {
+        if (transition.NextStatus == WorkflowStatus.Running)
+        {
+            _outbox.Add(new WorkflowDispatchMessage(updated.Id, updated.CurrentSeq, transition.NextNode));
+        }
     }
 
     public ValueTask FailAsync(Guid runId, string errorMessage, CancellationToken ct)
@@ -132,8 +183,10 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
     public ValueTask<IReadOnlyList<WorkflowRun>> FindStrandedAsync(TimeSpan olderThan, CancellationToken ct) =>
         ValueTask.FromResult<IReadOnlyList<WorkflowRun>>([]);
 
-    /// <summary>Seeds a run directly, bypassing <see cref="StartAsync"/>, for a test that wants full control over its starting shape.</summary>
-    public void Seed(WorkflowRun run) => _runs[run.Id] = run;
+    // A Seed(WorkflowRun) affordance used to live here, letting a test place a run at an arbitrary node with an
+    // arbitrary visit count. It is gone deliberately: every run in these tests now starts through StartAsync and
+    // reaches its node by being dispatched, which is what makes the visit counts the cap test reads the store's
+    // own work rather than a value the test wrote down.
 
     private static WorkflowRun Apply(WorkflowRun run, long seq, WorkflowTransition transition, IReadOnlyDictionary<string, object?>? variables)
     {

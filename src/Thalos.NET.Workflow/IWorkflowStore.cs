@@ -18,6 +18,25 @@ public interface IWorkflowStore
     /// as one entry — the run has entered it by virtue of starting there — so a start node that also carries a
     /// <c>maxVisits</c> cap is bounded correctly from its very first run, not given one free, uncounted entry.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>A started run is a dispatched run.</b> An implementation must schedule <paramref name="startNode"/>'s
+    /// own execution as part of this call, in the same unit of work that writes the run: a caller does not — and
+    /// must not have to — mint the first <see cref="WorkflowDispatchMessage"/> itself. An implementation that
+    /// only writes the row leaves every run it creates at <see cref="WorkflowStatus.Running"/> with nothing that
+    /// will ever advance it, and <see cref="WorkflowRunReconciler.SweepAsync"/> will eventually terminate each
+    /// one as stranded.
+    /// </para>
+    /// <para>
+    /// <b><paramref name="correlationKey"/> is unique across every process and for all time.</b> The key space
+    /// is global: it is not scoped per <paramref name="process"/>, and it is not released when a run reaches a
+    /// terminal status. A second call with a key some earlier run already used returns <em>that</em> run's id —
+    /// whatever process and version it belonged to, and whether it is still running, succeeded, failed or
+    /// cancelled months ago — and starts nothing. A caller that wants a fresh run must supply a key nothing has
+    /// ever used, so keys are worth minting with the attempt in them (a run id, a timestamp, an attempt counter)
+    /// rather than from a business identity that recurs.
+    /// </para>
+    /// </remarks>
     ValueTask<Guid> StartAsync(string process, int version, string correlationKey, string startNode, CancellationToken ct);
 
     /// <summary>Finds a run by id, or <see langword="null"/> if none exists.</summary>

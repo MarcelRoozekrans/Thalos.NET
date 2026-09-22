@@ -23,7 +23,13 @@ CREATE TABLE workflow_run
 );
 
 -- StartAsync is keyed for idempotent lookup by correlation_key: a second StartAsync call for a
--- correlation_key already in flight returns the existing run instead of creating a duplicate.
+-- correlation_key this table already holds returns that existing run's id instead of creating a duplicate.
+--
+-- This index carries no "process" column and no status predicate, so the key space it enforces is global and
+-- permanent: a key is unique across every process, not per process, and a run reaching Succeeded/Failed/
+-- Cancelled never releases its key. A second StartAsync for a key a run used a month ago therefore returns
+-- that terminal run's id — for whatever process it belonged to — and starts nothing at all. Callers must mint
+-- keys that include the attempt, not a recurring business identity.
 CREATE UNIQUE INDEX ix_workflow_run_correlation_key ON workflow_run (correlation_key);
 
 -- Append-only: no UPDATE statement against this table is ever written anywhere in

@@ -1,5 +1,6 @@
 using System.Data.Async;
 using System.Data.Common;
+using System.Text.Json;
 using Npgsql;
 using Thalos.Workflow;
 using Thalos.Workflow.Orm;
@@ -38,7 +39,8 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
 
         (await ScalarAsync<string>("SELECT current_node FROM workflow_run WHERE id = @id", runId)).Should().Be("review");
         (await CountAsync("SELECT count(*) FROM workflow_run_event WHERE run_id = @id", runId)).Should().Be(2);
-        (await CountAsync("SELECT count(*) FROM outboxmessages", null)).Should().Be(1);
+        // Two: StartAsync's dispatch for 'implement', and this completion's dispatch for 'review'.
+        (await CountAsync("SELECT count(*) FROM outboxmessages", null)).Should().Be(2);
     }
 
     [Fact]
@@ -53,7 +55,10 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         await act.Should().ThrowAsync<Exception>();
         (await ScalarAsync<string>("SELECT current_node FROM workflow_run WHERE id = @id", runId)).Should().Be("implement");
         (await CountAsync("SELECT count(*) FROM workflow_run_event WHERE run_id = @id", runId)).Should().Be(1);
-        (await CountAsync("SELECT count(*) FROM outboxmessages", null)).Should().Be(0);
+        // One, not zero: StartAsync's own dispatch for 'implement' committed on its own transaction and is
+        // untouched by this rollback. The property under test is that the failed completion added nothing —
+        // a non-transactional enqueue would leave 2 here.
+        (await CountAsync("SELECT count(*) FROM outboxmessages", null)).Should().Be(1);
     }
 
     // --- Step 4: optimistic concurrency on xmin ------------------------------------------------------------
@@ -167,6 +172,28 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         run!.Variables.Should().BeEmpty();
     }
 
+    /// <summary>
+    /// A bare <see cref="OrmWorkflowStore.StartAsync"/> — nothing else called, nothing hand-constructed — must
+    /// leave exactly one dispatch message in the outbox, naming the run's start node at its initial seq. Without
+    /// it a run created through the shipped public API sits at <see cref="WorkflowStatus.Running"/> with an empty
+    /// outbox and nothing that will ever dispatch its start node; the reconciler then sweeps it as stranded.
+    /// Every other suite in this repository hid that by constructing the first
+    /// <see cref="WorkflowDispatchMessage"/> itself after calling <c>StartAsync</c>, which is exactly why this
+    /// assertion is made against the table rather than against a dispatch's observable effect.
+    /// </summary>
+    [Fact]
+    public async Task StartAsync_enqueues_the_first_dispatch_so_a_started_run_can_advance()
+    {
+        var runId = await _store.StartAsync("manufacture", 1, "c-start-dispatch", "implement", CancellationToken.None);
+
+        (await CountAsync("SELECT count(*) FROM outboxmessages", null)).Should().Be(1, "a started run must have its start node's dispatch already enqueued");
+        (await ScalarAsync<string>("SELECT TypeName FROM outboxmessages LIMIT 1", null)).Should().Be(WorkflowDispatch.TypeName);
+
+        var payload = await ScalarAsync<byte[]>("SELECT Payload FROM outboxmessages LIMIT 1", null);
+        var message = JsonSerializer.Deserialize<WorkflowDispatchMessage>(payload!);
+        message.Should().Be(new WorkflowDispatchMessage(runId, 1, "implement"), "the enqueued message must name the run's own start node at the seq StartAsync left it on");
+    }
+
     [Fact]
     public async Task StartAsync_is_idempotent_for_the_same_correlation_key()
     {
@@ -175,6 +202,9 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
 
         second.Should().Be(first);
         (await CountAsync("SELECT count(*) FROM workflow_run WHERE correlation_key = @id", "c-dup")).Should().Be(1);
+        // The idempotent branch must not enqueue: the first call's message is still in flight at a live seq, so a
+        // second one would be a duplicate delivery for a node already scheduled.
+        (await CountAsync("SELECT count(*) FROM outboxmessages", null)).Should().Be(1, "the second call creates no run, so it must schedule no work either");
     }
 
     [Fact]
@@ -512,11 +542,12 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     /// <summary>
     /// Delegates to a real <see cref="OrmOutboxStore"/> — the row genuinely gets written, on the caller's
     /// transaction — and only then throws. A store that enqueued outside the transaction, or that never wrote
-    /// the row at all, would leave <c>outboxmessages</c> empty either way, so
-    /// <c>(await CountAsync("SELECT count(*) FROM outboxmessages", null)).Should().Be(0)</c> after the rollback
-    /// is only capable of catching a real atomicity bug because a row was actually inserted first. A store
-    /// that throws before writing anything (the shape this replaced) makes that assertion true by construction,
-    /// whether or not the real enqueue is transactional.
+    /// the row at all, would leave the failed completion's row count unchanged either way, so the post-rollback
+    /// <c>outboxmessages</c> count assertion is only capable of catching a real atomicity bug because a row was
+    /// actually inserted first. A store that throws before writing anything (the shape this replaced) makes that
+    /// assertion true by construction, whether or not the real enqueue is transactional. The count asserted
+    /// after the rollback is one rather than zero because <c>StartAsync</c> committed its own dispatch on a
+    /// separate, earlier transaction this rollback has no bearing on.
     /// </summary>
     private sealed class ThrowingOutboxStore(IAsyncDbConnection connection) : IOutboxStore
     {
