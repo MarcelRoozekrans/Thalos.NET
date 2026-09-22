@@ -270,6 +270,36 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task FailAsync_is_idempotent_when_called_twice()
+    {
+        var runId = await _store.StartAsync("manufacture", 1, "c-fail-twice", "implement", CancellationToken.None);
+
+        await _store.FailAsync(runId, "boom", CancellationToken.None);
+        // A naive retry would insert a second event at the same (run_id, seq) — the terminal-state guard is
+        // what turns this into a no-op instead of a unique-constraint violation.
+        await _store.FailAsync(runId, "boom again", CancellationToken.None);
+
+        var run = await _store.FindAsync(runId, CancellationToken.None);
+        run!.Status.Should().Be(WorkflowStatus.Failed);
+        run.LastError.Should().Be("boom", "the second call is a no-op — it must not overwrite the first failure's recorded error");
+        (await CountAsync("SELECT count(*) FROM workflow_run_event WHERE run_id = @id", runId)).Should().Be(2, "Entered + the one Failed event — the retry adds nothing");
+    }
+
+    [Fact]
+    public async Task CancelAsync_is_idempotent_on_an_already_failed_run()
+    {
+        var runId = await _store.StartAsync("manufacture", 1, "c-cancel-after-fail", "implement", CancellationToken.None);
+
+        await _store.FailAsync(runId, "boom", CancellationToken.None);
+        await _store.CancelAsync(runId, "operator abort", CancellationToken.None);
+
+        var run = await _store.FindAsync(runId, CancellationToken.None);
+        run!.Status.Should().Be(WorkflowStatus.Failed, "a run that already reached a terminal state stays there — Cancel does not override Fail");
+        run.LastError.Should().Be("boom");
+        (await CountAsync("SELECT count(*) FROM workflow_run_event WHERE run_id = @id", runId)).Should().Be(2, "Entered + Failed — CancelAsync on an already-terminal run adds nothing");
+    }
+
+    [Fact]
     public async Task CancelAsync_marks_the_run_cancelled_and_records_the_reason()
     {
         var runId = await _store.StartAsync("manufacture", 1, "c-cancel", "implement", CancellationToken.None);

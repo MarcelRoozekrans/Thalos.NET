@@ -30,6 +30,18 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
         FROM workflow_run
         """;
 
+    /// <summary>
+    /// <see cref="StartAsync"/>'s <c>current_seq</c> for a brand-new run: it is on its first node's execution.
+    /// Tied to <see cref="SeedEventSeq"/> by a shared symbol, not left as two numeric literals in different
+    /// methods, because a future edit to one without the other would silently reintroduce the tie this pair
+    /// exists to avoid — the seeded "Entered" event and the run's own <c>current_seq</c> deliberately differ by
+    /// one specifically so the first <see cref="CompleteNodeAsync"/> call's own event never collides with it.
+    /// </summary>
+    private const long InitialCurrentSeq = 1;
+
+    /// <summary>The seq <see cref="StartAsync"/> records the seeded "Entered" event at — see <see cref="InitialCurrentSeq"/>.</summary>
+    private const long SeedEventSeq = InitialCurrentSeq - 1;
+
     private readonly WorkflowOrmOptions _options = options ?? throw new ArgumentNullException(nameof(options));
 
     /// <inheritdoc/>
@@ -51,7 +63,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
             insert.Transaction = tx;
             insert.CommandText = """
                 INSERT INTO workflow_run (id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error)
-                VALUES (@id, @process, @version, @correlationKey, @currentNode, 1, @status, NULL, @visits::jsonb, '{}'::jsonb, NULL)
+                VALUES (@id, @process, @version, @correlationKey, @currentNode, @currentSeq, @status, NULL, @visits::jsonb, '{}'::jsonb, NULL)
                 ON CONFLICT (correlation_key) DO NOTHING
                 """;
             insert.Parameters.AddWithValue("id", id);
@@ -59,6 +71,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
             insert.Parameters.AddWithValue("version", version);
             insert.Parameters.AddWithValue("correlationKey", correlationKey);
             insert.Parameters.AddWithValue("currentNode", startNode);
+            insert.Parameters.AddWithValue("currentSeq", InitialCurrentSeq);
             insert.Parameters.AddWithValue("status", nameof(WorkflowStatus.Running));
             insert.Parameters.AddWithValue("visits", visitsJson);
             inserted = await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
@@ -78,7 +91,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
         }
 
         await InsertEventAsync(
-            connection, tx, id, seq: 0,
+            connection, tx, id, seq: SeedEventSeq,
             fromNode: null, toNode: startNode,
             status: WorkflowStatus.Running, awaitingSignal: null,
             outcome: null, variables: null, error: null,
@@ -194,6 +207,16 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
         var row = await ReadRunRowAsync(connection, tx, runId, ct).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Workflow run '{runId}' was not found.");
 
+        if (IsTerminal(row.Status))
+        {
+            // Idempotent: the run already reached a terminal state, whether this is the same failure being
+            // retried or a different terminal path won the race. Re-recording it would collide with
+            // workflow_run_event's (run_id, seq) unique index — FailAsync never advances current_seq, so a
+            // retry reads the identical row.CurrentSeq the first call already used — and would mean nothing
+            // anyway: the run's outcome is already on record.
+            return;
+        }
+
         await InsertEventAsync(
             connection, tx, runId, row.CurrentSeq,
             fromNode: row.CurrentNode, toNode: row.CurrentNode,
@@ -234,6 +257,14 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
 
         var row = await ReadRunRowAsync(connection, tx, runId, ct).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Workflow run '{runId}' was not found.");
+
+        if (IsTerminal(row.Status))
+        {
+            // Idempotent for the same reason as FailAsync above: a run already Succeeded, Failed or
+            // Cancelled has nothing left for this call to record, and re-recording it at the same
+            // row.CurrentSeq would collide with workflow_run_event's (run_id, seq) unique index.
+            return;
+        }
 
         // WorkflowEventKind has no "Cancelled" member — Advance never produces one, since cancellation is not
         // one of its four evaluation outcomes (see WorkflowEventKind's remarks). The literal string is written
@@ -302,7 +333,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
     }
 
     /// <summary>
-    /// The event-append + run-update + conditional-dispatch-enqueue sequence shared by <see cref="CompleteNodeAsync"/>
+    /// The run-update + event-append + conditional-dispatch-enqueue sequence shared by <see cref="CompleteNodeAsync"/>
     /// and <see cref="ResumeAsync"/> once each has its own <see cref="WorkflowTransition"/> in hand.
     /// </summary>
     /// <remarks>
@@ -310,6 +341,18 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
     /// key collision — and the merged bag, not a replacement, is what gets persisted: a node that returns no
     /// variables must not wipe what an earlier node wrote. The event log still records <paramref name="variables"/>
     /// unmerged, so <c>workflow_run_event</c> shows exactly what this one transition contributed.
+    /// <para>
+    /// The xmin-checked <see cref="UpdateRunAsync"/> runs first, before the event <c>INSERT</c> and before the
+    /// dispatch enqueue. This is one transaction, so statement order inside it doesn't affect atomicity — only
+    /// which failure a losing racer hits first — and that ordering is what matters here: <c>workflow_run_event</c>
+    /// carries a unique index on <c>(run_id, seq)</c>. With the <c>UPDATE</c> first, a racer that loses the
+    /// <c>xmin</c> check throws <see cref="WorkflowConcurrencyException"/> immediately and never reaches the
+    /// event <c>INSERT</c> at all, so two racers can never both attempt to insert an event at the same
+    /// <c>(run_id, seq)</c>. With the insert first — the shape this replaced — both racers could insert
+    /// successfully and only the loser's later <c>UPDATE</c> would fail, except the second racer's insert
+    /// collided on the unique index before ever reaching its own <c>UPDATE</c>, raising a raw
+    /// <see cref="Npgsql.PostgresException"/> instead of <see cref="WorkflowConcurrencyException"/>.
+    /// </para>
     /// </remarks>
     private async Task ApplyTransitionAsync(
         NpgsqlConnection connection, NpgsqlTransaction tx, Guid runId, long seq, RunRow row,
@@ -332,14 +375,14 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
 
         var newSeq = seq + 1;
 
+        await UpdateRunAsync(connection, tx, runId, row.Xmin, newSeq, transition.NextNode, transition.NextStatus, transition.AwaitingSignal, visits, mergedVariables, ct).ConfigureAwait(false);
+
         await InsertEventAsync(
             connection, tx, runId, seq,
             fromNode: row.CurrentNode, toNode: transition.NextNode,
             status: transition.NextStatus, awaitingSignal: transition.AwaitingSignal,
             outcome: outcome, variables: variables, error: null,
             kind: transition.Kind.ToString(), ct).ConfigureAwait(false);
-
-        await UpdateRunAsync(connection, tx, runId, row.Xmin, newSeq, transition.NextNode, transition.NextStatus, transition.AwaitingSignal, visits, mergedVariables, ct).ConfigureAwait(false);
 
         if (transition.NextStatus == WorkflowStatus.Running)
         {
@@ -408,7 +451,20 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
         cmd.Parameters.AddWithValue("outcome", (object?)outcome ?? DBNull.Value);
         cmd.Parameters.AddWithValue("variables", variables is null ? DBNull.Value : JsonSerializer.Serialize(variables));
         cmd.Parameters.AddWithValue("error", (object?)error ?? DBNull.Value);
-        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+        catch (PostgresException ex) when (string.Equals(ex.SqlState, PostgresErrorCodes.UniqueViolation, StringComparison.Ordinal) && string.Equals(ex.ConstraintName, "ix_workflow_run_event_run_id_seq", StringComparison.Ordinal))
+        {
+            // Defence in depth: ApplyTransitionAsync now runs the xmin-checked UPDATE before this INSERT
+            // specifically so a losing racer throws WorkflowConcurrencyException there and never reaches
+            // this statement — two racers can no longer both attempt to insert an event at the same
+            // (run_id, seq). Unreachable through that path; kept in case a future caller (StartAsync,
+            // FailAsync, CancelAsync included) ever inserts an event without the UPDATE-first ordering
+            // protecting it.
+            throw new WorkflowConcurrencyException($"Workflow run '{runId}' already has an event recorded at seq {seq}.", ex);
+        }
     }
 
     private static async Task<RunRow?> ReadRunRowAsync(NpgsqlConnection connection, NpgsqlTransaction? transaction, Guid runId, CancellationToken ct)
@@ -465,6 +521,10 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
         JsonValueKind.Array => element.EnumerateArray().Select(ToPlainValue).ToList(),
         _ => null,
     };
+
+    /// <summary>Whether <paramref name="status"/> is one a run cannot leave: no further transition, completion, or termination is meaningful once reached.</summary>
+    private static bool IsTerminal(WorkflowStatus status) =>
+        status is WorkflowStatus.Succeeded or WorkflowStatus.Failed or WorkflowStatus.Cancelled;
 
     private static WorkflowRun ToWorkflowRun(RunRow row) => new()
     {
