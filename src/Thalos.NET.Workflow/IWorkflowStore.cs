@@ -71,6 +71,15 @@ public interface IWorkflowStore
     /// <summary>Cancels a run for <paramref name="reason"/> before it reaches a terminal node.</summary>
     ValueTask CancelAsync(Guid runId, string reason, CancellationToken ct);
 
-    /// <summary>Finds runs that have not progressed in at least <paramref name="olderThan"/>, for stranded-run recovery.</summary>
+    /// <summary>
+    /// Finds runs stranded by a dead-lettered dispatch message, for <see cref="WorkflowRunReconciler"/> to
+    /// terminate. Only <see cref="WorkflowStatus.Running"/> runs are candidates: a run
+    /// <see cref="WorkflowStatus.Awaiting"/> a signal has nothing in flight by design (it is parked at an
+    /// approval gate, not stranded) and may legitimately sit there for days, so it is never returned here no
+    /// matter how stale <see cref="WorkflowRun.CurrentSeq"/>'s last update is. Results are ordered oldest-updated
+    /// first and capped at an implementation-defined batch size, so a sweep run always terminates in bounded
+    /// time even when many runs qualify — a run left over past the cap is picked up by the next sweep, since a
+    /// stranded run stays stranded until something terminates it.
+    /// </summary>
     ValueTask<IReadOnlyList<WorkflowRun>> FindStrandedAsync(TimeSpan olderThan, CancellationToken ct);
 }

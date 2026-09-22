@@ -353,6 +353,22 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         stranded.Select(r => r.Id).Should().NotContain(freshId);
     }
 
+    [Fact]
+    public async Task FindStrandedAsync_excludes_a_stale_awaiting_run()
+    {
+        // A run parked Awaiting has nothing in flight by design and may legitimately sit there for days — it
+        // must never be reported stranded no matter how stale, or a consumer sweeping this list would destroy
+        // exactly the human-in-the-loop work the gate exists to protect. See WorkflowRunReconciler's remarks.
+        var runId = await _store.StartAsync("approval", 1, "c-stale-awaiting", "start", CancellationToken.None);
+        var toGate = new WorkflowTransition("gate", WorkflowStatus.Awaiting, "ok", WorkflowEventKind.Awaiting);
+        await _store.CompleteNodeAsync(runId, seq: 1, toGate, new NodeResult(null, Empty), CancellationToken.None);
+        await ExecuteAsync("UPDATE workflow_run SET updated_at = now() - interval '10 days' WHERE id = @id", runId);
+
+        var stranded = await _store.FindStrandedAsync(TimeSpan.FromMinutes(10), CancellationToken.None);
+
+        stranded.Select(r => r.Id).Should().NotContain(runId);
+    }
+
     // --- helpers -----------------------------------------------------------------------------------------
 
     private OrmWorkflowStore StoreWithFailingOutbox() => new(new WorkflowOrmOptions

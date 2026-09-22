@@ -307,15 +307,31 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
         await tx.CommitAsync(ct).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// The most stranded runs <see cref="FindStrandedAsync"/> returns in one call. A dead-lettered dispatch
+    /// message strands at most one run apiece, so an unbounded fleet backlog is not an expected shape — this
+    /// exists to cap a single sweep's work and its one open connection's lifetime, not to model an expected
+    /// steady-state count. Chosen generously above anything a healthy system should ever accumulate: a
+    /// consumer's periodic sweeper (see <see cref="WorkflowRunReconciler"/>) re-queries every tick, so a
+    /// backlog past this cap is simply worked off over a few extra ticks rather than lost.
+    /// </summary>
+    private const int MaxStrandedResults = 500;
+
     /// <inheritdoc/>
     public async ValueTask<IReadOnlyList<WorkflowRun>> FindStrandedAsync(TimeSpan olderThan, CancellationToken ct)
     {
         await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
         await using var cmd = connection.CreateCommand();
-        cmd.CommandText = SelectRunSql + " WHERE status IN (@running, @awaiting) AND updated_at < @threshold";
+
+        // Awaiting is deliberately excluded: a run parked at an approval gate has nothing in flight by design
+        // and may sit there legitimately for days. Sweeping it out because nobody approved it quickly would
+        // destroy exactly the work the gate exists to protect. Only Running — a node an in-flight dispatch
+        // message was supposed to advance, and might now never will because that message dead-lettered — is a
+        // stranded-run candidate.
+        cmd.CommandText = SelectRunSql + " WHERE status = @running AND updated_at < @threshold ORDER BY updated_at ASC LIMIT @limit";
         cmd.Parameters.AddWithValue("running", nameof(WorkflowStatus.Running));
-        cmd.Parameters.AddWithValue("awaiting", nameof(WorkflowStatus.Awaiting));
         cmd.Parameters.AddWithValue("threshold", DateTimeOffset.UtcNow - olderThan);
+        cmd.Parameters.AddWithValue("limit", MaxStrandedResults);
 
         var results = new List<WorkflowRun>();
         await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
