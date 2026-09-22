@@ -14,4 +14,13 @@ namespace Thalos;
 /// The qualified tool name the model must call to report its result (e.g. <c>"workflow__report_outcome"</c>).
 /// </param>
 /// <param name="AllowedValues">The closed set of values the tool's argument schema restricts the call to.</param>
-public sealed record OutcomeToolSchema(string ToolName, IReadOnlyList<string> AllowedValues);
+public sealed record OutcomeToolSchema(string ToolName, IReadOnlyList<string> AllowedValues)
+{
+    /// <summary>
+    /// The single argument name the tool takes, and the only property the read side looks for in a recorded call's
+    /// arguments JSON. A constant rather than a per-schema value so the side that <em>offers</em> the tool and the
+    /// side that <em>reads</em> the call back cannot drift apart: two independently spelled string literals would
+    /// fail silently — a well-formed call whose argument nobody recognises reads as "no outcome reported".
+    /// </summary>
+    public const string ArgumentName = "outcome";
+}

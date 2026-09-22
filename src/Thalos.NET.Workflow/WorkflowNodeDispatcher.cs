@@ -42,8 +42,13 @@ public sealed class WorkflowNodeDispatcher(
     /// </summary>
     internal const string OutcomeToolName = "workflow__report_outcome";
 
-    /// <summary>The single argument name a call to <see cref="OutcomeToolName"/> is read from.</summary>
-    internal const string OutcomeArgumentName = "outcome";
+    /// <summary>
+    /// The single argument name a call to <see cref="OutcomeToolName"/> is read from. Aliases
+    /// <see cref="OutcomeToolSchema.ArgumentName"/> rather than repeating the literal: the side that offers the tool
+    /// spells the argument from that constant, and a second literal here could drift from it silently - a
+    /// well-formed call whose argument this side did not recognise would read as "no outcome reported".
+    /// </summary>
+    internal const string OutcomeArgumentName = OutcomeToolSchema.ArgumentName;
 
     private static readonly IReadOnlyDictionary<string, object?> EmptyVariables =
         new Dictionary<string, object?>(StringComparer.Ordinal);
