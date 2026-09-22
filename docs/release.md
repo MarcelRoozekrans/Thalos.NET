@@ -110,6 +110,36 @@ non-empty commit. The full explanation also lives in
 [`README.md`](../README.md#breaking-change-ichanneladapterdeliverasync-now-takes-a-conversationid) for a human reading
 the package itself, independent of what release-please renders.
 
+The next release ships fifteen packages: `Thalos.NET.Workflow` and `Thalos.NET.Workflow.Orm` join the thirteen
+already shipping as of 0.6.0 (`Thalos.NET.Git` and `Thalos.NET.Git.LibGit2Sharp`, released in 0.6.0, having
+joined the eleven of 0.4.x). `Thalos.NET.Workflow` ships `net8.0` + `net10.0`; `Thalos.NET.Workflow.Orm` is
+`net10.0`-only, same reason as `Thalos.NET.Memory.RagNet` — its own dependencies (`ZeroAlloc.ORM`,
+`ZeroAlloc.Outbox.Orm`, `AdoNet.Async.Adapters`) ship `net10.0`-only builds. `ci.yml`'s `pack-validate` job — the
+`expected` package list, the TFM-selection branch, and both package-count checks and their error-message text —
+is updated for both new packages.
+
+**Breaking changes accumulated across the workflow-engine phase (2.2, Part A):**
+
+- `ThalosAgentRuntime`'s public constructor gained a required `IOutcomeToolFactory outcomeTools` parameter
+  ahead of the optional `logger` one, so a turn can be given the constrained-outcome tool schema a workflow
+  node asks for. Any direct instantiation outside `AddThalos(...)` DI wiring needs the new argument.
+- `OrmWorkflowStore`'s public constructor gained a required `IProcessDefinitionStore definitions` parameter —
+  process definitions are now resolved from the store at run time instead of being supplied out of band.
+- `IWorkflowReferenceResolver.AgentExistsAsync` was removed and collapsed into `ResolveAgentIdAsync`: one
+  lookup answers both "does this agent exist" and "what id does it have," so `ProcessValidator` at load time
+  and the node dispatcher at run time cannot drift out of agreement with each other.
+- `IWorkflowStore` gained `FailStrandedAsync(Guid runId, long expectedSeq, string errorMessage, CancellationToken ct)`
+  — source-breaking for any external `IWorkflowStore` implementer, needed by the reconciler to fail a run
+  stranded by a dead-lettered dispatch message.
+- `IProcessDefinitionStore.UpsertAndActivateAsync`'s return type changed to `ValueTask<Result>`, so a
+  same-version re-sync whose content differs from what is stored comes back as a typed failure instead of a
+  silent overwrite — see the behaviour-change note below.
+
+**Migration 1004 must be deployed together with the code that writes `content_hash`.** This is the operationally
+sharpest item in the phase: applying 1004 ahead of the code rollout breaks process sync with `23502` on every
+instance still running pre-1004 code. Full mechanism and rollout guidance: [Schema migrations and rolling
+deploys](#schema-migrations-and-rolling-deploys) below.
+
 ## Local development against a consumer (Daedalus)
 
 `scripts/pack-local.ps1` packs `0.3.0-local.<timestamp>` (the `VersionPrefix` in `Directory.Build.props`) into `C:\Projects\Prive\.nuget-local`
