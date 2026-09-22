@@ -194,3 +194,23 @@ them. A node written as `models: [sonnet, opus]` therefore executes **once**, ag
 resolved agent is configured with, and the fan-out is silently ignored — no warning at load time, nothing in the
 event log. They are reserved for a later phase; treat any process file using them as declaring intent, not
 behaviour.
+
+## Process files that used to sync and now report an error
+
+`ProcessValidator` gained three rules this phase, and `ProcessDefinitionSync` validates before it activates. A
+process file that previously synced cleanly can now be rejected — with the version already active left running
+untouched, as for any other validation failure. The three shapes:
+
+- **A terminal node that also declares `next`, `branch` or `outcomes`.** `Advance` resolves the outgoing edge
+  before it ever reaches the terminal status, so the run took that edge and the node's terminal status was
+  unreachable.
+- **A declared outcome that is blank or repeated.** These become the closed `enum` of the outcome tool the node's
+  agent is offered, and `OutcomeTool.Validate` refuses both — so the node failed on every dispatch.
+- **An `onExceeded` redirect from which the capped node is reachable again.** The cap fired, redirected, and was
+  routed straight back into the node it had just capped, forever.
+
+Every file this newly rejects was already broken at run time — each shape either never terminated or failed on
+every dispatch of the node — so nothing that used to work stops working. What changes is *when* you find out:
+at sync, naming the node, instead of after a run had spent the agent turns to reach it. A deployer rolling out
+this version should expect `SyncAsync` to start reporting errors for such files, and should read the error rather
+than assume the sync itself regressed.

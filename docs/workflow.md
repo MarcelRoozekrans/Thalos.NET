@@ -78,6 +78,8 @@ runs workflows on behalf of people should return theirs, because that is what de
 is allowed to call.
 
 ```csharp
+using ZeroAlloc.Authorization;   // ISecurityContext lives here, not in Thalos
+
 sealed class WorkflowCaller(WorkflowRun run) : ISecurityContext
 {
     public string Id => $"workflow:{run.Process}:{run.Id}";
@@ -129,9 +131,25 @@ services.AddOutbox(o =>
     .WithOrm();
 ```
 
-`.WithOrm()` registers `OrmOutboxStore`, which takes an `IAsyncDbConnection` from DI — register one scoped over an
-`NpgsqlConnection` on the same database `AddWorkflowOrm` was given. `OutboxWorkerService` opens a scope per batch,
-so a scoped dispatcher and a scoped connection are both fine.
+`.WithOrm()` registers `OrmOutboxStore`, whose only constructor parameter is an `IAsyncDbConnection` resolved from
+DI. Nothing registers one for you, and the type arrives transitively from `AdoNet.Async.Adapters` rather than from
+a package you added by name, so here it is in full — same database `AddWorkflowOrm` was given:
+
+```csharp
+using System.Data.Async;            // IAsyncDbConnection
+using System.Data.Async.Adapters;   // the AsAsync() extension
+using Npgsql;
+
+services.AddScoped<IAsyncDbConnection>(sp =>
+{
+    var connection = new NpgsqlConnection(configuration.GetConnectionString("workflow"));
+    connection.Open();
+    return connection.AsAsync();
+});
+```
+
+`OutboxWorkerService` opens a scope per batch, so a scoped dispatcher and a scoped connection are both fine — each
+batch gets its own connection and disposes it with the scope.
 
 Two things about the retry budget, because they decide what a failure costs. The dispatcher deliberately does
 **not** throw for a node-level failure — a turn that failed, an unresolvable agent name, an outcome outside the
@@ -269,8 +287,12 @@ unresolvable, optimistic-concurrency loss — comes back as a `Result` failure, 
 - **`models:`, `lenses:` and `quorum:` are parsed and ignored.** A node declaring `models: [sonnet, opus]` runs
   once, against whatever single model the resolved agent is configured with, silently. See
   [`release.md`](release.md#process-file-keys-that-are-parsed-but-not-yet-honoured).
-- **Every node in a loop is a task node.** The validator requires each node to be exactly one of task, gate or
-  terminal, so there is no bare relay node: a loop back to a capped node passes through at least one more node that
-  runs its own agent turn. Budget a loop iteration at two turns, not one.
+- **There is no unattended zero-cost relay.** The validator requires each node to be exactly one of task, gate or
+  terminal, so a loop back to a capped node must pass through one of two things, and neither is free. Another
+  **task** node costs one more paid agent turn per lap — budget that loop at two turns, not one. A **gate** costs
+  no turn at all: `gate: { await: sig, next: work }` is a legal, validating pass-through that the dispatcher parks
+  at `Awaiting` without running anything, and `ResumeAsync` then resolves its `next` edge back into the capped
+  node. But it costs a lap of blocking on an external signal — nothing advances that run until something calls
+  `ResumeAsync`. Pick which cost you want; you cannot have neither.
 - **`maxVisits` is the only spend bound the engine has.** It is enforced on entry to the capped node and the
   validator now rejects an `onExceeded` that can route back into it, but nothing else caps what a run costs.
