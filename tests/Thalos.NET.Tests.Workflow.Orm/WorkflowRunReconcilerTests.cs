@@ -32,7 +32,8 @@ public sealed class WorkflowRunReconcilerTests(PostgresFixture pg) : IAsyncLifet
     public async Task InitializeAsync()
     {
         await pg.ResetAsync();
-        _store = new OrmWorkflowStore(new WorkflowOrmOptions { ConnectionString = pg.ConnectionString });
+        var options = new WorkflowOrmOptions { ConnectionString = pg.ConnectionString };
+        _store = new OrmWorkflowStore(options, new OrmProcessDefinitionStore(options));
         _reconciler = new WorkflowRunReconciler(_store);
     }
 

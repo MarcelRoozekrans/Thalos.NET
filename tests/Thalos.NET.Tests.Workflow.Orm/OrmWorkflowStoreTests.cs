@@ -19,7 +19,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     public async Task InitializeAsync()
     {
         await pg.ResetAsync();
-        _store = new OrmWorkflowStore(new WorkflowOrmOptions { ConnectionString = pg.ConnectionString });
+        _store = NewStore();
     }
 
     public Task DisposeAsync() => Task.CompletedTask;
@@ -67,7 +67,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         const int attempts = 8;
         var tasks = Enumerable.Range(0, attempts).Select(async _ =>
         {
-            var store = new OrmWorkflowStore(new WorkflowOrmOptions { ConnectionString = pg.ConnectionString });
+            var store = NewStore();
             try
             {
                 await store.CompleteNodeAsync(runId, 1, transition, new NodeResult("ok", Empty), CancellationToken.None);
@@ -200,11 +200,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task ResumeAsync_defers_to_the_interpreter_for_the_gates_successor()
     {
-        var process = ApprovalProcess();
-        var store = new OrmWorkflowStore(new WorkflowOrmOptions
-        {
-            ConnectionString = pg.ConnectionString,
-        }.AddProcess(process));
+        var store = await ActivateApprovalProcessAsync();
 
         var runId = await store.StartAsync("approval", 1, "c-resume", "start", CancellationToken.None);
         await store.CompleteNodeAsync(
@@ -226,11 +222,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task ResumeAsync_fails_when_the_signal_does_not_match()
     {
-        var process = ApprovalProcess();
-        var store = new OrmWorkflowStore(new WorkflowOrmOptions
-        {
-            ConnectionString = pg.ConnectionString,
-        }.AddProcess(process));
+        var store = await ActivateApprovalProcessAsync();
 
         var runId = await store.StartAsync("approval", 1, "c-resume-2", "start", CancellationToken.None);
         await store.CompleteNodeAsync(
@@ -443,24 +435,50 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
 
     // --- helpers -----------------------------------------------------------------------------------------
 
-    private OrmWorkflowStore StoreWithFailingOutbox() => new(new WorkflowOrmOptions
-    {
-        ConnectionString = pg.ConnectionString,
-        OutboxStoreFactory = connection => new ThrowingOutboxStore(connection),
-    });
-
-    private static ProcessDefinition ApprovalProcess() => new()
-    {
-        Name = "approval",
-        Version = 1,
-        StartNode = "start",
-        Nodes = new Dictionary<string, ProcessNode>(StringComparer.Ordinal)
+    private OrmWorkflowStore StoreWithFailingOutbox() => new(
+        new WorkflowOrmOptions
         {
-            ["start"] = new ProcessNode { Next = "gate" },
-            ["gate"] = new ProcessNode { Await = "ok", Next = "done" },
-            ["done"] = new ProcessNode { Terminal = "succeeded" },
+            ConnectionString = pg.ConnectionString,
+            OutboxStoreFactory = connection => new ThrowingOutboxStore(connection),
         },
-    };
+        NewDefinitionStore());
+
+    /// <summary>
+    /// A store wired to the real <see cref="OrmProcessDefinitionStore"/> over the same database — the same pairing
+    /// <c>AddWorkflowOrm</c> composes. Nothing here registers process definitions in memory: a test that needs a
+    /// definition resolvable puts it in the table through <see cref="ActivateApprovalProcessAsync"/>, which is now
+    /// the only way a definition becomes runnable.
+    /// </summary>
+    private OrmWorkflowStore NewStore() =>
+        new(new WorkflowOrmOptions { ConnectionString = pg.ConnectionString }, NewDefinitionStore());
+
+    private OrmProcessDefinitionStore NewDefinitionStore() =>
+        new(new WorkflowOrmOptions { ConnectionString = pg.ConnectionString });
+
+    /// <summary>The YAML behind <see cref="ActivateApprovalProcessAsync"/>: a task node, an approval gate, a terminal.</summary>
+    private const string ApprovalYaml = """
+        process: approval
+        version: 1
+        nodes:
+          start: { next: gate }
+          gate: { await: ok, next: done }
+          done: { terminal: succeeded }
+        """;
+
+    /// <summary>
+    /// Writes the approval process into <c>process_definition</c> and returns a workflow store that resolves
+    /// against it. This replaces the in-memory registry these two resume tests used to seed: a definition now has
+    /// to be in the table for a resume to find it, which is the whole point of the change they were updated for.
+    /// </summary>
+    private async Task<OrmWorkflowStore> ActivateApprovalProcessAsync()
+    {
+        var definitions = NewDefinitionStore();
+        var definition = ProcessLoader.Load(ApprovalYaml);
+        definition.IsSuccess.Should().BeTrue(definition.IsFailure ? definition.Error : "");
+        await definitions.UpsertAndActivateAsync(definition.Value, ApprovalYaml, CancellationToken.None);
+
+        return new OrmWorkflowStore(new WorkflowOrmOptions { ConnectionString = pg.ConnectionString }, definitions);
+    }
 
     private async Task<T?> ScalarAsync<T>(string sql, object? parameter)
     {

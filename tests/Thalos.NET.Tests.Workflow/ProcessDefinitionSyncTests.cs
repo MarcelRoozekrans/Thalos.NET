@@ -30,7 +30,7 @@ public sealed class ProcessDefinitionSyncTests
     [Fact]
     public async Task SyncAsync_activates_a_single_valid_document()
     {
-        var store = new FakeStore();
+        var store = new InMemoryProcessDefinitionStore();
         var sync = new ProcessDefinitionSync(new FakeSource([new ProcessDocument("a.yaml", ManufactureV1)]), store, new AlwaysResolves());
 
         var result = await sync.SyncAsync(CancellationToken.None);
@@ -43,7 +43,7 @@ public sealed class ProcessDefinitionSyncTests
     [Fact]
     public async Task SyncAsync_rejects_a_batch_with_two_documents_naming_the_same_process()
     {
-        var store = new FakeStore();
+        var store = new InMemoryProcessDefinitionStore();
         var sync = new ProcessDefinitionSync(
             new FakeSource([
                 new ProcessDocument("manufacture.yaml", ManufactureV2),
@@ -62,7 +62,7 @@ public sealed class ProcessDefinitionSyncTests
     [Fact]
     public async Task SyncAsync_does_not_treat_two_different_processes_as_duplicates()
     {
-        var store = new FakeStore();
+        var store = new InMemoryProcessDefinitionStore();
         var other = ManufactureV1.Replace("process: manufacture", "process: other");
         var sync = new ProcessDefinitionSync(
             new FakeSource([new ProcessDocument("a.yaml", ManufactureV1), new ProcessDocument("b.yaml", other)]),
@@ -78,23 +78,6 @@ public sealed class ProcessDefinitionSyncTests
     private sealed class FakeSource(IReadOnlyList<ProcessDocument> documents) : IProcessDefinitionSource
     {
         public ValueTask<IReadOnlyList<ProcessDocument>> ReadAllAsync(CancellationToken ct) => ValueTask.FromResult(documents);
-    }
-
-    private sealed class FakeStore : IProcessDefinitionStore
-    {
-        public List<ProcessDefinition> Activated { get; } = [];
-
-        public ValueTask UpsertAndActivateAsync(ProcessDefinition definition, string yaml, CancellationToken ct)
-        {
-            Activated.Add(definition);
-            return ValueTask.CompletedTask;
-        }
-
-        public ValueTask<int?> GetActiveVersionAsync(string process, CancellationToken ct) =>
-            ValueTask.FromResult<int?>(Activated.Where(d => string.Equals(d.Name, process, StringComparison.Ordinal)).Select(d => (int?)d.Version).LastOrDefault());
-
-        public ValueTask<Result> TryRemoveAsync(string process, int version, CancellationToken ct) =>
-            ValueTask.FromResult(Result.Success());
     }
 
     private sealed class AlwaysResolves : IWorkflowReferenceResolver

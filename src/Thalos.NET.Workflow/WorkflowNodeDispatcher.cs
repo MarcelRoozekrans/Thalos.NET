@@ -15,6 +15,10 @@ namespace Thalos.Workflow;
 /// never inspects or interprets what comes back from it — it only forwards the value into
 /// <see cref="SubagentRunRequest.Caller"/>. Agent name resolution is the same shape: <see cref="IWorkflowReferenceResolver"/>
 /// is a host-backed port (its <c>ResolveAgentIdAsync</c>), not something this dispatcher implements itself.
+/// The run's <see cref="ProcessDefinition"/> arrives the same way, through <see cref="IProcessDefinitionStore"/>,
+/// resolved per dispatch on the run's pinned <c>(Process, ProcessVersion)</c> — the store is the single source of
+/// truth for what a process is, so a definition that was synced is runnable and one that was not is not, with no
+/// separately populated registry able to hold a different answer.
 /// </summary>
 /// <remarks>
 /// <b>A node failure must not throw.</b> A throw would hand the message back to the outbox for eight retries with
@@ -32,7 +36,7 @@ public sealed class WorkflowNodeDispatcher(
     IWorkflowStore store,
     ISubagentRunner runner,
     IWorkflowReferenceResolver resolver,
-    IReadOnlyDictionary<(string Process, int Version), ProcessDefinition> processes,
+    IProcessDefinitionStore definitions,
     Func<WorkflowRun, ISecurityContext> resolveCaller)
 {
     /// <summary>
@@ -56,8 +60,7 @@ public sealed class WorkflowNodeDispatcher(
     private readonly IWorkflowStore _store = store ?? throw new ArgumentNullException(nameof(store));
     private readonly ISubagentRunner _runner = runner ?? throw new ArgumentNullException(nameof(runner));
     private readonly IWorkflowReferenceResolver _resolver = resolver ?? throw new ArgumentNullException(nameof(resolver));
-    private readonly IReadOnlyDictionary<(string Process, int Version), ProcessDefinition> _processes =
-        processes ?? throw new ArgumentNullException(nameof(processes));
+    private readonly IProcessDefinitionStore _definitions = definitions ?? throw new ArgumentNullException(nameof(definitions));
     private readonly Func<WorkflowRun, ISecurityContext> _resolveCaller =
         resolveCaller ?? throw new ArgumentNullException(nameof(resolveCaller));
 
@@ -150,18 +153,32 @@ public sealed class WorkflowNodeDispatcher(
     }
 
     /// <summary>
-    /// Looks up <paramref name="run"/>'s process and current node, failing the run (not throwing — see this
-    /// class's remarks) when either is missing: a run pointing at an unregistered process or a node the loaded
-    /// definition no longer has is a configuration problem no outbox retry would fix.
+    /// Resolves <paramref name="run"/>'s process definition through <see cref="IProcessDefinitionStore.GetAsync"/>
+    /// and finds its current node, failing the run (not throwing — see this class's remarks) when either does not
+    /// resolve. The definition comes from the store on the run's pinned <c>(Process, ProcessVersion)</c>, never
+    /// from a dictionary handed in at composition time: the store is the one place a definition lives, so a
+    /// version that was synced is runnable and a version that was not is not, with no second registration step
+    /// able to disagree with the table.
     /// </summary>
+    /// <remarks>
+    /// Both failures here are node failures, routed through <see cref="IWorkflowStore.FailAsync"/> rather than
+    /// thrown, for the reason this class's remarks give: an unresolvable definition is a configuration problem
+    /// that eight outbox retries would only repeat, each one re-running a paid agent turn. The store's own error
+    /// message already names the process and version, so it is passed through verbatim rather than re-worded into
+    /// something that could drift from it. An <em>exception</em> escaping <c>GetAsync</c> is a different thing —
+    /// the backing store being unreachable — and is deliberately left to propagate, because that is transient and
+    /// a retry genuinely can fix it.
+    /// </remarks>
     private async ValueTask<(ProcessDefinition Process, ProcessNode Node)?> ResolveNodeAsync(WorkflowRun run, CancellationToken ct)
     {
-        if (!_processes.TryGetValue((run.Process, run.ProcessVersion), out var process))
+        var definition = await _definitions.GetAsync(run.Process, run.ProcessVersion, ct).ConfigureAwait(false);
+        if (definition.IsFailure)
         {
-            await _store.FailAsync(run.Id, $"No process definition registered for '{run.Process}' version {run.ProcessVersion}.", ct).ConfigureAwait(false);
+            await _store.FailAsync(run.Id, definition.Error, ct).ConfigureAwait(false);
             return null;
         }
 
+        var process = definition.Value;
         if (!process.Nodes.TryGetValue(run.CurrentNode, out var node))
         {
             await _store.FailAsync(run.Id, $"Process '{run.Process}' version {run.ProcessVersion} has no node named '{run.CurrentNode}'.", ct).ConfigureAwait(false);

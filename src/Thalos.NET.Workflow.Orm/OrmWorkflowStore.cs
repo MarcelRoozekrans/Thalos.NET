@@ -23,7 +23,7 @@ namespace Thalos.Workflow.Orm;
 /// additionally checks the caller-supplied <c>seq</c> against the run's persisted <see cref="WorkflowRun.CurrentSeq"/>
 /// before touching anything, so a stale or redelivered completion is rejected the same way.
 /// </remarks>
-public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStore
+public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinitionStore definitions) : IWorkflowStore
 {
     private const string SelectRunSql = """
         SELECT id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, xmin::text::bigint AS xmin
@@ -43,6 +43,15 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
     private const long SeedEventSeq = InitialCurrentSeq - 1;
 
     private readonly WorkflowOrmOptions _options = options ?? throw new ArgumentNullException(nameof(options));
+
+    /// <summary>
+    /// Where <see cref="ResumeAsync"/> gets the run's <see cref="ProcessDefinition"/> from — the same
+    /// <see cref="IProcessDefinitionStore"/> <c>ProcessDefinitionSync</c> writes to and
+    /// <c>WorkflowNodeDispatcher</c> reads from, so a gate resumes against exactly the definition a dispatch
+    /// would have run it against. This store holds no process registry of its own; there is nowhere for a second
+    /// answer to live.
+    /// </summary>
+    private readonly IProcessDefinitionStore _definitions = definitions ?? throw new ArgumentNullException(nameof(definitions));
 
     /// <inheritdoc/>
     public async ValueTask<Guid> StartAsync(string process, int version, string correlationKey, string startNode, CancellationToken ct)
@@ -161,10 +170,19 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
             return Result.Failure($"Workflow run '{runId}' is not awaiting signal '{signal}'.");
         }
 
-        if (!_options.Processes.TryGetValue((row.Process, row.ProcessVersion), out var process))
+        // Resolved on the run's pinned (Process, ProcessVersion), not on whatever version is currently active:
+        // a run parked at a gate for days must come back to the graph it started on even if newer versions have
+        // activated meanwhile. Read on a separate connection while this method's transaction is open, which is
+        // safe because it touches a different table and takes no lock the run row's writer waits on — and in the
+        // normal case it is a cache hit doing no I/O at all. The definition store's own error message already
+        // names the process and version, so it is surfaced verbatim rather than re-worded.
+        var definition = await _definitions.GetAsync(row.Process, row.ProcessVersion, ct).ConfigureAwait(false);
+        if (definition.IsFailure)
         {
-            return Result.Failure($"No process definition registered for '{row.Process}' version {row.ProcessVersion}.");
+            return Result.Failure(definition.Error);
         }
+
+        var process = definition.Value;
 
         // Advance is called with Status still Awaiting (per IWorkflowStore.ResumeAsync's contract) — that is
         // the only signal Advance has to tell this resume from a fresh arrival at the same gate. The store

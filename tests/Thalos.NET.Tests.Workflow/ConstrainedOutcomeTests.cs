@@ -23,7 +23,12 @@ public sealed class ConstrainedOutcomeTests
     /// is what turns it into an <see cref="AgentId"/>, mirroring how a real host resolves it over its own
     /// <c>IAgentCatalog</c>, never a raw id written into the process file.
     /// </summary>
-    private static readonly ProcessDefinition Def = ProcessLoader.Load("""
+    /// <remarks>
+    /// Kept as YAML rather than a parsed <see cref="ProcessDefinition"/> because that is what a definition store
+    /// holds: these fixtures are seeded into <see cref="InMemoryProcessDefinitionStore"/> and come back out
+    /// through the same parse the real store performs, instead of being handed to the dispatcher pre-built.
+    /// </remarks>
+    private const string DefYaml = """
         process: gate-check
         version: 1
         nodes:
@@ -34,10 +39,10 @@ public sealed class ConstrainedOutcomeTests
             branch: { approved: done, rejected: rework }
           rework: { terminal: failed }
           done: { terminal: succeeded }
-        """).Value;
+        """;
 
-    /// <summary>A task node feeding an approval gate feeding a terminal — the fixture the Critical fix needs and <see cref="Def"/> never exercised.</summary>
-    private static readonly ProcessDefinition GateDef = ProcessLoader.Load("""
+    /// <summary>A task node feeding an approval gate feeding a terminal — the fixture the Critical fix needs and <see cref="DefYaml"/> never exercised.</summary>
+    private const string GateDefYaml = """
         process: approval-flow
         version: 1
         nodes:
@@ -47,39 +52,42 @@ public sealed class ConstrainedOutcomeTests
             next: gate
           gate: { await: human_approval, next: done }
           done: { terminal: succeeded }
-        """).Value;
+        """;
 
     /// <summary>References an agent name no resolver entry covers, to test the unresolvable-agent path.</summary>
-    private static readonly ProcessDefinition UnknownAgentDef = ProcessLoader.Load("""
+    private const string UnknownAgentDefYaml = """
         process: bad-agent
         version: 1
         nodes:
           only: { agent: ghost, skill: whatever, next: done }
           done: { terminal: succeeded }
-        """).Value;
+        """;
 
     private readonly FakeWorkflowStore _store;
+    private readonly InMemoryProcessDefinitionStore _definitions;
     private readonly FakeSubagentRunner _runner;
     private readonly WorkflowNodeDispatcher _dispatcher;
     private readonly Guid _runId = Guid.NewGuid();
 
     public ConstrainedOutcomeTests()
     {
-        var processes = new Dictionary<(string, int), ProcessDefinition>
-        {
-            [("gate-check", 1)] = Def,
-            [("approval-flow", 1)] = GateDef,
-            [("bad-agent", 1)] = UnknownAgentDef,
-        };
+        // The definitions live in the store and nowhere else — the dispatcher and the workflow store are both
+        // handed the same instance, so there is no separate registry a test could seed differently from what a
+        // sync would have written.
+        _definitions = new InMemoryProcessDefinitionStore()
+            .Seed(DefYaml)
+            .Seed(GateDefYaml)
+            .Seed(UnknownAgentDefYaml);
+
         var resolver = new FakeWorkflowReferenceResolver(new Dictionary<string, AgentId>(StringComparer.Ordinal)
         {
             ["reviewer"] = ReviewerId,
             ["starter"] = StarterId,
         });
 
-        _store = new FakeWorkflowStore(processes);
+        _store = new FakeWorkflowStore(_definitions);
         _runner = new FakeSubagentRunner();
-        _dispatcher = new WorkflowNodeDispatcher(_store, _runner, resolver, processes, _ => new FakeSecurityContext("workflow-engine"));
+        _dispatcher = new WorkflowNodeDispatcher(_store, _runner, resolver, _definitions, _ => new FakeSecurityContext("workflow-engine"));
 
         _store.Seed(new WorkflowRun
         {

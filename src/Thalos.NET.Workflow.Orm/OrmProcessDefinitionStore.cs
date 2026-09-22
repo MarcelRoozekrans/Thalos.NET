@@ -73,6 +73,40 @@ public sealed class OrmProcessDefinitionStore(WorkflowOrmOptions options) : IPro
 
     /// <inheritdoc/>
     /// <remarks>
+    /// Reads the <em>exact</em> (process, version) row, with no <c>is_active</c> filter: a run pinned to a
+    /// version that has since been superseded by a newer activation must keep resolving to the shape it started
+    /// on, so filtering on <c>is_active</c> here would break every live run the moment a new version activated —
+    /// precisely the drift <see cref="UpsertAndActivateAsync"/> is careful not to cause.
+    /// </remarks>
+    public async ValueTask<Result<ProcessDefinition>> GetAsync(string process, int version, CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(process);
+
+        await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = "SELECT yaml FROM process_definition WHERE process = @process AND version = @version";
+        cmd.Parameters.AddWithValue("process", process);
+        cmd.Parameters.AddWithValue("version", version);
+
+        var yaml = await cmd.ExecuteScalarAsync(ct).ConfigureAwait(false) as string;
+        if (yaml is null)
+        {
+            return Result<ProcessDefinition>.Failure(
+                $"No process definition stored for '{process}' version {version}.");
+        }
+
+        // Parsed here rather than trusted: the row was written by ProcessDefinitionSync after
+        // ProcessValidator accepted it, but this store is not the only thing that can reach the table, and a
+        // row that no longer parses must surface as a named failure rather than an exception out of a read.
+        var loaded = ProcessLoader.Load(yaml);
+        return loaded.IsSuccess
+            ? loaded
+            : Result<ProcessDefinition>.Failure(
+                $"The stored definition for '{process}' version {version} could not be parsed: {loaded.Error}");
+    }
+
+    /// <inheritdoc/>
+    /// <remarks>
     /// Deliberately does not require a <c>process_definition</c> row to exist for <paramref name="version"/>:
     /// <see cref="IWorkflowStore.StartAsync"/> stamps <see cref="WorkflowRun.ProcessVersion"/> onto a run
     /// independently of this store, so a run can pin a version this store never held a row for (or has already

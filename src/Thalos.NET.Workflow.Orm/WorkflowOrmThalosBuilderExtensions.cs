@@ -6,8 +6,9 @@ namespace Thalos.Workflow.Orm;
 
 /// <summary>
 /// Registers the ZeroAlloc.ORM-backed <see cref="IWorkflowStore"/> and <see cref="IProcessDefinitionStore"/> on a
-/// <see cref="ThalosBuilder"/>. Both share the same <see cref="WorkflowOrmOptions"/> registration and open a
-/// connection per call — one <see cref="AddWorkflowOrm"/> call is enough to get everything this package offers;
+/// <see cref="ThalosBuilder"/>. Both share the same <see cref="WorkflowOrmOptions"/> registration, and the
+/// workflow store resolves process definitions through the very <see cref="IProcessDefinitionStore"/> registered
+/// here, so syncing a definition is what makes it runnable. Both open a connection per call — one <see cref="AddWorkflowOrm"/> call is enough to get everything this package offers;
 /// a consumer should never need a second, hand-written registration for <see cref="IProcessDefinitionStore"/>.
 /// </summary>
 /// <remarks>
@@ -41,8 +42,14 @@ public static class WorkflowOrmThalosBuilderExtensions
 
         var services = builder.Services;
         services.Replace(ServiceDescriptor.Singleton(options));
-        services.Replace(ServiceDescriptor.Singleton<IWorkflowStore>(sp => new OrmWorkflowStore(sp.GetRequiredService<WorkflowOrmOptions>())));
-        services.Replace(ServiceDescriptor.Singleton<IProcessDefinitionStore>(sp => new OrmProcessDefinitionStore(sp.GetRequiredService<WorkflowOrmOptions>())));
+        // One IProcessDefinitionStore singleton, wrapped in the cache, resolved by both consumers: the dispatcher
+        // that runs a node and the workflow store that resumes a gate share one cache and one answer for what a
+        // process is. Registering the cache here rather than letting each consumer hold its own is what keeps that
+        // "one answer" true — two caches would be two things to invalidate and two chances to disagree.
+        services.Replace(ServiceDescriptor.Singleton<IProcessDefinitionStore>(sp =>
+            new CachingProcessDefinitionStore(new OrmProcessDefinitionStore(sp.GetRequiredService<WorkflowOrmOptions>()))));
+        services.Replace(ServiceDescriptor.Singleton<IWorkflowStore>(sp =>
+            new OrmWorkflowStore(sp.GetRequiredService<WorkflowOrmOptions>(), sp.GetRequiredService<IProcessDefinitionStore>())));
 
         for (var i = services.Count - 1; i >= 0; i--)
         {

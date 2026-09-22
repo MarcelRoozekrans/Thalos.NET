@@ -31,6 +31,23 @@ public interface IProcessDefinitionStore
     ValueTask<int?> GetActiveVersionAsync(string process, CancellationToken ct);
 
     /// <summary>
+    /// Reads the definition stored for <paramref name="process"/> version <paramref name="version"/> — the
+    /// read-by-version path run-time resolution takes. A run pins <see cref="WorkflowRun.ProcessVersion"/> once,
+    /// at <c>IWorkflowStore.StartAsync</c>, and never changes it, so this exact pair — not
+    /// <see cref="GetActiveVersionAsync"/>'s answer — is what a live run must keep resolving against: activating
+    /// a newer version must never silently move a run that started on an older one onto a different graph.
+    /// </summary>
+    /// <remarks>
+    /// Returns <see cref="Result{T}.Failure"/>, never <see langword="null"/> and never a throw, for both ways a
+    /// version can fail to resolve — no row stored for the pair, and a stored row whose YAML no longer parses —
+    /// with the process and version named in the message either way, because the caller's only sensible response
+    /// to either is to fail the run with something a human can act on. An exception escaping this method means
+    /// the backing store itself was unreachable, which is a transient infrastructure failure a retry can fix and
+    /// is deliberately a different channel from "this definition does not resolve".
+    /// </remarks>
+    ValueTask<Result<ProcessDefinition>> GetAsync(string process, int version, CancellationToken ct);
+
+    /// <summary>
     /// Removes <paramref name="process"/> version <paramref name="version"/> — but not when a run that has not
     /// yet reached a terminal status still pins it (see this interface's remarks), which surfaces as
     /// <see cref="Result.Failure"/> rather than a thrown exception. A <paramref name="version"/> with no stored

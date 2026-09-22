@@ -11,7 +11,7 @@ namespace Thalos.Tests.Workflow;
 /// contract the dispatcher tests actually exercise — the seq-checked completion, the visits-on-entry rule, and
 /// idempotent terminal calls — not the full ORM implementation's atomicity guarantees.
 /// </summary>
-internal sealed class FakeWorkflowStore(IReadOnlyDictionary<(string Process, int Version), ProcessDefinition> processes) : IWorkflowStore
+internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : IWorkflowStore
 {
     private readonly Dictionary<Guid, WorkflowRun> _runs = [];
 
@@ -57,23 +57,28 @@ internal sealed class FakeWorkflowStore(IReadOnlyDictionary<(string Process, int
         return ValueTask.CompletedTask;
     }
 
-    public ValueTask<Result> ResumeAsync(Guid runId, string signal, string? payload, CancellationToken ct)
+    public async ValueTask<Result> ResumeAsync(Guid runId, string signal, string? payload, CancellationToken ct)
     {
         if (!_runs.TryGetValue(runId, out var run))
         {
-            return ValueTask.FromResult(Result.Failure($"Workflow run '{runId}' was not found."));
+            return Result.Failure($"Workflow run '{runId}' was not found.");
         }
 
         if (run.Status != WorkflowStatus.Awaiting || !string.Equals(run.AwaitingSignal, signal, StringComparison.Ordinal))
         {
-            return ValueTask.FromResult(Result.Failure($"Workflow run '{runId}' is not awaiting signal '{signal}'."));
+            return Result.Failure($"Workflow run '{runId}' is not awaiting signal '{signal}'.");
         }
 
-        if (!processes.TryGetValue((run.Process, run.ProcessVersion), out var process))
+        // Resolved through the definition store on the run's pinned pair, mirroring OrmWorkflowStore.ResumeAsync
+        // — the point of this fake is to stand in for that store's shape, and a fake that kept its own process
+        // registry would be reproducing exactly the second source of truth the real one no longer has.
+        var definition = await definitions.GetAsync(run.Process, run.ProcessVersion, ct);
+        if (definition.IsFailure)
         {
-            return ValueTask.FromResult(Result.Failure($"No process definition registered for '{run.Process}' version {run.ProcessVersion}."));
+            return Result.Failure(definition.Error);
         }
 
+        var process = definition.Value;
         var variables = payload is null
             ? new Dictionary<string, object?>(StringComparer.Ordinal)
             : new Dictionary<string, object?>(StringComparer.Ordinal) { ["payload"] = payload };
@@ -81,11 +86,11 @@ internal sealed class FakeWorkflowStore(IReadOnlyDictionary<(string Process, int
         var transition = WorkflowInterpreter.Advance(process, run, new NodeResult(null, variables));
         if (transition.IsFailure)
         {
-            return ValueTask.FromResult(Result.Failure(transition.Error));
+            return Result.Failure(transition.Error);
         }
 
         _runs[runId] = Apply(run, run.CurrentSeq, transition.Value, variables);
-        return ValueTask.FromResult(Result.Success());
+        return Result.Success();
     }
 
     public ValueTask FailAsync(Guid runId, string errorMessage, CancellationToken ct)

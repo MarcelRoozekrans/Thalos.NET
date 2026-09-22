@@ -53,8 +53,8 @@ public sealed class ProcessDefinitionStoreTests(PostgresFixture pg) : IAsyncLife
     {
         await pg.ResetAsync();
         var options = new WorkflowOrmOptions { ConnectionString = pg.ConnectionString };
-        _store = new OrmWorkflowStore(options);
         _definitions = new OrmProcessDefinitionStore(options);
+        _store = new OrmWorkflowStore(options, _definitions);
         _source = new FakeProcessDefinitionSource();
         _sync = new ProcessDefinitionSync(_source, _definitions, new AlwaysResolves());
     }

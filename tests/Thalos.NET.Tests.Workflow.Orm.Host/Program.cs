@@ -36,6 +36,18 @@ catch (Exception ex)
     return 1;
 }
 
+/// <summary>
+/// Pairs the workflow store with the real definition store over the same database, exactly as
+/// <c>AddWorkflowOrm</c> does. Neither command here resumes a gate, so nothing in this host actually reads a
+/// definition — the definition store is supplied because the workflow store requires one, which is itself the
+/// point: there is no longer a construction path that leaves definition resolution unwired.
+/// </summary>
+static OrmWorkflowStore NewStore(string connectionString)
+{
+    var options = new WorkflowOrmOptions { ConnectionString = connectionString, EnsureSchemaOnStartup = false };
+    return new OrmWorkflowStore(options, new OrmProcessDefinitionStore(options));
+}
+
 static int Fail(string message)
 {
     Console.Error.WriteLine(message);
@@ -58,7 +70,7 @@ static async Task<int> WriteAsync(string connectionString, CancellationToken ct)
 {
     await EnsureSchemaAsync(connectionString, ct).ConfigureAwait(false);
 
-    var store = new OrmWorkflowStore(new WorkflowOrmOptions { ConnectionString = connectionString, EnsureSchemaOnStartup = false });
+    var store = NewStore(connectionString);
 
     var runId = await store.StartAsync("manufacture", 1, Guid.NewGuid().ToString(), "implement", ct).ConfigureAwait(false);
 
@@ -80,7 +92,7 @@ static async Task<int> ReadAsync(string connectionString, string runIdText, Canc
         return Fail($"'{runIdText}' is not a valid run id");
     }
 
-    var store = new OrmWorkflowStore(new WorkflowOrmOptions { ConnectionString = connectionString, EnsureSchemaOnStartup = false });
+    var store = NewStore(connectionString);
     var run = await store.FindAsync(runId, ct).ConfigureAwait(false);
     if (run is null)
     {
