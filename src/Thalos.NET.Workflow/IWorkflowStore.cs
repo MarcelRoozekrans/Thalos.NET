@@ -14,7 +14,9 @@ public interface IWorkflowStore
     /// <summary>
     /// Starts a new run of <paramref name="process"/> version <paramref name="version"/> at
     /// <paramref name="startNode"/>, keyed for idempotent lookup by <paramref name="correlationKey"/>, and
-    /// returns its id.
+    /// returns its id. Seeds <see cref="WorkflowRun.Visits"/> with <paramref name="startNode"/> already counted
+    /// as one entry — the run has entered it by virtue of starting there — so a start node that also carries a
+    /// <c>maxVisits</c> cap is bounded correctly from its very first run, not given one free, uncounted entry.
     /// </summary>
     ValueTask<Guid> StartAsync(string process, int version, string correlationKey, string startNode, CancellationToken ct);
 
@@ -24,12 +26,17 @@ public interface IWorkflowStore
     /// <summary>
     /// Records that the node at <paramref name="seq"/> produced <paramref name="result"/> and applies
     /// <paramref name="transition"/> atomically with appending to the run's event log: the run moves to
-    /// <see cref="WorkflowTransition.NextNode"/> at <see cref="WorkflowTransition.NextStatus"/>, and
-    /// <see cref="WorkflowRun.Visits"/>'s count for <see cref="WorkflowTransition.NextNode"/> is incremented by
-    /// one — <c>Visits</c> counts entries, so the increment lands on the node the run is entering, not the one
-    /// it just finished. <see cref="WorkflowInterpreter.Advance"/> computed <paramref name="transition"/>
-    /// assuming this is the increment that happens; a store that increments a different node's count, or
-    /// increments the same node twice, breaks the cap check on <paramref name="transition"/>'s next call.
+    /// <see cref="WorkflowTransition.NextNode"/> at <see cref="WorkflowTransition.NextStatus"/>. When
+    /// <see cref="WorkflowTransition.NextNode"/> differs from the run's current node, <see cref="WorkflowRun.Visits"/>'s
+    /// count for it is incremented by one — <c>Visits</c> counts entries, so the increment lands on the node the
+    /// run is entering, not the one it just finished. When <see cref="WorkflowTransition.NextNode"/> is instead
+    /// the <em>same</em> node the run is already at — a gate parking on itself while awaiting a signal, or a
+    /// terminal node ending the run — no entry has occurred and <c>Visits</c> must not be incremented; doing so
+    /// would burn a visit per park against any capped gate purely from staying put.
+    /// <see cref="WorkflowInterpreter.Advance"/> computed <paramref name="transition"/> assuming this is the
+    /// increment that happens; a store that increments a different node's count, increments the same node
+    /// twice, or increments on a self-transition, breaks the cap check on <paramref name="transition"/>'s next
+    /// call.
     /// </summary>
     ValueTask CompleteNodeAsync(Guid runId, long seq, WorkflowTransition transition, NodeResult result, CancellationToken ct);
 

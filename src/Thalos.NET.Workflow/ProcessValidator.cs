@@ -50,11 +50,13 @@ public static class ProcessValidator
     /// absent — a node cannot run an agent's default instructions with the skill unpinned; <c>maxVisits</c> and
     /// <c>onExceeded</c> are both present or both absent — a cap with nowhere to route to, or a route with no
     /// cap behind it, would only be discovered after a run had already paid for the agent turns that hit it;
-    /// a declared <c>terminal</c> is <c>succeeded</c> or <c>failed</c> — <c>cancelled</c> is an operator action
-    /// through <c>CancelAsync</c>, not a destination a process graph gets to declare, and any other value would
+    /// a declared <c>terminal</c> is <c>succeeded</c> or <c>failed</c>, compared case-insensitively to match
+    /// <see cref="WorkflowInterpreter"/>'s own parsing — <c>cancelled</c> is an operator action through
+    /// <c>CancelAsync</c>, not a destination a process graph gets to declare, and any other value would
     /// otherwise validate cleanly and only fail once a run reached it; and a node is exactly one of task, gate
     /// or terminal.
     /// </summary>
+
     private static void ValidateShape(ProcessDefinition process, List<string> errors)
     {
         foreach (var (name, node) in process.Nodes)
@@ -90,7 +92,9 @@ public static class ProcessValidator
                 errors.Add($"node '{name}' declares 'onExceeded' but no 'maxVisits' cap");
             }
 
-            if (node.Terminal is not null && node.Terminal is not ("succeeded" or "failed"))
+            if (node.Terminal is not null &&
+                !node.Terminal.Equals("succeeded", StringComparison.OrdinalIgnoreCase) &&
+                !node.Terminal.Equals("failed", StringComparison.OrdinalIgnoreCase))
             {
                 errors.Add($"node '{name}' has an unrecognized terminal status '{node.Terminal}' (must be 'succeeded' or 'failed'; 'cancelled' is an operator action, not a declared destination)");
             }
