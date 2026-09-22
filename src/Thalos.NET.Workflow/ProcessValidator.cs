@@ -18,8 +18,9 @@ public static class ProcessValidator
 {
     /// <summary>
     /// Validates <paramref name="process"/>'s shape — every reference resolves, every node is reachable from
-    /// <see cref="ProcessDefinition.StartNode"/>, every node can reach a terminal, and every node is exactly one
-    /// of task (<c>agent</c> and <c>skill</c> both present), gate or terminal — and, when
+    /// <see cref="ProcessDefinition.StartNode"/>, every node can reach a terminal, every node declaring
+    /// <c>maxVisits</c> also declares <c>onExceeded</c>, and every node is exactly one of task
+    /// (<c>agent</c> and <c>skill</c> both present), gate or terminal — and, when
     /// <paramref name="resolver"/> is not <see langword="null"/>, that
     /// every declared agent and skill exists in the host.
     /// </summary>
@@ -46,8 +47,10 @@ public static class ProcessValidator
     /// The per-node shape rules that need no graph walk: every <c>next</c>/<c>branch</c> value/<c>onExceeded</c>
     /// target names a node that exists; every <c>branch</c> key is a declared outcome; a node declaring
     /// <c>branch</c> also declares <c>outcomes</c>; <c>agent</c> and <c>skill</c> are both present or both
-    /// absent — a node cannot run an agent's default instructions with the skill unpinned; and a node is
-    /// exactly one of task, gate or terminal.
+    /// absent — a node cannot run an agent's default instructions with the skill unpinned; a node declaring
+    /// <c>maxVisits</c> also declares <c>onExceeded</c> — a cap with nowhere to route to would only be
+    /// discovered after a run had already paid for the agent turns that hit it; and a node is exactly one of
+    /// task, gate or terminal.
     /// </summary>
     private static void ValidateShape(ProcessDefinition process, List<string> errors)
     {
@@ -72,6 +75,11 @@ public static class ProcessValidator
             if (node.Branch.Count > 0 && node.Outcomes.Count == 0)
             {
                 errors.Add($"node '{name}' declares 'branch' without declaring 'outcomes'");
+            }
+
+            if (node.MaxVisits is not null && node.OnExceeded is null)
+            {
+                errors.Add($"node '{name}' declares 'maxVisits' but no 'onExceeded' target");
             }
 
             if (node.Agent is not null && node.Skill is null)

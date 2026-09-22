@@ -19,7 +19,10 @@ namespace Thalos.Workflow;
 /// <b>Cap.</b> Skipped unless <see cref="ProcessNode.MaxVisits"/> is set. Compares
 /// <c>Visits[node] + 1 &gt; MaxVisits</c> — the ordinal of the completion just reported, not the count that will
 /// exist after it — before any outgoing edge is considered, so a <c>maxVisits: 5</c> node's sixth completion,
-/// and only its sixth, is redirected to <see cref="ProcessNode.OnExceeded"/> instead of its usual edge.
+/// and only its sixth, is redirected to <see cref="ProcessNode.OnExceeded"/> instead of its usual edge. A cap
+/// with no <c>OnExceeded</c> target now fails <see cref="ProcessValidator"/> at load time, so the null check
+/// below is defence in depth: unreachable for any process that validated, kept in case a caller constructs a
+/// <see cref="ProcessDefinition"/> by hand without going through the validator.
 /// </item>
 /// <item>
 /// <b>Gate.</b> <see cref="ProcessNode.Await"/> set means the run parks at this node, awaiting an external
@@ -52,6 +55,9 @@ public static class WorkflowInterpreter
             var completionOrdinal = run.Visits.GetValueOrDefault(run.CurrentNode) + 1;
             if (completionOrdinal > maxVisits)
             {
+                // Defence in depth: ProcessValidator now rejects maxVisits without onExceeded at load time,
+                // so this branch is unreachable through the validated path. Kept for a hand-built
+                // ProcessDefinition that bypassed the validator.
                 if (node.OnExceeded is null)
                 {
                     return Result<WorkflowTransition>.Failure(

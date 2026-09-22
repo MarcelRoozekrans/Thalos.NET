@@ -7,14 +7,13 @@ namespace Thalos.Workflow;
 /// without the work behind its new node also being scheduled, and never schedules that work without the
 /// transition having committed.
 /// </summary>
-/// <remarks>
-/// The brief for this task specifies <see cref="IWorkflowStore"/>'s exact surface but not this interface's; the
-/// single method below is this task's best-effort placeholder for "enqueue the node dispatch that Task 4's
-/// transactional outbox will pick up," sized to what Task 4's brief describes needing. Task 4 owns the final
-/// shape and should widen or reshape this member as its outbox payload turns out to require.
-/// </remarks>
 public interface IWorkflowDispatcher
 {
-    /// <summary>Schedules <paramref name="node"/> of run <paramref name="runId"/> to run its agent/skill pair.</summary>
-    ValueTask DispatchAsync(Guid runId, string node, CancellationToken ct);
+    /// <summary>
+    /// Schedules <paramref name="node"/> of run <paramref name="runId"/> to run its agent/skill pair.
+    /// <paramref name="seq"/> travels with the dispatched message so the engine's redelivery defence has
+    /// something to compare against: a message whose <paramref name="seq"/> no longer matches the run's current
+    /// sequence number is dropped as a no-op rather than acted on twice.
+    /// </summary>
+    ValueTask DispatchAsync(Guid runId, long seq, string node, CancellationToken ct);
 }
