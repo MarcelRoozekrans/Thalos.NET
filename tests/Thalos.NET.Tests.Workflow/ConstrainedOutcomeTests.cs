@@ -15,18 +15,46 @@ namespace Thalos.Tests.Workflow;
 public sealed class ConstrainedOutcomeTests
 {
     private static readonly AgentId ReviewerId = AgentId.New();
+    private static readonly AgentId StarterId = AgentId.New();
 
-    /// <summary><c>review</c> declares a closed outcome set and branches on it; <c>rework</c>/<c>done</c> are plain terminals.</summary>
-    private static readonly ProcessDefinition Def = ProcessLoader.Load($$"""
+    /// <summary>
+    /// <c>review</c> declares a closed outcome set and branches on it; <c>rework</c>/<c>done</c> are plain
+    /// terminals. <c>agent:</c> is the reviewer's human-authored name — <see cref="FakeWorkflowReferenceResolver"/>
+    /// is what turns it into an <see cref="AgentId"/>, mirroring how a real host resolves it over its own
+    /// <c>IAgentCatalog</c>, never a raw id written into the process file.
+    /// </summary>
+    private static readonly ProcessDefinition Def = ProcessLoader.Load("""
         process: gate-check
         version: 1
         nodes:
           review:
-            agent: {{ReviewerId}}
+            agent: reviewer
             skill: code-review
             outcomes: [approved, rejected]
             branch: { approved: done, rejected: rework }
           rework: { terminal: failed }
+          done: { terminal: succeeded }
+        """).Value;
+
+    /// <summary>A task node feeding an approval gate feeding a terminal — the fixture the Critical fix needs and <see cref="Def"/> never exercised.</summary>
+    private static readonly ProcessDefinition GateDef = ProcessLoader.Load("""
+        process: approval-flow
+        version: 1
+        nodes:
+          start:
+            agent: starter
+            skill: kick-off
+            next: gate
+          gate: { await: human_approval, next: done }
+          done: { terminal: succeeded }
+        """).Value;
+
+    /// <summary>References an agent name no resolver entry covers, to test the unresolvable-agent path.</summary>
+    private static readonly ProcessDefinition UnknownAgentDef = ProcessLoader.Load("""
+        process: bad-agent
+        version: 1
+        nodes:
+          only: { agent: ghost, skill: whatever, next: done }
           done: { terminal: succeeded }
         """).Value;
 
@@ -37,10 +65,21 @@ public sealed class ConstrainedOutcomeTests
 
     public ConstrainedOutcomeTests()
     {
-        var processes = new Dictionary<(string, int), ProcessDefinition> { [("gate-check", 1)] = Def };
+        var processes = new Dictionary<(string, int), ProcessDefinition>
+        {
+            [("gate-check", 1)] = Def,
+            [("approval-flow", 1)] = GateDef,
+            [("bad-agent", 1)] = UnknownAgentDef,
+        };
+        var resolver = new FakeWorkflowReferenceResolver(new Dictionary<string, AgentId>(StringComparer.Ordinal)
+        {
+            ["reviewer"] = ReviewerId,
+            ["starter"] = StarterId,
+        });
+
         _store = new FakeWorkflowStore(processes);
         _runner = new FakeSubagentRunner();
-        _dispatcher = new WorkflowNodeDispatcher(_store, _runner, processes, _ => new FakeSecurityContext("workflow-engine"));
+        _dispatcher = new WorkflowNodeDispatcher(_store, _runner, resolver, processes, _ => new FakeSecurityContext("workflow-engine"));
 
         _store.Seed(new WorkflowRun
         {
@@ -81,24 +120,23 @@ public sealed class ConstrainedOutcomeTests
     private void GivenAgentReturns(string outcome) =>
         _runner.NextResult = _ => Result<AgentTurnResult, AgentError>.Success(TurnResultReporting(outcome));
 
-    private static AgentTurnResult TurnResultReporting(string outcome)
-    {
-        var toolCall = new ToolCallSummary(
-            ToolCallId.New(),
-            WorkflowNodeDispatcher.OutcomeToolName,
-            $$"""{"outcome":"{{outcome}}"}""",
-            true,
-            outcome,
-            TimeSpan.Zero);
+    /// <summary>Configures the fake runner to call the outcome tool twice, with two different, disagreeing values.</summary>
+    private void GivenAgentReturnsDisagreeingOutcomes(string first, string second) =>
+        _runner.NextResult = _ => Result<AgentTurnResult, AgentError>.Success(TurnResultReportingBoth(first, second));
 
-        return new AgentTurnResult(
-            TurnId.New(),
-            SessionId.New(),
-            $"Reported outcome: {outcome}",
-            TurnUsage.Empty("test-model"),
-            [toolCall],
-            TimeSpan.Zero);
-    }
+    /// <summary>Configures the fake runner to complete the turn without ever calling the outcome tool.</summary>
+    private void GivenAgentNeverReportsAnOutcome() =>
+        _runner.NextResult = _ => Result<AgentTurnResult, AgentError>.Success(
+            new AgentTurnResult(TurnId.New(), SessionId.New(), "Looked into it.", TurnUsage.Empty("test-model"), [], TimeSpan.Zero));
+
+    private static AgentTurnResult TurnResultReporting(string outcome) =>
+        new(TurnId.New(), SessionId.New(), $"Reported outcome: {outcome}", TurnUsage.Empty("test-model"), [OutcomeCall(outcome)], TimeSpan.Zero);
+
+    private static AgentTurnResult TurnResultReportingBoth(string first, string second) =>
+        new(TurnId.New(), SessionId.New(), "ambiguous", TurnUsage.Empty("test-model"), [OutcomeCall(first), OutcomeCall(second)], TimeSpan.Zero);
+
+    private static ToolCallSummary OutcomeCall(string outcome) =>
+        new(ToolCallId.New(), WorkflowNodeDispatcher.OutcomeToolName, $$"""{"outcome":"{{outcome}}"}""", true, outcome, TimeSpan.Zero);
 
     private sealed class CapturedInvocation
     {
@@ -127,6 +165,102 @@ public sealed class ConstrainedOutcomeTests
         var run = await _store.FindAsync(_runId, CancellationToken.None);
         run!.Status.Should().Be(WorkflowStatus.Failed);
         run.LastError.Should().Contain("approved, with some concerns").And.Contain("review");
+    }
+
+    /// <summary>
+    /// Critical fix: an approval gate has no agent — <see cref="ProcessValidator"/>'s "exactly one of task, gate
+    /// or terminal" rule guarantees it — so arriving at one must park the run at <see cref="WorkflowStatus.Awaiting"/>
+    /// via <see cref="WorkflowInterpreter.Advance"/>, exactly like the terminal-node case, rather than trying
+    /// (and failing) to resolve an agent that was never going to be there. Before the fix,
+    /// <see cref="WorkflowNodeDispatcher"/> special-cased only <c>Terminal</c> and fell through to agent
+    /// resolution for a gate, failing every run that ever reached one.
+    /// </summary>
+    [Fact]
+    public async Task A_gate_arrival_parks_the_run_at_awaiting_instead_of_failing()
+    {
+        var gateRunId = Guid.NewGuid();
+        _store.Seed(new WorkflowRun
+        {
+            Id = gateRunId,
+            Process = "approval-flow",
+            ProcessVersion = 1,
+            CurrentNode = "gate",
+            CurrentSeq = 1,
+            Status = WorkflowStatus.Running,
+            AwaitingSignal = null,
+            Visits = new Dictionary<string, int>(StringComparer.Ordinal) { ["start"] = 1, ["gate"] = 1 },
+        });
+
+        await _dispatcher.DispatchAsync(new WorkflowDispatchMessage(gateRunId, 1, "gate"), CancellationToken.None);
+
+        var run = await _store.FindAsync(gateRunId, CancellationToken.None);
+        run!.Status.Should().Be(WorkflowStatus.Awaiting);
+        run.AwaitingSignal.Should().Be("human_approval");
+        run.CurrentNode.Should().Be("gate");
+        _runner.CallCount.Should().Be(0, "a gate has no agent to run — it parks on Advance's own verdict alone");
+    }
+
+    /// <summary>Important fix: <c>agent:</c> is a human-authored name resolved through <see cref="IWorkflowReferenceResolver"/>, not a raw <see cref="AgentId"/>.</summary>
+    [Fact]
+    public async Task An_unresolvable_agent_name_fails_the_node_instead_of_throwing()
+    {
+        var badRunId = Guid.NewGuid();
+        _store.Seed(new WorkflowRun
+        {
+            Id = badRunId,
+            Process = "bad-agent",
+            ProcessVersion = 1,
+            CurrentNode = "only",
+            CurrentSeq = 1,
+            Status = WorkflowStatus.Running,
+            AwaitingSignal = null,
+            Visits = new Dictionary<string, int>(StringComparer.Ordinal) { ["only"] = 1 },
+        });
+
+        await _dispatcher.DispatchAsync(new WorkflowDispatchMessage(badRunId, 1, "only"), CancellationToken.None);
+
+        var run = await _store.FindAsync(badRunId, CancellationToken.None);
+        run!.Status.Should().Be(WorkflowStatus.Failed);
+        run.LastError.Should().Contain("ghost").And.Contain("only");
+        _runner.CallCount.Should().Be(0);
+    }
+
+    /// <summary>Cheap fix: the message's own node name is part of the contract — a mismatch against the run's actual position is corruption, not an ordinary redelivery race, and must fail loudly rather than act on the wrong node.</summary>
+    [Fact]
+    public async Task A_message_naming_the_wrong_node_fails_the_run_instead_of_acting_on_it()
+    {
+        await _dispatcher.DispatchAsync(new WorkflowDispatchMessage(_runId, 1, "done"), CancellationToken.None);
+
+        var run = await _store.FindAsync(_runId, CancellationToken.None);
+        run!.Status.Should().Be(WorkflowStatus.Failed);
+        run.LastError.Should().Contain("done").And.Contain("review");
+        _runner.CallCount.Should().Be(0);
+    }
+
+    /// <summary>Cheap fix: two tool calls that disagree on the value must fail the node — picking either one would be exactly the guess this task exists to eliminate.</summary>
+    [Fact]
+    public async Task Disagreeing_outcome_tool_calls_fail_the_node_instead_of_picking_one()
+    {
+        GivenAgentReturnsDisagreeingOutcomes("approved", "rejected");
+
+        await _dispatcher.DispatchAsync(new WorkflowDispatchMessage(_runId, 1, "review"), CancellationToken.None);
+
+        var run = await _store.FindAsync(_runId, CancellationToken.None);
+        run!.Status.Should().Be(WorkflowStatus.Failed);
+        run.LastError.Should().Contain("approved").And.Contain("rejected").And.Contain("review");
+    }
+
+    /// <summary>Cheap fix: a turn that never calls the outcome tool gets its own explicit message, distinguishable in the event log from a call that reported a wrong value.</summary>
+    [Fact]
+    public async Task A_turn_that_never_calls_the_outcome_tool_fails_with_a_distinct_message()
+    {
+        GivenAgentNeverReportsAnOutcome();
+
+        await _dispatcher.DispatchAsync(new WorkflowDispatchMessage(_runId, 1, "review"), CancellationToken.None);
+
+        var run = await _store.FindAsync(_runId, CancellationToken.None);
+        run!.Status.Should().Be(WorkflowStatus.Failed);
+        run.LastError.Should().Contain("review").And.Contain("without calling").And.Contain(WorkflowNodeDispatcher.OutcomeToolName);
     }
 
     /// <summary>

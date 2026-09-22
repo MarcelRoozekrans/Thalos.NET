@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Text.Json;
 using ZeroAlloc.Authorization;
 using ZeroAlloc.Results;
@@ -14,23 +13,25 @@ namespace Thalos.Workflow;
 /// host-specific part. Here that part is <c>resolveCaller</c>: an opaque function from a run to the
 /// <see cref="ISecurityContext"/> it executes as, supplied by whoever registers this dispatcher. This dispatcher
 /// never inspects or interprets what comes back from it — it only forwards the value into
-/// <see cref="SubagentRunRequest.Caller"/>.
+/// <see cref="SubagentRunRequest.Caller"/>. Agent name resolution is the same shape: <see cref="IWorkflowReferenceResolver"/>
+/// is a host-backed port (its <c>ResolveAgentIdAsync</c>), not something this dispatcher implements itself.
 /// </summary>
 /// <remarks>
 /// <b>A node failure must not throw.</b> A throw would hand the message back to the outbox for eight retries with
 /// exponential backoff, re-running the subagent each time — paying for the same failing turn eight times over,
-/// with nobody told until it dead-letters. A result this dispatcher dislikes — the turn itself failed, or
-/// <see cref="WorkflowInterpreter.Advance"/> rejects the outcome it produced — is recorded through
-/// <see cref="IWorkflowStore.FailAsync"/> instead, which marks the run <see cref="WorkflowStatus.Failed"/> without
-/// leaving the outbox anything to retry. Only a turn that never produced a result at all — an unexpected exception
-/// escaping <see cref="ISubagentRunner.RunAsync"/> itself, or <see cref="IWorkflowStore"/> throwing
-/// <see cref="WorkflowConcurrencyException"/> because another dispatch already won the race to complete this node —
-/// is allowed to propagate, because those genuinely are the transient, infrastructure-shaped failures a retry can
-/// fix.
+/// with nobody told until it dead-letters. A result this dispatcher dislikes — the turn itself failed, an
+/// unresolvable agent name, an ambiguous or missing outcome, or <see cref="WorkflowInterpreter.Advance"/> rejecting
+/// the outcome it produced — is recorded through <see cref="IWorkflowStore.FailAsync"/> instead, which marks the
+/// run <see cref="WorkflowStatus.Failed"/> without leaving the outbox anything to retry. Only a turn that never
+/// produced a result at all — an unexpected exception escaping <see cref="ISubagentRunner.RunAsync"/> itself, or
+/// <see cref="IWorkflowStore"/> throwing <see cref="WorkflowConcurrencyException"/> because another dispatch
+/// already won the race to complete this node — is allowed to propagate, because those genuinely are the
+/// transient, infrastructure-shaped failures a retry can fix.
 /// </remarks>
 public sealed class WorkflowNodeDispatcher(
     IWorkflowStore store,
     ISubagentRunner runner,
+    IWorkflowReferenceResolver resolver,
     IReadOnlyDictionary<(string Process, int Version), ProcessDefinition> processes,
     Func<WorkflowRun, ISecurityContext> resolveCaller)
 {
@@ -49,6 +50,7 @@ public sealed class WorkflowNodeDispatcher(
 
     private readonly IWorkflowStore _store = store ?? throw new ArgumentNullException(nameof(store));
     private readonly ISubagentRunner _runner = runner ?? throw new ArgumentNullException(nameof(runner));
+    private readonly IWorkflowReferenceResolver _resolver = resolver ?? throw new ArgumentNullException(nameof(resolver));
     private readonly IReadOnlyDictionary<(string Process, int Version), ProcessDefinition> _processes =
         processes ?? throw new ArgumentNullException(nameof(processes));
     private readonly Func<WorkflowRun, ISecurityContext> _resolveCaller =
@@ -78,32 +80,68 @@ public sealed class WorkflowNodeDispatcher(
             return;
         }
 
+        // Seq already matches at this point, so a node-name mismatch is not an ordinary redelivery race - it
+        // would mean the message and the run's own state disagree about where the run is, which is corruption
+        // worth failing loudly on rather than silently acting on the wrong node.
+        if (!string.Equals(message.Node, run.CurrentNode, StringComparison.Ordinal))
+        {
+            await _store.FailAsync(run.Id, $"dispatch message named node '{message.Node}' but run '{run.Id}' is at '{run.CurrentNode}' (seq {message.Seq} matched).", ct).ConfigureAwait(false);
+            return;
+        }
+
         var resolved = await ResolveNodeAsync(run, ct).ConfigureAwait(false);
         if (resolved is not { } target)
         {
             return;
         }
 
-        // A terminal node declares no agent or skill — ProcessValidator accepts it with neither, since it has
-        // nothing left to do but end the run at its declared status (ProcessNode.Terminal). Reaching one always
-        // takes two Advance calls: the first, on the branch/next edge that led here, reports NextStatus Running
-        // (ApplyCap does not special-case a terminal target), which is exactly why a dispatch was enqueued for
-        // it at all; this second call, made directly against an empty result with nothing to run, is what
-        // actually yields the terminal status. Skipping the agent/skill resolution below for this case is not
-        // an optimisation — a terminal node has no agent to resolve in the first place.
-        if (target.Node.Terminal is not null)
+        // A terminal node and a gate both declare no agent or skill - ProcessValidator's "exactly one of task,
+        // gate or terminal" rule guarantees a node with Await or Terminal set has Agent null. Reaching either
+        // always takes two Advance calls: the first, on the branch/next edge that led here, reports NextStatus
+        // Running (ApplyCap does not special-case either kind of target), which is exactly why a dispatch was
+        // enqueued for it at all; this second call, made directly against an empty result with nothing to run,
+        // is what actually yields the terminal status or parks the gate at Awaiting. A gate arriving here is
+        // always a fresh arrival, never a resume - Advance parks whenever run.Status is not already Awaiting,
+        // and this method only ever reaches Advance with the run's persisted Running status (the guard above)
+        // - so IWorkflowStore.ResumeAsync, not this dispatcher, is what later calls Advance again with Awaiting
+        // set to actually leave the gate.
+        if (target.Node.Terminal is not null || target.Node.Await is not null)
         {
             await AdvanceAndPersistAsync(run, target.Process, new NodeResult(null, EmptyVariables), message.Seq, ct).ConfigureAwait(false);
             return;
         }
 
-        if (!AgentId.TryParse(target.Node.Agent, CultureInfo.InvariantCulture, out var agentId))
+        var agentId = await ResolveAgentAsync(run, target.Node, ct).ConfigureAwait(false);
+        if (agentId is not { } resolvedAgentId)
         {
-            await _store.FailAsync(run.Id, $"node '{run.CurrentNode}' has an invalid agent identifier '{target.Node.Agent}'.", ct).ConfigureAwait(false);
             return;
         }
 
-        await RunNodeAsync(run, target.Process, target.Node, agentId, message.Seq, ct).ConfigureAwait(false);
+        await RunNodeAsync(run, target.Process, target.Node, resolvedAgentId, message.Seq, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Resolves <paramref name="node"/>'s <see cref="ProcessNode.Agent"/> name to an <see cref="AgentId"/> through
+    /// <see cref="IWorkflowReferenceResolver.ResolveAgentIdAsync"/> — <c>agent:</c> is a human-authored name in a
+    /// git-reviewed process file, never a raw id, so this dispatcher never parses it as one itself. Fails the run
+    /// (not throwing — see this class's remarks) when the node has no agent name at all, or the name does not
+    /// resolve.
+    /// </summary>
+    private async ValueTask<AgentId?> ResolveAgentAsync(WorkflowRun run, ProcessNode node, CancellationToken ct)
+    {
+        if (node.Agent is not { } agentName)
+        {
+            await _store.FailAsync(run.Id, $"node '{run.CurrentNode}' is a task node with no agent name.", ct).ConfigureAwait(false);
+            return null;
+        }
+
+        var agentId = await _resolver.ResolveAgentIdAsync(agentName, ct).ConfigureAwait(false);
+        if (agentId is null)
+        {
+            await _store.FailAsync(run.Id, $"node '{run.CurrentNode}' references unknown agent '{agentName}'.", ct).ConfigureAwait(false);
+        }
+
+        return agentId;
     }
 
     /// <summary>
@@ -130,9 +168,9 @@ public sealed class WorkflowNodeDispatcher(
 
     /// <summary>
     /// Runs <paramref name="node"/>'s agent turn and persists whatever <see cref="WorkflowInterpreter.Advance"/>
-    /// decides from it. Every path that reaches a verdict — the turn itself failing, or <c>Advance</c> rejecting
-    /// the outcome it produced — goes through <see cref="IWorkflowStore.FailAsync"/>, never a throw; see this
-    /// class's remarks for why.
+    /// decides from it. Every path that reaches a verdict — the turn itself failing, an ambiguous or missing
+    /// outcome, or <c>Advance</c> rejecting the outcome it produced — goes through <see cref="IWorkflowStore.FailAsync"/>,
+    /// never a throw; see this class's remarks for why.
     /// </summary>
     private async ValueTask RunNodeAsync(WorkflowRun run, ProcessDefinition process, ProcessNode node, AgentId agentId, long seq, CancellationToken ct)
     {
@@ -157,13 +195,19 @@ public sealed class WorkflowNodeDispatcher(
             return;
         }
 
-        var nodeResult = BuildNodeResult(turn.Value, outcomeTool);
-        await AdvanceAndPersistAsync(run, process, nodeResult, seq, ct).ConfigureAwait(false);
+        var nodeResult = BuildNodeResult(run.CurrentNode, turn.Value, outcomeTool);
+        if (nodeResult.IsFailure)
+        {
+            await _store.FailAsync(run.Id, nodeResult.Error, ct).ConfigureAwait(false);
+            return;
+        }
+
+        await AdvanceAndPersistAsync(run, process, nodeResult.Value, seq, ct).ConfigureAwait(false);
     }
 
     /// <summary>
     /// The shared tail of every path through <see cref="DispatchAsync"/> that has a <see cref="NodeResult"/> in
-    /// hand — a completed agent turn, or the empty result a terminal node is advanced with. Calls
+    /// hand — a completed agent turn, or the empty result a terminal node or gate is advanced with. Calls
     /// <see cref="WorkflowInterpreter.Advance"/> and either fails the run (a result Advance rejects, e.g. an
     /// outcome outside the node's declared set — see this class's remarks on why that is <see cref="IWorkflowStore.FailAsync"/>
     /// and never a throw) or persists the transition. A <see cref="WorkflowConcurrencyException"/> from
@@ -191,33 +235,53 @@ public sealed class WorkflowNodeDispatcher(
 
     /// <summary>
     /// Builds the node result Advance evaluates. For a node with no declared outcomes, the outcome is always
-    /// <see langword="null"/> — nothing to constrain. For a node with declared outcomes, the value comes only from
-    /// a call to <paramref name="outcomeTool"/>'s <see cref="OutcomeToolSchema.ToolName"/> in
+    /// <see langword="null"/> — nothing to constrain. For a node with declared outcomes, the value comes only
+    /// from a call to <paramref name="outcomeTool"/>'s <see cref="OutcomeToolSchema.ToolName"/> in
     /// <see cref="AgentTurnResult.ToolCalls"/>: never from <see cref="AgentTurnResult.Text"/>. A model that never
-    /// called the tool, or called it with a value <see cref="ExtractOutcome"/> cannot read as a plain string,
-    /// yields a <see langword="null"/> outcome, which <see cref="WorkflowInterpreter.Advance"/> then rejects for a
-    /// branching node exactly as it would reject any other outcome outside the declared set — this method does not
-    /// pre-validate against <see cref="OutcomeToolSchema.AllowedValues"/> itself, because Advance is the single
-    /// place that check already lives and duplicating it here would only create a second place for the two to
-    /// drift.
+    /// called the tool fails the node right here, with a message that names <paramref name="nodeName"/> and says
+    /// plainly that no outcome was reported — distinct from the message <see cref="WorkflowInterpreter.Advance"/>
+    /// produces for a call that reported a value outside the declared set, so the event log can tell a silent
+    /// model apart from a miscategorising one. This method does not otherwise pre-validate the reported value
+    /// against <see cref="OutcomeToolSchema.AllowedValues"/> itself, because <c>Advance</c> is the single place
+    /// that check already lives and duplicating it here would only create a second place for the two to drift.
     /// </summary>
-    private static NodeResult BuildNodeResult(AgentTurnResult turn, OutcomeToolSchema? outcomeTool) =>
-        outcomeTool is null
-            ? new NodeResult(null, EmptyVariables)
-            : new NodeResult(ExtractOutcome(turn, outcomeTool.ToolName), EmptyVariables);
+    private static Result<NodeResult> BuildNodeResult(string nodeName, AgentTurnResult turn, OutcomeToolSchema? outcomeTool)
+    {
+        if (outcomeTool is null)
+        {
+            return Result<NodeResult>.Success(new NodeResult(null, EmptyVariables));
+        }
+
+        var extraction = ExtractOutcome(turn, outcomeTool.ToolName);
+        if (extraction.IsFailure)
+        {
+            return Result<NodeResult>.Failure($"node '{nodeName}' {extraction.Error}");
+        }
+
+        if (extraction.Value is null)
+        {
+            return Result<NodeResult>.Failure($"node '{nodeName}' completed without calling '{outcomeTool.ToolName}' to report an outcome.");
+        }
+
+        return Result<NodeResult>.Success(new NodeResult(extraction.Value, EmptyVariables));
+    }
 
     /// <summary>
-    /// Reads the outcome strictly from a tool call named <paramref name="toolName"/> — never from
+    /// Reads the outcome strictly from tool calls named <paramref name="toolName"/> — never from
     /// <see cref="AgentTurnResult.Text"/>. This is the read-side half of the structural constraint: even a model
     /// that ignored the tool's schema and free-texted its answer into <c>Text</c> gets no consideration here, the
     /// same as a model that never called the tool at all. Malformed <see cref="ToolCallSummary.ArgumentsJson"/> —
-    /// not valid JSON, or missing/non-string <see cref="OutcomeArgumentName"/> — is treated the same as "no
-    /// outcome reported" rather than thrown: it is still a turn that completed, just one whose tool call this
-    /// dispatcher cannot make sense of, and <see cref="WorkflowInterpreter.Advance"/> already rejects a
-    /// <see langword="null"/> outcome for any node that declares one.
+    /// not valid JSON, or missing/non-string <see cref="OutcomeArgumentName"/> — is treated as though that
+    /// particular call did not report a value, rather than thrown: it is still a turn that completed, just one
+    /// call this dispatcher cannot make sense of. Two or more matching calls that disagree on the value fail
+    /// outright — picking one would be exactly the guess this task exists to eliminate — while repeated calls
+    /// that agree, or a single call, resolve to that one value. A <see langword="null"/> success value means no
+    /// call reported anything usable at all, which <see cref="BuildNodeResult"/> turns into its own explicit
+    /// "no outcome reported" failure rather than letting a silent <see langword="null"/> reach <c>Advance</c>.
     /// </summary>
-    private static string? ExtractOutcome(AgentTurnResult turn, string toolName)
+    private static Result<string?> ExtractOutcome(AgentTurnResult turn, string toolName)
     {
+        string? outcome = null;
         foreach (var call in turn.ToolCalls)
         {
             if (!string.Equals(call.ToolName, toolName, StringComparison.Ordinal))
@@ -225,22 +289,38 @@ public sealed class WorkflowNodeDispatcher(
                 continue;
             }
 
-            try
+            var value = TryReadOutcomeArgument(call.ArgumentsJson);
+            if (value is null)
             {
-                using var arguments = JsonDocument.Parse(call.ArgumentsJson);
-                if (arguments.RootElement.TryGetProperty(OutcomeArgumentName, out var value) && value.ValueKind == JsonValueKind.String)
-                {
-                    return value.GetString();
-                }
+                continue;
             }
-            catch (JsonException)
+
+            if (outcome is not null && !string.Equals(outcome, value, StringComparison.Ordinal))
             {
-                // Malformed tool-call arguments are not this dispatcher's problem to throw over — see the
-                // remarks above. Falls through to the next matching call, if any, or returns null below.
+                return Result<string?>.Failure(
+                    $"called '{toolName}' more than once with disagreeing values ('{outcome}' and '{value}') — refusing to guess which one to use");
             }
+
+            outcome = value;
         }
 
-        return null;
+        return Result<string?>.Success(outcome);
+    }
+
+    /// <summary>Reads the <see cref="OutcomeArgumentName"/> string argument out of one tool call's JSON, or <see langword="null"/> if it isn't there or isn't a string.</summary>
+    private static string? TryReadOutcomeArgument(string argumentsJson)
+    {
+        try
+        {
+            using var arguments = JsonDocument.Parse(argumentsJson);
+            return arguments.RootElement.TryGetProperty(OutcomeArgumentName, out var value) && value.ValueKind == JsonValueKind.String
+                ? value.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
