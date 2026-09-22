@@ -51,6 +51,25 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     /// would have run it against. This store holds no process registry of its own; there is nowhere for a second
     /// answer to live.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Resolution takes the run's pinned <c>(Process, ProcessVersion)</c>, never the currently active version: a
+    /// run parked at a gate for days must come back to the graph it started on even if newer versions activated
+    /// meanwhile.
+    /// </para>
+    /// <para>
+    /// <b>What this read costs.</b> <see cref="ResumeAsync"/> calls it while its own transaction is open, so it
+    /// takes a <em>second</em> connection from the same pool. That is safe for locking — a different table, and
+    /// no lock the run row's writer waits on — but it should not be waved away as free just because a warm cache
+    /// makes it no I/O at all. The case that decides whether this is sound is the loaded one: a cold host
+    /// resuming many parked gates at once would otherwise have every resume holding one connection and queuing
+    /// for another, which past enough concurrency stops being slow and starts timing out.
+    /// <c>CachingProcessDefinitionStore</c>'s single-flight is what bounds it, capping concurrent
+    /// second-connection demand at one per distinct version however many resumes arrive together. A store
+    /// constructed here with an un-decorated <see cref="IProcessDefinitionStore"/> gives that guarantee up;
+    /// <c>AddWorkflowOrm</c> always wires the decorator.
+    /// </para>
+    /// </remarks>
     private readonly IProcessDefinitionStore _definitions = definitions ?? throw new ArgumentNullException(nameof(definitions));
 
     /// <inheritdoc/>
@@ -170,12 +189,9 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             return Result.Failure($"Workflow run '{runId}' is not awaiting signal '{signal}'.");
         }
 
-        // Resolved on the run's pinned (Process, ProcessVersion), not on whatever version is currently active:
-        // a run parked at a gate for days must come back to the graph it started on even if newer versions have
-        // activated meanwhile. Read on a separate connection while this method's transaction is open, which is
-        // safe because it touches a different table and takes no lock the run row's writer waits on — and in the
-        // normal case it is a cache hit doing no I/O at all. The definition store's own error message already
-        // names the process and version, so it is surfaced verbatim rather than re-worded.
+        // Resolved on the run's pinned (Process, ProcessVersion), not on whatever version is currently active —
+        // see _definitions for why, and for what this read costs while the transaction is open. The definition
+        // store's own error message already names the process and version, so it is surfaced verbatim.
         var definition = await _definitions.GetAsync(row.Process, row.ProcessVersion, ct).ConfigureAwait(false);
         if (definition.IsFailure)
         {

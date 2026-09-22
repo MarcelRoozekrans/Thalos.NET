@@ -1,4 +1,5 @@
 using Thalos.Workflow;
+using ZeroAlloc.Results;
 
 namespace Thalos.Tests.Workflow;
 
@@ -208,6 +209,84 @@ public sealed class CachingProcessDefinitionStoreTests
 
         await cache.GetAsync("pipeline", 1, CancellationToken.None);
         inner.GetCallCount.Should().Be(4, "version 1 was the oldest entry and must have been the one evicted");
+    }
+
+    /// <summary>
+    /// Single-flight. A cold cache is the dangerous moment, not a warm one: on a freshly started host every
+    /// parked gate can resume at once and every one of those resumes misses on the same few versions. Because the
+    /// ORM store's resume holds its run-transaction connection while asking for a definition, each of those
+    /// misses takes a second connection from the same pool, so a fan-out here is a connection stampede rather
+    /// than merely duplicated work.
+    /// </summary>
+    /// <remarks>
+    /// The gate is what makes this observable: it holds the first read open so the other callers are genuinely
+    /// concurrent with it rather than arriving after it already populated the cache. Turns red if the
+    /// single-flight map is removed — the count becomes the number of concurrent callers instead of one. Asserted
+    /// on the call count rather than on the returned values, because every caller gets the right answer either
+    /// way; the whole point is how many reads it took.
+    /// </remarks>
+    [Fact]
+    public async Task Concurrent_misses_on_one_version_collapse_into_a_single_read()
+    {
+        const int callers = 32;
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var inner = new InMemoryProcessDefinitionStore().Seed(Yaml("pipeline", 1, "done"));
+        inner.ReleaseGate = gate;
+        var cache = new CachingProcessDefinitionStore(inner);
+
+        var resolves = new Task<Result<ProcessDefinition>>[callers];
+        for (var i = 0; i < callers; i++)
+        {
+            resolves[i] = Task.Run(async () => await cache.GetAsync("pipeline", 1, CancellationToken.None));
+        }
+
+        // Let every caller reach the cache and queue behind the one in-flight read before releasing it.
+        while (inner.GetCallCount == 0)
+        {
+            await Task.Yield();
+        }
+
+        gate.SetResult();
+        var results = await Task.WhenAll(resolves);
+
+        results.Should().AllSatisfy(r => r.IsSuccess.Should().BeTrue());
+        results.Should().AllSatisfy(r => r.Value.Nodes.Should().ContainKey("done"));
+        inner.GetCallCount.Should().Be(
+            1,
+            "{0} concurrent misses on one version must collapse into a single read — without single-flight each one takes its own connection from the same pool the resume transaction is already holding one from",
+            callers);
+    }
+
+    /// <summary>
+    /// A cancelled caller must detach from the shared read rather than cancelling it for everyone else. Turns red
+    /// if the shared read is started with the first caller's token instead of <see cref="CancellationToken.None"/>.
+    /// </summary>
+    [Fact]
+    public async Task Cancelling_one_caller_does_not_cancel_the_shared_read()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var inner = new InMemoryProcessDefinitionStore().Seed(Yaml("pipeline", 1, "done"));
+        inner.ReleaseGate = gate;
+        var cache = new CachingProcessDefinitionStore(inner);
+
+        using var cts = new CancellationTokenSource();
+        var cancelled = Task.Run(async () => await cache.GetAsync("pipeline", 1, cts.Token));
+        while (inner.GetCallCount == 0)
+        {
+            await Task.Yield();
+        }
+
+        var survivor = Task.Run(async () => await cache.GetAsync("pipeline", 1, CancellationToken.None));
+        await cts.CancelAsync();
+
+        var cancelling = async () => await cancelled;
+        await cancelling.Should().ThrowAsync<OperationCanceledException>("the cancelled caller observes its own token");
+
+        gate.SetResult();
+        var result = await survivor;
+
+        result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error : "");
+        result.Value.Nodes.Should().ContainKey("done", "the other caller's cancellation must not have cancelled the read this one was waiting on");
     }
 
     /// <summary>

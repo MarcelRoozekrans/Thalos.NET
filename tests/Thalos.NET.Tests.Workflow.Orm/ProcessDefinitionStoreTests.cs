@@ -136,25 +136,38 @@ public sealed class ProcessDefinitionStoreTests(PostgresFixture pg) : IAsyncLife
     // --- Property 4: a stored version is immutable ---------------------------------------------------------
 
     /// <summary>
-    /// Re-syncing unchanged files is what happens on every host startup, so it has to stay a clean no-op — and it
-    /// must still activate, since a re-sync is also how a rolled-back deployment makes an older version current
-    /// again. Turns red if the immutability check is written as "reject any re-store of an existing version"
-    /// rather than "reject a re-store whose content differs".
+    /// Re-syncing unchanged files is what happens on every host startup, so it has to stay a clean no-op — and,
+    /// critically, it must still <em>activate</em>. Version 2 is activated in between specifically so the final
+    /// assertion has somewhere to be wrong: asserting version 1 is active immediately after syncing version 1
+    /// would hold just as well against an implementation that returns early and never activates anything, which
+    /// is the failure this test exists to catch — a restart re-syncing unchanged files and leaving the wrong
+    /// version active, or none. Going back to version 1 is also the rollback path, so this covers both at once.
     /// </summary>
+    /// <remarks>
+    /// Turns red if the identical-content branch skips activation, and separately if the check is written as
+    /// "reject any re-store of an existing version" rather than "reject a re-store whose content differs" — that
+    /// second mistake fails the success assertion instead. See this task's report for the red observation.
+    /// </remarks>
     [Fact]
-    public async Task Re_syncing_identical_content_at_the_same_version_is_an_idempotent_success()
+    public async Task Re_syncing_identical_content_at_the_same_version_re_activates_that_version()
     {
         var ct = CancellationToken.None;
         await WriteProcessFile(ValidV1);
         (await _sync.SyncAsync(ct)).IsSuccess.Should().BeTrue();
 
-        // Byte-for-byte the same document, synced again.
-        var second = await _sync.SyncAsync(ct);
+        await WriteProcessFile(ValidV2);
+        (await _sync.SyncAsync(ct)).IsSuccess.Should().BeTrue();
+        (await ActiveVersion("manufacture")).Should().Be(2, "version 2 must genuinely be the active one before the rollback, or the final assertion proves nothing");
 
-        second.IsSuccess.Should().BeTrue(second.IsFailure ? second.Error : "");
-        second.Value.Should().Be(1, "the unchanged document is still activated, not skipped");
-        (await ActiveVersion("manufacture")).Should().Be(1);
-        (await StoredYaml("manufacture", 1)).Should().Be(ValidV1);
+        // Byte-for-byte the document version 1 was first stored from — the rollback case, and the same thing a
+        // restart does over a process file that has not changed.
+        await WriteProcessFile(ValidV1);
+        var rolledBack = await _sync.SyncAsync(ct);
+
+        rolledBack.IsSuccess.Should().BeTrue(rolledBack.IsFailure ? rolledBack.Error : "");
+        rolledBack.Value.Should().Be(1, "the unchanged document is still activated, not skipped");
+        (await ActiveVersion("manufacture")).Should().Be(1, "an identical re-sync must still activate — otherwise a restart over unchanged files leaves the wrong version active");
+        (await StoredYaml("manufacture", 1)).Should().Be(ValidV1, "re-storing identical content must not disturb what is stored");
     }
 
     /// <summary>

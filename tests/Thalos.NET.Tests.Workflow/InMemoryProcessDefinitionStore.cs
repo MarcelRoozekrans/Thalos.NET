@@ -22,8 +22,21 @@ internal sealed class InMemoryProcessDefinitionStore : IProcessDefinitionStore
     /// <summary>Every definition <see cref="UpsertAndActivateAsync"/> was called with, in call order.</summary>
     public List<ProcessDefinition> Activated { get; } = [];
 
-    /// <summary>How many times <see cref="GetAsync"/> has been called, cache decorators included or not.</summary>
-    public int GetCallCount { get; private set; }
+    private int _getCallCount;
+
+    /// <summary>
+    /// How many times <see cref="GetAsync"/> has actually been reached. Counted with <see cref="Interlocked"/>
+    /// because the single-flight test calls it from many threads at once, and a non-atomic increment there could
+    /// lose a count and make a broken cache look correct.
+    /// </summary>
+    public int GetCallCount => Volatile.Read(ref _getCallCount);
+
+    /// <summary>
+    /// When set, <see cref="GetAsync"/> waits on this before returning — lets a test hold the first read open
+    /// while further callers pile up behind it, which is the only way to observe whether concurrent misses on one
+    /// key collapse into a single call or fan out into many.
+    /// </summary>
+    public TaskCompletionSource? ReleaseGate { get; set; }
 
     /// <summary>
     /// When set, <see cref="TryRemoveAsync"/> refuses — standing in for the real store's "a run still pins this
@@ -52,23 +65,28 @@ internal sealed class InMemoryProcessDefinitionStore : IProcessDefinitionStore
     public ValueTask<int?> GetActiveVersionAsync(string process, CancellationToken ct) =>
         ValueTask.FromResult(_active.TryGetValue(process, out var version) ? version : (int?)null);
 
-    public ValueTask<Result<ProcessDefinition>> GetAsync(string process, int version, CancellationToken ct)
+    public async ValueTask<Result<ProcessDefinition>> GetAsync(string process, int version, CancellationToken ct)
     {
-        GetCallCount++;
+        Interlocked.Increment(ref _getCallCount);
+
+        if (ReleaseGate is { } gate)
+        {
+            await gate.Task.ConfigureAwait(false);
+        }
 
         // Same two failure shapes, and the same messages' shape, as the real store: nothing stored for the pair,
         // and a stored row that no longer parses. Both name the process and version.
         if (!_yaml.TryGetValue((process, version), out var yaml))
         {
-            return ValueTask.FromResult(Result<ProcessDefinition>.Failure(
-                $"No process definition stored for '{process}' version {version}."));
+            return Result<ProcessDefinition>.Failure(
+                $"No process definition stored for '{process}' version {version}.");
         }
 
         var loaded = ProcessLoader.Load(yaml);
-        return ValueTask.FromResult(loaded.IsSuccess
+        return loaded.IsSuccess
             ? loaded
             : Result<ProcessDefinition>.Failure(
-                $"The stored definition for '{process}' version {version} could not be parsed: {loaded.Error}"));
+                $"The stored definition for '{process}' version {version} could not be parsed: {loaded.Error}");
     }
 
     public ValueTask<Result> TryRemoveAsync(string process, int version, CancellationToken ct)

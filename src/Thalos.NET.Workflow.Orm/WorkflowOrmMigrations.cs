@@ -17,6 +17,15 @@ namespace Thalos.Workflow.Orm;
 /// migration claims version 1. A version collision is not rejected — it is silently treated as "already
 /// applied" and the colliding migration's SQL never runs — so this package reserves the 1000+ range to stay
 /// clear of the outbox's low numbers and of whatever range a future migration source picks next.
+/// <para>
+/// <b>Rolling deploys: migration 1004 is not backward compatible with pre-1004 code.</b> It adds
+/// <c>process_definition.content_hash</c> as <c>NOT NULL</c> with no default. PostgreSQL validates <c>NOT NULL</c>
+/// against the proposed tuple <em>before</em> conflict resolution, so an instance running code that predates 1004
+/// — whose INSERT never mentions the column — fails with <c>23502</c> on every
+/// <see cref="IProcessDefinitionStore.UpsertAndActivateAsync"/> call, including the <c>ON CONFLICT</c> path.
+/// Applying 1004 ahead of the rollout therefore breaks process syncing on every instance still on the old code,
+/// for as long as it is still running. Apply the migration and deploy the matching code as one step.
+/// </para>
 /// </remarks>
 public static class WorkflowOrmMigrations
 {

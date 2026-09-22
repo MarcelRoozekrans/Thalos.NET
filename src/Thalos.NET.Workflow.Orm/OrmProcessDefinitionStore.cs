@@ -58,26 +58,55 @@ public sealed class OrmProcessDefinitionStore(WorkflowOrmOptions options) : IPro
             }
         }
 
-        // One statement, keyed on the version just upserted: the new version becomes the process's only active
-        // row and every other version of the same process is deactivated in the same UPDATE. No statement
-        // ordering could leave two versions of one process active at once, even transiently within this
-        // transaction — ix_process_definition_one_active_per_process enforces the same invariant at the schema
-        // level as a second line of defence.
+        await ActivateAsync(connection, tx, definition, ct).ConfigureAwait(false);
+
+        await tx.CommitAsync(ct).ConfigureAwait(false);
+        return Result.Success();
+    }
+
+    /// <summary>
+    /// Makes <paramref name="definition"/>'s version the process's only active row: deactivate every other
+    /// version first, then activate this one. Two statements in one transaction, deliberately, and in that order.
+    /// </summary>
+    /// <remarks>
+    /// This was one statement — <c>SET is_active = (version = @version) WHERE process = @process</c> — on the
+    /// reasoning that a single UPDATE could not leave two versions active even transiently. That reasoning was
+    /// wrong about how the guard behaves: <c>ix_process_definition_one_active_per_process</c> is a partial unique
+    /// <em>index</em>, which PostgreSQL checks per row as the UPDATE walks them, not once at statement end. So
+    /// whenever the walk reached the version being activated before the one being deactivated, the row set
+    /// briefly held two active versions and the write failed with <c>23505</c>. It happened to work while
+    /// activation only ever followed an insert of a brand-new version, and broke the moment a version already
+    /// stored was re-activated — a rollback to a previous version, or a restart re-syncing an unchanged file
+    /// after a newer version had been activated. A partial unique index cannot be made <c>DEFERRABLE</c>, so
+    /// splitting the statement is the fix: deactivating first passes through a state with <em>zero</em> active
+    /// rows, which the index is perfectly happy with, and the invariant still holds at commit because both
+    /// statements share this transaction.
+    /// </remarks>
+    private static async Task ActivateAsync(NpgsqlConnection connection, NpgsqlTransaction tx, ProcessDefinition definition, CancellationToken ct)
+    {
+        await using (var deactivate = connection.CreateCommand())
+        {
+            deactivate.Transaction = tx;
+            deactivate.CommandText = """
+                UPDATE process_definition SET is_active = false
+                WHERE process = @process AND is_active AND version <> @version
+                """;
+            deactivate.Parameters.AddWithValue("process", definition.Name);
+            deactivate.Parameters.AddWithValue("version", definition.Version);
+            await deactivate.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+
         await using (var activate = connection.CreateCommand())
         {
             activate.Transaction = tx;
             activate.CommandText = """
-                UPDATE process_definition
-                SET is_active = (version = @version)
-                WHERE process = @process
+                UPDATE process_definition SET is_active = true
+                WHERE process = @process AND version = @version
                 """;
             activate.Parameters.AddWithValue("process", definition.Name);
             activate.Parameters.AddWithValue("version", definition.Version);
             await activate.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
-
-        await tx.CommitAsync(ct).ConfigureAwait(false);
-        return Result.Success();
     }
 
     /// <summary>

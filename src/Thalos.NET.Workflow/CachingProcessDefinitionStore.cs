@@ -54,6 +54,15 @@ public sealed class CachingProcessDefinitionStore : IProcessDefinitionStore
     public const int DefaultCapacity = 256;
 
     private readonly ConcurrentDictionary<ProcessVersion, Entry> _entries = new(ProcessVersionComparer.Instance);
+
+    /// <summary>
+    /// The single-flight map: at most one in-flight read per key, so N concurrent misses on the same version
+    /// collapse to one call into <see cref="_inner"/> instead of N. See <see cref="GetAsync"/> for why that
+    /// matters rather than being a micro-optimisation.
+    /// </summary>
+    private readonly ConcurrentDictionary<ProcessVersion, Lazy<Task<Result<ProcessDefinition>>>> _inFlight =
+        new(ProcessVersionComparer.Instance);
+
     private readonly IProcessDefinitionStore _inner;
     private readonly object _trimGate = new();
     private long _stamp;
@@ -103,6 +112,34 @@ public sealed class CachingProcessDefinitionStore : IProcessDefinitionStore
         _inner.GetActiveVersionAsync(process, ct);
 
     /// <inheritdoc/>
+    /// <remarks>
+    /// <para>
+    /// <b>Single-flight.</b> A cache only helps once something is in it; the dangerous moment is a cold one. On a
+    /// host that has just started, every parked gate can resume at once, and every one of those resumes misses on
+    /// the same handful of versions. Without this, N concurrent misses on one key are N reads. That is worse than
+    /// wasted work in this specific composition: the ORM store's <c>ResumeAsync</c> holds its run-transaction
+    /// connection while asking this store for a definition, which takes a <em>second</em> connection from the same
+    /// pool — so a stampede has every resume holding connection A and queuing for connection B, and at high enough
+    /// concurrency they block until the pool timeout fires rather than merely being slow. Collapsing to one
+    /// in-flight read per key caps second-connection demand at one per distinct version no matter how many resumes
+    /// arrive together, which fixes that at its source.
+    /// </para>
+    /// <para>
+    /// <b><see cref="Lazy{T}"/>, not a bare task.</b> <see cref="ConcurrentDictionary{TKey,TValue}.GetOrAdd(TKey, Func{TKey,TValue})"/>
+    /// does not promise the factory runs only once under contention — it promises only that one result wins. A
+    /// bare task factory could therefore still start two reads and discard one, which is exactly what this is
+    /// supposed to prevent. <see cref="LazyThreadSafetyMode.ExecutionAndPublication"/> gives the once-only
+    /// guarantee the map itself does not.
+    /// </para>
+    /// <para>
+    /// <b>The shared read is not cancellable.</b> It runs with <see cref="CancellationToken.None"/> deliberately:
+    /// the token belonging to whichever caller happened to arrive first must not be able to cancel a read every
+    /// other waiter is depending on. Each caller instead observes its own <paramref name="ct"/> through
+    /// <see cref="Task.WaitAsync(CancellationToken)"/>, so cancelling one caller detaches that caller and leaves
+    /// the shared read running for the rest. The cost is that a cancelled or shutting-down host may wait out one
+    /// single-row indexed read; that is a far smaller price than a cancellation racing across unrelated callers.
+    /// </para>
+    /// </remarks>
     public async ValueTask<Result<ProcessDefinition>> GetAsync(string process, int version, CancellationToken ct)
     {
         var key = new ProcessVersion(process, version);
@@ -111,7 +148,32 @@ public sealed class CachingProcessDefinitionStore : IProcessDefinitionStore
             return Result<ProcessDefinition>.Success(cached.Definition);
         }
 
-        var loaded = await _inner.GetAsync(process, version, ct).ConfigureAwait(false);
+        var flight = _inFlight.GetOrAdd(
+            key,
+            static (k, self) => new Lazy<Task<Result<ProcessDefinition>>>(
+                () => self.ResolveAsync(k), LazyThreadSafetyMode.ExecutionAndPublication),
+            this);
+
+        try
+        {
+            return await flight.Value.WaitAsync(ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            // Removed by key *and* instance: a later miss on the same key may already have installed a fresh
+            // flight by the time this one finishes, and removing by key alone would evict that newer read's entry
+            // and let the next arrival start a third.
+            _inFlight.TryRemove(new KeyValuePair<ProcessVersion, Lazy<Task<Result<ProcessDefinition>>>>(key, flight));
+        }
+    }
+
+    /// <summary>
+    /// The one read every waiter on a key shares. Populates the cache before returning, so all of them are served
+    /// by the single inner call rather than the first one populating and the rest still having read.
+    /// </summary>
+    private async Task<Result<ProcessDefinition>> ResolveAsync(ProcessVersion key)
+    {
+        var loaded = await _inner.GetAsync(key.Process, key.Version, CancellationToken.None).ConfigureAwait(false);
         if (loaded.IsFailure)
         {
             return loaded;

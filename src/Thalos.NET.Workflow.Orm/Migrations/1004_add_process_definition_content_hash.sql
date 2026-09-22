@@ -8,6 +8,12 @@
 -- An in-process cache can evict on its own writes, but a second host's cache cannot see them — two hosts could
 -- execute different graphs for the same pinned version. With the hash stored, a re-sync of the same version
 -- with different content is refused outright, so the version number is a real promise about the content.
+-- DEPLOY THIS MIGRATION TOGETHER WITH THE CODE THAT WRITES content_hash. Do not apply it ahead of the rollout.
+-- The column is NOT NULL with no default once the statements below finish, and PostgreSQL checks NOT NULL against
+-- the proposed tuple BEFORE conflict resolution — so an instance still running pre-1004 code, whose INSERT does
+-- not mention content_hash, fails with 23502 on every UpsertAndActivateAsync, the ON CONFLICT path included. In a
+-- rolling deploy where one instance migrates first, every instance not yet replaced loses process syncing until it
+-- is. Migrate and deploy as one step, or accept a sync outage for the length of the rollout.
 ALTER TABLE process_definition ADD COLUMN content_hash text NOT NULL DEFAULT '';
 
 -- Backfills rows written before this column existed. Must produce byte-for-byte what the application computes

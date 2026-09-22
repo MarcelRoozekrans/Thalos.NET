@@ -23,6 +23,14 @@ public sealed class WorkflowOrmOptions
     /// When set (the default), a hosted service runs <see cref="WorkflowOrmMigrations.Postgres"/> and
     /// <c>ZeroAlloc.Outbox.Orm.OutboxOrmMigrations.Postgres</c> at startup, before the host accepts work.
     /// </summary>
+    /// <remarks>
+    /// Leaving this on means the <em>first</em> instance to start applies any pending migration while the others
+    /// are still running whatever code they were deployed with. That is fine for additive migrations and not fine
+    /// for migration 1004, which pre-1004 code cannot write against at all — see
+    /// <see cref="WorkflowOrmMigrations"/>. A deployment that rolls instances one at a time across that migration
+    /// should apply schema changes as an explicit step with this turned off, rather than letting whichever
+    /// instance happens to win the race decide when the rest start failing.
+    /// </remarks>
     public bool EnsureSchemaOnStartup { get; set; } = true;
 
     /// <summary>

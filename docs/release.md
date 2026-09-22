@@ -120,3 +120,38 @@ the package itself, independent of what release-please renders.
 `renovate.json` ignores `dotnet-sdk` on purpose: `global.json` pins the lowest 10.0.x feature band with
 `rollForward: latestFeature` so both dev machines and CI resolve; a bumped pin above locally installed
 SDKs breaks local builds. Everything else is bumped by PRs that must pass the same gates.
+
+## Schema migrations and rolling deploys
+
+`Thalos.NET.Workflow.Orm` ships SQL migrations (`WorkflowOrmMigrations.Postgres`). By default
+`WorkflowOrmOptions.EnsureSchemaOnStartup` applies them from the host at startup, which means the first
+instance to start applies anything pending while the other instances are still running the code they were
+deployed with.
+
+That is safe for a purely additive migration. It is **not** safe for a migration older code cannot write
+against, and there is one of those:
+
+### 1004 — `process_definition.content_hash`
+
+Adds `content_hash` as `NOT NULL` with no default, to make a stored process version immutable: re-syncing the
+same `(process, version)` with different content is refused instead of rewriting a definition a live run is
+pinned to.
+
+**Apply this migration and deploy the matching code as one step. Do not apply it ahead of the rollout.**
+
+PostgreSQL validates `NOT NULL` against the proposed tuple *before* conflict resolution, so an instance running
+pre-1004 code — whose `INSERT` never mentions the column — fails with `23502` on **every**
+`UpsertAndActivateAsync`, the `ON CONFLICT` path included. In a rolling deploy where one instance migrates
+first, every instance not yet replaced loses process syncing for as long as it is still running. Nothing
+already-running breaks — runs, resumes and dispatch are unaffected, since they only read — but no process
+definition can be synced or activated from an old instance.
+
+For a deployment that rolls instances one at a time across this migration, turn `EnsureSchemaOnStartup` off and
+apply the schema change as an explicit step, rather than letting whichever instance wins the startup race
+decide when the rest start failing.
+
+### Behaviour change that ships with it
+
+Editing a process file **without bumping its `version`** is now a sync *error* rather than a silent overwrite.
+Authors who relied on re-syncing a version in place must bump the version instead. The error names the process
+and version and says so.
