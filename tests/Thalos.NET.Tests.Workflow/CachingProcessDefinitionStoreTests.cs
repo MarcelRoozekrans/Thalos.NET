@@ -13,6 +13,25 @@ namespace Thalos.Tests.Workflow;
 /// </summary>
 public sealed class CachingProcessDefinitionStoreTests
 {
+    /// <summary>
+    /// Spins until <paramref name="condition"/> holds, or fails the test. Bounded deliberately: an unbounded spin
+    /// turns a regression that stops the inner read being reached into a hung suite rather than a red test, and a
+    /// hang is far more expensive to diagnose than an assertion naming what never happened.
+    /// </summary>
+    private static async Task WaitUntilAsync(Func<bool> condition, string because)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (!condition())
+        {
+            if (DateTime.UtcNow > deadline)
+            {
+                Assert.Fail($"Timed out after 10s waiting: {because}.");
+            }
+
+            await Task.Delay(1);
+        }
+    }
+
     private static string Yaml(string process, int version, string next) => $$"""
         process: {{process}}
         version: {{version}}
@@ -241,10 +260,7 @@ public sealed class CachingProcessDefinitionStoreTests
         }
 
         // Let every caller reach the cache and queue behind the one in-flight read before releasing it.
-        while (inner.GetCallCount == 0)
-        {
-            await Task.Yield();
-        }
+        await WaitUntilAsync(() => inner.GetCallCount > 0, "the inner store must be reached at least once");
 
         gate.SetResult();
         var results = await Task.WhenAll(resolves);
@@ -258,11 +274,28 @@ public sealed class CachingProcessDefinitionStoreTests
     }
 
     /// <summary>
-    /// A cancelled caller must detach from the shared read rather than cancelling it for everyone else. Turns red
-    /// if the shared read is started with the first caller's token instead of <see cref="CancellationToken.None"/>.
+    /// A cancelled caller must detach from the shared read rather than cancelling it for everyone else, and must
+    /// not tear down the flight the others are still attached to.
     /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is falsifiable only because <see cref="InMemoryProcessDefinitionStore.ReleaseGate"/> honours the
+    /// cancellation token. A fake that ignored <c>ct</c> would finish on release whichever token the shared read
+    /// had been started with, so the named property could not fail — the earlier version of this test asserted it
+    /// and could not have caught its own violation. With the gate honouring <c>ct</c>, starting the shared read
+    /// with the first caller's token makes that token's cancellation cancel the gate wait, the shared task faults,
+    /// and the survivor's success assertion goes red.
+    /// </para>
+    /// <para>
+    /// The final call-count assertion is what proves the survivor <em>shared</em> rather than merely succeeded: if
+    /// the cancelled caller's exit had de-registered the flight, the survivor would have installed a second one
+    /// and read again, and the count would be 2. Ordering between the cancel and the survivor's arrival is
+    /// therefore not something this test has to win — either order must still yield one read, which is exactly the
+    /// guarantee being claimed.
+    /// </para>
+    /// </remarks>
     [Fact]
-    public async Task Cancelling_one_caller_does_not_cancel_the_shared_read()
+    public async Task Cancelling_one_caller_neither_cancels_nor_duplicates_the_shared_read()
     {
         var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var inner = new InMemoryProcessDefinitionStore().Seed(Yaml("pipeline", 1, "done"));
@@ -271,22 +304,24 @@ public sealed class CachingProcessDefinitionStoreTests
 
         using var cts = new CancellationTokenSource();
         var cancelled = Task.Run(async () => await cache.GetAsync("pipeline", 1, cts.Token));
-        while (inner.GetCallCount == 0)
-        {
-            await Task.Yield();
-        }
+        await WaitUntilAsync(() => inner.GetCallCount > 0, "the first caller must have started the shared read");
 
-        var survivor = Task.Run(async () => await cache.GetAsync("pipeline", 1, CancellationToken.None));
+        // Cancel and let that caller fully unwind *before* the next one arrives. The ordering is the whole point:
+        // a survivor that attached beforehand would hold the flight alive by itself and could not tell whether
+        // cancellation tears it down. Arriving afterwards, it can only get one read if the flight outlived the
+        // caller that abandoned it.
         await cts.CancelAsync();
-
         var cancelling = async () => await cancelled;
         await cancelling.Should().ThrowAsync<OperationCanceledException>("the cancelled caller observes its own token");
+
+        var survivor = Task.Run(async () => await cache.GetAsync("pipeline", 1, CancellationToken.None));
 
         gate.SetResult();
         var result = await survivor;
 
         result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error : "");
         result.Value.Nodes.Should().ContainKey("done", "the other caller's cancellation must not have cancelled the read this one was waiting on");
+        inner.GetCallCount.Should().Be(1, "the survivor arrived after the cancellation and must still have shared the one in-flight read — a count of 2 means the cancelled caller tore the flight down on its way out and the survivor started a second read");
     }
 
     /// <summary>

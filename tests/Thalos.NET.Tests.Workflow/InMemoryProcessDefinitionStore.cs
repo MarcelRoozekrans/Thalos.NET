@@ -36,6 +36,13 @@ internal sealed class InMemoryProcessDefinitionStore : IProcessDefinitionStore
     /// while further callers pile up behind it, which is the only way to observe whether concurrent misses on one
     /// key collapse into a single call or fan out into many.
     /// </summary>
+    /// <remarks>
+    /// The wait <b>honours the cancellation token</b>, via <see cref="Task.WaitAsync(CancellationToken)"/>. That
+    /// is not incidental: a gate that ignored <c>ct</c> would complete on release no matter which token the
+    /// caller passed, so a test claiming "cancelling one caller does not cancel the shared read" could not
+    /// actually fail if the shared read were started with a caller's token. Honouring it here is what gives that
+    /// test something to detect.
+    /// </remarks>
     public TaskCompletionSource? ReleaseGate { get; set; }
 
     /// <summary>
@@ -71,7 +78,7 @@ internal sealed class InMemoryProcessDefinitionStore : IProcessDefinitionStore
 
         if (ReleaseGate is { } gate)
         {
-            await gate.Task.ConfigureAwait(false);
+            await gate.Task.WaitAsync(ct).ConfigureAwait(false);
         }
 
         // Same two failure shapes, and the same messages' shape, as the real store: nothing stored for the pair,

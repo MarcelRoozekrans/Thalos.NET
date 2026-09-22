@@ -27,6 +27,8 @@ public sealed class OrmProcessDefinitionStore(WorkflowOrmOptions options) : IPro
         await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
         await using var tx = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
 
+        await LockProcessAsync(connection, tx, definition.Name, ct).ConfigureAwait(false);
+
         // The immutability check and the write are one statement on purpose. A read-then-write pair would leave a
         // window where two syncs both see "no row yet" and the second silently overwrites the first; here the
         // conflicting row is locked by ON CONFLICT itself, so the comparison happens against the committed row.
@@ -65,6 +67,39 @@ public sealed class OrmProcessDefinitionStore(WorkflowOrmOptions options) : IPro
     }
 
     /// <summary>
+    /// The advisory-lock class this package takes per-process activation locks under. Advisory locks live in one
+    /// cluster-wide space shared with everything else using the database, including ZeroAlloc.ORM's own migration
+    /// lock; namespacing with a fixed class keeps a key collision confined to this package's own locks, where the
+    /// worst outcome is serialising two activations that need not have been.
+    /// </summary>
+    private const int ActivationLockClass = 0x5448414C;
+
+    /// <summary>
+    /// Serialises activation of one process for the rest of the transaction. Released automatically on commit or
+    /// rollback — there is no unlock path to get wrong, and an abandoned transaction cannot strand the lock.
+    /// </summary>
+    /// <remarks>
+    /// Taken before the upsert rather than before the activation, and that ordering is the whole point. Row locks
+    /// alone cannot be acquired in one canonical order here: the upsert's <c>ON CONFLICT</c> already locks the
+    /// target version's row, so a sync activating version 1 and one activating version 3 each reach the
+    /// activation step already holding a different row, and ordering the activation's own locking only moves the
+    /// deadlock instead of removing it — measured, not assumed. One lock per process, taken before any row is
+    /// touched, removes the question: two activations of the same process cannot interleave, and two activations
+    /// of different processes never contend, since they touch disjoint rows and hash to different keys.
+    /// Activation is a sync-time administrative operation, not a hot path, so serialising it per process costs
+    /// nothing worth measuring.
+    /// </remarks>
+    private static async Task LockProcessAsync(NpgsqlConnection connection, NpgsqlTransaction tx, string process, CancellationToken ct)
+    {
+        await using var cmd = connection.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "SELECT pg_advisory_xact_lock(@lock_class, hashtext(@process))";
+        cmd.Parameters.AddWithValue("lock_class", ActivationLockClass);
+        cmd.Parameters.AddWithValue("process", process);
+        await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Makes <paramref name="definition"/>'s version the process's only active row: deactivate every other
     /// version first, then activate this one. Two statements in one transaction, deliberately, and in that order.
     /// </summary>
@@ -81,15 +116,48 @@ public sealed class OrmProcessDefinitionStore(WorkflowOrmOptions options) : IPro
     /// splitting the statement is the fix: deactivating first passes through a state with <em>zero</em> active
     /// rows, which the index is perfectly happy with, and the invariant still holds at commit because both
     /// statements share this transaction.
+    /// <para>
+    /// <b>Why the deactivate carries no <c>is_active</c> predicate.</b> Splitting the statement introduced a
+    /// second race the single statement did not have, and the predicate was its trigger. Two concurrent syncs of
+    /// one process at different versions, version 2 active: A activates version 1, B activates version 3, A
+    /// commits first. Under <c>READ COMMITTED</c> B's snapshot predates that commit, so B still sees version 1 as
+    /// inactive — and <c>AND is_active</c> filters version 1 out of B's scan entirely. A row never scanned gets no
+    /// <c>EPQ</c> re-check, so B never deactivates it and B's own activate collides with A's committed active row:
+    /// a raw <c>23505</c> out of a <c>ValueTask&lt;Result&gt;</c> API, through <c>ProcessDefinitionSync</c>, which
+    /// has no <c>catch</c> for it. Dropping the predicate keeps that row in B's scan so the <c>EPQ</c> re-check
+    /// can re-evaluate it, at the cost of a few no-op row versions per activation.
+    /// </para>
+    /// <para>
+    /// <b>That alone was not enough, and the code does not pretend otherwise.</b> Removing the predicate turned
+    /// the <c>23505</c> into <c>40P01</c> — see the next paragraph — so the guarantee actually rests on
+    /// <see cref="LockProcessAsync"/>. With activation serialised per process, this predicate is no longer
+    /// load-bearing: the concurrency test passes with it either present or absent. It stays absent because a
+    /// statement that is correct without relying on an outer lock is worth more than one that is not, but the
+    /// honest account is that serialisation is the fix and this is belt-and-braces.
+    /// </para>
+    /// <para>
+    /// <b>Concurrency is resolved before this method runs, not inside it.</b> Dropping the predicate fixed the
+    /// <c>23505</c> and exposed the next layer: splitting one statement into two also split the <em>lock
+    /// order</em>. Activating version 1 deactivates 2 and 3 then locks 1; activating version 3 deactivates 1 and
+    /// 2 then locks 3 — run concurrently, the first holds 3 and wants 1 while the second holds 1 and wants 3,
+    /// which is <c>40P01</c>: an observed deadlock, not a theoretical one. The original single statement avoided
+    /// that for the same reason it caused the other bug — one scan over every row meant both transactions took
+    /// the same locks in the same order. That canonical order cannot be rebuilt here, because the upsert has
+    /// already locked the target row by the time this method is reached, so
+    /// <see cref="LockProcessAsync"/> resolves it upstream of all of this instead.
+    /// </para>
     /// </remarks>
     private static async Task ActivateAsync(NpgsqlConnection connection, NpgsqlTransaction tx, ProcessDefinition definition, CancellationToken ct)
     {
         await using (var deactivate = connection.CreateCommand())
         {
             deactivate.Transaction = tx;
+            // No "AND is_active" predicate, deliberately — see this method's remarks. With LockProcessAsync in
+            // place this is defence in depth rather than the mechanism: it keeps the statement correct on its own
+            // terms, without depending on the serialisation to hide a snapshot-visibility trap.
             deactivate.CommandText = """
                 UPDATE process_definition SET is_active = false
-                WHERE process = @process AND is_active AND version <> @version
+                WHERE process = @process AND version <> @version
                 """;
             deactivate.Parameters.AddWithValue("process", definition.Name);
             deactivate.Parameters.AddWithValue("version", definition.Version);

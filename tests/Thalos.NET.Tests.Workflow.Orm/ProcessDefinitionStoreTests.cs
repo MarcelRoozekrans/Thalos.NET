@@ -210,6 +210,78 @@ public sealed class ProcessDefinitionStoreTests(PostgresFixture pg) : IAsyncLife
         resolved.Value.Nodes["review"].Branch["rejected"].Should().Be("implement", "the live run's graph must be the one it started on, not the refused edit");
     }
 
+    /// <summary>
+    /// Two syncs of one process activating <em>different</em> versions at the same time. Neither may throw: a
+    /// loser has to surface as <see cref="Result.Failure"/> or as a clean last-writer-wins success, never as a
+    /// raw <c>PostgresException</c> escaping a <c>ValueTask&lt;Result&gt;</c> API — nothing between here and
+    /// <see cref="ProcessDefinitionSync"/> catches one. Exactly one version must end active, which is the
+    /// invariant the partial unique index exists for.
+    /// </summary>
+    /// <remarks>
+    /// This is the test the "cannot race" claim was missing: that property was asserted only in prose while the
+    /// activation was one statement, and stayed prose when it became two. It is specifically a regression guard
+    /// on the deactivate's predicate — restoring <c>AND is_active</c> there makes the loser skip the winner's row
+    /// instead of blocking on it, and the collision comes back as <c>23505</c>. Repeated, because whether the two
+    /// transactions actually interleave is a matter of timing; one pass could pass by luck.
+    /// </remarks>
+    [Fact]
+    public async Task Concurrent_activations_of_different_versions_do_not_throw_and_leave_exactly_one_active()
+    {
+        var ct = CancellationToken.None;
+        var v1 = ValidV1;
+        var v2 = ValidV2;
+        var v3 = ValidV2.Replace("version: 2", "version: 3");
+
+        for (var attempt = 0; attempt < 12; attempt++)
+        {
+            await ResetProcessDefinitionsAsync();
+
+            // All three versions stored, with version 2 active — the starting shape the race needs.
+            await ActivateAsync(v1, ct);
+            await ActivateAsync(v3, ct);
+            await ActivateAsync(v2, ct);
+            (await ActiveVersion("manufacture")).Should().Be(2);
+
+            // One activates backwards to 1, the other forwards to 3, concurrently.
+            var back = Task.Run(async () => await ActivateAsync(v1, ct), ct);
+            var forward = Task.Run(async () => await ActivateAsync(v3, ct), ct);
+
+            var both = async () => await Task.WhenAll(back, forward);
+            await both.Should().NotThrowAsync(
+                "a concurrent activation must resolve as a Result, not as a raw PostgresException — ProcessDefinitionSync has no catch for one, so it would escape the sync entirely");
+
+            var active = await ActiveVersion("manufacture");
+            active.Should().BeOneOf([1, 3], "whichever writer committed last decides, but it must be one of the two that ran");
+            (await CountActiveAsync("manufacture")).Should().Be(1, "the one-active-version-per-process invariant must hold after the race, not just before it");
+        }
+    }
+
+    /// <summary>Stores and activates <paramref name="yaml"/> through a store of its own, so concurrent callers do not share a connection.</summary>
+    private async Task ActivateAsync(string yaml, CancellationToken ct)
+    {
+        var definition = ProcessLoader.Load(yaml);
+        definition.IsSuccess.Should().BeTrue(definition.IsFailure ? definition.Error : "");
+        var store = new OrmProcessDefinitionStore(new WorkflowOrmOptions { ConnectionString = pg.ConnectionString });
+        (await store.UpsertAndActivateAsync(definition.Value, yaml, ct)).IsSuccess.Should().BeTrue();
+    }
+
+    private async Task ResetProcessDefinitionsAsync()
+    {
+        await using var connection = new NpgsqlConnection(pg.ConnectionString);
+        await connection.OpenAsync();
+        await using var cmd = new NpgsqlCommand("DELETE FROM process_definition", connection);
+        await cmd.ExecuteNonQueryAsync();
+    }
+
+    private async Task<long> CountActiveAsync(string process)
+    {
+        await using var connection = new NpgsqlConnection(pg.ConnectionString);
+        await connection.OpenAsync();
+        await using var cmd = new NpgsqlCommand("SELECT count(*) FROM process_definition WHERE process = @p AND is_active", connection);
+        cmd.Parameters.AddWithValue("p", process);
+        return (long)(await cmd.ExecuteScalarAsync())!;
+    }
+
     // --- helpers -----------------------------------------------------------------------------------------
 
     /// <summary>The exact YAML stored for a version, for asserting a refused write changed nothing.</summary>
