@@ -1,3 +1,4 @@
+using Npgsql;
 using Thalos.Workflow;
 using Thalos.Workflow.Orm;
 
@@ -132,7 +133,82 @@ public sealed class ProcessDefinitionStoreTests(PostgresFixture pg) : IAsyncLife
             "version 2's run is still running and must still block removing version 2");
     }
 
+    // --- Property 4: a stored version is immutable ---------------------------------------------------------
+
+    /// <summary>
+    /// Re-syncing unchanged files is what happens on every host startup, so it has to stay a clean no-op — and it
+    /// must still activate, since a re-sync is also how a rolled-back deployment makes an older version current
+    /// again. Turns red if the immutability check is written as "reject any re-store of an existing version"
+    /// rather than "reject a re-store whose content differs".
+    /// </summary>
+    [Fact]
+    public async Task Re_syncing_identical_content_at_the_same_version_is_an_idempotent_success()
+    {
+        var ct = CancellationToken.None;
+        await WriteProcessFile(ValidV1);
+        (await _sync.SyncAsync(ct)).IsSuccess.Should().BeTrue();
+
+        // Byte-for-byte the same document, synced again.
+        var second = await _sync.SyncAsync(ct);
+
+        second.IsSuccess.Should().BeTrue(second.IsFailure ? second.Error : "");
+        second.Value.Should().Be(1, "the unchanged document is still activated, not skipped");
+        (await ActiveVersion("manufacture")).Should().Be(1);
+        (await StoredYaml("manufacture", 1)).Should().Be(ValidV1);
+    }
+
+    /// <summary>
+    /// The invariant that makes a version number a real promise. A valid edit that reuses a version number already
+    /// stored with different content is refused, and — the assertion that actually matters — the stored definition
+    /// is left byte-for-byte as it was. An error return with the row already rewritten would be worse than no
+    /// check at all: the caller would believe nothing happened while a live run's graph had already changed.
+    /// </summary>
+    /// <remarks>
+    /// Turns red if <c>UpsertAndActivateAsync</c> goes back to an unconditional <c>DO UPDATE SET yaml</c>, or if
+    /// the rejection is implemented as a read-then-write pair whose write still lands before the check fails.
+    /// </remarks>
+    [Fact]
+    public async Task Re_syncing_changed_content_at_the_same_version_is_refused_and_leaves_the_stored_definition_unchanged()
+    {
+        var ct = CancellationToken.None;
+        await WriteProcessFile(ValidV1);
+        (await _sync.SyncAsync(ct)).IsSuccess.Should().BeTrue();
+        var runId = await _store.StartAsync("manufacture", version: 1, "c-immutable", "implement", ct);
+
+        // Still version 1, still perfectly valid, but a different graph: 'review' rejecting now loops to
+        // 'adjudicate' instead of back to 'implement'. Exactly the edit that must not land underneath the run
+        // started above.
+        var edited = ValidV1.Replace("branch: { approved: gate, rejected: implement }", "branch: { approved: gate, rejected: adjudicate }");
+        edited.Should().NotBe(ValidV1, "the fixture edit must actually change the document, or this test proves nothing");
+        await WriteProcessFile(edited);
+
+        var result = await _sync.SyncAsync(ct);
+
+        result.IsFailure.Should().BeTrue("a stored version is immutable — the author has to bump the version");
+        result.Error.Should().Contain("manufacture").And.Contain("1");
+        (await StoredYaml("manufacture", 1)).Should().Be(
+            ValidV1,
+            "the refusal must leave the stored definition byte-for-byte unchanged — an error return with the row already rewritten would be worse than no check at all");
+        (await _store.FindAsync(runId, ct))!.ProcessVersion.Should().Be(1);
+
+        // And the run still resolves the graph it started on.
+        var resolved = await _definitions.GetAsync("manufacture", 1, ct);
+        resolved.IsSuccess.Should().BeTrue(resolved.IsFailure ? resolved.Error : "");
+        resolved.Value.Nodes["review"].Branch["rejected"].Should().Be("implement", "the live run's graph must be the one it started on, not the refused edit");
+    }
+
     // --- helpers -----------------------------------------------------------------------------------------
+
+    /// <summary>The exact YAML stored for a version, for asserting a refused write changed nothing.</summary>
+    private async Task<string?> StoredYaml(string process, int version)
+    {
+        await using var connection = new NpgsqlConnection(pg.ConnectionString);
+        await connection.OpenAsync();
+        await using var cmd = new NpgsqlCommand("SELECT yaml FROM process_definition WHERE process = @p AND version = @v", connection);
+        cmd.Parameters.AddWithValue("p", process);
+        cmd.Parameters.AddWithValue("v", version);
+        return await cmd.ExecuteScalarAsync() as string;
+    }
 
     private Task WriteProcessFile(string yaml)
     {

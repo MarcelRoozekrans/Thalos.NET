@@ -7,7 +7,9 @@ namespace Thalos.Workflow;
 /// <see cref="IWorkflowReferenceResolver"/>, and only then activates it through <see cref="IProcessDefinitionStore"/>.
 /// This is what makes hot-reload safe: a document that fails to load or validate is reported and left alone — the
 /// version already active for that process, if any, keeps running unchanged. A broken edit to a process file is
-/// rejected, never made runnable.
+/// rejected, never made runnable. An edit that is perfectly valid but reuses a version number already stored with
+/// different content is rejected too, by the store rather than by this type: a version a run may be pinned to is
+/// immutable, so the fix is to bump the version, not to rewrite the graph underneath a live run.
 /// </summary>
 public sealed class ProcessDefinitionSync(
     IProcessDefinitionSource source,
@@ -81,7 +83,17 @@ public sealed class ProcessDefinitionSync(
                 continue;
             }
 
-            await _store.UpsertAndActivateAsync(validated.Value, document.Yaml, ct).ConfigureAwait(false);
+            // The store enforces one rule of its own: a stored version is immutable. Editing a process file
+            // without bumping its version is refused here rather than rewriting the definition a live run is
+            // pinned to, and is reported exactly like a load or validation error — one bad document, the rest of
+            // the batch still syncs.
+            var activation = await _store.UpsertAndActivateAsync(validated.Value, document.Yaml, ct).ConfigureAwait(false);
+            if (activation.IsFailure)
+            {
+                errors.Add($"{document.SourcePath}: {activation.Error}");
+                continue;
+            }
+
             activated++;
         }
 

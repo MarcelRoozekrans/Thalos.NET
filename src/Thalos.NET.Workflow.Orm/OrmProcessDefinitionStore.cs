@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using Npgsql;
 using ZeroAlloc.Results;
 
@@ -15,26 +17,45 @@ public sealed class OrmProcessDefinitionStore(WorkflowOrmOptions options) : IPro
     private readonly WorkflowOrmOptions _options = options ?? throw new ArgumentNullException(nameof(options));
 
     /// <inheritdoc/>
-    public async ValueTask UpsertAndActivateAsync(ProcessDefinition definition, string yaml, CancellationToken ct)
+    public async ValueTask<Result> UpsertAndActivateAsync(ProcessDefinition definition, string yaml, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(definition);
         ArgumentException.ThrowIfNullOrWhiteSpace(yaml);
 
+        var contentHash = ComputeContentHash(yaml);
+
         await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
         await using var tx = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
 
+        // The immutability check and the write are one statement on purpose. A read-then-write pair would leave a
+        // window where two syncs both see "no row yet" and the second silently overwrites the first; here the
+        // conflicting row is locked by ON CONFLICT itself, so the comparison happens against the committed row.
+        // The DO UPDATE's WHERE is what enforces the rule: it fires only when the stored hash equals the incoming
+        // one, so an identical re-sync updates the row to itself and RETURNING yields a row, while a changed
+        // definition matches nothing, writes nothing, and yields no row at all. Distinguishing the two therefore
+        // needs no second query and cannot race.
         await using (var upsert = connection.CreateCommand())
         {
             upsert.Transaction = tx;
             upsert.CommandText = """
-                INSERT INTO process_definition (process, version, yaml, is_active)
-                VALUES (@process, @version, @yaml, false)
+                INSERT INTO process_definition (process, version, yaml, content_hash, is_active)
+                VALUES (@process, @version, @yaml, @content_hash, false)
                 ON CONFLICT (process, version) DO UPDATE SET yaml = EXCLUDED.yaml
+                WHERE process_definition.content_hash = EXCLUDED.content_hash
+                RETURNING content_hash
                 """;
             upsert.Parameters.AddWithValue("process", definition.Name);
             upsert.Parameters.AddWithValue("version", definition.Version);
             upsert.Parameters.AddWithValue("yaml", yaml);
-            await upsert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            upsert.Parameters.AddWithValue("content_hash", contentHash);
+
+            if (await upsert.ExecuteScalarAsync(ct).ConfigureAwait(false) is null)
+            {
+                // Nothing was written — the transaction is abandoned without committing, so the stored
+                // definition is byte-for-byte what it was before this call.
+                return Result.Failure(
+                    $"Process '{definition.Name}' version {definition.Version} is already stored with different content. A stored version is immutable, because a run that started on it must keep the exact graph it started on — bump the version instead of editing version {definition.Version} in place.");
+            }
         }
 
         // One statement, keyed on the version just upserted: the new version becomes the process's only active
@@ -56,7 +77,18 @@ public sealed class OrmProcessDefinitionStore(WorkflowOrmOptions options) : IPro
         }
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
+        return Result.Success();
     }
+
+    /// <summary>
+    /// The content identity a stored version is pinned to: lowercase hex of SHA-256 over <paramref name="yaml"/>'s
+    /// UTF-8 bytes. Migration 1004's backfill computes the same value in SQL, and the two must agree exactly — a
+    /// mismatch would make the first re-sync of an unchanged file read as a content change and be refused. Not a
+    /// security boundary, so the choice of SHA-256 is about collision resistance for accidental edits, not about
+    /// resisting a crafted one.
+    /// </summary>
+    private static string ComputeContentHash(string yaml) =>
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(yaml)));
 
     /// <inheritdoc/>
     public async ValueTask<int?> GetActiveVersionAsync(string process, CancellationToken ct)

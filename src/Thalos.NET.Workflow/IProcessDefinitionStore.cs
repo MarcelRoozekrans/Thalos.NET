@@ -23,9 +23,27 @@ public interface IProcessDefinitionStore
     /// other version of the same process — a version a run is currently pinned to is never removed by this,
     /// only marked no longer the one new runs start on. Called only after
     /// <see cref="ProcessValidator.ValidateAsync"/> has already accepted <paramref name="definition"/>; this
-    /// method does not validate and never rejects a definition on its own account.
+    /// method does not validate <paramref name="definition"/>'s graph.
     /// </summary>
-    ValueTask UpsertAndActivateAsync(ProcessDefinition definition, string yaml, CancellationToken ct);
+    /// <remarks>
+    /// <para>
+    /// It does enforce one thing of its own, though: <b>a stored version is immutable</b>. Re-storing a
+    /// <c>(Name, Version)</c> pair that already exists with <em>identical</em> content is an idempotent success —
+    /// re-syncing unchanged files is the normal case on every startup and must stay safe, and it still
+    /// (re)activates the version. Re-storing the same pair with <em>different</em> content is a
+    /// <see cref="Result.Failure"/> naming the process and version and telling the author to bump the version;
+    /// the stored definition is left exactly as it was.
+    /// </para>
+    /// <para>
+    /// This is what makes the version number a real promise. Without it, a run pinned to version 3 could have the
+    /// graph it started on rewritten underneath it, which empties both properties this interface exists to
+    /// establish — "an in-flight run keeps the version it started on" and "a version stays resolvable while any
+    /// run pins it" are meaningless if what the version <em>means</em> can change. An in-process cache can evict
+    /// on its own writes, but it cannot see another host's, so two hosts could otherwise execute different graphs
+    /// for the same pinned version.
+    /// </para>
+    /// </remarks>
+    ValueTask<Result> UpsertAndActivateAsync(ProcessDefinition definition, string yaml, CancellationToken ct);
 
     /// <summary>The version currently active for <paramref name="process"/>, or <see langword="null"/> if none has ever activated.</summary>
     ValueTask<int?> GetActiveVersionAsync(string process, CancellationToken ct);

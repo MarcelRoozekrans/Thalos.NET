@@ -20,21 +20,17 @@ namespace Thalos.Workflow;
 /// </para>
 /// <para>
 /// <b>Why caching is sound.</b> A run pins <c>(process, version)</c> at <c>IWorkflowStore.StartAsync</c> and never
-/// changes it, and <see cref="IProcessDefinitionStore.UpsertAndActivateAsync"/> makes a new version current rather
-/// than editing a live one, so an entry keyed on a pinned pair describes a graph that does not move underneath it.
-/// This decorator does not rely on that alone, though: it sits on the write path too, and drops the affected key on
-/// every <see cref="UpsertAndActivateAsync"/> and every successful <see cref="TryRemoveAsync"/>. That matters
-/// because the underlying upsert is an <em>upsert</em> — re-syncing a process file without bumping its version
-/// rewrites that version's stored YAML in place — so "immutable version" is a convention the sync discipline keeps,
-/// not something the storage layer enforces. Write-through eviction makes this cache correct even when that
-/// convention is broken in-process; see this type's note on the limit of that.
+/// changes it, and <see cref="IProcessDefinitionStore.UpsertAndActivateAsync"/> <em>refuses</em> to store a version
+/// that already exists with different content, so a cached entry keyed on a pinned pair describes a graph that
+/// cannot move underneath it. That is an enforced invariant at the storage layer, not a convention: a same-version
+/// edit is an error telling the author to bump the version, and nothing rewrites a stored definition in place.
 /// </para>
 /// <para>
-/// <b>What it does not protect against.</b> Eviction is per instance, so it cannot see a same-version rewrite
-/// performed by a <em>different</em> host process. Two hosts sharing one database, where one re-activates version N
-/// with changed YAML, can leave the other serving the previous parse of version N until that key is evicted for
-/// some other reason. Bumping the version — the discipline the pin exists to support — is what actually prevents
-/// that; this decorator narrows the window rather than closing it.
+/// <b>Eviction is kept anyway.</b> This decorator still drops the affected key on a successful
+/// <see cref="UpsertAndActivateAsync"/> and a successful <see cref="TryRemoveAsync"/>. It is no longer
+/// load-bearing — the invariant above is what makes staleness impossible, including across host processes, which
+/// per-instance eviction could never have covered — but keeping it means the cache is correct on its own terms
+/// rather than only in combination with a rule enforced elsewhere.
 /// </para>
 /// <para>
 /// <b>What bounds its growth.</b> Two things. Entries are only ever added for a pair a caller actually asked for,
@@ -81,16 +77,22 @@ public sealed class CachingProcessDefinitionStore : IProcessDefinitionStore
     public int Count => _entries.Count;
 
     /// <inheritdoc/>
-    public async ValueTask UpsertAndActivateAsync(ProcessDefinition definition, string yaml, CancellationToken ct)
+    public async ValueTask<Result> UpsertAndActivateAsync(ProcessDefinition definition, string yaml, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(definition);
 
-        await _inner.UpsertAndActivateAsync(definition, yaml, ct).ConfigureAwait(false);
+        var result = await _inner.UpsertAndActivateAsync(definition, yaml, ct).ConfigureAwait(false);
+        if (result.IsSuccess)
+        {
+            // Belt and braces rather than load-bearing: the store now refuses a same-version content change, so a
+            // successful write either inserted a version this cache never held or rewrote one to itself. Dropping
+            // the key anyway costs one re-read and means this decorator stays correct on its own terms rather than
+            // on an invariant enforced somewhere else. Not dropped on failure — nothing was written, so the cached
+            // parse still matches the row.
+            _entries.TryRemove(new ProcessVersion(definition.Name, definition.Version), out _);
+        }
 
-        // The write path is an upsert, so this key's stored YAML may have just been rewritten in place. Dropping
-        // the entry after the write costs one re-read on the next resolve and removes the only in-process way a
-        // cached parse could disagree with the row behind it.
-        _entries.TryRemove(new ProcessVersion(definition.Name, definition.Version), out _);
+        return result;
     }
 
     /// <inheritdoc/>

@@ -52,28 +52,56 @@ public sealed class CachingProcessDefinitionStoreTests
     }
 
     /// <summary>
-    /// The premise the cache rests on is that a pinned version does not change under it. The storage layer does
-    /// not actually enforce that — the upsert rewrites a version's YAML in place — so the cache drops the key it
-    /// just wrote. Turns red if that eviction is removed: the resolve afterwards would return the stale graph.
+    /// A successful write still drops the key. Since the store now refuses a same-version content change, the only
+    /// successful re-activation of an already-stored version is an identical one, so this can no longer be about
+    /// avoiding a stale graph — it is about the decorator being correct on its own terms rather than only in
+    /// combination with an invariant enforced elsewhere. Turns red if eviction is dropped from the write path.
     /// </summary>
     [Fact]
-    public async Task Re_activating_a_version_drops_its_cached_entry()
+    public async Task Re_activating_a_version_with_identical_content_drops_its_cached_entry()
+    {
+        var yaml = Yaml("pipeline", 1, "done");
+        var inner = new InMemoryProcessDefinitionStore().Seed(yaml);
+        var cache = new CachingProcessDefinitionStore(inner);
+
+        (await cache.GetAsync("pipeline", 1, CancellationToken.None)).Value.Nodes.Should().ContainKey("done");
+        cache.Count.Should().Be(1);
+
+        var parsed = ProcessLoader.Load(yaml);
+        parsed.IsSuccess.Should().BeTrue(parsed.IsFailure ? parsed.Error : "");
+        (await cache.UpsertAndActivateAsync(parsed.Value, yaml, CancellationToken.None)).IsSuccess.Should().BeTrue(
+            "re-syncing an unchanged file is the normal case on every startup and must stay safe");
+
+        cache.Count.Should().Be(0, "a successful write drops the key it wrote");
+        (await cache.GetAsync("pipeline", 1, CancellationToken.None)).Value.Nodes.Should().ContainKey("done");
+        inner.GetCallCount.Should().Be(2, "the entry was evicted, so the resolve after the write has to reach the store again");
+    }
+
+    /// <summary>
+    /// A refused same-version rewrite wrote nothing, so the cached parse still matches the stored row and must
+    /// survive. Turns red if eviction stops being conditional on the write succeeding — which would additionally
+    /// make the cache re-read a definition that never changed.
+    /// </summary>
+    [Fact]
+    public async Task A_refused_same_version_rewrite_keeps_its_cached_entry()
     {
         var inner = new InMemoryProcessDefinitionStore().Seed(Yaml("pipeline", 1, "done"));
         var cache = new CachingProcessDefinitionStore(inner);
 
         (await cache.GetAsync("pipeline", 1, CancellationToken.None)).Value.Nodes.Should().ContainKey("done");
 
-        // Same version number, different graph — the case "an immutable pinned version" does not cover.
+        // Same version number, different graph — refused by the store rather than rewritten.
         var rewritten = Yaml("pipeline", 1, "audit");
         var parsed = ProcessLoader.Load(rewritten);
         parsed.IsSuccess.Should().BeTrue(parsed.IsFailure ? parsed.Error : "");
-        await cache.UpsertAndActivateAsync(parsed.Value, rewritten, CancellationToken.None);
 
-        var after = await cache.GetAsync("pipeline", 1, CancellationToken.None);
+        var write = await cache.UpsertAndActivateAsync(parsed.Value, rewritten, CancellationToken.None);
 
-        after.Value.Nodes.Should().ContainKey("audit", "the write path must drop the key it rewrote, or the cache keeps serving the graph that version no longer has");
-        inner.GetCallCount.Should().Be(2, "the resolve after the rewrite has to reach the store again");
+        write.IsFailure.Should().BeTrue("a stored version is immutable");
+        write.Error.Should().Contain("pipeline").And.Contain("1");
+        cache.Count.Should().Be(1, "nothing was written, so the cached parse still matches the stored row");
+        (await cache.GetAsync("pipeline", 1, CancellationToken.None)).Value.Nodes.Should().ContainKey("done", "the refused rewrite must not have changed what resolves");
+        inner.GetCallCount.Should().Be(1, "the entry was never evicted, so no second read should have happened");
     }
 
     [Fact]

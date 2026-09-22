@@ -31,12 +31,22 @@ internal sealed class InMemoryProcessDefinitionStore : IProcessDefinitionStore
     /// </summary>
     public bool RefuseRemoval { get; set; }
 
-    public ValueTask UpsertAndActivateAsync(ProcessDefinition definition, string yaml, CancellationToken ct)
+    public ValueTask<Result> UpsertAndActivateAsync(ProcessDefinition definition, string yaml, CancellationToken ct)
     {
+        // Mirrors the real store's immutability rule: same content at the same version is an idempotent success
+        // that still activates; different content at the same version is refused with nothing written. A fake that
+        // kept the old overwrite-always behaviour would let the tests pass while the property the store now
+        // enforces was broken.
+        if (_yaml.TryGetValue((definition.Name, definition.Version), out var stored) && !string.Equals(stored, yaml, StringComparison.Ordinal))
+        {
+            return ValueTask.FromResult(Result.Failure(
+                $"Process '{definition.Name}' version {definition.Version} is already stored with different content. A stored version is immutable, because a run that started on it must keep the exact graph it started on — bump the version instead of editing version {definition.Version} in place."));
+        }
+
         Activated.Add(definition);
         _yaml[(definition.Name, definition.Version)] = yaml;
         _active[definition.Name] = definition.Version;
-        return ValueTask.CompletedTask;
+        return ValueTask.FromResult(Result.Success());
     }
 
     public ValueTask<int?> GetActiveVersionAsync(string process, CancellationToken ct) =>
