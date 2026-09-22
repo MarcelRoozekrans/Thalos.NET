@@ -8,9 +8,18 @@ namespace Thalos.Workflow.Orm;
 /// Registers the ZeroAlloc.ORM-backed <see cref="IWorkflowStore"/> and <see cref="IProcessDefinitionStore"/> on a
 /// <see cref="ThalosBuilder"/>. Both share the same <see cref="WorkflowOrmOptions"/> registration, and the
 /// workflow store resolves process definitions through the very <see cref="IProcessDefinitionStore"/> registered
-/// here, so syncing a definition is what makes it runnable. Both open a connection per call — one <see cref="AddWorkflowOrm"/> call is enough to get everything this package offers;
-/// a consumer should never need a second, hand-written registration for <see cref="IProcessDefinitionStore"/>.
+/// here, so syncing a definition is what makes it runnable. Both open a connection per call — one
+/// <see cref="AddWorkflowOrm"/> call is enough to get everything <em>this package</em> offers; a consumer should
+/// never need a second, hand-written registration for <see cref="IProcessDefinitionStore"/>.
 /// </summary>
+/// <remarks>
+/// <b>This is two of the seven pieces a moving run needs, not all seven.</b> A host that stops here has a database
+/// that records runs and nothing that advances them: no <see cref="IWorkflowReferenceResolver"/>, no
+/// <c>WorkflowNodeDispatcher</c>, no outbox consumer bound to <see cref="WorkflowDispatch.TypeName"/>, no
+/// <see cref="WorkflowRunReconciler"/> on a schedule, and no <see cref="IProcessDefinitionSource"/> feeding
+/// <see cref="ProcessDefinitionSync"/>. Every one of those is host policy or host hosting, which is why none of
+/// them is registered here — <c>docs/workflow.md</c> is the end-to-end wiring.
+/// </remarks>
 /// <remarks>
 /// The design brief for this task named the extension target <c>IThalosBuilder</c>, but Thalos.NET's actual
 /// composition-root type — the one every other integration package (<c>Thalos.NET.Git.LibGit2Sharp</c>,

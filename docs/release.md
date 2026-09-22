@@ -185,3 +185,12 @@ decide when the rest start failing.
 Editing a process file **without bumping its `version`** is now a sync *error* rather than a silent overwrite.
 Authors who relied on re-syncing a version in place must bump the version instead. The error names the process
 and version and says so.
+
+## Process-file keys that are parsed but not yet honoured
+
+`ProcessNode` carries three properties the loader populates from the YAML and nothing in the engine reads:
+`models:`, `lenses:` and `quorum:`. No validator rule inspects them and `WorkflowNodeDispatcher` never looks at
+them. A node written as `models: [sonnet, opus]` therefore executes **once**, against whatever single model the
+resolved agent is configured with, and the fan-out is silently ignored — no warning at load time, nothing in the
+event log. They are reserved for a later phase; treat any process file using them as declaring intent, not
+behaviour.

@@ -53,12 +53,21 @@ public sealed record WorkflowRun
     public required IReadOnlyDictionary<string, int> Visits { get; init; }
 
     /// <summary>
-    /// Variables nodes have produced so far, merged across the run's lifetime — later writes win on key
-    /// collision, and a node that returns no variables leaves this bag untouched rather than clearing it. This
-    /// is how one node's output becomes a later node's input: <see cref="NodeResult.Variables"/> merges into
-    /// this bag on every <see cref="IWorkflowStore.CompleteNodeAsync"/> and <see cref="IWorkflowStore.ResumeAsync"/>
-    /// call, in the same transaction as the rest of that call's writes.
+    /// Variables accumulated across the run's lifetime — later writes win on key collision, and a write that
+    /// carries no variables leaves this bag untouched rather than clearing it. <see cref="NodeResult.Variables"/>
+    /// merges into this bag on every <see cref="IWorkflowStore.CompleteNodeAsync"/> and
+    /// <see cref="IWorkflowStore.ResumeAsync"/> call, in the same transaction as the rest of that call's writes.
     /// </summary>
+    /// <remarks>
+    /// <b>What actually writes to this bag today.</b> Exactly one thing:
+    /// <see cref="IWorkflowStore.ResumeAsync"/>'s <c>payload</c>, which lands under the literal key
+    /// <c>"payload"</c>. <see cref="WorkflowNodeDispatcher"/> builds every <see cref="NodeResult"/> with an empty
+    /// variable bag — it reads an agent turn's outcome and nothing else — so a node's own output does not reach
+    /// this dictionary through any shipped code path. Node-produced variables are a contract this type and the
+    /// store honour (the merge is implemented, transactional and tested) and the dispatcher does not yet
+    /// populate: a consumer supplying its own dispatch loop can pass a populated <see cref="NodeResult"/> and the
+    /// merge will do the right thing, but out of the box no node's result feeds a later node's input.
+    /// </remarks>
     public IReadOnlyDictionary<string, object?> Variables { get; init; } = new Dictionary<string, object?>(StringComparer.Ordinal);
 
     /// <summary>The most recent error recorded against this run, or <see langword="null"/> if it has not failed.</summary>

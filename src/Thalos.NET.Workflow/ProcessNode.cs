@@ -36,12 +36,25 @@ public sealed class ProcessNode
     /// <summary>The node to run once <see cref="MaxVisits"/> is exceeded.</summary>
     public string? OnExceeded { get; init; }
 
-    /// <summary>The model identifiers a multi-model node fans out to.</summary>
+    /// <summary>
+    /// <b>Reserved; not yet honoured.</b> The model identifiers a multi-model node would fan out to. The loader
+    /// reads <c>models:</c> off the YAML and this property carries it, but nothing else in the engine looks at
+    /// it: <see cref="ProcessValidator"/> has no rule for it and <see cref="WorkflowNodeDispatcher"/> never reads
+    /// it. A node declaring <c>models: [sonnet, opus]</c> executes once, against whatever single model the
+    /// resolved agent is configured with, with no warning that the fan-out was ignored.
+    /// </summary>
     public IReadOnlyList<string> Models { get; init; } = [];
 
-    /// <summary>The lens identifiers a multi-lens node evaluates against.</summary>
+    /// <summary>
+    /// <b>Reserved; not yet honoured.</b> The lens identifiers a multi-lens node would evaluate against. Parsed
+    /// and carried, read by nothing — see <see cref="Models"/> for the same caveat in full.
+    /// </summary>
     public IReadOnlyList<string> Lenses { get; init; } = [];
 
-    /// <summary>The minimum number of agreeing results a quorum node requires.</summary>
+    /// <summary>
+    /// <b>Reserved; not yet honoured.</b> The minimum number of agreeing results a quorum node would require.
+    /// Parsed and carried, read by nothing — see <see cref="Models"/> for the same caveat in full. Without a
+    /// fan-out to take a quorum over, there is nothing for this number to constrain.
+    /// </summary>
     public int? Quorum { get; init; }
 }

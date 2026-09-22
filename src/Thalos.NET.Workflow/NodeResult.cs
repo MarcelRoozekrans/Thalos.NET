@@ -21,6 +21,12 @@ public sealed class NodeResult
     /// </summary>
     public string? Outcome { get; }
 
-    /// <summary>Variables the node produced, to be merged into the run's state by the caller.</summary>
+    /// <summary>
+    /// Variables the node produced, to be merged into the run's state by the caller. <see cref="WorkflowNodeDispatcher"/>
+    /// always passes an empty dictionary here — it extracts an outcome from the agent turn and nothing else — so
+    /// on the shipped dispatch path this is never populated. A consumer driving its own dispatch loop can supply
+    /// values and <see cref="IWorkflowStore.CompleteNodeAsync"/> will merge them into
+    /// <see cref="WorkflowRun.Variables"/>.
+    /// </summary>
     public IReadOnlyDictionary<string, object?> Variables { get; }
 }
