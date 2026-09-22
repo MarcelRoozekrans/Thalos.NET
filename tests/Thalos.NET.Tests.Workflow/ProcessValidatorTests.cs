@@ -1,4 +1,5 @@
 using NSubstitute;
+using Thalos;
 using Thalos.Workflow;
 
 namespace Thalos.Tests.Workflow;
@@ -72,7 +73,7 @@ public sealed class ProcessValidatorTests
             """;
         var def = ProcessLoader.Load(yaml).Value;
         var resolver = Substitute.For<IWorkflowReferenceResolver>();
-        resolver.AgentExistsAsync("ghost-writer", Arg.Any<CancellationToken>()).Returns(false);
+        resolver.ResolveAgentIdAsync("ghost-writer", Arg.Any<CancellationToken>()).Returns((AgentId?)null);
         resolver.SkillExistsAsync("draft", Arg.Any<CancellationToken>()).Returns(true);
 
         var result = await ProcessValidator.ValidateAsync(def, resolver, CancellationToken.None);
@@ -93,7 +94,7 @@ public sealed class ProcessValidatorTests
             """;
         var def = ProcessLoader.Load(yaml).Value;
         var resolver = Substitute.For<IWorkflowReferenceResolver>();
-        resolver.AgentExistsAsync("ghost-writer", Arg.Any<CancellationToken>()).Returns(true);
+        resolver.ResolveAgentIdAsync("ghost-writer", Arg.Any<CancellationToken>()).Returns((AgentId?)AgentId.New());
         resolver.SkillExistsAsync("draft", Arg.Any<CancellationToken>()).Returns(true);
 
         var result = await ProcessValidator.ValidateAsync(def, resolver, CancellationToken.None);

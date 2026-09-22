@@ -235,7 +235,7 @@ public static class ProcessValidator
     {
         foreach (var (name, node) in process.Nodes)
         {
-            if (node.Agent is not null && !await resolver.AgentExistsAsync(node.Agent, ct).ConfigureAwait(false))
+            if (node.Agent is not null && await resolver.ResolveAgentIdAsync(node.Agent, ct).ConfigureAwait(false) is null)
             {
                 errors.Add($"node '{name}' references unknown agent '{node.Agent}'");
             }
