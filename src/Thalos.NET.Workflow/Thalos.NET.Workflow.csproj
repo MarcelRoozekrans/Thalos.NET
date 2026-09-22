@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Thalos.Workflow</RootNamespace>
+    <PackageId>Thalos.NET.Workflow</PackageId>
+    <Description>Durable process-graph engine for Thalos.NET: sequence, branch, loop-back and approval-gate primitives defined in a file rather than in code, with no persistence backend dependency so a consumer can supply one.</Description>
+    <PackageTags>agents;workflow;durable;microsoft-agent-framework;zeroalloc</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />
+    <ProjectReference Include="..\Thalos.NET.Skills\Thalos.NET.Skills.csproj" />
+    <PackageReference Include="YamlDotNet" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Workflow" />
+  </ItemGroup>
+</Project>

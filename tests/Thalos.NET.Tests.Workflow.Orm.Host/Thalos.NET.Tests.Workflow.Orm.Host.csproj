@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFrameworks>net10.0</TargetFrameworks>
+    <IsPackable>false</IsPackable>
+    <!-- lives under tests/ (per the task brief) but is a plain console app, not an xunit test project -->
+    <IsTestProject>false</IsTestProject>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <!-- console-app entry point, not a library surface -->
+    <NoWarn>$(NoWarn);CA1515</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Thalos.NET.Workflow.Orm\Thalos.NET.Workflow.Orm.csproj" />
+  </ItemGroup>
+  <!-- tests/Directory.Build.props adds the xunit test-SDK stack unconditionally; this is a plain console
+       app with its own top-level-statement entry point, and the test SDK's generated Main collides with it. -->
+  <ItemGroup>
+    <PackageReference Remove="Microsoft.NET.Test.Sdk" />
+    <PackageReference Remove="xunit" />
+    <PackageReference Remove="xunit.runner.visualstudio" />
+    <PackageReference Remove="AwesomeAssertions" />
+    <PackageReference Remove="NSubstitute" />
+    <PackageReference Remove="coverlet.collector" />
+    <Using Remove="Xunit" />
+    <Using Remove="AwesomeAssertions" />
+  </ItemGroup>
+</Project>

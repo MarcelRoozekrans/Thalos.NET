@@ -40,7 +40,7 @@ public sealed class ContextProviderTurnTests
         var history = new SessionStoreChatHistoryProvider(store);
         var factory = new AgentFactory(provider, [], catalog, history, new ServiceCollection().BuildServiceProvider(), null, [new Source()]);
         var def = new AgentDefinition { Id = AgentId.New(), Name = "a", Instructions = "sys" };
-        var runtime = new ThalosAgentRuntime(new StaticAgentCatalog([def]), factory, store, history, new RecordingNotificationPublisher(), new AgentEventHub(), TimeProvider.System, null);
+        var runtime = new ThalosAgentRuntime(new StaticAgentCatalog([def]), factory, store, history, new RecordingNotificationPublisher(), new AgentEventHub(), TimeProvider.System, Substitute.For<IOutcomeToolFactory>(), null);
         var caller = RuntimeFixture.User();
 
         var s = (await runtime.CreateSessionAsync(def.Id, caller, default)).Value;

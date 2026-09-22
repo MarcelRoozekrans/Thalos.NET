@@ -180,8 +180,14 @@ public sealed partial class SubagentRunner : ISubagentRunner
     private async ValueTask<Result<AgentTurnResult, AgentError>> RunTurnAsync(
         SubagentRunRequest request, SessionId sessionId, SubagentBudget budget, CancellationToken ct)
     {
+        // RequiredOutcome travels with the turn, not with the session: the runtime offers the outcome tool for this
+        // one turn only. Forwarding it here is the whole of what makes SubagentRunRequest.RequiredOutcome do
+        // anything - drop this line and the tool is never offered, the model never calls it, and every constrained
+        // node fails as "completed without reporting an outcome".
         var turn = await _runtime
-            .RunTurnAsync(new AgentTurnRequest(sessionId, request.Task, request.Caller), ct)
+            .RunTurnAsync(
+                new AgentTurnRequest(sessionId, request.Task, request.Caller) { RequiredOutcome = request.RequiredOutcome },
+                ct)
             .ConfigureAwait(false);
 
         // Post-hoc only: RunTurnAsync is buffered and returns after the whole turn has already run, so there is no

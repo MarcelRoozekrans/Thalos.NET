@@ -30,6 +30,13 @@
     <PackageVersion Include="Npgsql" Version="10.0.3" />
     <!-- native git backend — confined to Thalos.NET.Git.LibGit2Sharp -->
     <PackageVersion Include="LibGit2Sharp" Version="0.32.0" />
+    <!-- YAML process-graph definitions — confined to Thalos.NET.Workflow -->
+    <PackageVersion Include="YamlDotNet" Version="16.3.0" />
+    <!-- Raw-SQL ORM + transactional outbox, PostgreSQL persistence — net10.0-only, confined to Thalos.NET.Workflow.Orm -->
+    <PackageVersion Include="ZeroAlloc.ORM" Version="1.7.0" />
+    <PackageVersion Include="ZeroAlloc.Outbox" Version="2.6.0" />
+    <PackageVersion Include="ZeroAlloc.Outbox.Orm" Version="2.6.0" />
+    <PackageVersion Include="AdoNet.Async.Adapters" Version="1.4.1" />
 
     <!-- Microsoft.Extensions -->
     <PackageVersion Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="10.0.12" />

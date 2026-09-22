@@ -110,6 +110,36 @@ non-empty commit. The full explanation also lives in
 [`README.md`](../README.md#breaking-change-ichanneladapterdeliverasync-now-takes-a-conversationid) for a human reading
 the package itself, independent of what release-please renders.
 
+The next release ships fifteen packages: `Thalos.NET.Workflow` and `Thalos.NET.Workflow.Orm` join the thirteen
+already shipping as of 0.6.0 (`Thalos.NET.Git` and `Thalos.NET.Git.LibGit2Sharp`, released in 0.6.0, having
+joined the eleven of 0.4.x). `Thalos.NET.Workflow` ships `net8.0` + `net10.0`; `Thalos.NET.Workflow.Orm` is
+`net10.0`-only, same reason as `Thalos.NET.Memory.RagNet` — its own dependencies (`ZeroAlloc.ORM`,
+`ZeroAlloc.Outbox.Orm`, `AdoNet.Async.Adapters`) ship `net10.0`-only builds. `ci.yml`'s `pack-validate` job — the
+`expected` package list, the TFM-selection branch, and both package-count checks and their error-message text —
+is updated for both new packages.
+
+**Breaking changes accumulated across the workflow-engine phase (2.2, Part A):**
+
+- `ThalosAgentRuntime`'s public constructor gained a required `IOutcomeToolFactory outcomeTools` parameter
+  ahead of the optional `logger` one, so a turn can be given the constrained-outcome tool schema a workflow
+  node asks for. Any direct instantiation outside `AddThalos(...)` DI wiring needs the new argument.
+- `OrmWorkflowStore`'s public constructor gained a required `IProcessDefinitionStore definitions` parameter —
+  process definitions are now resolved from the store at run time instead of being supplied out of band.
+- `IWorkflowReferenceResolver.AgentExistsAsync` was removed and collapsed into `ResolveAgentIdAsync`: one
+  lookup answers both "does this agent exist" and "what id does it have," so `ProcessValidator` at load time
+  and the node dispatcher at run time cannot drift out of agreement with each other.
+- `IWorkflowStore` gained `FailStrandedAsync(Guid runId, long expectedSeq, string errorMessage, CancellationToken ct)`
+  — source-breaking for any external `IWorkflowStore` implementer, needed by the reconciler to fail a run
+  stranded by a dead-lettered dispatch message.
+- `IProcessDefinitionStore.UpsertAndActivateAsync`'s return type changed to `ValueTask<Result>`, so a
+  same-version re-sync whose content differs from what is stored comes back as a typed failure instead of a
+  silent overwrite — see the behaviour-change note below.
+
+**Migration 1004 must be deployed together with the code that writes `content_hash`.** This is the operationally
+sharpest item in the phase: applying 1004 ahead of the code rollout breaks process sync with `23502` on every
+instance still running pre-1004 code. Full mechanism and rollout guidance: [Schema migrations and rolling
+deploys](#schema-migrations-and-rolling-deploys) below.
+
 ## Local development against a consumer (Daedalus)
 
 `scripts/pack-local.ps1` packs `0.3.0-local.<timestamp>` (the `VersionPrefix` in `Directory.Build.props`) into `C:\Projects\Prive\.nuget-local`
@@ -120,3 +150,67 @@ the package itself, independent of what release-please renders.
 `renovate.json` ignores `dotnet-sdk` on purpose: `global.json` pins the lowest 10.0.x feature band with
 `rollForward: latestFeature` so both dev machines and CI resolve; a bumped pin above locally installed
 SDKs breaks local builds. Everything else is bumped by PRs that must pass the same gates.
+
+## Schema migrations and rolling deploys
+
+`Thalos.NET.Workflow.Orm` ships SQL migrations (`WorkflowOrmMigrations.Postgres`). By default
+`WorkflowOrmOptions.EnsureSchemaOnStartup` applies them from the host at startup, which means the first
+instance to start applies anything pending while the other instances are still running the code they were
+deployed with.
+
+That is safe for a purely additive migration. It is **not** safe for a migration older code cannot write
+against, and there is one of those:
+
+### 1004 — `process_definition.content_hash`
+
+Adds `content_hash` as `NOT NULL` with no default, to make a stored process version immutable: re-syncing the
+same `(process, version)` with different content is refused instead of rewriting a definition a live run is
+pinned to.
+
+**Apply this migration and deploy the matching code as one step. Do not apply it ahead of the rollout.**
+
+PostgreSQL validates `NOT NULL` against the proposed tuple *before* conflict resolution, so an instance running
+pre-1004 code — whose `INSERT` never mentions the column — fails with `23502` on **every**
+`UpsertAndActivateAsync`, the `ON CONFLICT` path included. In a rolling deploy where one instance migrates
+first, every instance not yet replaced loses process syncing for as long as it is still running. Nothing
+already-running breaks — runs, resumes and dispatch are unaffected, since they only read — but no process
+definition can be synced or activated from an old instance.
+
+For a deployment that rolls instances one at a time across this migration, turn `EnsureSchemaOnStartup` off and
+apply the schema change as an explicit step, rather than letting whichever instance wins the startup race
+decide when the rest start failing.
+
+### Behaviour change that ships with it
+
+Editing a process file **without bumping its `version`** is now a sync *error* rather than a silent overwrite.
+Authors who relied on re-syncing a version in place must bump the version instead. The error names the process
+and version and says so.
+
+## Process-file keys that are parsed but not yet honoured
+
+`ProcessNode` carries three properties the loader populates from the YAML and nothing in the engine reads:
+`models:`, `lenses:` and `quorum:`. No validator rule inspects them and `WorkflowNodeDispatcher` never looks at
+them. A node written as `models: [sonnet, opus]` therefore executes **once**, against whatever single model the
+resolved agent is configured with, and the fan-out is silently ignored — no warning at load time, nothing in the
+event log. They are reserved for a later phase; treat any process file using them as declaring intent, not
+behaviour.
+
+## Process files that used to sync and now report an error
+
+`ProcessValidator` gained three rules this phase, and `ProcessDefinitionSync` validates before it activates. A
+process file that previously synced cleanly can now be rejected — with the version already active left running
+untouched, as for any other validation failure. The three shapes:
+
+- **A terminal node that also declares `next`, `branch` or `outcomes`.** `Advance` resolves the outgoing edge
+  before it ever reaches the terminal status, so the run took that edge and the node's terminal status was
+  unreachable.
+- **A declared outcome that is blank or repeated.** These become the closed `enum` of the outcome tool the node's
+  agent is offered, and `OutcomeTool.Validate` refuses both — so the node failed on every dispatch.
+- **An `onExceeded` redirect from which the capped node is reachable again.** The cap fired, redirected, and was
+  routed straight back into the node it had just capped, forever.
+
+Every file this newly rejects was already broken at run time — each shape either never terminated or failed on
+every dispatch of the node — so nothing that used to work stops working. What changes is *when* you find out:
+at sync, naming the node, instead of after a run had spent the agent turns to reach it. A deployer rolling out
+this version should expect `SyncAsync` to start reporting errors for such files, and should read the error rather
+than assume the sync itself regressed.

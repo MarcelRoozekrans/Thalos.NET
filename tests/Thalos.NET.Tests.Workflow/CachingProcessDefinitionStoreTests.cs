@@ -1,0 +1,344 @@
+using Thalos.Workflow;
+using ZeroAlloc.Results;
+
+namespace Thalos.Tests.Workflow;
+
+/// <summary>
+/// Tests for <see cref="CachingProcessDefinitionStore"/>: the two things a cache in front of definition
+/// resolution has to get right are that it actually saves the read, and that it never serves an answer the
+/// underlying store would no longer give. Every assertion here is written against
+/// <see cref="InMemoryProcessDefinitionStore.GetCallCount"/> rather than the returned value where the point is
+/// "did this reach the store", because a cache that returns the right answer while re-reading every time is
+/// indistinguishable from no cache at all by value alone.
+/// </summary>
+public sealed class CachingProcessDefinitionStoreTests
+{
+    /// <summary>
+    /// Spins until <paramref name="condition"/> holds, or fails the test. Bounded deliberately: an unbounded spin
+    /// turns a regression that stops the inner read being reached into a hung suite rather than a red test, and a
+    /// hang is far more expensive to diagnose than an assertion naming what never happened.
+    /// </summary>
+    private static async Task WaitUntilAsync(Func<bool> condition, string because)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (!condition())
+        {
+            if (DateTime.UtcNow > deadline)
+            {
+                Assert.Fail($"Timed out after 10s waiting: {because}.");
+            }
+
+            await Task.Delay(1);
+        }
+    }
+
+    private static string Yaml(string process, int version, string next) => $$"""
+        process: {{process}}
+        version: {{version}}
+        nodes:
+          implement: { agent: backend, skill: tdd, next: {{next}} }
+          {{next}}: { terminal: succeeded }
+        """;
+
+    [Fact]
+    public async Task A_second_resolve_of_the_same_version_does_not_reach_the_inner_store()
+    {
+        var inner = new InMemoryProcessDefinitionStore().Seed(Yaml("pipeline", 1, "done"));
+        var cache = new CachingProcessDefinitionStore(inner);
+
+        var first = await cache.GetAsync("pipeline", 1, CancellationToken.None);
+        var second = await cache.GetAsync("pipeline", 1, CancellationToken.None);
+
+        first.IsSuccess.Should().BeTrue(first.IsFailure ? first.Error : "");
+        second.IsSuccess.Should().BeTrue();
+        second.Value.Nodes.Should().ContainKey("done");
+        inner.GetCallCount.Should().Be(1, "the second resolve must be served from the cache — a count of 2 means the cache is not caching");
+    }
+
+    [Fact]
+    public async Task Two_versions_of_one_process_are_cached_separately()
+    {
+        var inner = new InMemoryProcessDefinitionStore()
+            .Seed(Yaml("pipeline", 1, "done"))
+            .Seed(Yaml("pipeline", 2, "audit"));
+        var cache = new CachingProcessDefinitionStore(inner);
+
+        var v1 = await cache.GetAsync("pipeline", 1, CancellationToken.None);
+        var v2 = await cache.GetAsync("pipeline", 2, CancellationToken.None);
+
+        v1.Value.Nodes.Should().ContainKey("done").And.NotContainKey("audit");
+        v2.Value.Nodes.Should().ContainKey("audit", "a cache keyed on the process name alone would hand version 2's resolve version 1's graph");
+        cache.Count.Should().Be(2);
+    }
+
+    /// <summary>
+    /// A successful write still drops the key. Since the store now refuses a same-version content change, the only
+    /// successful re-activation of an already-stored version is an identical one, so this can no longer be about
+    /// avoiding a stale graph — it is about the decorator being correct on its own terms rather than only in
+    /// combination with an invariant enforced elsewhere. Turns red if eviction is dropped from the write path.
+    /// </summary>
+    [Fact]
+    public async Task Re_activating_a_version_with_identical_content_drops_its_cached_entry()
+    {
+        var yaml = Yaml("pipeline", 1, "done");
+        var inner = new InMemoryProcessDefinitionStore().Seed(yaml);
+        var cache = new CachingProcessDefinitionStore(inner);
+
+        (await cache.GetAsync("pipeline", 1, CancellationToken.None)).Value.Nodes.Should().ContainKey("done");
+        cache.Count.Should().Be(1);
+
+        var parsed = ProcessLoader.Load(yaml);
+        parsed.IsSuccess.Should().BeTrue(parsed.IsFailure ? parsed.Error : "");
+        (await cache.UpsertAndActivateAsync(parsed.Value, yaml, CancellationToken.None)).IsSuccess.Should().BeTrue(
+            "re-syncing an unchanged file is the normal case on every startup and must stay safe");
+
+        cache.Count.Should().Be(0, "a successful write drops the key it wrote");
+        (await cache.GetAsync("pipeline", 1, CancellationToken.None)).Value.Nodes.Should().ContainKey("done");
+        inner.GetCallCount.Should().Be(2, "the entry was evicted, so the resolve after the write has to reach the store again");
+    }
+
+    /// <summary>
+    /// A refused same-version rewrite wrote nothing, so the cached parse still matches the stored row and must
+    /// survive. Turns red if eviction stops being conditional on the write succeeding — which would additionally
+    /// make the cache re-read a definition that never changed.
+    /// </summary>
+    [Fact]
+    public async Task A_refused_same_version_rewrite_keeps_its_cached_entry()
+    {
+        var inner = new InMemoryProcessDefinitionStore().Seed(Yaml("pipeline", 1, "done"));
+        var cache = new CachingProcessDefinitionStore(inner);
+
+        (await cache.GetAsync("pipeline", 1, CancellationToken.None)).Value.Nodes.Should().ContainKey("done");
+
+        // Same version number, different graph — refused by the store rather than rewritten.
+        var rewritten = Yaml("pipeline", 1, "audit");
+        var parsed = ProcessLoader.Load(rewritten);
+        parsed.IsSuccess.Should().BeTrue(parsed.IsFailure ? parsed.Error : "");
+
+        var write = await cache.UpsertAndActivateAsync(parsed.Value, rewritten, CancellationToken.None);
+
+        write.IsFailure.Should().BeTrue("a stored version is immutable");
+        write.Error.Should().Contain("pipeline").And.Contain("1");
+        cache.Count.Should().Be(1, "nothing was written, so the cached parse still matches the stored row");
+        (await cache.GetAsync("pipeline", 1, CancellationToken.None)).Value.Nodes.Should().ContainKey("done", "the refused rewrite must not have changed what resolves");
+        inner.GetCallCount.Should().Be(1, "the entry was never evicted, so no second read should have happened");
+    }
+
+    [Fact]
+    public async Task A_successful_removal_drops_its_cached_entry()
+    {
+        var inner = new InMemoryProcessDefinitionStore().Seed(Yaml("pipeline", 1, "done"));
+        var cache = new CachingProcessDefinitionStore(inner);
+
+        (await cache.GetAsync("pipeline", 1, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        cache.Count.Should().Be(1);
+
+        (await cache.TryRemoveAsync("pipeline", 1, CancellationToken.None)).IsSuccess.Should().BeTrue();
+
+        cache.Count.Should().Be(0);
+        (await cache.GetAsync("pipeline", 1, CancellationToken.None)).IsFailure.Should().BeTrue("the row is gone, so the cache must not keep answering for it");
+    }
+
+    /// <summary>
+    /// A removal the store refuses — because a run still pins the version — leaves the row in place, so evicting
+    /// the cached parse would throw away a hot entry for a version that is still perfectly valid and, worse,
+    /// suggest the definition had gone away. Turns red if eviction stops being conditional on success.
+    /// </summary>
+    [Fact]
+    public async Task A_refused_removal_keeps_its_cached_entry()
+    {
+        var inner = new InMemoryProcessDefinitionStore().Seed(Yaml("pipeline", 1, "done"));
+        var cache = new CachingProcessDefinitionStore(inner);
+
+        (await cache.GetAsync("pipeline", 1, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        inner.RefuseRemoval = true;
+
+        (await cache.TryRemoveAsync("pipeline", 1, CancellationToken.None)).IsFailure.Should().BeTrue();
+
+        cache.Count.Should().Be(1, "the version is still stored and still pinned, so its cached parse is still correct");
+        (await cache.GetAsync("pipeline", 1, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        inner.GetCallCount.Should().Be(1, "the entry was never evicted, so no second read should have happened");
+    }
+
+    /// <summary>
+    /// A resolve that fails must not be remembered: a dispatch can legitimately race ahead of the sync that
+    /// stores its definition, and caching that miss would leave the process unrunnable for the host's whole
+    /// lifetime rather than for one run. Turns red if the failure path starts populating the map.
+    /// </summary>
+    [Fact]
+    public async Task A_failed_resolve_is_not_cached()
+    {
+        var inner = new InMemoryProcessDefinitionStore();
+        var cache = new CachingProcessDefinitionStore(inner);
+
+        (await cache.GetAsync("pipeline", 1, CancellationToken.None)).IsFailure.Should().BeTrue();
+        cache.Count.Should().Be(0);
+
+        // The definition arrives late — exactly the race a negative cache would make permanent.
+        inner.Seed(Yaml("pipeline", 1, "done"));
+
+        (await cache.GetAsync("pipeline", 1, CancellationToken.None)).IsSuccess.Should().BeTrue("a definition that lands after a failed resolve must become resolvable");
+    }
+
+    /// <summary>
+    /// The hard bound on growth. Turns red if <see cref="CachingProcessDefinitionStore.TrimToCapacity"/> stops
+    /// evicting — the map would then grow with every distinct version a long-lived host ever resolves.
+    /// </summary>
+    [Fact]
+    public async Task The_cache_never_holds_more_than_its_capacity()
+    {
+        var inner = new InMemoryProcessDefinitionStore();
+        for (var version = 1; version <= 5; version++)
+        {
+            inner.Seed(Yaml("pipeline", version, "done"));
+        }
+
+        var cache = new CachingProcessDefinitionStore(inner, capacity: 2);
+        for (var version = 1; version <= 5; version++)
+        {
+            (await cache.GetAsync("pipeline", version, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        }
+
+        cache.Count.Should().Be(2, "five distinct versions were resolved through a cache capped at two");
+    }
+
+    /// <summary>
+    /// Eviction is oldest-inserted-first, so the version resolved first is the one dropped. Asserted through the
+    /// inner store's call count rather than <c>Count</c>, because <c>Count</c> alone cannot say <em>which</em>
+    /// entries survived — a policy that evicted the newest would keep the count at two and still be wrong.
+    /// </summary>
+    [Fact]
+    public async Task Eviction_drops_the_oldest_inserted_entry_first()
+    {
+        var inner = new InMemoryProcessDefinitionStore()
+            .Seed(Yaml("pipeline", 1, "done"))
+            .Seed(Yaml("pipeline", 2, "done"))
+            .Seed(Yaml("pipeline", 3, "done"));
+        var cache = new CachingProcessDefinitionStore(inner, capacity: 2);
+
+        await cache.GetAsync("pipeline", 1, CancellationToken.None);
+        await cache.GetAsync("pipeline", 2, CancellationToken.None);
+        await cache.GetAsync("pipeline", 3, CancellationToken.None);
+        inner.GetCallCount.Should().Be(3);
+
+        // Version 2 and 3 should still be cached; version 1 was the oldest and is gone.
+        await cache.GetAsync("pipeline", 2, CancellationToken.None);
+        await cache.GetAsync("pipeline", 3, CancellationToken.None);
+        inner.GetCallCount.Should().Be(3, "versions 2 and 3 must still be cached");
+
+        await cache.GetAsync("pipeline", 1, CancellationToken.None);
+        inner.GetCallCount.Should().Be(4, "version 1 was the oldest entry and must have been the one evicted");
+    }
+
+    /// <summary>
+    /// Single-flight. A cold cache is the dangerous moment, not a warm one: on a freshly started host every
+    /// parked gate can resume at once and every one of those resumes misses on the same few versions. Because the
+    /// ORM store's resume holds its run-transaction connection while asking for a definition, each of those
+    /// misses takes a second connection from the same pool, so a fan-out here is a connection stampede rather
+    /// than merely duplicated work.
+    /// </summary>
+    /// <remarks>
+    /// The gate is what makes this observable: it holds the first read open so the other callers are genuinely
+    /// concurrent with it rather than arriving after it already populated the cache. Turns red if the
+    /// single-flight map is removed — the count becomes the number of concurrent callers instead of one. Asserted
+    /// on the call count rather than on the returned values, because every caller gets the right answer either
+    /// way; the whole point is how many reads it took.
+    /// </remarks>
+    [Fact]
+    public async Task Concurrent_misses_on_one_version_collapse_into_a_single_read()
+    {
+        const int callers = 32;
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var inner = new InMemoryProcessDefinitionStore().Seed(Yaml("pipeline", 1, "done"));
+        inner.ReleaseGate = gate;
+        var cache = new CachingProcessDefinitionStore(inner);
+
+        var resolves = new Task<Result<ProcessDefinition>>[callers];
+        for (var i = 0; i < callers; i++)
+        {
+            resolves[i] = Task.Run(async () => await cache.GetAsync("pipeline", 1, CancellationToken.None));
+        }
+
+        // Let every caller reach the cache and queue behind the one in-flight read before releasing it.
+        await WaitUntilAsync(() => inner.GetCallCount > 0, "the inner store must be reached at least once");
+
+        gate.SetResult();
+        var results = await Task.WhenAll(resolves);
+
+        results.Should().AllSatisfy(r => r.IsSuccess.Should().BeTrue());
+        results.Should().AllSatisfy(r => r.Value.Nodes.Should().ContainKey("done"));
+        inner.GetCallCount.Should().Be(
+            1,
+            "{0} concurrent misses on one version must collapse into a single read — without single-flight each one takes its own connection from the same pool the resume transaction is already holding one from",
+            callers);
+    }
+
+    /// <summary>
+    /// A cancelled caller must detach from the shared read rather than cancelling it for everyone else, and must
+    /// not tear down the flight the others are still attached to.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// This is falsifiable only because <see cref="InMemoryProcessDefinitionStore.ReleaseGate"/> honours the
+    /// cancellation token. A fake that ignored <c>ct</c> would finish on release whichever token the shared read
+    /// had been started with, so the named property could not fail — the earlier version of this test asserted it
+    /// and could not have caught its own violation. With the gate honouring <c>ct</c>, starting the shared read
+    /// with the first caller's token makes that token's cancellation cancel the gate wait, the shared task faults,
+    /// and the survivor's success assertion goes red.
+    /// </para>
+    /// <para>
+    /// The final call-count assertion is what proves the survivor <em>shared</em> rather than merely succeeded: if
+    /// the cancelled caller's exit had de-registered the flight, the survivor would have installed a second one
+    /// and read again, and the count would be 2. Ordering between the cancel and the survivor's arrival is
+    /// therefore not something this test has to win — either order must still yield one read, which is exactly the
+    /// guarantee being claimed.
+    /// </para>
+    /// </remarks>
+    [Fact]
+    public async Task Cancelling_one_caller_neither_cancels_nor_duplicates_the_shared_read()
+    {
+        var gate = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var inner = new InMemoryProcessDefinitionStore().Seed(Yaml("pipeline", 1, "done"));
+        inner.ReleaseGate = gate;
+        var cache = new CachingProcessDefinitionStore(inner);
+
+        using var cts = new CancellationTokenSource();
+        var cancelled = Task.Run(async () => await cache.GetAsync("pipeline", 1, cts.Token));
+        await WaitUntilAsync(() => inner.GetCallCount > 0, "the first caller must have started the shared read");
+
+        // Cancel and let that caller fully unwind *before* the next one arrives. The ordering is the whole point:
+        // a survivor that attached beforehand would hold the flight alive by itself and could not tell whether
+        // cancellation tears it down. Arriving afterwards, it can only get one read if the flight outlived the
+        // caller that abandoned it.
+        await cts.CancelAsync();
+        var cancelling = async () => await cancelled;
+        await cancelling.Should().ThrowAsync<OperationCanceledException>("the cancelled caller observes its own token");
+
+        var survivor = Task.Run(async () => await cache.GetAsync("pipeline", 1, CancellationToken.None));
+
+        gate.SetResult();
+        var result = await survivor;
+
+        result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error : "");
+        result.Value.Nodes.Should().ContainKey("done", "the other caller's cancellation must not have cancelled the read this one was waiting on");
+        inner.GetCallCount.Should().Be(1, "the survivor arrived after the cancellation and must still have shared the one in-flight read — a count of 2 means the cancelled caller tore the flight down on its way out and the survivor started a second read");
+    }
+
+    /// <summary>
+    /// <see cref="CachingProcessDefinitionStore.GetActiveVersionAsync"/> is deliberately a pass-through: which
+    /// version is active is the one fact a sync changes, and a stale answer would start new runs on a superseded
+    /// version. Turns red if it ever starts caching.
+    /// </summary>
+    [Fact]
+    public async Task The_active_version_is_never_cached()
+    {
+        var inner = new InMemoryProcessDefinitionStore().Seed(Yaml("pipeline", 1, "done"));
+        var cache = new CachingProcessDefinitionStore(inner);
+
+        (await cache.GetActiveVersionAsync("pipeline", CancellationToken.None)).Should().Be(1);
+
+        inner.Seed(Yaml("pipeline", 2, "done"));
+
+        (await cache.GetActiveVersionAsync("pipeline", CancellationToken.None)).Should().Be(2, "a newly activated version must be visible immediately");
+    }
+}

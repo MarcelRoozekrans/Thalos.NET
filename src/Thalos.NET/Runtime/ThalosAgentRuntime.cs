@@ -6,6 +6,7 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Thalos.Sessions;
+using Thalos.Tools;
 using ZeroAlloc.Authorization;
 using ZeroAlloc.Results;
 
@@ -25,6 +26,7 @@ public sealed partial class ThalosAgentRuntime(
     IAgentNotificationPublisher publisher,
     AgentEventHub hub,
     TimeProvider clock,
+    IOutcomeToolFactory outcomeTools,
     ILogger<ThalosAgentRuntime>? logger = null) : IAgentRuntime
 {
     private const string AdminRole = "admin";
@@ -205,15 +207,7 @@ public sealed partial class ThalosAgentRuntime(
             await publisher.PublishAsync(new TurnStartedNotification(sessionId, turnId, definition.Id, request.Caller.Id, clock.GetUtcNow()), ct).ConfigureAwait(false);
             LogTurnStarted(_logger, turnId, sessionId, definition.Name);
 
-            var agent = await agentFactory.GetOrCreateAsync(definition, ct).ConfigureAwait(false);
-            if (agent.IsFailure)
-            {
-                failure = agent.Error;
-            }
-            else
-            {
-                await RunModelLoopAsync(scope, agent.Value, request.Text, text, usage, ct).ConfigureAwait(false);
-            }
+            failure = await ResolveAndRunAsync(scope, definition, request, text, usage, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -242,6 +236,32 @@ public sealed partial class ThalosAgentRuntime(
         {
             scope.Dispose(); // completes the channel → the iterator's ReadAllAsync ends
         }
+    }
+
+    /// <summary>
+    /// Resolves what this turn needs — the per-turn run options, then the agent — and runs the model loop, returning
+    /// the first <see cref="AgentError"/> that stops it or <see langword="null"/> when the loop ran. Run options are
+    /// built <em>before</em> the agent so a request naming an outcome schema no provider could accept fails without
+    /// first building, and caching, a chat-client pipeline for it. Split out of <see cref="ProduceTurnAsync"/> so
+    /// that method stays about the turn's lifecycle rather than its resolution order.
+    /// </summary>
+    private async ValueTask<AgentError?> ResolveAndRunAsync(
+        TurnScope scope, AgentDefinition definition, AgentTurnRequest request, StringBuilder text, StrongBox<TurnUsage> usage, CancellationToken ct)
+    {
+        var runOptions = BuildRunOptions(request.RequiredOutcome);
+        if (runOptions.IsFailure)
+        {
+            return runOptions.Error;
+        }
+
+        var agent = await agentFactory.GetOrCreateAsync(definition, ct).ConfigureAwait(false);
+        if (agent.IsFailure)
+        {
+            return agent.Error;
+        }
+
+        await RunModelLoopAsync(scope, agent.Value, request.Text, runOptions.Value, text, usage, ct).ConfigureAwait(false);
+        return null;
     }
 
     /// <summary>Second phase of a turn: records the outcome in the store, releases the session and publishes the terminal event(s). May throw (store).</summary>
@@ -275,10 +295,10 @@ public sealed partial class ThalosAgentRuntime(
     /// into <paramref name="usage"/> as it arrives (so a failure mid-turn keeps the completed round-trips' tokens) and adopts
     /// the provider-reported model id when the definition did not pin one.
     /// </summary>
-    private async Task RunModelLoopAsync(TurnScope scope, AIAgent agent, string prompt, StringBuilder text, StrongBox<TurnUsage> usage, CancellationToken ct)
+    private async Task RunModelLoopAsync(TurnScope scope, AIAgent agent, string prompt, ChatClientAgentRunOptions? runOptions, StringBuilder text, StrongBox<TurnUsage> usage, CancellationToken ct)
     {
         var mafSession = await historyProvider.CreateBoundSessionAsync(agent, scope.SessionId, ct).ConfigureAwait(false);
-        await foreach (var update in agent.RunStreamingAsync(prompt, mafSession, cancellationToken: ct).ConfigureAwait(false))
+        await foreach (var update in agent.RunStreamingAsync(prompt, mafSession, runOptions, ct).ConfigureAwait(false))
         {
             if (string.IsNullOrEmpty(usage.Value.ModelId) && update.AsChatResponseUpdate().ModelId is { Length: > 0 } modelId)
             {
@@ -302,6 +322,41 @@ public sealed partial class ThalosAgentRuntime(
     }
 
     // ---------- helpers ----------
+
+    /// <summary>
+    /// Turns an optional <see cref="AgentTurnRequest.RequiredOutcome"/> into the per-run options MAF unions with the
+    /// agent's own <c>ChatOptions</c>, adding the outcome tool to this turn's tool list and nothing else.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Run options, not the agent's cached tool set, because the outcome set belongs to the <em>turn</em>: two
+    /// workflow nodes routinely share one agent definition and declare different outcomes, and the agent cache is
+    /// keyed on the definition alone. Anything baked into the agent would leak one node's outcome set into the
+    /// other's turns — or, worse, into a turn that declared none. <c>null</c> in, <c>null</c> out: a request without
+    /// an outcome schema produces no options object at all, so <c>RunStreamingAsync</c> receives exactly the
+    /// argument it received before this existed.
+    /// </para>
+    /// <para>
+    /// <c>ChatOptions.ToolMode</c> is deliberately left alone. <c>ChatToolMode.RequireSpecific</c> exists and is
+    /// portable, but it says "the model's <em>next</em> message must be this call", not "the turn may not end
+    /// without it" — it would force the report on the first round-trip, before the node has done any of its work.
+    /// Thalos has no seam that expresses the constraint actually wanted, and a setting that merely looks like a
+    /// guarantee is worse than none: the turn is left free, and a turn that ends without reporting is caught on the
+    /// read side, where the absence is unambiguous.
+    /// </para>
+    /// </remarks>
+    private Result<ChatClientAgentRunOptions?, AgentError> BuildRunOptions(OutcomeToolSchema? requiredOutcome)
+    {
+        if (requiredOutcome is null)
+        {
+            return Result<ChatClientAgentRunOptions?, AgentError>.Success(null);
+        }
+
+        var tool = outcomeTools.Create(requiredOutcome);
+        return tool.IsFailure
+            ? Result<ChatClientAgentRunOptions?, AgentError>.Failure(tool.Error)
+            : Result<ChatClientAgentRunOptions?, AgentError>.Success(new ChatClientAgentRunOptions(new ChatOptions { Tools = [tool.Value] }));
+    }
 
     /// <summary>Validates, loads, authorizes and claims the session (Idle → Running). Nothing here may leave the session claimed on failure.</summary>
     private async ValueTask<Result<AgentDefinition, AgentError>> BeginTurnAsync(AgentTurnRequest request, CancellationToken ct)

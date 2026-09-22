@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Thalos.NET.Workflow.Orm\Thalos.NET.Workflow.Orm.csproj" />
+    <!-- Not a code dependency — DurabilityAcrossProcessesTests starts this as a child process via Process.Start
+         and locates its built exe on disk. ReferenceOutputAssembly=false keeps it out of this project's own
+         binary references while still making it a build dependency, so a clean "dotnet test" builds it first
+         instead of the durability test only passing because someone happened to build it by hand earlier. -->
+    <ProjectReference Include="..\Thalos.NET.Tests.Workflow.Orm.Host\Thalos.NET.Tests.Workflow.Orm.Host.csproj" ReferenceOutputAssembly="false" />
+    <PackageReference Include="Testcontainers.PostgreSql" />
+    <PackageReference Include="Npgsql" />
+  </ItemGroup>
+</Project>

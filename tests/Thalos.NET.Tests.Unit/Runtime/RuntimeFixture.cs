@@ -23,6 +23,9 @@ internal sealed class RuntimeFixture
     public AgentDefinition Agent { get; private set; }
     public ThalosAgentRuntime Runtime { get; private set; } = null!;
 
+    /// <summary>The real outcome-tool factory the runtime was built with; set by <see cref="Build"/>.</summary>
+    public IOutcomeToolFactory OutcomeTools { get; private set; } = null!;
+
     /// <summary>Wraps the store the runtime (and history provider) sees; <see cref="Store"/> stays the raw in-memory store for assertions.</summary>
     public Func<IAgentSessionStore, IAgentSessionStore>? StoreDecorator { get; set; }
 
@@ -60,7 +63,9 @@ internal sealed class RuntimeFixture
         var services = new ServiceCollection().BuildServiceProvider();
         var factory = new AgentFactory(provider, [], catalog, history, services, null);
         var agents = new StaticAgentCatalog([Agent]);
-        Runtime = new ThalosAgentRuntime(agents, factory, store, history, publisher, Hub, TimeProvider.System, null);
+        // The real factory, over the same authorizer the catalog uses: an outcome tool is authorized exactly like any other.
+        OutcomeTools = new OutcomeToolFactory(Authorizer, publisher, TimeProvider.System);
+        Runtime = new ThalosAgentRuntime(agents, factory, store, history, publisher, Hub, TimeProvider.System, OutcomeTools, null);
         return this;
     }
 
