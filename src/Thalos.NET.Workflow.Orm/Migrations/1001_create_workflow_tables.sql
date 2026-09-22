@@ -46,4 +46,7 @@ CREATE TABLE workflow_run_event
     created_at timestamptz NOT NULL DEFAULT now()
 );
 
-CREATE INDEX ix_workflow_run_event_run_id ON workflow_run_event (run_id, seq);
+-- Unique, not just indexed: the seeded "Entered" event uses seq = 0 specifically so it never ties with the
+-- first CompleteNodeAsync's seq = 1 event. A tie would leave ORDER BY seq non-deterministic between them —
+-- Task 8's outbox consumer and 2.8's run-inspection surface both read this log in seq order.
+CREATE UNIQUE INDEX ix_workflow_run_event_run_id_seq ON workflow_run_event (run_id, seq);

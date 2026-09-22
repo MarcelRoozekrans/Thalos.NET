@@ -25,8 +25,6 @@ namespace Thalos.Workflow.Orm;
 /// </remarks>
 public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStore
 {
-    private const string DispatchMessageTypeName = "thalos.workflow.node-dispatch";
-
     private const string SelectRunSql = """
         SELECT id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, xmin::text::bigint AS xmin
         FROM workflow_run
@@ -80,7 +78,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
         }
 
         await InsertEventAsync(
-            connection, tx, id, seq: 1,
+            connection, tx, id, seq: 0,
             fromNode: null, toNode: startNode,
             status: WorkflowStatus.Running, awaitingSignal: null,
             outcome: null, variables: null, error: null,
@@ -109,6 +107,16 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
 
         var row = await ReadRunRowAsync(connection, tx, runId, ct).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Workflow run '{runId}' was not found.");
+
+        // A run that was cancelled or failed out-of-band has no CurrentSeq change to reflect that — FailAsync
+        // and CancelAsync only flip status — so a completion racing in after either would otherwise pass the
+        // seq check below, read a still-matching xmin, and resurrect the run to Running. Guarding on status
+        // here is what actually stops that: the exact race cancellation exists to prevent.
+        if (row.Status is not WorkflowStatus.Running)
+        {
+            throw new WorkflowConcurrencyException(
+                $"Workflow run '{runId}' is {row.Status}, not Running — a completion for seq {seq} arrived after the run left the running state.");
+        }
 
         if (row.CurrentSeq != seq)
         {
@@ -159,7 +167,17 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
             return Result.Failure(transitionResult.Error);
         }
 
-        await ApplyTransitionAsync(connection, tx, runId, row.CurrentSeq, row, transitionResult.Value, outcome: null, variables, ct).ConfigureAwait(false);
+        // A concurrency loss here surfaces as Result.Failure, not a thrown WorkflowConcurrencyException, so a
+        // caller matching on this method's Result return does not need a second, exception-based error channel
+        // to also handle — every failure mode ResumeAsync can hit arrives the same way.
+        try
+        {
+            await ApplyTransitionAsync(connection, tx, runId, row.CurrentSeq, row, transitionResult.Value, outcome: null, variables, ct).ConfigureAwait(false);
+        }
+        catch (WorkflowConcurrencyException ex)
+        {
+            return Result.Failure(ex.Message);
+        }
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
         return Result.Success();
@@ -333,7 +351,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
     {
         var outboxStore = CreateOutboxStore(connection);
         var payload = JsonSerializer.SerializeToUtf8Bytes(new WorkflowDispatchMessage(runId, seq, node));
-        await outboxStore.EnqueueAsync(DispatchMessageTypeName, payload, tx, ct).ConfigureAwait(false);
+        await outboxStore.EnqueueAsync(WorkflowDispatch.TypeName, payload, tx, ct).ConfigureAwait(false);
     }
 
     private static async Task UpdateRunAsync(
@@ -475,6 +493,4 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
         Dictionary<string, object?> Variables,
         string? LastError,
         long Xmin);
-
-    private sealed record WorkflowDispatchMessage(Guid RunId, long Seq, string Node);
 }

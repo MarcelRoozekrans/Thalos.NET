@@ -1,8 +1,10 @@
+using System.Data.Async;
 using System.Data.Common;
 using Npgsql;
 using Thalos.Workflow;
 using Thalos.Workflow.Orm;
 using ZeroAlloc.Outbox;
+using ZeroAlloc.Outbox.Orm;
 
 namespace Thalos.Tests.Workflow.Orm;
 
@@ -250,6 +252,24 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task CompleteNodeAsync_does_not_resurrect_a_run_that_was_failed_out_of_band()
+    {
+        var runId = await _store.StartAsync("manufacture", 1, "c-no-resurrect", "implement", CancellationToken.None);
+
+        // FailAsync flips status but never touches current_seq — an in-flight completion for the seq the run
+        // was on when it failed would otherwise still pass CompleteNodeAsync's seq check.
+        await _store.FailAsync(runId, "boom", CancellationToken.None);
+
+        var toReview = new WorkflowTransition("review", WorkflowStatus.Running, null, WorkflowEventKind.Completed);
+        var act = () => _store.CompleteNodeAsync(runId, 1, toReview, new NodeResult("ok", Empty), CancellationToken.None).AsTask();
+
+        await act.Should().ThrowAsync<WorkflowConcurrencyException>();
+        var run = await _store.FindAsync(runId, CancellationToken.None);
+        run!.Status.Should().Be(WorkflowStatus.Failed, "a late completion must not resurrect a run that already left the running state");
+        run.CurrentNode.Should().Be("implement");
+    }
+
+    [Fact]
     public async Task CancelAsync_marks_the_run_cancelled_and_records_the_reason()
     {
         var runId = await _store.StartAsync("manufacture", 1, "c-cancel", "implement", CancellationToken.None);
@@ -282,7 +302,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     private OrmWorkflowStore StoreWithFailingOutbox() => new(new WorkflowOrmOptions
     {
         ConnectionString = pg.ConnectionString,
-        OutboxStoreFactory = _ => new ThrowingOutboxStore(),
+        OutboxStoreFactory = connection => new ThrowingOutboxStore(connection),
     });
 
     private static ProcessDefinition ApprovalProcess() => new()
@@ -327,10 +347,24 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         await cmd.ExecuteNonQueryAsync();
     }
 
-    private sealed class ThrowingOutboxStore : IOutboxStore
+    /// <summary>
+    /// Delegates to a real <see cref="OrmOutboxStore"/> — the row genuinely gets written, on the caller's
+    /// transaction — and only then throws. A store that enqueued outside the transaction, or that never wrote
+    /// the row at all, would leave <c>outboxmessages</c> empty either way, so
+    /// <c>(await CountAsync("SELECT count(*) FROM outboxmessages", null)).Should().Be(0)</c> after the rollback
+    /// is only capable of catching a real atomicity bug because a row was actually inserted first. A store
+    /// that throws before writing anything (the shape this replaced) makes that assertion true by construction,
+    /// whether or not the real enqueue is transactional.
+    /// </summary>
+    private sealed class ThrowingOutboxStore(IAsyncDbConnection connection) : IOutboxStore
     {
-        public ValueTask EnqueueAsync(string typeName, ReadOnlyMemory<byte> payload, DbTransaction? transaction, CancellationToken ct) =>
-            throw new InvalidOperationException("simulated outbox enqueue failure");
+        private readonly OrmOutboxStore _inner = new(connection);
+
+        public async ValueTask EnqueueAsync(string typeName, ReadOnlyMemory<byte> payload, DbTransaction? transaction, CancellationToken ct)
+        {
+            await _inner.EnqueueAsync(typeName, payload, transaction, ct);
+            throw new InvalidOperationException("simulated outbox enqueue failure after the row was written");
+        }
 
         public ValueTask EnqueueDeferredAsync(string typeName, ReadOnlyMemory<byte> payload, CancellationToken ct) =>
             throw new NotSupportedException();

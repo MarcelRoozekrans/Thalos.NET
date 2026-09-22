@@ -6,8 +6,7 @@ namespace Thalos.Workflow;
 /// The pure decision layer of the workflow engine: given a process, the run currently positioned at one of its
 /// nodes, and the result that node just produced, decides the run's next transition. Performs no I/O and
 /// touches no database — every fact it needs is already in its three parameters — which is what makes it
-/// exhaustively testable in memory and is the property <see cref="IWorkflowStore"/> and
-/// <see cref="IWorkflowDispatcher"/> implementations build on.
+/// exhaustively testable in memory and is the property <see cref="IWorkflowStore"/> implementations build on.
 /// </summary>
 /// <remarks>
 /// Evaluates a node in a fixed order — gate, then resolve the outgoing edge via <c>branch</c> or <c>next</c>,

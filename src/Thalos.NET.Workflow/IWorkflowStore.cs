@@ -42,7 +42,9 @@ public interface IWorkflowStore
 
     /// <summary>
     /// Resumes a run parked at a gate awaiting <paramref name="signal"/>, carrying <paramref name="payload"/>
-    /// into the run's variables.
+    /// into the run's variables under the literal key <c>"payload"</c> — a store that merges
+    /// <paramref name="payload"/> in some other shape binds a different, undocumented contract than a caller
+    /// reading <see cref="WorkflowRun.Variables"/>["payload"] expects.
     /// </summary>
     /// <remarks>
     /// This method does not decide where the run goes next — it verifies <paramref name="signal"/> matches
@@ -56,7 +58,10 @@ public interface IWorkflowStore
     /// actually flips the run to <see cref="WorkflowStatus.Running"/> (or further, if a cap redirects it) —
     /// applied by this method exactly as <see cref="CompleteNodeAsync"/> applies one. A store that computes the
     /// gate's successor itself, instead of calling <c>Advance</c>, duplicates the interpreter's edge logic in a
-    /// second place, and the two will drift.
+    /// second place, and the two will drift. Every failure mode — the run not found, the signal not matching,
+    /// the process unregistered, or an optimistic-concurrency loss applying the transition — surfaces as
+    /// <see cref="Result.Failure"/>, not a thrown exception: a caller that only matches on this method's
+    /// <see cref="Result"/> should never need a second, exception-based error channel to also handle.
     /// </remarks>
     ValueTask<Result> ResumeAsync(Guid runId, string signal, string? payload, CancellationToken ct);
 
