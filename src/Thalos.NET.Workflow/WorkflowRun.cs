@@ -46,8 +46,9 @@ public sealed record WorkflowRun
     /// dictionary has never been entered. Incremented when the run moves onto a node — the start node counts as
     /// one as of <see cref="IWorkflowStore.StartAsync"/> — not when it finishes running. This is a count of
     /// visits, not of completions: <see cref="WorkflowInterpreter.Advance"/> reads it to enforce a node's
-    /// <see cref="ProcessNode.MaxVisits"/> cap, comparing <c>Visits[node] + 1</c> — the ordinal the visit
-    /// <em>about to happen</em> would carry — against the cap before the node runs again.
+    /// <see cref="ProcessNode.MaxVisits"/> cap, comparing <c>Visits[target] + 1</c> — where <c>target</c> is the
+    /// node an outgoing edge resolves to, not the node reporting the result — against the cap before that entry
+    /// is taken.
     /// </summary>
     public required IReadOnlyDictionary<string, int> Visits { get; init; }
 

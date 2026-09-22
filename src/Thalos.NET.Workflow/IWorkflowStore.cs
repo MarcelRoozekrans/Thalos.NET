@@ -44,6 +44,20 @@ public interface IWorkflowStore
     /// Resumes a run parked at a gate awaiting <paramref name="signal"/>, carrying <paramref name="payload"/>
     /// into the run's variables.
     /// </summary>
+    /// <remarks>
+    /// This method does not decide where the run goes next — it verifies <paramref name="signal"/> matches
+    /// <see cref="WorkflowRun.AwaitingSignal"/>, then defers entirely to
+    /// <see cref="WorkflowInterpreter.Advance"/> for that decision, the same way <see cref="CompleteNodeAsync"/>
+    /// does for a task node's completion. Critically, it must call <c>Advance</c> with the run's
+    /// <see cref="WorkflowRun.Status"/> still <see cref="WorkflowStatus.Awaiting"/> — that is the only signal
+    /// <c>Advance</c> has to tell a resume from a fresh arrival at the same gate, and calling it with
+    /// <see cref="WorkflowStatus.Running"/> already set would make it park all over again. <c>Advance</c>
+    /// returns a <see cref="WorkflowTransition"/> whose <see cref="WorkflowTransition.NextStatus"/> is what
+    /// actually flips the run to <see cref="WorkflowStatus.Running"/> (or further, if a cap redirects it) —
+    /// applied by this method exactly as <see cref="CompleteNodeAsync"/> applies one. A store that computes the
+    /// gate's successor itself, instead of calling <c>Advance</c>, duplicates the interpreter's edge logic in a
+    /// second place, and the two will drift.
+    /// </remarks>
     ValueTask<Result> ResumeAsync(Guid runId, string signal, string? payload, CancellationToken ct);
 
     /// <summary>Marks a run failed with <paramref name="errorMessage"/>, outside the normal node/outcome flow.</summary>

@@ -10,7 +10,10 @@ namespace Thalos.Tests.Workflow;
 /// <c>review</c>'s <c>rejected</c> outcome looping back to <c>implement</c>, capped at <c>maxVisits: 5</c> with
 /// <c>onExceeded: adjudicate</c>. Because the cap is checked on the edge's resolved target rather than the node
 /// reporting the result, <c>review</c>'s own cap can only ever fire on the edge that re-enters <c>review</c> —
-/// <c>implement</c>'s <c>next</c> — never on the edge that leaves <c>review</c> for <c>gate</c>.
+/// <c>implement</c>'s <c>next</c> — never on the edge that leaves <c>review</c> for <c>gate</c>. <c>gate</c>
+/// itself behaves two ways depending on <see cref="WorkflowRun.Status"/>: arriving (any status but
+/// <see cref="WorkflowStatus.Awaiting"/>) parks the run there, while resuming (status already
+/// <see cref="WorkflowStatus.Awaiting"/>) follows its <c>next</c> edge to <c>publish</c> instead.
 /// </summary>
 public sealed class WorkflowInterpreterTests
 {
@@ -98,6 +101,26 @@ public sealed class WorkflowInterpreterTests
         t.NextStatus.Should().Be(WorkflowStatus.Awaiting);
         t.AwaitingSignal.Should().Be("human_approval");
         t.Kind.Should().Be(WorkflowEventKind.Awaiting);
+    }
+
+    /// <summary>
+    /// The other half of the gate primitive, and the one that did not exist before this test was added: without
+    /// checking <see cref="WorkflowRun.Status"/>, <c>Advance</c> would park a resumed run right back on the
+    /// gate it was just resumed from, making <c>gate</c>'s <c>next</c> edge to <c>publish</c> permanently
+    /// unreachable. A run whose status is already <see cref="WorkflowStatus.Awaiting"/> when <c>Advance</c> is
+    /// called on its gate is being resumed, not arriving, so this resolves <c>next</c> like any other node —
+    /// with <see cref="WorkflowEventKind.Resumed"/> in place of <see cref="WorkflowEventKind.Completed"/>.
+    /// </summary>
+    [Fact]
+    public void Advance_resumes_a_gate_and_follows_its_next_edge()
+    {
+        var run = RunAt("gate") with { Status = WorkflowStatus.Awaiting, AwaitingSignal = "human_approval" };
+
+        var t = WorkflowInterpreter.Advance(Def, run, new NodeResult(null, Empty)).Value;
+
+        t.NextNode.Should().Be("publish");
+        t.NextStatus.Should().Be(WorkflowStatus.Running);
+        t.Kind.Should().Be(WorkflowEventKind.Resumed);
     }
 
     /// <summary>

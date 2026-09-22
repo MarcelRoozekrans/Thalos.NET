@@ -14,9 +14,19 @@ namespace Thalos.Workflow;
 /// then cap-check the resolved target, then terminal:
 /// <list type="number">
 /// <item>
-/// <b>Gate.</b> <see cref="ProcessNode.Await"/> set means the run parks at this node, awaiting an external
-/// signal, regardless of any <c>branch</c>/<c>next</c> also present on it. Checked first because a park is a
-/// decision about the current node itself, not an edge to resolve — there is no target yet to cap-check.
+/// <b>Gate.</b> <see cref="ProcessNode.Await"/> set means this node is a gate, which behaves one of two ways
+/// depending on <see cref="WorkflowRun.Status"/> — the only signal available to tell an arrival from a resume,
+/// since both call this method with the run positioned at the same node. Arriving at a gate — <c>Status</c> is
+/// anything other than <see cref="WorkflowStatus.Awaiting"/> — parks the run there: status becomes
+/// <see cref="WorkflowStatus.Awaiting"/>, the signal is set to <see cref="ProcessNode.Await"/>, and
+/// <see cref="WorkflowTransition.NextNode"/> stays the gate itself, regardless of any <c>branch</c>/<c>next</c>
+/// also present on it. Resuming a gate — <c>Status</c> is already <see cref="WorkflowStatus.Awaiting"/>, which
+/// only happens when <see cref="IWorkflowStore.ResumeAsync"/> calls this method again on the still-parked run —
+/// instead falls through to resolve the gate's <c>branch</c>/<c>next</c> edge exactly like any other node,
+/// producing <see cref="WorkflowEventKind.Resumed"/> in place of <see cref="WorkflowEventKind.Completed"/> or
+/// <see cref="WorkflowEventKind.Branched"/>. Without this distinction a gate could never be left: the same
+/// <c>Await</c> check would park it again on every call, leaving its <c>next</c>/<c>branch</c> edge permanently
+/// unreachable — a one-way door into a state nothing ever routes out of.
 /// </item>
 /// <item>
 /// <b>Resolve the edge.</b> A non-empty <see cref="ProcessNode.Branch"/> requires <see cref="NodeResult.Outcome"/>
@@ -62,8 +72,9 @@ public static class WorkflowInterpreter
     public static Result<WorkflowTransition> Advance(ProcessDefinition process, WorkflowRun run, NodeResult result)
     {
         var node = process.Nodes[run.CurrentNode];
+        var isGateResume = node.Await is not null && run.Status == WorkflowStatus.Awaiting;
 
-        if (node.Await is not null)
+        if (node.Await is not null && !isGateResume)
         {
             return Result<WorkflowTransition>.Success(
                 new WorkflowTransition(run.CurrentNode, WorkflowStatus.Awaiting, node.Await, WorkflowEventKind.Awaiting));
@@ -81,12 +92,12 @@ public static class WorkflowInterpreter
             }
 
             target = branchTarget.Value;
-            kind = WorkflowEventKind.Branched;
+            kind = isGateResume ? WorkflowEventKind.Resumed : WorkflowEventKind.Branched;
         }
         else if (node.Next is not null)
         {
             target = node.Next;
-            kind = WorkflowEventKind.Completed;
+            kind = isGateResume ? WorkflowEventKind.Resumed : WorkflowEventKind.Completed;
         }
         else if (node.Terminal is not null)
         {

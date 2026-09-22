@@ -23,6 +23,7 @@ public sealed class ProcessValidatorTests
     //   - onExceeded without maxVisits: row 15 rejects, row 13 (drop ', maxVisits: 3') accepts
     //   - unrecognized terminal status: row 16 rejects, row 1 (succeeded vs banana) accepts
     //   - terminal casing:              row 17 accepts (Succeeded), pairs with row 16 (Succeeded vs banana)
+    //   - onExceeded names its own node: row 18 rejects, row 13 (a vs b) accepts
     public static TheoryData<string, string, bool> Cases => new()
     {
         { "a: { agent: x, skill: s, next: b }\n  b: { terminal: succeeded }", "", true },
@@ -42,6 +43,7 @@ public sealed class ProcessValidatorTests
         { "a: { agent: x, skill: s, next: b, onExceeded: b }\n  b: { terminal: succeeded }", "declares 'onExceeded' but no 'maxVisits' cap", false },
         { "a: { agent: x, skill: s, next: b }\n  b: { terminal: banana }", "has an unrecognized terminal status 'banana'", false },
         { "a: { agent: x, skill: s, next: b }\n  b: { terminal: Succeeded }", "", true },
+        { "a: { agent: x, skill: s, next: b, maxVisits: 3, onExceeded: a }\n  b: { terminal: succeeded }", "declares 'onExceeded: a'", false },
     };
 
     [Theory, MemberData(nameof(Cases))]

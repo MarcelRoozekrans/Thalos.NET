@@ -19,10 +19,10 @@ public static class ProcessValidator
     /// <summary>
     /// Validates <paramref name="process"/>'s shape — every reference resolves, every node is reachable from
     /// <see cref="ProcessDefinition.StartNode"/>, every node can reach a terminal, every node declaring
-    /// <c>maxVisits</c> also declares <c>onExceeded</c> and vice versa, every declared <c>terminal</c> is
-    /// <c>succeeded</c> or <c>failed</c>, and every node is exactly one of task (<c>agent</c> and <c>skill</c>
-    /// both present), gate or terminal — and, when <paramref name="resolver"/> is not <see langword="null"/>,
-    /// that every declared agent and skill exists in the host.
+    /// <c>maxVisits</c> also declares <c>onExceeded</c> and vice versa without naming itself, every declared
+    /// <c>terminal</c> is <c>succeeded</c> or <c>failed</c>, and every node is exactly one of task (<c>agent</c>
+    /// and <c>skill</c> both present), gate or terminal — and, when <paramref name="resolver"/> is not
+    /// <see langword="null"/>, that every declared agent and skill exists in the host.
     /// </summary>
     public static async ValueTask<Result<ProcessDefinition>> ValidateAsync(
         ProcessDefinition process, IWorkflowReferenceResolver? resolver, CancellationToken ct)
@@ -47,16 +47,10 @@ public static class ProcessValidator
     /// The per-node shape rules that need no graph walk: every <c>next</c>/<c>branch</c> value/<c>onExceeded</c>
     /// target names a node that exists; every <c>branch</c> key is a declared outcome; a node declaring
     /// <c>branch</c> also declares <c>outcomes</c>; <c>agent</c> and <c>skill</c> are both present or both
-    /// absent — a node cannot run an agent's default instructions with the skill unpinned; <c>maxVisits</c> and
-    /// <c>onExceeded</c> are both present or both absent — a cap with nowhere to route to, or a route with no
-    /// cap behind it, would only be discovered after a run had already paid for the agent turns that hit it;
-    /// a declared <c>terminal</c> is <c>succeeded</c> or <c>failed</c>, compared case-insensitively to match
-    /// <see cref="WorkflowInterpreter"/>'s own parsing — <c>cancelled</c> is an operator action through
-    /// <c>CancelAsync</c>, not a destination a process graph gets to declare, and any other value would
-    /// otherwise validate cleanly and only fail once a run reached it; and a node is exactly one of task, gate
-    /// or terminal.
+    /// absent — a node cannot run an agent's default instructions with the skill unpinned;
+    /// <see cref="ValidateCapAndTerminal"/>'s <c>maxVisits</c>/<c>onExceeded</c>/<c>terminal</c> rules; and a
+    /// node is exactly one of task, gate or terminal.
     /// </summary>
-
     private static void ValidateShape(ProcessDefinition process, List<string> errors)
     {
         foreach (var (name, node) in process.Nodes)
@@ -82,22 +76,7 @@ public static class ProcessValidator
                 errors.Add($"node '{name}' declares 'branch' without declaring 'outcomes'");
             }
 
-            if (node.MaxVisits is not null && node.OnExceeded is null)
-            {
-                errors.Add($"node '{name}' declares 'maxVisits' but no 'onExceeded' target");
-            }
-
-            if (node.OnExceeded is not null && node.MaxVisits is null)
-            {
-                errors.Add($"node '{name}' declares 'onExceeded' but no 'maxVisits' cap");
-            }
-
-            if (node.Terminal is not null &&
-                !node.Terminal.Equals("succeeded", StringComparison.OrdinalIgnoreCase) &&
-                !node.Terminal.Equals("failed", StringComparison.OrdinalIgnoreCase))
-            {
-                errors.Add($"node '{name}' has an unrecognized terminal status '{node.Terminal}' (must be 'succeeded' or 'failed'; 'cancelled' is an operator action, not a declared destination)");
-            }
+            ValidateCapAndTerminal(name, node, errors);
 
             if (node.Agent is not null && node.Skill is null)
             {
@@ -117,6 +96,43 @@ public static class ProcessValidator
             {
                 errors.Add($"node '{name}' must be exactly one of task, gate or terminal");
             }
+        }
+    }
+
+    /// <summary>
+    /// The <c>maxVisits</c>/<c>onExceeded</c> pairing and self-reference rules, plus the <c>terminal</c> status
+    /// rule — split out of <see cref="ValidateShape"/> to keep that method under the analyzer's line limit.
+    /// <c>maxVisits</c> and <c>onExceeded</c> are both present or both absent — a cap with nowhere to route to,
+    /// or a route with no cap behind it, would only be discovered after a run had already paid for the agent
+    /// turns that hit it; <c>onExceeded</c> never names its own node — redirecting a cap back to the node it
+    /// just capped would spin forever, exactly the loop <c>maxVisits</c> exists to bound; and a declared
+    /// <c>terminal</c> is <c>succeeded</c> or <c>failed</c>, compared case-insensitively to match
+    /// <see cref="WorkflowInterpreter"/>'s own parsing — <c>cancelled</c> is an operator action through
+    /// <c>CancelAsync</c>, not a destination a process graph gets to declare, and any other value would
+    /// otherwise validate cleanly and only fail once a run reached it.
+    /// </summary>
+    private static void ValidateCapAndTerminal(string name, ProcessNode node, List<string> errors)
+    {
+        if (node.MaxVisits is not null && node.OnExceeded is null)
+        {
+            errors.Add($"node '{name}' declares 'maxVisits' but no 'onExceeded' target");
+        }
+
+        if (node.OnExceeded is not null && node.MaxVisits is null)
+        {
+            errors.Add($"node '{name}' declares 'onExceeded' but no 'maxVisits' cap");
+        }
+
+        if (node.OnExceeded is not null && string.Equals(node.OnExceeded, name, StringComparison.Ordinal))
+        {
+            errors.Add($"node '{name}' declares 'onExceeded: {name}' — a cap cannot redirect to the node it just capped, or it would spin forever");
+        }
+
+        if (node.Terminal is not null &&
+            !node.Terminal.Equals("succeeded", StringComparison.OrdinalIgnoreCase) &&
+            !node.Terminal.Equals("failed", StringComparison.OrdinalIgnoreCase))
+        {
+            errors.Add($"node '{name}' has an unrecognized terminal status '{node.Terminal}' (must be 'succeeded' or 'failed'; 'cancelled' is an operator action, not a declared destination)");
         }
     }
 
