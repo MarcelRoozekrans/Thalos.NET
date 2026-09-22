@@ -1,0 +1,31 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <!-- ZeroAlloc.ORM / ZeroAlloc.Outbox.Orm / AdoNet.Async.Adapters ship net10.0-only builds -->
+    <TargetFrameworks>net10.0</TargetFrameworks>
+    <RootNamespace>Thalos.Workflow.Orm</RootNamespace>
+    <PackageId>Thalos.NET.Workflow.Orm</PackageId>
+    <Description>ZeroAlloc.ORM-backed IWorkflowStore for Thalos.NET.Workflow: raw-SQL persistence over PostgreSQL with a transactional outbox dispatch (ZeroAlloc.Outbox.Orm) so a run's transition and the work behind its next node commit or roll back together. No EF Core in this package's dependency tree.</Description>
+    <PackageTags>agents;workflow;durable;postgres;orm;outbox;microsoft-agent-framework;zeroalloc</PackageTags>
+    <!-- MA0004: raw ADO.NET (NpgsqlConnection/NpgsqlTransaction) throughout this package means "await using"
+         disposal cannot itself carry .ConfigureAwait(false) without giving up member access to the connection
+         for the rest of the method — the same rationale tests/Directory.Build.props documents for its own
+         MA0004 suppression. -->
+    <NoWarn>$(NoWarn);MA0004</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Thalos.NET.Workflow\Thalos.NET.Workflow.csproj" />
+    <PackageReference Include="ZeroAlloc.ORM" />
+    <PackageReference Include="ZeroAlloc.Outbox" />
+    <PackageReference Include="ZeroAlloc.Outbox.Orm" />
+    <PackageReference Include="AdoNet.Async.Adapters" />
+    <PackageReference Include="Npgsql" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Migrations\*.sql" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Workflow.Orm" />
+  </ItemGroup>
+</Project>
