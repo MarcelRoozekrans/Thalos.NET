@@ -19,7 +19,8 @@ public static class ProcessValidator
     /// <summary>
     /// Validates <paramref name="process"/>'s shape — every reference resolves, every node is reachable from
     /// <see cref="ProcessDefinition.StartNode"/>, every node can reach a terminal, and every node is exactly one
-    /// of task, gate or terminal — and, when <paramref name="resolver"/> is not <see langword="null"/>, that
+    /// of task (<c>agent</c> and <c>skill</c> both present), gate or terminal — and, when
+    /// <paramref name="resolver"/> is not <see langword="null"/>, that
     /// every declared agent and skill exists in the host.
     /// </summary>
     public static async ValueTask<Result<ProcessDefinition>> ValidateAsync(
@@ -44,7 +45,9 @@ public static class ProcessValidator
     /// <summary>
     /// The per-node shape rules that need no graph walk: every <c>next</c>/<c>branch</c> value/<c>onExceeded</c>
     /// target names a node that exists; every <c>branch</c> key is a declared outcome; a node declaring
-    /// <c>branch</c> also declares <c>outcomes</c>; and a node is exactly one of task, gate or terminal.
+    /// <c>branch</c> also declares <c>outcomes</c>; <c>agent</c> and <c>skill</c> are both present or both
+    /// absent — a node cannot run an agent's default instructions with the skill unpinned; and a node is
+    /// exactly one of task, gate or terminal.
     /// </summary>
     private static void ValidateShape(ProcessDefinition process, List<string> errors)
     {
@@ -71,7 +74,17 @@ public static class ProcessValidator
                 errors.Add($"node '{name}' declares 'branch' without declaring 'outcomes'");
             }
 
-            var isTask = node.Agent is not null || node.Skill is not null;
+            if (node.Agent is not null && node.Skill is null)
+            {
+                errors.Add($"node '{name}' has 'agent' but no 'skill'");
+            }
+
+            if (node.Skill is not null && node.Agent is null)
+            {
+                errors.Add($"node '{name}' has 'skill' but no 'agent'");
+            }
+
+            var isTask = node.Agent is not null && node.Skill is not null;
             var isGate = node.Await is not null;
             var isTerminal = node.Terminal is not null;
             var kindCount = (isTask ? 1 : 0) + (isGate ? 1 : 0) + (isTerminal ? 1 : 0);

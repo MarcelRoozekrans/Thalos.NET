@@ -17,6 +17,8 @@ public sealed class ProcessValidatorTests
     //   - unknown 'onExceeded' target:  row 8 rejects, row 7 (zz vs b) accepts
     //   - branch without outcomes:      row 9 rejects, row 3 (add 'outcomes: [ok], ') accepts
     //   - not exactly one node kind:    row 10 rejects, row 1 (drop 'terminal: succeeded, ') accepts
+    //   - agent without skill:          row 11 rejects, row 1 (drop 'skill: s, ') accepts
+    //   - skill without agent:          row 12 rejects, row 1 (drop 'agent: x, ') accepts
     public static TheoryData<string, string, bool> Cases => new()
     {
         { "a: { agent: x, skill: s, next: b }\n  b: { terminal: succeeded }", "", true },
@@ -29,6 +31,8 @@ public sealed class ProcessValidatorTests
         { "a: { agent: x, skill: s, outcomes: [ok], branch: { ok: a }, maxVisits: 3, onExceeded: zz }\n  b: { terminal: succeeded }", "unknown node 'zz'", false },
         { "a: { agent: x, skill: s, branch: { ok: b } }\n  b: { terminal: succeeded }", "declares 'branch' without declaring 'outcomes'", false },
         { "a: { agent: x, skill: s, terminal: succeeded, next: b }\n  b: { terminal: succeeded }", "must be exactly one of task, gate or terminal", false },
+        { "a: { agent: x, next: b }\n  b: { terminal: succeeded }", "has 'agent' but no 'skill'", false },
+        { "a: { skill: s, next: b }\n  b: { terminal: succeeded }", "has 'skill' but no 'agent'", false },
     };
 
     [Theory, MemberData(nameof(Cases))]
