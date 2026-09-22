@@ -27,22 +27,54 @@ public sealed class ProcessDefinitionSync(
     /// repository from syncing, and the batch result is a failure overall only because that one document's error
     /// is in it, not because syncing stopped early.
     /// </summary>
+    /// <remarks>
+    /// One exception to "every other document is still processed": two documents in the same batch that load
+    /// successfully and declare the same <see cref="ProcessDefinition.Name"/> — a stale file left behind
+    /// alongside its replacement, say — fail the <em>whole</em> batch before anything is activated, named in
+    /// <see cref="FindDuplicateProcessName"/>. Activating either one would make which version ends up active
+    /// depend on listing order rather than on anything a reviewer chose, which is exactly the kind of
+    /// back-door-runnable state this type exists to prevent — the same property Step 2's rejection test protects
+    /// against a single broken document.
+    /// </remarks>
     public async ValueTask<Result<int>> SyncAsync(CancellationToken ct)
     {
         var documents = await _source.ReadAllAsync(ct).ConfigureAwait(false);
-        var activated = 0;
         var errors = new List<string>();
+        var loaded = new List<(ProcessDocument Document, ProcessDefinition Definition)>();
 
         foreach (var document in documents)
         {
-            var loaded = ProcessLoader.Load(document.Yaml);
-            if (loaded.IsFailure)
+            var result = ProcessLoader.Load(document.Yaml);
+            if (result.IsFailure)
             {
-                errors.Add($"{document.SourcePath}: {loaded.Error}");
+                errors.Add($"{document.SourcePath}: {result.Error}");
                 continue;
             }
 
-            var validated = await ProcessValidator.ValidateAsync(loaded.Value, _resolver, ct).ConfigureAwait(false);
+            loaded.Add((document, result.Value));
+        }
+
+        var duplicate = FindDuplicateProcessName(loaded);
+        if (duplicate is not null)
+        {
+            errors.Add(duplicate);
+            return Result<int>.Failure(string.Join("; ", errors));
+        }
+
+        var activated = await ActivateAllAsync(loaded, errors, ct).ConfigureAwait(false);
+
+        return errors.Count == 0
+            ? Result<int>.Success(activated)
+            : Result<int>.Failure(string.Join("; ", errors));
+    }
+
+    private async ValueTask<int> ActivateAllAsync(
+        List<(ProcessDocument Document, ProcessDefinition Definition)> loaded, List<string> errors, CancellationToken ct)
+    {
+        var activated = 0;
+        foreach (var (document, definition) in loaded)
+        {
+            var validated = await ProcessValidator.ValidateAsync(definition, _resolver, ct).ConfigureAwait(false);
             if (validated.IsFailure)
             {
                 errors.Add($"{document.SourcePath}: {validated.Error}");
@@ -53,8 +85,29 @@ public sealed class ProcessDefinitionSync(
             activated++;
         }
 
-        return errors.Count == 0
-            ? Result<int>.Success(activated)
-            : Result<int>.Failure(string.Join("; ", errors));
+        return activated;
+    }
+
+    /// <summary>
+    /// The batch-level integrity check that runs before any activation: two documents that both loaded
+    /// successfully and name the same <see cref="ProcessDefinition.Name"/> (regardless of version) leave whichever
+    /// one <see cref="ActivateAllAsync"/> happened to process last as the active version — a listing-order
+    /// accident deciding which definition wins, silently, in the exact type whose job is to stop that. Names both
+    /// documents' <see cref="ProcessDocument.SourcePath"/> so the fix is obvious from the error alone.
+    /// </summary>
+    private static string? FindDuplicateProcessName(List<(ProcessDocument Document, ProcessDefinition Definition)> loaded)
+    {
+        var seen = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var (document, definition) in loaded)
+        {
+            if (seen.TryGetValue(definition.Name, out var first))
+            {
+                return $"process '{definition.Name}' is declared by more than one document ('{first}' and '{document.SourcePath}') — refusing to activate anything in this batch rather than let listing order decide which one wins";
+            }
+
+            seen[definition.Name] = document.SourcePath;
+        }
+
+        return null;
     }
 }

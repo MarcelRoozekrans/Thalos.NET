@@ -98,12 +98,15 @@ public static class ProcessValidator
                 errors.Add($"node '{name}' must be exactly one of task, gate or terminal");
             }
 
-            // A gate resolves via 'next' only. isGate alone satisfies the exactly-one-kind check above, so
-            // without this a gate node could also carry 'branch'/'outcomes' and validate cleanly — but the
-            // interpreter's resume path has no declared outcome to branch on (a signal's payload is not one of
-            // the node's Outcomes), leaving the signal-to-branch mapping an unstated convention. Forbidding the
-            // shape is simpler than inventing that convention.
-            if (isGate && (node.Branch.Count > 0 || node.Outcomes.Count > 0))
+            // A gate resolves via 'next' only, checked on Outcomes alone — not Branch too. A gate with 'branch'
+            // and no 'outcomes' is already caught above by "declares 'branch' without declaring 'outcomes'"; a
+            // gate with 'branch' AND 'outcomes' is caught by the Outcomes.Count > 0 check right here. No input
+            // exists where a Branch.Count > 0 disjunct would be the one that flips this verdict, so it is left
+            // out rather than kept as a guard that cannot fail by construction. Without this check at all, a
+            // gate could still declare 'outcomes' and validate cleanly, but the interpreter's resume path has no
+            // declared outcome to branch on (a signal's payload is not one of the node's Outcomes), leaving the
+            // signal-to-branch mapping an unstated convention. Forbidding the shape is simpler than inventing it.
+            if (isGate && node.Outcomes.Count > 0)
             {
                 errors.Add($"node '{name}' is a gate ('await' set) and must resolve via 'next' only — 'branch'/'outcomes' are not allowed on a gate");
             }
