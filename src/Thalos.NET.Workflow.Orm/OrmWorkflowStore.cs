@@ -217,13 +217,10 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
             return;
         }
 
-        await InsertEventAsync(
-            connection, tx, runId, row.CurrentSeq,
-            fromNode: row.CurrentNode, toNode: row.CurrentNode,
-            status: WorkflowStatus.Failed, awaitingSignal: null,
-            outcome: null, variables: null, error: errorMessage,
-            kind: nameof(WorkflowEventKind.Failed), ct).ConfigureAwait(false);
-
+        // The xmin-checked UPDATE runs before the event INSERT, same as ApplyTransitionAsync and for the same
+        // reason: two concurrent FailAsync calls on the same Running run both clear the terminal-state guard
+        // above and would otherwise both attempt to insert at the same row.CurrentSeq. With the UPDATE first,
+        // the loser throws WorkflowConcurrencyException here and never reaches the INSERT at all.
         await using (var update = connection.CreateCommand())
         {
             update.Transaction = tx;
@@ -243,6 +240,13 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
                 throw new WorkflowConcurrencyException($"Workflow run '{runId}' was concurrently modified.");
             }
         }
+
+        await InsertEventAsync(
+            connection, tx, runId, row.CurrentSeq,
+            fromNode: row.CurrentNode, toNode: row.CurrentNode,
+            status: WorkflowStatus.Failed, awaitingSignal: null,
+            outcome: null, variables: null, error: errorMessage,
+            kind: nameof(WorkflowEventKind.Failed), ct).ConfigureAwait(false);
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
     }
@@ -266,16 +270,10 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
             return;
         }
 
-        // WorkflowEventKind has no "Cancelled" member — Advance never produces one, since cancellation is not
-        // one of its four evaluation outcomes (see WorkflowEventKind's remarks). The literal string is written
-        // directly; the "kind" column is plain text with no check constraint against the enum's members.
-        await InsertEventAsync(
-            connection, tx, runId, row.CurrentSeq,
-            fromNode: row.CurrentNode, toNode: row.CurrentNode,
-            status: WorkflowStatus.Cancelled, awaitingSignal: null,
-            outcome: null, variables: null, error: reason,
-            kind: "Cancelled", ct).ConfigureAwait(false);
-
+        // Same UPDATE-before-INSERT ordering as FailAsync, and for the same reason: two concurrent CancelAsync
+        // calls (or a CancelAsync racing a FailAsync) on the same Running run both clear the guard above, and
+        // only the UPDATE-first ordering guarantees the loser hits WorkflowConcurrencyException before ever
+        // attempting to insert at the same row.CurrentSeq.
         await using (var update = connection.CreateCommand())
         {
             update.Transaction = tx;
@@ -295,6 +293,16 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
                 throw new WorkflowConcurrencyException($"Workflow run '{runId}' was concurrently modified.");
             }
         }
+
+        // WorkflowEventKind has no "Cancelled" member — Advance never produces one, since cancellation is not
+        // one of its four evaluation outcomes (see WorkflowEventKind's remarks). The literal string is written
+        // directly; the "kind" column is plain text with no check constraint against the enum's members.
+        await InsertEventAsync(
+            connection, tx, runId, row.CurrentSeq,
+            fromNode: row.CurrentNode, toNode: row.CurrentNode,
+            status: WorkflowStatus.Cancelled, awaitingSignal: null,
+            outcome: null, variables: null, error: reason,
+            kind: "Cancelled", ct).ConfigureAwait(false);
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
     }
@@ -457,12 +465,12 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
         }
         catch (PostgresException ex) when (string.Equals(ex.SqlState, PostgresErrorCodes.UniqueViolation, StringComparison.Ordinal) && string.Equals(ex.ConstraintName, "ix_workflow_run_event_run_id_seq", StringComparison.Ordinal))
         {
-            // Defence in depth: ApplyTransitionAsync now runs the xmin-checked UPDATE before this INSERT
-            // specifically so a losing racer throws WorkflowConcurrencyException there and never reaches
-            // this statement — two racers can no longer both attempt to insert an event at the same
-            // (run_id, seq). Unreachable through that path; kept in case a future caller (StartAsync,
-            // FailAsync, CancelAsync included) ever inserts an event without the UPDATE-first ordering
-            // protecting it.
+            // Defence in depth: every current caller of this method — ApplyTransitionAsync, FailAsync, and
+            // CancelAsync — now runs its xmin-checked UPDATE before this INSERT specifically so a losing
+            // racer throws WorkflowConcurrencyException there and never reaches this statement at all: two
+            // racers can no longer both attempt to insert an event at the same (run_id, seq). Unreachable
+            // through any of today's call sites; kept in case a future caller inserts an event without that
+            // UPDATE-first ordering protecting it.
             throw new WorkflowConcurrencyException($"Workflow run '{runId}' already has an event recorded at seq {seq}.", ex);
         }
     }

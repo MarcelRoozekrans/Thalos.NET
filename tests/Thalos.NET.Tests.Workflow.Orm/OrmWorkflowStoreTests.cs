@@ -71,18 +71,25 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
             try
             {
                 await store.CompleteNodeAsync(runId, 1, transition, new NodeResult("ok", Empty), CancellationToken.None);
-                return true;
+                return (Won: true, Exception: (WorkflowConcurrencyException?)null);
             }
-            catch (WorkflowConcurrencyException)
+            catch (WorkflowConcurrencyException ex)
             {
-                return false;
+                return (Won: false, Exception: ex);
             }
         });
 
         var results = await Task.WhenAll(tasks);
 
-        results.Count(won => won).Should().Be(1, "exactly one of several racing completions against the same seq should win the xmin check");
-        results.Count(won => !won).Should().Be(attempts - 1);
+        results.Count(r => r.Won).Should().Be(1, "exactly one of several racing completions against the same seq should win the xmin check");
+        var losers = results.Where(r => !r.Won).ToArray();
+        losers.Should().HaveCount(attempts - 1);
+        // A loser must be rejected by the xmin guard in UpdateRunAsync directly, not by the 23505-to-
+        // WorkflowConcurrencyException mapping in InsertEventAsync: that mapping only fires downstream of a
+        // guard failure once the guard itself is removed (both throw the same exception type), which would
+        // otherwise make this assertion pass whether or not the guard exists at all.
+        losers.Should().OnlyContain(r => r.Exception!.InnerException == null,
+            "a loser must fail the xmin guard directly, not fall through to the defence-in-depth 23505 mapping");
         (await ScalarAsync<long>("SELECT current_seq FROM workflow_run WHERE id = @id", runId)).Should().Be(2);
     }
 
@@ -263,7 +270,8 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         var toReview = new WorkflowTransition("review", WorkflowStatus.Running, null, WorkflowEventKind.Completed);
         var act = () => _store.CompleteNodeAsync(runId, 1, toReview, new NodeResult("ok", Empty), CancellationToken.None).AsTask();
 
-        await act.Should().ThrowAsync<WorkflowConcurrencyException>();
+        var thrown = await act.Should().ThrowAsync<WorkflowConcurrencyException>();
+        thrown.Which.InnerException.Should().BeNull("the status guard throws directly; only the defence-in-depth 23505 mapping downstream of it carries an inner PostgresException, and removing the guard must not silently fall through to that mapping and still pass");
         var run = await _store.FindAsync(runId, CancellationToken.None);
         run!.Status.Should().Be(WorkflowStatus.Failed, "a late completion must not resurrect a run that already left the running state");
         run.CurrentNode.Should().Be("implement");
@@ -297,6 +305,24 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         run!.Status.Should().Be(WorkflowStatus.Failed, "a run that already reached a terminal state stays there — Cancel does not override Fail");
         run.LastError.Should().Be("boom");
         (await CountAsync("SELECT count(*) FROM workflow_run_event WHERE run_id = @id", runId)).Should().Be(2, "Entered + Failed — CancelAsync on an already-terminal run adds nothing");
+    }
+
+    [Fact]
+    public async Task FailAsync_is_idempotent_on_a_succeeded_run()
+    {
+        var runId = await _store.StartAsync("manufacture", 1, "c-fail-after-succeed", "implement", CancellationToken.None);
+        var toDone = new WorkflowTransition("done", WorkflowStatus.Succeeded, null, WorkflowEventKind.Completed);
+        await _store.CompleteNodeAsync(runId, 1, toDone, new NodeResult("ok", Empty), CancellationToken.None);
+
+        // Succeeded is the one terminal-guard branch with a plausible "this call was a mistake" reading — a
+        // late or misdirected FailAsync must not downgrade a run that already succeeded. Pinned in a test
+        // rather than left to the guard's comment alone.
+        await _store.FailAsync(runId, "boom", CancellationToken.None);
+
+        var run = await _store.FindAsync(runId, CancellationToken.None);
+        run!.Status.Should().Be(WorkflowStatus.Succeeded, "a run that already succeeded must not be overwritten to Failed");
+        run.LastError.Should().BeNull();
+        (await CountAsync("SELECT count(*) FROM workflow_run_event WHERE run_id = @id", runId)).Should().Be(2, "Entered + the Completed-to-Succeeded event — FailAsync on a Succeeded run adds nothing");
     }
 
     [Fact]
