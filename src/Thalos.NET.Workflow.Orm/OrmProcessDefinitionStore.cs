@@ -85,9 +85,23 @@ public sealed class OrmProcessDefinitionStore(WorkflowOrmOptions options) : IPro
     /// activation step already holding a different row, and ordering the activation's own locking only moves the
     /// deadlock instead of removing it — measured, not assumed. One lock per process, taken before any row is
     /// touched, removes the question: two activations of the same process cannot interleave, and two activations
-    /// of different processes never contend, since they touch disjoint rows and hash to different keys.
-    /// Activation is a sync-time administrative operation, not a hot path, so serialising it per process costs
-    /// nothing worth measuring.
+    /// of different processes contend only on a rare key collision, whose sole cost is the serialisation
+    /// described above. Activation is a sync-time administrative operation, not a hot path, so serialising it per
+    /// process costs nothing worth measuring.
+    /// <para>
+    /// <b>Scope: activation only, not every write to the table.</b> <see cref="TryRemoveAsync"/> deliberately
+    /// does not take this lock, even though it deletes rows and the row it deletes may be the active one. So a
+    /// removal running concurrently with an activation is not serialised against it, and the pair could in
+    /// principle leave the process with <em>zero</em> active versions — no deadlock, and no violation of the
+    /// at-most-one invariant the index enforces, but not the at-least-one a reader might assume this lock
+    /// provides. Do not read this as a per-process write lock; it is a per-process activation lock.
+    /// </para>
+    /// <para>
+    /// <c>hashtext</c> is an undocumented PostgreSQL internal. It is safe here because its value is only ever
+    /// compared against itself, within one server, for the lifetime of a transaction — nothing persists it or
+    /// carries it between servers or versions. Treat its output as an opaque, non-portable token, and do not
+    /// build anything on the specific numbers it produces.
+    /// </para>
     /// </remarks>
     private static async Task LockProcessAsync(NpgsqlConnection connection, NpgsqlTransaction tx, string process, CancellationToken ct)
     {

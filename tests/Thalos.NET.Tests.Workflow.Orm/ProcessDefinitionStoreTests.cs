@@ -211,18 +211,32 @@ public sealed class ProcessDefinitionStoreTests(PostgresFixture pg) : IAsyncLife
     }
 
     /// <summary>
-    /// Two syncs of one process activating <em>different</em> versions at the same time. Neither may throw: a
-    /// loser has to surface as <see cref="Result.Failure"/> or as a clean last-writer-wins success, never as a
-    /// raw <c>PostgresException</c> escaping a <c>ValueTask&lt;Result&gt;</c> API — nothing between here and
-    /// <see cref="ProcessDefinitionSync"/> catches one. Exactly one version must end active, which is the
-    /// invariant the partial unique index exists for.
+    /// Two syncs of one process activating <em>different</em> versions at the same time. <b>Both must succeed</b>
+    /// — that is the contract this test pins, and what <see cref="ActivateAsync"/> asserts. Serialised by
+    /// <c>LockProcessAsync</c>, the two activations run one after the other rather than racing, and neither has
+    /// anything to fail on: <see cref="IProcessDefinitionStore.UpsertAndActivateAsync"/> returns
+    /// <see cref="Result.Failure"/> only for the immutability check, which needs the same version with different
+    /// content and so cannot arise here. Last writer wins. Above all, neither may <em>throw</em>: a raw
+    /// <c>PostgresException</c> out of a <c>ValueTask&lt;Result&gt;</c> API would escape
+    /// <see cref="ProcessDefinitionSync"/> entirely, which has no <c>catch</c> for one. Exactly one version must
+    /// end active, the invariant the partial unique index exists for.
     /// </summary>
     /// <remarks>
     /// This is the test the "cannot race" claim was missing: that property was asserted only in prose while the
-    /// activation was one statement, and stayed prose when it became two. It is specifically a regression guard
-    /// on the deactivate's predicate — restoring <c>AND is_active</c> there makes the loser skip the winner's row
-    /// instead of blocking on it, and the collision comes back as <c>23505</c>. Repeated, because whether the two
-    /// transactions actually interleave is a matter of timing; one pass could pass by luck.
+    /// activation was one statement, and stayed prose when it became two.
+    /// <para>
+    /// <b>It guards <c>LockProcessAsync</c>.</b> The change that turns it red is removing the per-process
+    /// advisory lock, and it goes red with <c>40P01: deadlock detected</c> — observed, not predicted. It is
+    /// <em>not</em> a guard on the deactivate's <c>AND is_active</c> predicate: with the lock held, restoring
+    /// that predicate cannot produce a <c>23505</c>, because the lock blocks the second transaction at its very
+    /// first statement, before it takes any snapshot, so once the first commits and releases, the second's
+    /// deactivate runs on a fresh <c>READ COMMITTED</c> snapshot that already contains the committed row and
+    /// keeps it in scan. The test passes with the predicate present or absent. Saying otherwise would credit a
+    /// statement with a safety something else provides, which is the precise mistake that produced the bugs this
+    /// file now guards against.
+    /// </para>
+    /// Repeated, because whether the two transactions actually interleave is a matter of timing; one pass could
+    /// pass by luck.
     /// </remarks>
     [Fact]
     public async Task Concurrent_activations_of_different_versions_do_not_throw_and_leave_exactly_one_active()
@@ -248,7 +262,7 @@ public sealed class ProcessDefinitionStoreTests(PostgresFixture pg) : IAsyncLife
 
             var both = async () => await Task.WhenAll(back, forward);
             await both.Should().NotThrowAsync(
-                "a concurrent activation must resolve as a Result, not as a raw PostgresException — ProcessDefinitionSync has no catch for one, so it would escape the sync entirely");
+                "a concurrent activation must resolve as a Result, not as a raw PostgresException — ProcessDefinitionSync has no catch for one, so it would escape the sync entirely. Removing LockProcessAsync is what breaks this, with 40P01");
 
             var active = await ActiveVersion("manufacture");
             active.Should().BeOneOf([1, 3], "whichever writer committed last decides, but it must be one of the two that ran");
