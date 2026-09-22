@@ -4,7 +4,12 @@ using Microsoft.Extensions.Hosting;
 
 namespace Thalos.Workflow.Orm;
 
-/// <summary>Registers the ZeroAlloc.ORM-backed <see cref="IWorkflowStore"/> on a <see cref="ThalosBuilder"/>.</summary>
+/// <summary>
+/// Registers the ZeroAlloc.ORM-backed <see cref="IWorkflowStore"/> and <see cref="IProcessDefinitionStore"/> on a
+/// <see cref="ThalosBuilder"/>. Both share the same <see cref="WorkflowOrmOptions"/> registration and open a
+/// connection per call — one <see cref="AddWorkflowOrm"/> call is enough to get everything this package offers;
+/// a consumer should never need a second, hand-written registration for <see cref="IProcessDefinitionStore"/>.
+/// </summary>
 /// <remarks>
 /// The design brief for this task named the extension target <c>IThalosBuilder</c>, but Thalos.NET's actual
 /// composition-root type — the one every other integration package (<c>Thalos.NET.Git.LibGit2Sharp</c>,
@@ -14,9 +19,13 @@ namespace Thalos.Workflow.Orm;
 public static class WorkflowOrmThalosBuilderExtensions
 {
     /// <summary>
-    /// Uses <see cref="OrmWorkflowStore"/> as the <see cref="IWorkflowStore"/>, replacing any earlier
-    /// registration. When <see cref="WorkflowOrmOptions.EnsureSchemaOnStartup"/> is set (the default), also
-    /// registers a hosted service that applies the outbox and workflow migrations at startup.
+    /// Uses <see cref="OrmWorkflowStore"/> as the <see cref="IWorkflowStore"/> and
+    /// <see cref="OrmProcessDefinitionStore"/> as the <see cref="IProcessDefinitionStore"/>, replacing any
+    /// earlier registration of either. Does not register <see cref="ProcessDefinitionSync"/> or an
+    /// <c>IProcessDefinitionSource</c> — syncing is an engine-level concern and where definitions come from is
+    /// host policy, so a host composes those itself from the <see cref="IProcessDefinitionStore"/> registered
+    /// here. When <see cref="WorkflowOrmOptions.EnsureSchemaOnStartup"/> is set (the default), also registers a
+    /// hosted service that applies the outbox and workflow migrations at startup.
     /// </summary>
     public static ThalosBuilder AddWorkflowOrm(this ThalosBuilder builder, Action<WorkflowOrmOptions> configure)
     {
@@ -33,6 +42,7 @@ public static class WorkflowOrmThalosBuilderExtensions
         var services = builder.Services;
         services.Replace(ServiceDescriptor.Singleton(options));
         services.Replace(ServiceDescriptor.Singleton<IWorkflowStore>(sp => new OrmWorkflowStore(sp.GetRequiredService<WorkflowOrmOptions>())));
+        services.Replace(ServiceDescriptor.Singleton<IProcessDefinitionStore>(sp => new OrmProcessDefinitionStore(sp.GetRequiredService<WorkflowOrmOptions>())));
 
         for (var i = services.Count - 1; i >= 0; i--)
         {
