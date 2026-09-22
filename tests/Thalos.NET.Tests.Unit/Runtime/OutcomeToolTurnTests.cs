@@ -111,6 +111,37 @@ public sealed class OutcomeToolTurnTests
     }
 
     /// <summary>
+    /// The case the whole design rests on: two turns of the <em>same cached agent</em> declaring <em>different</em>
+    /// outcome sets. The agent cache is keyed on the definition alone, so anything that attached the tool to the
+    /// agent — or that built the run options once and reused them — would serve the second turn the first turn's
+    /// enum, silently offering a node a set of outcomes its process never declared. Red if the options are cached,
+    /// reused, or hung off the agent: the second request would carry "approved"/"rejected" rather than
+    /// "escalate"/"resolve".
+    /// </summary>
+    [Fact]
+    public async Task Two_turns_of_one_agent_each_see_only_their_own_outcome_set()
+    {
+        var triage = new OutcomeToolSchema("workflow__report_outcome", ["escalate", "resolve"]);
+        var f = new RuntimeFixture().Build();
+        f.Client.ThenText("one").ThenText("two");
+        var s = (await f.Runtime.CreateSessionAsync(f.Agent.Id, RuntimeFixture.User(), default)).Value;
+
+        await f.Runtime.RunTurnAsync(new AgentTurnRequest(s, "go", RuntimeFixture.User()) { RequiredOutcome = Approval }, default);
+        await f.Runtime.RunTurnAsync(new AgentTurnRequest(s, "again", RuntimeFixture.User()) { RequiredOutcome = triage }, default);
+
+        EnumOfferedIn(f.Client, 0).Should().Equal("approved", "rejected");
+        EnumOfferedIn(f.Client, 1).Should().Equal("escalate", "resolve");
+    }
+
+    /// <summary>The <c>enum</c> array of the one outcome tool offered on request <paramref name="index"/>; throws if it was not offered at all.</summary>
+    private static IReadOnlyList<string?> EnumOfferedIn(Thalos.Testing.ScriptedChatClient client, int index) =>
+        [.. (client.Requests[index].Options?.Tools ?? [])
+            .OfType<AIFunctionDeclaration>()
+            .Single(t => string.Equals(t.Name, "workflow__report_outcome", StringComparison.Ordinal))
+            .JsonSchema.GetProperty("properties").GetProperty(OutcomeToolSchema.ArgumentName)
+            .GetProperty("enum").EnumerateArray().Select(e => e.GetString())];
+
+    /// <summary>
     /// Documents the decision on requirement 3: the turn is left free rather than forced with
     /// <c>ChatToolMode.RequireSpecific</c>, which would demand the report on the model's <em>next</em> message —
     /// before the node has done its work — rather than before the turn ends. Red if a tool mode is set.
@@ -125,7 +156,8 @@ public sealed class OutcomeToolTurnTests
         await f.Runtime.RunTurnAsync(
             new AgentTurnRequest(s, "go", RuntimeFixture.User()) { RequiredOutcome = Approval }, default);
 
-        f.Client.Requests[0].Options?.ToolMode.Should().BeNull();
+        // Parenthesised: unwrapped, a null Options would short-circuit the whole expression and assert nothing at all.
+        (f.Client.Requests[0].Options?.ToolMode).Should().BeNull();
     }
 
     /// <summary>
