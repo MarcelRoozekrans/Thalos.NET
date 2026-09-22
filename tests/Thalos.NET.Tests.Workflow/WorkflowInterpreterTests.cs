@@ -44,6 +44,19 @@ public sealed class WorkflowInterpreterTests
         LastError = null,
     };
 
+    /// <summary>
+    /// <see cref="WorkflowInterpreter.Advance"/> is entitled to rely on <see cref="ProcessValidator"/>'s
+    /// guarantees and does not re-check them, so <see cref="Def"/> has to actually satisfy them — otherwise the
+    /// fixture could drift into violating one and no test above would notice.
+    /// </summary>
+    [Fact]
+    public async Task Def_satisfies_ProcessValidator_so_Advance_may_rely_on_its_guarantees()
+    {
+        var result = await ProcessValidator.ValidateAsync(Def, resolver: null, CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error : "");
+    }
+
     [Fact]
     public void Advance_follows_next_for_a_sequence_node()
     {
@@ -78,6 +91,7 @@ public sealed class WorkflowInterpreterTests
     {
         var t = WorkflowInterpreter.Advance(Def, RunAt("gate"), new NodeResult(null, Empty)).Value;
 
+        t.NextNode.Should().Be("gate");
         t.NextStatus.Should().Be(WorkflowStatus.Awaiting);
         t.AwaitingSignal.Should().Be("human_approval");
         t.Kind.Should().Be(WorkflowEventKind.Awaiting);
@@ -129,5 +143,35 @@ public sealed class WorkflowInterpreterTests
 
         t.IsFailure.Should().BeTrue();
         t.Error.Should().Contain("approved, with concerns").And.Contain("review");
+    }
+
+    /// <summary>
+    /// No node in <see cref="Def"/> combines <c>maxVisits</c> with a plain <c>next</c> edge — <c>review</c>,
+    /// the only capped node, routes through <c>branch</c> instead — so nothing above would notice the cap
+    /// check being moved below <c>next</c> in the evaluation order. A dedicated fixture pins it: a capped node
+    /// whose only outgoing edge is <c>next</c>, revisited past its cap, must still be redirected to
+    /// <c>onExceeded</c> rather than looping forever on <c>next</c>.
+    /// </summary>
+    [Fact]
+    public void Advance_checks_the_cap_before_taking_next_on_a_plain_sequence_node()
+    {
+        var def = ProcessLoader.Load("""
+            process: cap-before-next
+            version: 1
+            nodes:
+              loop: { agent: x, skill: y, next: loop, maxVisits: 3, onExceeded: done }
+              done: { terminal: succeeded }
+            """).Value;
+        var run = RunAt("loop") with
+        {
+            Process = "cap-before-next",
+            ProcessVersion = 1,
+            Visits = new Dictionary<string, int>(StringComparer.Ordinal) { ["loop"] = 3 },
+        };
+
+        var t = WorkflowInterpreter.Advance(def, run, new NodeResult(null, Empty)).Value;
+
+        t.NextNode.Should().Be("done");
+        t.Kind.Should().Be(WorkflowEventKind.CapExceeded);
     }
 }

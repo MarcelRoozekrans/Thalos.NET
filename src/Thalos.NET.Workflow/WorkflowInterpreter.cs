@@ -17,12 +17,13 @@ namespace Thalos.Workflow;
 /// <list type="number">
 /// <item>
 /// <b>Cap.</b> Skipped unless <see cref="ProcessNode.MaxVisits"/> is set. Compares
-/// <c>Visits[node] + 1 &gt; MaxVisits</c> — the ordinal of the completion just reported, not the count that will
-/// exist after it — before any outgoing edge is considered, so a <c>maxVisits: 5</c> node's sixth completion,
-/// and only its sixth, is redirected to <see cref="ProcessNode.OnExceeded"/> instead of its usual edge. A cap
-/// with no <c>OnExceeded</c> target now fails <see cref="ProcessValidator"/> at load time, so the null check
-/// below is defence in depth: unreachable for any process that validated, kept in case a caller constructs a
-/// <see cref="ProcessDefinition"/> by hand without going through the validator.
+/// <c>Visits[node] + 1 &gt; MaxVisits</c> — <see cref="WorkflowRun.Visits"/> counts entries, not completions, so
+/// <c>Visits[node] + 1</c> is the ordinal the node's <em>next</em> entry would carry if the usual edge were
+/// taken — before any outgoing edge is considered, so a <c>maxVisits: 5</c> node's fifth completion, and only
+/// its fifth, is redirected to <see cref="ProcessNode.OnExceeded"/> instead of its usual edge, and the node
+/// never runs a sixth time. A cap with no <c>OnExceeded</c> target now fails <see cref="ProcessValidator"/> at
+/// load time, so the null check below is defence in depth: unreachable for any process that validated, kept in
+/// case a caller constructs a <see cref="ProcessDefinition"/> by hand without going through the validator.
 /// </item>
 /// <item>
 /// <b>Gate.</b> <see cref="ProcessNode.Await"/> set means the run parks at this node, awaiting an external
@@ -36,7 +37,12 @@ namespace Thalos.Workflow;
 /// unconstrained model reply can never silently pick a branch.
 /// </item>
 /// <item><b>Next.</b> An unconditional successor, for a node with no branch.</item>
-/// <item><b>Terminal.</b> The node ends the run at its declared status.</item>
+/// <item>
+/// <b>Terminal.</b> The node ends the run at its declared status. <see cref="ProcessValidator"/> restricts
+/// <c>terminal</c> to <c>succeeded</c> or <c>failed</c> at load time, so the <c>Enum.TryParse</c> guard below is
+/// defence in depth in the same sense as the cap's <c>OnExceeded</c> check: unreachable for any process that
+/// validated, kept for a hand-built <see cref="ProcessDefinition"/>.
+/// </item>
 /// </list>
 /// </remarks>
 public static class WorkflowInterpreter
@@ -115,6 +121,9 @@ public static class WorkflowInterpreter
 
     private static Result<WorkflowTransition> AdvanceTerminal(string terminal, string nodeName)
     {
+        // Defence in depth: ProcessValidator now restricts terminal to succeeded/failed at load time,
+        // so this branch is unreachable through the validated path. Kept for a hand-built
+        // ProcessDefinition that bypassed the validator.
         if (!Enum.TryParse<WorkflowStatus>(terminal, ignoreCase: true, out var terminalStatus))
         {
             return Result<WorkflowTransition>.Failure(

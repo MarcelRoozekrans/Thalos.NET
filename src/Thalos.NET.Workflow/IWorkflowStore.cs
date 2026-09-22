@@ -23,8 +23,13 @@ public interface IWorkflowStore
 
     /// <summary>
     /// Records that the node at <paramref name="seq"/> produced <paramref name="result"/> and applies
-    /// <paramref name="transition"/> — the run's new node, status and visit count — atomically with appending to
-    /// the run's event log.
+    /// <paramref name="transition"/> atomically with appending to the run's event log: the run moves to
+    /// <see cref="WorkflowTransition.NextNode"/> at <see cref="WorkflowTransition.NextStatus"/>, and
+    /// <see cref="WorkflowRun.Visits"/>'s count for <see cref="WorkflowTransition.NextNode"/> is incremented by
+    /// one — <c>Visits</c> counts entries, so the increment lands on the node the run is entering, not the one
+    /// it just finished. <see cref="WorkflowInterpreter.Advance"/> computed <paramref name="transition"/>
+    /// assuming this is the increment that happens; a store that increments a different node's count, or
+    /// increments the same node twice, breaks the cap check on <paramref name="transition"/>'s next call.
     /// </summary>
     ValueTask CompleteNodeAsync(Guid runId, long seq, WorkflowTransition transition, NodeResult result, CancellationToken ct);
 

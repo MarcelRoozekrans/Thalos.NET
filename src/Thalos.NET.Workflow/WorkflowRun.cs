@@ -42,9 +42,12 @@ public sealed record WorkflowRun
     public string? AwaitingSignal { get; init; }
 
     /// <summary>
-    /// How many times each node has completed so far, keyed by node name; a node absent from this dictionary has
-    /// completed zero times. <see cref="WorkflowInterpreter.Advance"/> reads this to enforce a node's
-    /// <see cref="ProcessNode.MaxVisits"/> cap.
+    /// How many times the run has entered each node so far, keyed by node name; a node absent from this
+    /// dictionary has never been entered. Incremented when the run moves onto a node — the start node counts as
+    /// one as of <see cref="IWorkflowStore.StartAsync"/> — not when it finishes running. This is a count of
+    /// visits, not of completions: <see cref="WorkflowInterpreter.Advance"/> reads it to enforce a node's
+    /// <see cref="ProcessNode.MaxVisits"/> cap, comparing <c>Visits[node] + 1</c> — the ordinal the visit
+    /// <em>about to happen</em> would carry — against the cap before the node runs again.
     /// </summary>
     public required IReadOnlyDictionary<string, int> Visits { get; init; }
 
