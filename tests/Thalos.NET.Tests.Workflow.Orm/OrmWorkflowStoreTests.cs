@@ -424,8 +424,10 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     {
         // Oldest-updated-first is what makes a backlog past the cap drain over successive sweeps true, rather
         // than the same handful of runs winning the cap on every call while the rest starve forever. Nothing
-        // else in this suite pins the order, so a change to DESC (or no ORDER BY at all) would pass every other
-        // test here and still be wrong.
+        // else in this suite pins the order, so flipping ORDER BY to DESC would pass every other test here and
+        // still be wrong — that is the regression this test is falsifiable against. Dropping ORDER BY entirely
+        // is not: these three rows are inserted, and later updated, oldest-to-newest, so an unordered scan of
+        // this table happens to come back in the same sequence and would still pass.
         var oldestId = await _store.StartAsync("manufacture", 1, "c-order-oldest", "implement", CancellationToken.None);
         var middleId = await _store.StartAsync("manufacture", 1, "c-order-middle", "implement", CancellationToken.None);
         var newestId = await _store.StartAsync("manufacture", 1, "c-order-newest", "implement", CancellationToken.None);

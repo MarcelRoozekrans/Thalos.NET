@@ -19,10 +19,11 @@ namespace Thalos.Workflow;
 /// because that is the only signal <c>Advance</c> has to distinguish a genuine resume from a fresh arrival at
 /// the same gate — a store (or a caller) that reaches <c>Advance</c> any other way with a stale
 /// <see cref="WorkflowStatus.Awaiting"/> run resumes the gate rather than re-parking it. Since this sweep never
-/// calls <c>Advance</c> at all, that hazard cannot arise here: every run it acts on is unconditionally failed
-/// via <see cref="IWorkflowStore.FailAsync"/>, which records the termination and stops, without evaluating a
-/// single edge of the process graph. A caller that wants the work redone starts a fresh run; nothing about
-/// "stranded" implies "recoverable in place."
+/// calls <c>Advance</c> at all, that hazard cannot arise here: every run it acts on is offered to
+/// <see cref="IWorkflowStore.FailStrandedAsync"/>, which records the termination and stops — conditionally, on
+/// the run still being at the seq this sweep saw it at, never evaluating a single edge of the process graph
+/// either way. A caller that wants the work redone starts a fresh run; nothing about "stranded" implies
+/// "recoverable in place."
 /// </para>
 /// <para>
 /// <b>Awaiting runs are never candidates.</b> <see cref="IWorkflowStore.FindStrandedAsync"/> itself already
@@ -80,14 +81,16 @@ public sealed class WorkflowRunReconciler(IWorkflowStore store)
         {
             try
             {
-                await _store.FailStrandedAsync(
+                if (await _store.FailStrandedAsync(
                     run.Id,
                     run.CurrentSeq,
                     $"stranded: run '{run.Id}' made no progress for at least {olderThan} while Running — its " +
                     "dispatch message most likely dead-lettered after exhausting the outbox's retry budget, " +
                     "leaving nothing left to advance it.",
-                    ct).ConfigureAwait(false);
-                terminated++;
+                    ct).ConfigureAwait(false))
+                {
+                    terminated++;
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
