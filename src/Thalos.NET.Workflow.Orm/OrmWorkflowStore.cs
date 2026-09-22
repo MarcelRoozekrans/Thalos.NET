@@ -465,12 +465,16 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
         }
         catch (PostgresException ex) when (string.Equals(ex.SqlState, PostgresErrorCodes.UniqueViolation, StringComparison.Ordinal) && string.Equals(ex.ConstraintName, "ix_workflow_run_event_run_id_seq", StringComparison.Ordinal))
         {
-            // Defence in depth: every current caller of this method — ApplyTransitionAsync, FailAsync, and
-            // CancelAsync — now runs its xmin-checked UPDATE before this INSERT specifically so a losing
-            // racer throws WorkflowConcurrencyException there and never reaches this statement at all: two
-            // racers can no longer both attempt to insert an event at the same (run_id, seq). Unreachable
-            // through any of today's call sites; kept in case a future caller inserts an event without that
-            // UPDATE-first ordering protecting it.
+            // Defence in depth: every current caller of this method is safe from the race this mapping
+            // guards against, for two different reasons. ApplyTransitionAsync, FailAsync, and CancelAsync
+            // each run their xmin-checked UPDATE before this INSERT specifically so a losing racer throws
+            // WorkflowConcurrencyException there and never reaches this statement at all: two racers can no
+            // longer both attempt to insert an event at the same (run_id, seq). StartAsync is safe for an
+            // unrelated reason — it inserts against a freshly generated Guid, so a (run_id, seq) collision is
+            // structurally impossible there, and a concurrent duplicate start is absorbed by
+            // "ON CONFLICT (correlation_key) DO NOTHING" before this insert is ever reached. Unreachable
+            // through any of today's call sites; kept in case a future caller inserts an event without either
+            // safeguard protecting it.
             throw new WorkflowConcurrencyException($"Workflow run '{runId}' already has an event recorded at seq {seq}.", ex);
         }
     }
