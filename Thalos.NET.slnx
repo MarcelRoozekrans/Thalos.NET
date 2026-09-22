@@ -15,6 +15,8 @@
     <Project Path="src/Thalos.NET.Sentinel/Thalos.NET.Sentinel.csproj" />
     <Project Path="src/Thalos.NET.Skills/Thalos.NET.Skills.csproj" />
     <Project Path="src/Thalos.NET.Testing/Thalos.NET.Testing.csproj" />
+    <Project Path="src/Thalos.NET.Workflow/Thalos.NET.Workflow.csproj" />
+    <Project Path="src/Thalos.NET.Workflow.Orm/Thalos.NET.Workflow.Orm.csproj" />
     <Project Path="src/Thalos.NET/Thalos.NET.csproj" />
   </Folder>
   <Folder Name="/tests/">
@@ -31,5 +33,8 @@
     <Project Path="tests/Thalos.NET.Tests.Skills/Thalos.NET.Tests.Skills.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Subagents/Thalos.NET.Tests.Subagents.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Unit/Thalos.NET.Tests.Unit.csproj" />
+    <Project Path="tests/Thalos.NET.Tests.Workflow/Thalos.NET.Tests.Workflow.csproj" />
+    <Project Path="tests/Thalos.NET.Tests.Workflow.Orm/Thalos.NET.Tests.Workflow.Orm.csproj" />
+    <Project Path="tests/Thalos.NET.Tests.Workflow.Orm.Host/Thalos.NET.Tests.Workflow.Orm.Host.csproj" />
   </Folder>
 </Solution>
