@@ -26,6 +26,8 @@ public sealed class ProcessValidatorTests
     //   - terminal casing:              row 17 accepts (Succeeded), pairs with row 16 (Succeeded vs banana)
     //   - onExceeded names its own node: row 18 rejects, row 13 (a vs b) accepts
     //   - gate resolves via 'next' only: row 20 rejects, row 19 (drop 'outcomes: [ok]') accepts
+    //   - gate with 'branch' and no 'outcomes': row 21 rejects (caught by the unconditional branch-without-
+    //     outcomes rule, not the gate-only-next rule), row 19 (drop 'branch: { ok: c }') accepts
     public static TheoryData<string, string, bool> Cases => new()
     {
         { "a: { agent: x, skill: s, next: b }\n  b: { terminal: succeeded }", "", true },
@@ -48,6 +50,7 @@ public sealed class ProcessValidatorTests
         { "a: { agent: x, skill: s, next: b, maxVisits: 3, onExceeded: a }\n  b: { terminal: succeeded }", "declares 'onExceeded: a'", false },
         { "a: { agent: x, skill: s, next: b }\n  b: { await: sig, next: c }\n  c: { terminal: succeeded }", "", true },
         { "a: { agent: x, skill: s, next: b }\n  b: { await: sig, next: c, outcomes: [ok] }\n  c: { terminal: succeeded }", "is a gate ('await' set) and must resolve via 'next' only", false },
+        { "a: { agent: x, skill: s, next: b }\n  b: { await: sig, next: c, branch: { ok: c } }\n  c: { terminal: succeeded }", "declares 'branch' without declaring 'outcomes'", false },
     };
 
     [Theory, MemberData(nameof(Cases))]
