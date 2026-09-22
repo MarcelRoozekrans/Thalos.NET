@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.6.0...v0.7.0) (2026-09-22)
+
+
+### Features
+
+* **workflow:** durable process-graph engine for Thalos.NET ([#147](https://github.com/MarcelRoozekrans/Thalos.NET/issues/147)) ([960add9](https://github.com/MarcelRoozekrans/Thalos.NET/commit/960add9254ffb0920b676cceef79ed544daf1035))
+
 ## [0.6.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.5.1...v0.6.0) (2026-09-21)
 
 
