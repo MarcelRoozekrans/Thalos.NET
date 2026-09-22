@@ -20,8 +20,9 @@ public static class ProcessValidator
     /// Validates <paramref name="process"/>'s shape — every reference resolves, every node is reachable from
     /// <see cref="ProcessDefinition.StartNode"/>, every node can reach a terminal, every node declaring
     /// <c>maxVisits</c> also declares <c>onExceeded</c> and vice versa without naming itself, every declared
-    /// <c>terminal</c> is <c>succeeded</c> or <c>failed</c>, and every node is exactly one of task (<c>agent</c>
-    /// and <c>skill</c> both present), gate or terminal — and, when <paramref name="resolver"/> is not
+    /// <c>terminal</c> is <c>succeeded</c> or <c>failed</c>, every node is exactly one of task (<c>agent</c>
+    /// and <c>skill</c> both present), gate or terminal, and a gate (<c>await</c> set) resolves via <c>next</c>
+    /// only — never <c>branch</c>/<c>outcomes</c> — and, when <paramref name="resolver"/> is not
     /// <see langword="null"/>, that every declared agent and skill exists in the host.
     /// </summary>
     public static async ValueTask<Result<ProcessDefinition>> ValidateAsync(
@@ -95,6 +96,16 @@ public static class ProcessValidator
             if (kindCount != 1)
             {
                 errors.Add($"node '{name}' must be exactly one of task, gate or terminal");
+            }
+
+            // A gate resolves via 'next' only. isGate alone satisfies the exactly-one-kind check above, so
+            // without this a gate node could also carry 'branch'/'outcomes' and validate cleanly — but the
+            // interpreter's resume path has no declared outcome to branch on (a signal's payload is not one of
+            // the node's Outcomes), leaving the signal-to-branch mapping an unstated convention. Forbidding the
+            // shape is simpler than inventing that convention.
+            if (isGate && (node.Branch.Count > 0 || node.Outcomes.Count > 0))
+            {
+                errors.Add($"node '{name}' is a gate ('await' set) and must resolve via 'next' only — 'branch'/'outcomes' are not allowed on a gate");
             }
         }
     }

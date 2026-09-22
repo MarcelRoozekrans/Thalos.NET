@@ -51,7 +51,7 @@ public sealed class PostgresFixture : IAsyncLifetime
     {
         await using var connection = new NpgsqlConnection(ConnectionString);
         await connection.OpenAsync(ct);
-        await using var cmd = new NpgsqlCommand("TRUNCATE workflow_run_event, workflow_run, outboxmessages RESTART IDENTITY CASCADE", connection);
+        await using var cmd = new NpgsqlCommand("TRUNCATE workflow_run_event, workflow_run, process_definition, outboxmessages RESTART IDENTITY CASCADE", connection);
         await cmd.ExecuteNonQueryAsync(ct);
     }
 }

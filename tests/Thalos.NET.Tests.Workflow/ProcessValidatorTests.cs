@@ -25,6 +25,7 @@ public sealed class ProcessValidatorTests
     //   - unrecognized terminal status: row 16 rejects, row 1 (succeeded vs banana) accepts
     //   - terminal casing:              row 17 accepts (Succeeded), pairs with row 16 (Succeeded vs banana)
     //   - onExceeded names its own node: row 18 rejects, row 13 (a vs b) accepts
+    //   - gate resolves via 'next' only: row 20 rejects, row 19 (drop 'outcomes: [ok]') accepts
     public static TheoryData<string, string, bool> Cases => new()
     {
         { "a: { agent: x, skill: s, next: b }\n  b: { terminal: succeeded }", "", true },
@@ -45,6 +46,8 @@ public sealed class ProcessValidatorTests
         { "a: { agent: x, skill: s, next: b }\n  b: { terminal: banana }", "has an unrecognized terminal status 'banana'", false },
         { "a: { agent: x, skill: s, next: b }\n  b: { terminal: Succeeded }", "", true },
         { "a: { agent: x, skill: s, next: b, maxVisits: 3, onExceeded: a }\n  b: { terminal: succeeded }", "declares 'onExceeded: a'", false },
+        { "a: { agent: x, skill: s, next: b }\n  b: { await: sig, next: c }\n  c: { terminal: succeeded }", "", true },
+        { "a: { agent: x, skill: s, next: b }\n  b: { await: sig, next: c, outcomes: [ok] }\n  c: { terminal: succeeded }", "is a gate ('await' set) and must resolve via 'next' only", false },
     };
 
     [Theory, MemberData(nameof(Cases))]
