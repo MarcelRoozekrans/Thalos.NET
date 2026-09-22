@@ -16,6 +16,7 @@ CREATE TABLE workflow_run
     status text NOT NULL,
     awaiting_signal text NULL,
     visits jsonb NOT NULL,
+    variables jsonb NOT NULL DEFAULT '{}'::jsonb,
     last_error text NULL,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()

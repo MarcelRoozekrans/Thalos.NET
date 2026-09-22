@@ -52,6 +52,15 @@ public sealed record WorkflowRun
     /// </summary>
     public required IReadOnlyDictionary<string, int> Visits { get; init; }
 
+    /// <summary>
+    /// Variables nodes have produced so far, merged across the run's lifetime — later writes win on key
+    /// collision, and a node that returns no variables leaves this bag untouched rather than clearing it. This
+    /// is how one node's output becomes a later node's input: <see cref="NodeResult.Variables"/> merges into
+    /// this bag on every <see cref="IWorkflowStore.CompleteNodeAsync"/> and <see cref="IWorkflowStore.ResumeAsync"/>
+    /// call, in the same transaction as the rest of that call's writes.
+    /// </summary>
+    public IReadOnlyDictionary<string, object?> Variables { get; init; } = new Dictionary<string, object?>(StringComparer.Ordinal);
+
     /// <summary>The most recent error recorded against this run, or <see langword="null"/> if it has not failed.</summary>
     public string? LastError { get; init; }
 }

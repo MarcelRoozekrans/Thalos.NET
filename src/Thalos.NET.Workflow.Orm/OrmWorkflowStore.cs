@@ -28,7 +28,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
     private const string DispatchMessageTypeName = "thalos.workflow.node-dispatch";
 
     private const string SelectRunSql = """
-        SELECT id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, last_error, xmin::text::bigint AS xmin
+        SELECT id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, xmin::text::bigint AS xmin
         FROM workflow_run
         """;
 
@@ -52,8 +52,8 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
         {
             insert.Transaction = tx;
             insert.CommandText = """
-                INSERT INTO workflow_run (id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, last_error)
-                VALUES (@id, @process, @version, @correlationKey, @currentNode, 1, @status, NULL, @visits::jsonb, NULL)
+                INSERT INTO workflow_run (id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error)
+                VALUES (@id, @process, @version, @correlationKey, @currentNode, 1, @status, NULL, @visits::jsonb, '{}'::jsonb, NULL)
                 ON CONFLICT (correlation_key) DO NOTHING
                 """;
             insert.Parameters.AddWithValue("id", id);
@@ -287,6 +287,12 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
     /// The event-append + run-update + conditional-dispatch-enqueue sequence shared by <see cref="CompleteNodeAsync"/>
     /// and <see cref="ResumeAsync"/> once each has its own <see cref="WorkflowTransition"/> in hand.
     /// </summary>
+    /// <remarks>
+    /// <paramref name="variables"/> is merged into <paramref name="row"/>'s existing bag — later writes win on
+    /// key collision — and the merged bag, not a replacement, is what gets persisted: a node that returns no
+    /// variables must not wipe what an earlier node wrote. The event log still records <paramref name="variables"/>
+    /// unmerged, so <c>workflow_run_event</c> shows exactly what this one transition contributed.
+    /// </remarks>
     private async Task ApplyTransitionAsync(
         NpgsqlConnection connection, NpgsqlTransaction tx, Guid runId, long seq, RunRow row,
         WorkflowTransition transition, string? outcome, IReadOnlyDictionary<string, object?>? variables, CancellationToken ct)
@@ -295,6 +301,15 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
         if (!string.Equals(transition.NextNode, row.CurrentNode, StringComparison.Ordinal))
         {
             visits[transition.NextNode] = visits.GetValueOrDefault(transition.NextNode) + 1;
+        }
+
+        var mergedVariables = new Dictionary<string, object?>(row.Variables, StringComparer.Ordinal);
+        if (variables is not null)
+        {
+            foreach (var (key, value) in variables)
+            {
+                mergedVariables[key] = value;
+            }
         }
 
         var newSeq = seq + 1;
@@ -306,7 +321,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
             outcome: outcome, variables: variables, error: null,
             kind: transition.Kind.ToString(), ct).ConfigureAwait(false);
 
-        await UpdateRunAsync(connection, tx, runId, row.Xmin, newSeq, transition.NextNode, transition.NextStatus, transition.AwaitingSignal, visits, ct).ConfigureAwait(false);
+        await UpdateRunAsync(connection, tx, runId, row.Xmin, newSeq, transition.NextNode, transition.NextStatus, transition.AwaitingSignal, visits, mergedVariables, ct).ConfigureAwait(false);
 
         if (transition.NextStatus == WorkflowStatus.Running)
         {
@@ -324,14 +339,14 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
     private static async Task UpdateRunAsync(
         NpgsqlConnection connection, NpgsqlTransaction tx, Guid runId, long expectedXmin,
         long newSeq, string currentNode, WorkflowStatus status, string? awaitingSignal,
-        IReadOnlyDictionary<string, int> visits, CancellationToken ct)
+        IReadOnlyDictionary<string, int> visits, IReadOnlyDictionary<string, object?> variables, CancellationToken ct)
     {
         await using var update = connection.CreateCommand();
         update.Transaction = tx;
         update.CommandText = """
             UPDATE workflow_run
             SET current_node = @currentNode, current_seq = @newSeq, status = @status,
-                awaiting_signal = @awaitingSignal, visits = @visits::jsonb, updated_at = now()
+                awaiting_signal = @awaitingSignal, visits = @visits::jsonb, variables = @variables::jsonb, updated_at = now()
             WHERE id = @id AND xmin::text::bigint = @expectedXmin
             """;
         update.Parameters.AddWithValue("currentNode", currentNode);
@@ -339,6 +354,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
         update.Parameters.AddWithValue("status", status.ToString());
         update.Parameters.AddWithValue("awaitingSignal", (object?)awaitingSignal ?? DBNull.Value);
         update.Parameters.AddWithValue("visits", JsonSerializer.Serialize(visits));
+        update.Parameters.AddWithValue("variables", JsonSerializer.Serialize(variables));
         update.Parameters.AddWithValue("id", runId);
         update.Parameters.AddWithValue("expectedXmin", expectedXmin);
 
@@ -397,8 +413,40 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
         Status: Enum.Parse<WorkflowStatus>(reader.GetString(6)),
         AwaitingSignal: reader.IsDBNull(7) ? null : reader.GetString(7),
         Visits: JsonSerializer.Deserialize<Dictionary<string, int>>(reader.GetString(8)) ?? [],
-        LastError: reader.IsDBNull(9) ? null : reader.GetString(9),
-        Xmin: reader.GetInt64(10));
+        Variables: DeserializeVariables(reader.GetString(9)),
+        LastError: reader.IsDBNull(10) ? null : reader.GetString(10),
+        Xmin: reader.GetInt64(11));
+
+    /// <summary>
+    /// Deserializing straight to <c>Dictionary&lt;string, object?&gt;</c> leaves every value a boxed
+    /// <see cref="JsonElement"/>, not the plain CLR value a consumer reading <see cref="WorkflowRun.Variables"/>
+    /// would expect — comparing a boxed <see cref="JsonElement"/> string against a bare <see cref="string"/>
+    /// never succeeds. Deserializes through <see cref="JsonElement"/> instead and unwraps each value with
+    /// <see cref="ToPlainValue"/> so the bag holds ordinary strings, numbers, booleans, nulls, dictionaries and
+    /// lists.
+    /// </summary>
+    private static Dictionary<string, object?> DeserializeVariables(string json)
+    {
+        var raw = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json) ?? [];
+        var result = new Dictionary<string, object?>(raw.Count, StringComparer.Ordinal);
+        foreach (var (key, element) in raw)
+        {
+            result[key] = ToPlainValue(element);
+        }
+
+        return result;
+    }
+
+    private static object? ToPlainValue(JsonElement element) => element.ValueKind switch
+    {
+        JsonValueKind.String => element.GetString(),
+        JsonValueKind.Number => element.TryGetInt64(out var longValue) ? longValue : element.GetDouble(),
+        JsonValueKind.True => true,
+        JsonValueKind.False => false,
+        JsonValueKind.Object => element.EnumerateObject().ToDictionary(p => p.Name, p => ToPlainValue(p.Value), StringComparer.Ordinal),
+        JsonValueKind.Array => element.EnumerateArray().Select(ToPlainValue).ToList(),
+        _ => null,
+    };
 
     private static WorkflowRun ToWorkflowRun(RunRow row) => new()
     {
@@ -410,6 +458,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
         Status = row.Status,
         AwaitingSignal = row.AwaitingSignal,
         Visits = row.Visits,
+        Variables = row.Variables,
         LastError = row.LastError,
     };
 
@@ -423,6 +472,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options) : IWorkflowStor
         WorkflowStatus Status,
         string? AwaitingSignal,
         Dictionary<string, int> Visits,
+        Dictionary<string, object?> Variables,
         string? LastError,
         long Xmin);
 

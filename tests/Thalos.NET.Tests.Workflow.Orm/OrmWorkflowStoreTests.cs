@@ -101,6 +101,64 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task CompleteNodeAsync_merges_a_new_nodes_variables_without_dropping_earlier_ones()
+    {
+        var runId = await _store.StartAsync("manufacture", 1, "c-vars-merge", "implement", CancellationToken.None);
+
+        await _store.CompleteNodeAsync(
+            runId, seq: 1,
+            new WorkflowTransition("review", WorkflowStatus.Running, null, WorkflowEventKind.Completed),
+            new NodeResult("ok", new Dictionary<string, object?>(StringComparer.Ordinal) { ["plan"] = "fast-track", ["owner"] = "alice" }),
+            CancellationToken.None);
+
+        // The second node's own payload never mentions "owner" and overwrites "plan" — a replace-semantics bug
+        // would drop "owner" here and this assertion would fail; a merge keeps it.
+        await _store.CompleteNodeAsync(
+            runId, seq: 2,
+            new WorkflowTransition("publish", WorkflowStatus.Running, null, WorkflowEventKind.Completed),
+            new NodeResult("done", new Dictionary<string, object?>(StringComparer.Ordinal) { ["plan"] = "override" }),
+            CancellationToken.None);
+
+        var run = await _store.FindAsync(runId, CancellationToken.None);
+
+        run!.Variables.Should().ContainKey("plan").WhoseValue.Should().Be("override", "a later node's write to the same key wins");
+        run.Variables.Should().ContainKey("owner").WhoseValue.Should().Be("alice", "a later node that never mentions an earlier key must not drop it");
+    }
+
+    [Fact]
+    public async Task CompleteNodeAsync_leaves_the_variable_bag_intact_when_a_node_returns_no_variables()
+    {
+        var runId = await _store.StartAsync("manufacture", 1, "c-vars-empty", "implement", CancellationToken.None);
+
+        await _store.CompleteNodeAsync(
+            runId, seq: 1,
+            new WorkflowTransition("review", WorkflowStatus.Running, null, WorkflowEventKind.Completed),
+            new NodeResult("ok", new Dictionary<string, object?>(StringComparer.Ordinal) { ["plan"] = "fast-track" }),
+            CancellationToken.None);
+
+        // The second node produces no variables at all — a replace-semantics bug would wipe the bag to empty.
+        await _store.CompleteNodeAsync(
+            runId, seq: 2,
+            new WorkflowTransition("publish", WorkflowStatus.Running, null, WorkflowEventKind.Completed),
+            new NodeResult("done", Empty),
+            CancellationToken.None);
+
+        var run = await _store.FindAsync(runId, CancellationToken.None);
+
+        run!.Variables.Should().ContainKey("plan").WhoseValue.Should().Be("fast-track", "a node returning no variables must not clear what an earlier node wrote");
+    }
+
+    [Fact]
+    public async Task StartAsync_seeds_an_empty_variable_bag()
+    {
+        var runId = await _store.StartAsync("manufacture", 1, "c-vars-start", "implement", CancellationToken.None);
+
+        var run = await _store.FindAsync(runId, CancellationToken.None);
+
+        run!.Variables.Should().BeEmpty();
+    }
+
+    [Fact]
     public async Task StartAsync_is_idempotent_for_the_same_correlation_key()
     {
         var first = await _store.StartAsync("manufacture", 1, "c-dup", "implement", CancellationToken.None);
@@ -152,6 +210,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         run!.CurrentNode.Should().Be("done");
         run.Status.Should().Be(WorkflowStatus.Running);
         run.AwaitingSignal.Should().BeNull();
+        run.Variables.Should().ContainKey("payload").WhoseValue.Should().Be("approved", "ResumeAsync's payload merges into the run's variable bag the same way a node's own variables do");
         (await ScalarAsync<string>("SELECT kind FROM workflow_run_event WHERE run_id = @id ORDER BY seq DESC LIMIT 1", runId)).Should().Be(nameof(WorkflowEventKind.Resumed));
     }
 
