@@ -19,11 +19,13 @@ public static class ProcessValidator
     /// <summary>
     /// Validates <paramref name="process"/>'s shape — every reference resolves, every node is reachable from
     /// <see cref="ProcessDefinition.StartNode"/>, every node can reach a terminal, every node declaring
-    /// <c>maxVisits</c> also declares <c>onExceeded</c> and vice versa without naming itself, every declared
-    /// <c>terminal</c> is <c>succeeded</c> or <c>failed</c>, every node is exactly one of task (<c>agent</c>
-    /// and <c>skill</c> both present), gate or terminal, and a gate (<c>await</c> set) resolves via <c>next</c>
-    /// only — never <c>branch</c>/<c>outcomes</c> — and, when <paramref name="resolver"/> is not
-    /// <see langword="null"/>, that every declared agent and skill exists in the host.
+    /// <c>maxVisits</c> also declares <c>onExceeded</c> and vice versa without naming itself, no <c>onExceeded</c>
+    /// redirect can route back into the node it just capped, every declared <c>terminal</c> is <c>succeeded</c>
+    /// or <c>failed</c>, no declared <c>outcome</c> is blank or repeated, every node is exactly one of task
+    /// (<c>agent</c> and <c>skill</c> both present), gate or terminal, a gate (<c>await</c> set) resolves via
+    /// <c>next</c> only — never <c>branch</c>/<c>outcomes</c> — a terminal declares no outgoing edge at all, and,
+    /// when <paramref name="resolver"/> is not <see langword="null"/>, that every declared agent and skill exists
+    /// in the host.
     /// </summary>
     public static async ValueTask<Result<ProcessDefinition>> ValidateAsync(
         ProcessDefinition process, IWorkflowReferenceResolver? resolver, CancellationToken ct)
@@ -49,8 +51,10 @@ public static class ProcessValidator
     /// target names a node that exists; every <c>branch</c> key is a declared outcome; a node declaring
     /// <c>branch</c> also declares <c>outcomes</c>; <c>agent</c> and <c>skill</c> are both present or both
     /// absent — a node cannot run an agent's default instructions with the skill unpinned;
-    /// <see cref="ValidateCapAndTerminal"/>'s <c>maxVisits</c>/<c>onExceeded</c>/<c>terminal</c> rules; and a
-    /// node is exactly one of task, gate or terminal.
+    /// <see cref="ValidateCapAndTerminal"/>'s <c>maxVisits</c>/<c>onExceeded</c>/<c>terminal</c> rules;
+    /// <see cref="ValidateCapRedirectEscapes"/>'s check that a cap's redirect cannot route back into the capped
+    /// node; <see cref="ValidateOutcomeSet"/>'s blank/duplicate <c>outcomes</c> rules; and a node is exactly one
+    /// of task, gate or terminal.
     /// </summary>
     private static void ValidateShape(ProcessDefinition process, List<string> errors)
     {
@@ -78,6 +82,8 @@ public static class ProcessValidator
             }
 
             ValidateCapAndTerminal(name, node, errors);
+            ValidateCapRedirectEscapes(process, name, node, errors);
+            ValidateOutcomeSet(name, node, errors);
 
             if (node.Agent is not null && node.Skill is null)
             {
@@ -147,6 +153,92 @@ public static class ProcessValidator
             !node.Terminal.Equals("failed", StringComparison.OrdinalIgnoreCase))
         {
             errors.Add($"node '{name}' has an unrecognized terminal status '{node.Terminal}' (must be 'succeeded' or 'failed'; 'cancelled' is an operator action, not a declared destination)");
+        }
+
+        // The mirror of the gate rule above, and for the same reason. WorkflowInterpreter.Advance evaluates a
+        // node in a fixed order — gate, then branch, then next, then terminal — so a terminal node that also
+        // carries an outgoing edge has that edge taken and its terminal status never reached. The run walks on
+        // past the node that was supposed to end it. Forbidding the shape is the only way that combination is
+        // ever reported; nothing downstream can tell an author their end state is unreachable.
+        if (node.Terminal is not null && (node.Next is not null || node.Branch.Count > 0 || node.Outcomes.Count > 0))
+        {
+            errors.Add($"node '{name}' is a terminal ('terminal' set) and must not also declare 'next'/'branch'/'outcomes' — the outgoing edge is resolved first, so the run would take it and never reach the terminal status");
+        }
+    }
+
+    /// <summary>
+    /// The cap's redirect must actually escape the loop it caps. <see cref="WorkflowInterpreter.Advance"/> hands
+    /// back <see cref="ProcessNode.OnExceeded"/> without cap-checking that redirect target's own onward edges, so
+    /// <c>a: { maxVisits: 5, onExceeded: b }</c> paired with <c>b: { next: a }</c> runs <c>a</c> five times,
+    /// redirects to <c>b</c>, and is routed straight back into <c>a</c> — where the cap fires again, forever,
+    /// paying for <c>b</c>'s turn on every cycle. <c>maxVisits</c> is the only bound this engine puts on what a
+    /// run can spend, so a redirect that re-enters the capped node defeats the one guarantee it offers. Checked
+    /// here, at load time, by forward-walking the graph from the redirect: if the capped node is reachable again,
+    /// the process is rejected before a run ever starts.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="ValidateCapAndTerminal"/>'s self-reference rule already reports <c>onExceeded</c> naming its own
+    /// node, so that case is skipped here rather than reported a second time under different wording. An
+    /// <c>onExceeded</c> naming a node that does not exist is skipped too — <see cref="ValidateShape"/>'s
+    /// unknown-target rule owns that one, and there is no graph to walk from a node the process has not got.
+    /// The walk follows <see cref="ValidOutgoingTargets"/>, which includes other nodes' own <c>onExceeded</c>
+    /// edges: a cap that redirects into a second cap that redirects back is just as non-terminating as a plain
+    /// <c>next</c> that loops round, and both should be caught.
+    /// </remarks>
+    private static void ValidateCapRedirectEscapes(ProcessDefinition process, string name, ProcessNode node, List<string> errors)
+    {
+        if (node.MaxVisits is null ||
+            node.OnExceeded is not { } redirect ||
+            string.Equals(redirect, name, StringComparison.Ordinal) ||
+            !process.Nodes.ContainsKey(redirect))
+        {
+            return;
+        }
+
+        var visited = new HashSet<string>(StringComparer.Ordinal) { redirect };
+        var queue = new Queue<string>();
+        queue.Enqueue(redirect);
+
+        while (queue.Count > 0)
+        {
+            foreach (var target in ValidOutgoingTargets(process, process.Nodes[queue.Dequeue()]))
+            {
+                if (string.Equals(target, name, StringComparison.Ordinal))
+                {
+                    errors.Add(
+                        $"node '{name}' declares 'onExceeded: {redirect}', but '{name}' is reachable again from '{redirect}' — the cap would redirect and be routed straight back into '{name}', so the loop never terminates");
+                    return;
+                }
+
+                if (visited.Add(target))
+                {
+                    queue.Enqueue(target);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// A node's declared <c>outcomes</c> become the closed <c>enum</c> of the outcome tool
+    /// <c>WorkflowNodeDispatcher</c> offers the agent, and <c>OutcomeTool.Validate</c> refuses a set containing a
+    /// blank value or a duplicate. Without these two rules here, <c>outcomes: [approved, rejected, rejected]</c>
+    /// loads and validates cleanly and then fails on <em>every single dispatch</em> of that node — the shape this
+    /// validator exists to make impossible, since the whole point of load-time validation is that a graph which
+    /// passes it does not fail per node once a run is live and spending turns.
+    /// </summary>
+    private static void ValidateOutcomeSet(string name, ProcessNode node, List<string> errors)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var outcome in node.Outcomes)
+        {
+            if (string.IsNullOrWhiteSpace(outcome))
+            {
+                errors.Add($"node '{name}' declares a blank outcome — every declared outcome must be a non-blank value, or the outcome tool built for this node is rejected on every dispatch");
+            }
+            else if (!seen.Add(outcome))
+            {
+                errors.Add($"node '{name}' declares outcome '{outcome}' more than once — a duplicate makes the outcome tool's closed set unbuildable, so every dispatch of this node would fail");
+            }
         }
     }
 

@@ -28,6 +28,12 @@ public sealed class ProcessValidatorTests
     //   - gate resolves via 'next' only: row 20 rejects, row 19 (drop 'outcomes: [ok]') accepts
     //   - gate with 'branch' and no 'outcomes': row 21 rejects (caught by the unconditional branch-without-
     //     outcomes rule, not the gate-only-next rule), row 19 (drop 'branch: { ok: c }') accepts
+    //   - terminal carrying 'next':     row 22 rejects, row 1 (drop ', next: a') accepts
+    //   - terminal carrying 'outcomes': row 23 rejects, row 1 (drop ', outcomes: [ok]') accepts
+    //   - cap redirect routed back into the capped node: row 25 rejects, row 24 (c's 'next: a' vs 'next: d')
+    //     accepts — the redirect target's own successor is the single edit that flips the verdict
+    //   - blank declared outcome:       row 27 rejects, row 26 ('' vs 'no') accepts
+    //   - duplicate declared outcome:   row 28 rejects, row 26 (the second 'ok' vs 'no') accepts
     public static TheoryData<string, string, bool> Cases => new()
     {
         { "a: { agent: x, skill: s, next: b }\n  b: { terminal: succeeded }", "", true },
@@ -51,6 +57,13 @@ public sealed class ProcessValidatorTests
         { "a: { agent: x, skill: s, next: b }\n  b: { await: sig, next: c }\n  c: { terminal: succeeded }", "", true },
         { "a: { agent: x, skill: s, next: b }\n  b: { await: sig, next: c, outcomes: [ok] }\n  c: { terminal: succeeded }", "is a gate ('await' set) and must resolve via 'next' only", false },
         { "a: { agent: x, skill: s, next: b }\n  b: { await: sig, next: c, branch: { ok: c } }\n  c: { terminal: succeeded }", "declares 'branch' without declaring 'outcomes'", false },
+        { "a: { agent: x, skill: s, next: b }\n  b: { terminal: succeeded, next: a }", "is a terminal ('terminal' set) and must not also declare 'next'/'branch'/'outcomes'", false },
+        { "a: { agent: x, skill: s, next: b }\n  b: { terminal: succeeded, outcomes: [ok] }", "is a terminal ('terminal' set) and must not also declare 'next'/'branch'/'outcomes'", false },
+        { "a: { agent: x, skill: s, next: b, maxVisits: 3, onExceeded: c }\n  b: { agent: x, skill: s, next: d }\n  c: { agent: x, skill: s, next: d }\n  d: { terminal: succeeded }", "", true },
+        { "a: { agent: x, skill: s, next: b, maxVisits: 3, onExceeded: c }\n  b: { agent: x, skill: s, next: d }\n  c: { agent: x, skill: s, next: a }\n  d: { terminal: succeeded }", "'a' is reachable again from 'c'", false },
+        { "a: { agent: x, skill: s, outcomes: [ok, no], branch: { ok: b, no: b } }\n  b: { terminal: succeeded }", "", true },
+        { "a: { agent: x, skill: s, outcomes: [ok, ''], branch: { ok: b } }\n  b: { terminal: succeeded }", "node 'a' declares a blank outcome", false },
+        { "a: { agent: x, skill: s, outcomes: [ok, ok], branch: { ok: b } }\n  b: { terminal: succeeded }", "node 'a' declares outcome 'ok' more than once", false },
     };
 
     [Theory, MemberData(nameof(Cases))]
