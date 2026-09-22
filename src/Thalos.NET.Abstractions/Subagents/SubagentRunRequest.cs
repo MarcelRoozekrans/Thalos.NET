@@ -35,4 +35,11 @@ public sealed record SubagentRunRequest
 
     /// <summary>The session that caused this run, when there is one. Telemetry lineage only; never authorization.</summary>
     public SessionId? ParentSessionId { get; init; }
+
+    /// <summary>
+    /// When set, this run must report its result through the tool-call schema described here rather than through
+    /// free text — see <see cref="OutcomeToolSchema"/> for why that distinction is load-bearing. <see langword="null"/>
+    /// for a run with no closed-set outcome to report (a plain sequence step with nothing to branch on).
+    /// </summary>
+    public OutcomeToolSchema? RequiredOutcome { get; init; }
 }
