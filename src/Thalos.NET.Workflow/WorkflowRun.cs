@@ -59,14 +59,19 @@ public sealed record WorkflowRun
     /// <see cref="IWorkflowStore.ResumeAsync"/> call, in the same transaction as the rest of that call's writes.
     /// </summary>
     /// <remarks>
-    /// <b>What actually writes to this bag today.</b> Exactly one thing:
-    /// <see cref="IWorkflowStore.ResumeAsync"/>'s <c>payload</c>, which lands under the literal key
-    /// <c>"payload"</c>. <see cref="WorkflowNodeDispatcher"/> builds every <see cref="NodeResult"/> with an empty
-    /// variable bag — it reads an agent turn's outcome and nothing else — so a node's own output does not reach
-    /// this dictionary through any shipped code path. Node-produced variables are a contract this type and the
-    /// store honour (the merge is implemented, transactional and tested) and the dispatcher does not yet
-    /// populate: a consumer supplying its own dispatch loop can pass a populated <see cref="NodeResult"/> and the
-    /// merge will do the right thing, but out of the box no node's result feeds a later node's input.
+    /// <para>
+    /// <b>What writes to this bag.</b> Three things, all of them shipped.
+    /// <see cref="IWorkflowStore.StartAsync"/>'s initial variables seed it, so a run begins holding the work item
+    /// it exists to perform. <see cref="WorkflowNodeDispatcher"/> merges whatever a node reported through the
+    /// variables argument of its outcome tool call. <see cref="IWorkflowStore.ResumeAsync"/>'s <c>payload</c>
+    /// lands under the literal key <c>"payload"</c>.
+    /// </para>
+    /// <para>
+    /// <b>What reads it back.</b> <see cref="WorkflowNodeDispatcher"/> renders this bag into every task node's
+    /// instruction text, so one node's output does reach a later node's input out of the box — framed as
+    /// untrusted content, because the values were written by another agent, and bounded in size. A node with no
+    /// declared <c>outcomes</c> is offered no outcome tool, so it can be told variables but cannot report any.
+    /// </para>
     /// </remarks>
     public IReadOnlyDictionary<string, object?> Variables { get; init; } = new Dictionary<string, object?>(StringComparer.Ordinal);
 

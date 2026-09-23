@@ -8,9 +8,16 @@
   <ItemGroup>
     <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />
     <ProjectReference Include="..\Thalos.NET.Skills\Thalos.NET.Skills.csproj" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" />
     <PackageReference Include="YamlDotNet" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Thalos.NET.Tests.Workflow" />
+    <!-- WorkflowVariableBlock only: the unwrapping of a JSON variables object into plain CLR values has to be the
+         same on the way in through the dispatcher and on the way back out of the database, and two copies of it
+         drifted apart is exactly how a value ends up a different CLR type either side of a round trip. -->
+    <InternalsVisibleTo Include="Thalos.NET.Workflow.Orm" />
+    <!-- So the ORM store's own tests assert against the key cap constant rather than a copy of its value. -->
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Workflow.Orm" />
   </ItemGroup>
 </Project>

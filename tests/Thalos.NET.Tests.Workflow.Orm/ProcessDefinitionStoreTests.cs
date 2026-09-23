@@ -88,7 +88,7 @@ public sealed class ProcessDefinitionStoreTests(PostgresFixture pg) : IAsyncLife
         var ct = CancellationToken.None;
         await WriteProcessFile(ValidV1);
         await _sync.SyncAsync(ct);
-        var runId = await _store.StartAsync("manufacture", version: 1, "c1", "implement", ct);
+        var runId = await _store.StartAsync("manufacture", version: 1, "c1", "implement", initialVariables: null, ct);
 
         await WriteProcessFile(ValidV2); // a valid, different shape
         await _sync.SyncAsync(ct);
@@ -103,7 +103,7 @@ public sealed class ProcessDefinitionStoreTests(PostgresFixture pg) : IAsyncLife
     public async Task A_version_cannot_be_removed_while_a_run_still_pins_it()
     {
         var ct = CancellationToken.None;
-        var runId = await _store.StartAsync("manufacture", 1, "c1", "implement", ct);
+        var runId = await _store.StartAsync("manufacture", 1, "c1", "implement", initialVariables: null, ct);
         await WriteProcessFile(ValidV2);
         await _sync.SyncAsync(ct);
 
@@ -122,8 +122,8 @@ public sealed class ProcessDefinitionStoreTests(PostgresFixture pg) : IAsyncLife
     public async Task Removing_one_version_is_unaffected_by_a_different_version_still_being_pinned()
     {
         var ct = CancellationToken.None;
-        var v1RunId = await _store.StartAsync("manufacture", 1, "c-v1", "implement", ct);
-        await _store.StartAsync("manufacture", 2, "c-v2", "implement", ct); // stays Running for the whole test
+        var v1RunId = await _store.StartAsync("manufacture", 1, "c-v1", "implement", initialVariables: null, ct);
+        await _store.StartAsync("manufacture", 2, "c-v2", "implement", initialVariables: null, ct); // stays Running for the whole test
 
         await _store.CancelAsync(v1RunId, "test", ct);
 
@@ -186,7 +186,7 @@ public sealed class ProcessDefinitionStoreTests(PostgresFixture pg) : IAsyncLife
         var ct = CancellationToken.None;
         await WriteProcessFile(ValidV1);
         (await _sync.SyncAsync(ct)).IsSuccess.Should().BeTrue();
-        var runId = await _store.StartAsync("manufacture", version: 1, "c-immutable", "implement", ct);
+        var runId = await _store.StartAsync("manufacture", version: 1, "c-immutable", "implement", initialVariables: null, ct);
 
         // Still version 1, still perfectly valid, but a different graph: 'review' rejecting now loops to
         // 'adjudicate' instead of back to 'implement'. Exactly the edit that must not land underneath the run

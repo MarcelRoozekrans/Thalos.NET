@@ -124,7 +124,7 @@ public sealed class ConstrainedOutcomeTests : IAsyncLifetime
     /// that stopped enqueuing would make these tests visibly do nothing.
     /// </summary>
     public async Task InitializeAsync() =>
-        _runId = await _store.StartAsync("gate-check", 1, "c-review", "review", CancellationToken.None);
+        _runId = await _store.StartAsync("gate-check", 1, "c-review", "review", initialVariables: null, CancellationToken.None);
 
     public Task DisposeAsync() => Task.CompletedTask;
 
@@ -247,7 +247,7 @@ public sealed class ConstrainedOutcomeTests : IAsyncLifetime
     public async Task A_gate_arrival_parks_the_run_at_awaiting_instead_of_failing()
     {
         GivenAgentReturns("anything");  // 'start' declares no outcomes, so the reported value is ignored
-        var gateRunId = await _store.StartAsync("approval-flow", 1, "c-gate", "start", CancellationToken.None);
+        var gateRunId = await _store.StartAsync("approval-flow", 1, "c-gate", "start", initialVariables: null, CancellationToken.None);
 
         // Two messages, both produced by the store: StartAsync's dispatch for 'start', and the one completing
         // 'start' enqueues for 'gate'. The drain stops on its own once the gate parks, because a transition to
@@ -266,7 +266,7 @@ public sealed class ConstrainedOutcomeTests : IAsyncLifetime
     [Fact]
     public async Task An_unresolvable_agent_name_fails_the_node_instead_of_throwing()
     {
-        var badRunId = await _store.StartAsync("bad-agent", 1, "c-bad-agent", "only", CancellationToken.None);
+        var badRunId = await _store.StartAsync("bad-agent", 1, "c-bad-agent", "only", initialVariables: null, CancellationToken.None);
 
         (await DispatchNextAsync(badRunId)).Should().BeTrue("StartAsync must enqueue the start node's dispatch");
 
@@ -375,7 +375,7 @@ public sealed class ConstrainedOutcomeTests : IAsyncLifetime
             return Result<AgentTurnResult, AgentError>.Success(TurnResultReporting("again"));
         };
 
-        var loopRunId = await _store.StartAsync("capped-loop", 1, "c-loop", "work", CancellationToken.None);
+        var loopRunId = await _store.StartAsync("capped-loop", 1, "c-loop", "work", initialVariables: null, CancellationToken.None);
 
         await DrainAsync(loopRunId);
 

@@ -249,12 +249,56 @@ var runId = await store.StartAsync(
     version: await definitions.GetActiveVersionAsync("pipeline", ct) ?? throw new InvalidOperationException("pipeline is not synced"),
     correlationKey: $"issue-42:attempt-{Guid.NewGuid()}",
     startNode: "implement",
+    initialVariables: new Dictionary<string, object?>(StringComparer.Ordinal)
+    {
+        ["issue"] = "gh-42",
+        ["branch"] = "fix/null-guard",
+    },
     ct);
 ```
 
 That is the whole start. `StartAsync` writes the run, seeds its `Entered` event, and enqueues the start node's own
 dispatch — all in one transaction, so a run never exists without the work behind its first node already scheduled.
 You do not construct a `WorkflowDispatchMessage` yourself; step 4's consumer picks it up on the next poll.
+
+`initialVariables` is the run's opening `Variables` bag: the work item the first node is meant to act on. Pass
+`null` for a run that starts with nothing — the bag is then empty, never null. It is seeded only on the path that
+actually starts a run, so a call whose `correlationKey` an earlier run already used starts nothing and seeds
+nothing.
+
+## 8. Passing work from one node to the next
+
+Every task node's instruction text carries the run's accumulated variables, and a node with declared `outcomes`
+reports its own by passing a `variables` object on the same `workflow__report_outcome` call it reports its outcome
+on:
+
+```json
+{ "outcome": "implemented", "variables": { "changed_files": "src/Guard.cs", "summary": "added a null guard" } }
+```
+
+One tool, one read path. A node with no declared `outcomes` is offered no outcome tool at all, so it can be told
+variables but has no way to report any — correct for a node that declares nothing it produces.
+
+The values are merged into `WorkflowRun.Variables` by the same transactional merge `ResumeAsync` uses, later
+writes winning on key collision, and a call carrying no `variables` leaves the bag exactly as it was rather than
+clearing it.
+
+**Variables reaching a later node are framed as untrusted, and you should treat them that way too.** They arrive
+inside a `<workflow-variables note="...">` block whose note tells the reading agent they were written by other
+agents and are information, not instructions. This is not decoration: without it, an implementing agent can write
+instructions into a variable and steer the reviewer that reads them back, which defeats the point of having a
+separate reviewer. Values and keys cannot close or forge that block — the tag is escaped in both — and they are
+flattened to one line each.
+
+A `variables` argument that is present but is not a JSON object makes the dispatcher discard **that call**,
+outcome included. That is deliberate: the alternative is accepting the outcome while silently dropping what the
+node reported alongside it. The node then fails with its usual "completed without calling ... to report an
+outcome" *only when that was the only matching call* — a turn that also made a well-formed call still resolves on
+the well-formed one, because the rejection is per call, not per turn. An explicit JSON `null` is not that case at
+all: it reads as "no variables", the same as omitting the argument.
+
+Variables reaching a later node are shortened to fit, and the shortening is stated in the block. See the limits
+section below for which cap applies where.
 
 `version` is pinned at start and never re-resolved. A run parked at a gate for a week comes back to the graph it
 started on even if newer versions activated meanwhile; activating a new version only changes what *new* runs start
@@ -265,7 +309,7 @@ and no status predicate, so a key is never released — not when the run succeed
 `StartAsync` with a key any earlier run used returns *that* run's id, whatever process it belonged to and whatever
 state it is in, and starts nothing. Mint keys that include the attempt, not a business identity that recurs.
 
-## 8. Resuming an approval gate
+## 9. Resuming an approval gate
 
 A run that reaches a node with `await:` parks at `Awaiting` with the signal name recorded. Nothing advances it
 until something calls:
@@ -280,10 +324,35 @@ unresolvable, optimistic-concurrency loss — comes back as a `Result` failure, 
 
 ## Limits worth knowing before you author a process
 
-- **Node-produced variables are not populated yet.** `WorkflowRun.Variables` merges transactionally and correctly,
-  but `WorkflowNodeDispatcher` builds every `NodeResult` with an empty bag — it reads the turn's outcome and
-  nothing else. Today the only writer is `ResumeAsync`'s payload. One node's output does not become a later node's
-  input out of the box.
+- **The variable block put in front of a node has three caps, and the value cap is the one that bites.** The
+  run's own bag is never capped or trimmed; only what one node is *told* is. Any single value over 512 characters
+  is cut and marked, and that happens on the very first lap that writes an oversized value — a `diff` is over the
+  cap essentially always, so treat a `diff` variable as something the next node sees the beginning of, not the
+  whole of. Keys are capped at 128 the same way. The 4000-character *block* cap is separate and only bites once
+  enough **distinct** keys accumulate: a loop whose laps overwrite the same few keys keeps the key count flat and
+  never drops an entry, while still shortening every oversized value on every lap. Nothing is rejected and no turn
+  is skipped.
+- **A list or a nested object is shortened by dropping whole members, never by cutting mid-token**, so what
+  reaches the next node is still parseable JSON with the loss stated after it. That applies to the shapes the
+  engine itself produces; a host that seeds `StartAsync` with some other structured type gets a character cut.
+- **Everything the engine says inside the block is a `workflow-variables-…` element**, which is the same tag
+  family keys and values are escaped against — so a variable cannot claim the engine withheld or shortened
+  something it did not. Dropped entries are also logged at `Warning` with the omitted key names, because the
+  notice inside the block is visible to the reading agent and to nobody else. The log gets the same escaped,
+  bounded key list the block gets, from the same renderer: key names are agent-authored, and a log is a sink that
+  needs every protection the prompt does.
+- **The variable key space is bounded, and that is what makes the omitted-key list trustworthy.** A run's bag
+  holds at most **16 distinct keys** and one node turn may contribute at most **8** variables. Exceeding either
+  **fails the node**, with an error naming the cap — a rejected report is a contract you can see in the run's
+  error and event log, where a silently trimmed one is indistinguishable from a node that chose to report less.
+  Overwriting a key the run already holds is always allowed and never counts against the total, so a capped loop
+  can overwrite the same few keys lap after lap for as long as it runs. `StartAsync` throws `ArgumentException`
+  for a seed over the same cap.
+
+  The caps are not arbitrary and not a size optimisation. Because the number of keys that can exist is bounded,
+  the omission notice is sized to name **every** key it leaves out — so a node cannot flood the bag with
+  decoy names to push `task_brief` out of the list and hide that a brief ever existed. Widening the list instead
+  would only move the threshold at which that works.
 - **`models:`, `lenses:` and `quorum:` are parsed and ignored.** A node declaring `models: [sonnet, opus]` runs
   once, against whatever single model the resolved agent is configured with, silently. See
   [`release.md`](release.md#process-file-keys-that-are-parsed-but-not-yet-honoured).

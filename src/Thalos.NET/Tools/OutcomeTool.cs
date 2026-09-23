@@ -36,6 +36,15 @@ internal sealed class OutcomeTool : AIFunction
 {
     private const int MaxToolNameLength = 64;
 
+    /// <summary>
+    /// The description on the optional <see cref="OutcomeToolSchema.VariablesArgumentName"/> property. Free-form
+    /// on purpose: unlike the outcome, whose whole point is a closed <c>enum</c>, a variable bag has no set of
+    /// values a process file could declare — the caller chooses the keys. The schema still constrains its
+    /// <em>shape</em> to an object, which is what the read side needs to be able to merge it.
+    /// </summary>
+    private const string VariablesDescription =
+        "Optional. A flat or nested JSON object of values later steps of this workflow should be able to read. Omit it if there is nothing to hand on.";
+
     private readonly IReadOnlyList<string> _allowedValues;
     private readonly string _description;
     private readonly JsonElement _schema;
@@ -47,7 +56,8 @@ internal sealed class OutcomeTool : AIFunction
         _allowedValues = schema.AllowedValues;
         _description =
             $"Report the result of this task. Call this exactly once, after the work is done, with '{OutcomeToolSchema.ArgumentName}' "
-            + $"set to one of: {string.Join(", ", schema.AllowedValues)}. This is the only way the result is read; text replies are ignored.";
+            + $"set to one of: {string.Join(", ", schema.AllowedValues)}. This is the only way the result is read; text replies are ignored. "
+            + $"Optionally pass '{OutcomeToolSchema.VariablesArgumentName}': a JSON object of values later steps should be able to read.";
         _schema = BuildSchema(_description, schema.AllowedValues);
     }
 
@@ -112,6 +122,15 @@ internal sealed class OutcomeTool : AIFunction
                 $"No outcome reported: call '{Name}' with a '{OutcomeToolSchema.ArgumentName}' argument set to one of: {string.Join(", ", _allowedValues)}.");
         }
 
+        // The optional variables argument is refused the same way an out-of-set outcome is, rather than silently
+        // ignored: the read side discards the whole call when this argument is present in the wrong shape, so a
+        // model told nothing here would see its outcome vanish with no idea why.
+        if (arguments.TryGetValue(OutcomeToolSchema.VariablesArgumentName, out var rawVariables) && !IsJsonObject(rawVariables))
+        {
+            return new ValueTask<object?>(
+                $"'{OutcomeToolSchema.VariablesArgumentName}' must be a JSON object. Call '{Name}' again with '{OutcomeToolSchema.VariablesArgumentName}' set to an object, or leave it out entirely.");
+        }
+
         // Ordinal, never a culture- or case-insensitive match: "Approved" is not the declared "approved", and
         // accepting it here would hand the read side a value the process definition never declared.
         for (var i = 0; i < _allowedValues.Count; i++)
@@ -136,6 +155,28 @@ internal sealed class OutcomeTool : AIFunction
         string s => s,
         JsonElement { ValueKind: JsonValueKind.String } e => e.GetString(),
         _ => null,
+    };
+
+    /// <summary>
+    /// Whether the variables argument is an acceptable shape: an object, or absent-by-another-name — a CLR
+    /// dictionary, a <see cref="JsonElement"/> object, or <see langword="null"/>, which is how an omitted
+    /// optional argument commonly arrives and is therefore not a wrong shape at all.
+    /// </summary>
+    /// <remarks>
+    /// <b>This holds in one direction only.</b> Every shape accepted here serializes to something the read side
+    /// in <c>WorkflowNodeDispatcher</c> can merge, so a call this tool confirms is a call that side can read. The
+    /// converse is not true and must not be assumed: this check is advice to the model, not a gate.
+    /// <see cref="AuthorizingAIFunction"/> records the arguments <em>before</em> this method body ever runs, so a
+    /// call refused here is still recorded, still reaches the read side, and is still discarded there. Refusing
+    /// is worth doing because it tells the model why its outcome is about to vanish; it is not what keeps a bad
+    /// shape out of the run.
+    /// </remarks>
+    private static bool IsJsonObject(object? raw) => raw switch
+    {
+        null => true,
+        JsonElement { ValueKind: JsonValueKind.Object or JsonValueKind.Null } => true,
+        System.Collections.IDictionary => true,
+        _ => false,
     };
 
     private static bool IsValidToolName(string name)
@@ -178,6 +219,12 @@ internal sealed class OutcomeTool : AIFunction
             }
 
             writer.WriteEndArray();
+            writer.WriteEndObject();
+            writer.WritePropertyName(OutcomeToolSchema.VariablesArgumentName);
+            writer.WriteStartObject();
+            writer.WriteString("type", "object");
+            writer.WriteString("description", VariablesDescription);
+            writer.WriteBoolean("additionalProperties", true);
             writer.WriteEndObject();
             writer.WriteEndObject();
             writer.WritePropertyName("required");

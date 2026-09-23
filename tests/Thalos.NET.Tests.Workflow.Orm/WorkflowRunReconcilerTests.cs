@@ -42,7 +42,7 @@ public sealed class WorkflowRunReconcilerTests(PostgresFixture pg) : IAsyncLifet
     [Fact]
     public async Task SweepAsync_terminates_a_running_run_stale_past_the_threshold_with_a_named_reason()
     {
-        var runId = await _store.StartAsync("manufacture", 1, "c-stranded", "implement", CancellationToken.None);
+        var runId = await _store.StartAsync("manufacture", 1, "c-stranded", "implement", initialVariables: null, CancellationToken.None);
         await BackdateUpdatedAtAsync(runId, TimeSpan.FromHours(1));
 
         var terminated = await _reconciler.SweepAsync(ProductionThreshold, CancellationToken.None);
@@ -60,7 +60,7 @@ public sealed class WorkflowRunReconcilerTests(PostgresFixture pg) : IAsyncLifet
         // This is the assertion that stops the sweep from killing healthy long-running nodes: a run updated a
         // single second ago is well within a normal agent turn and must not be touched, even though it is
         // Running and would otherwise match FindStrandedAsync's status filter.
-        var runId = await _store.StartAsync("manufacture", 1, "c-healthy", "implement", CancellationToken.None);
+        var runId = await _store.StartAsync("manufacture", 1, "c-healthy", "implement", initialVariables: null, CancellationToken.None);
         await BackdateUpdatedAtAsync(runId, TimeSpan.FromSeconds(1));
 
         var terminated = await _reconciler.SweepAsync(ProductionThreshold, CancellationToken.None);
@@ -78,7 +78,7 @@ public sealed class WorkflowRunReconcilerTests(PostgresFixture pg) : IAsyncLifet
         // days — terminating it because nobody approved it quickly would destroy exactly the work the gate
         // exists to protect. Parked directly via CompleteNodeAsync (no process definition needed for this
         // store call) rather than through a full gate node, mirroring OrmWorkflowStoreTests' own style.
-        var runId = await _store.StartAsync("approval", 1, "c-awaiting", "start", CancellationToken.None);
+        var runId = await _store.StartAsync("approval", 1, "c-awaiting", "start", initialVariables: null, CancellationToken.None);
         var toGate = new WorkflowTransition("gate", WorkflowStatus.Awaiting, "ok", WorkflowEventKind.Awaiting);
         await _store.CompleteNodeAsync(runId, seq: 1, toGate, new NodeResult(null, Empty), CancellationToken.None);
         await BackdateUpdatedAtAsync(runId, TimeSpan.FromDays(10));
@@ -94,8 +94,8 @@ public sealed class WorkflowRunReconcilerTests(PostgresFixture pg) : IAsyncLifet
     [Fact]
     public async Task SweepAsync_terminates_several_stranded_runs_in_one_call()
     {
-        var first = await _store.StartAsync("manufacture", 1, "c-multi-1", "implement", CancellationToken.None);
-        var second = await _store.StartAsync("manufacture", 1, "c-multi-2", "implement", CancellationToken.None);
+        var first = await _store.StartAsync("manufacture", 1, "c-multi-1", "implement", initialVariables: null, CancellationToken.None);
+        var second = await _store.StartAsync("manufacture", 1, "c-multi-2", "implement", initialVariables: null, CancellationToken.None);
         await BackdateUpdatedAtAsync(first, TimeSpan.FromHours(2));
         await BackdateUpdatedAtAsync(second, TimeSpan.FromHours(3));
 
@@ -129,8 +129,8 @@ public sealed class WorkflowRunReconcilerTests(PostgresFixture pg) : IAsyncLifet
         // would re-head every future sweep's batch. throwsOnId's FailStrandedAsync always throws for one
         // specific run and delegates to the real store for every other call, simulating exactly that shape of
         // infrastructure fault without needing to actually break the database mid-sweep.
-        var throwsId = await _store.StartAsync("manufacture", 1, "c-isolation-throws", "implement", CancellationToken.None);
-        var survivesId = await _store.StartAsync("manufacture", 1, "c-isolation-survives", "implement", CancellationToken.None);
+        var throwsId = await _store.StartAsync("manufacture", 1, "c-isolation-throws", "implement", initialVariables: null, CancellationToken.None);
+        var survivesId = await _store.StartAsync("manufacture", 1, "c-isolation-survives", "implement", initialVariables: null, CancellationToken.None);
         await BackdateUpdatedAtAsync(throwsId, TimeSpan.FromHours(2));
         await BackdateUpdatedAtAsync(survivesId, TimeSpan.FromHours(1));
 
@@ -156,8 +156,14 @@ public sealed class WorkflowRunReconcilerTests(PostgresFixture pg) : IAsyncLifet
     /// <summary>Delegates every call to <paramref name="inner"/> except <see cref="FailStrandedAsync"/> for <paramref name="throwsForRunId"/>, which always throws — simulating an infrastructure fault on one run in a batch without needing to actually break the database mid-sweep.</summary>
     private sealed class ThrowsOnFailStrandedFor(IWorkflowStore inner, Guid throwsForRunId) : IWorkflowStore
     {
-        public ValueTask<Guid> StartAsync(string process, int version, string correlationKey, string startNode, CancellationToken ct) =>
-            inner.StartAsync(process, version, correlationKey, startNode, ct);
+        public ValueTask<Guid> StartAsync(
+            string process,
+            int version,
+            string correlationKey,
+            string startNode,
+            IReadOnlyDictionary<string, object?>? initialVariables,
+            CancellationToken ct) =>
+            inner.StartAsync(process, version, correlationKey, startNode, initialVariables, ct);
 
         public ValueTask<WorkflowRun?> FindAsync(Guid runId, CancellationToken ct) => inner.FindAsync(runId, ct);
 
