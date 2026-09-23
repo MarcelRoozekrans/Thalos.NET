@@ -117,6 +117,9 @@ public sealed class ModelTests
         new MemoryQuery { OwnerIds = [] }.Matches(r).Should().BeTrue("an empty owner list is treated as all owners");
         new MemoryQuery { AgentId = a }.Matches(r).Should().BeTrue();
         new MemoryQuery { AgentId = AgentId.New() }.Matches(r).Should().BeFalse();
+        new MemoryQuery { OwnerWideOnly = true }.Matches(r).Should().BeFalse("r is pinned to an agent, not owner-wide");
+        new MemoryQuery { OwnerWideOnly = true }.Matches(r with { AgentId = null }).Should().BeTrue();
+        new MemoryQuery { OwnerWideOnly = true, AgentId = a }.Matches(r).Should().BeFalse("OwnerWideOnly excludes a pinned record even when AgentId also matches it");
         new MemoryQuery { Kinds = [MemoryKind.Fact, MemoryKind.Note] }.Matches(r).Should().BeTrue();
         new MemoryQuery { Kinds = [MemoryKind.Note] }.Matches(r).Should().BeFalse();
         new MemoryQuery { Tags = ["x", "y"] }.Matches(r).Should().BeTrue("all listed tags present");

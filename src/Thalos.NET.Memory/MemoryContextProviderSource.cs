@@ -8,7 +8,9 @@ namespace Thalos.Memory;
 /// <summary>
 /// Creates a <see cref="MemoryContextProvider"/> per agent unless memory is disabled for it (<see cref="AgentMemorySettings.Enabled"/>
 /// overrides <see cref="MemoryOptions.Enabled"/>). The provider gets its own <see cref="RecallOptions"/> copy — <see cref="AgentMemorySettings.TopK"/>
-/// (clamped to ≥ 1) over the host-wide <see cref="MemoryOptions.Recall"/> — so the bound options instance is never mutated.
+/// (floored to ≥ 1 here) over the host-wide <see cref="MemoryOptions.Recall"/> — so the bound options instance is never mutated.
+/// Only the floor happens here: the upper bound (<see cref="MemoryQuery.MaxPageSize"/>, one page per scope partition) is enforced
+/// at host start by <c>MemoryThalosBuilderExtensions</c>' <c>ValidateOnStart</c> registration, not by capping the value in this class.
 /// </summary>
 public sealed class MemoryContextProviderSource(
     IMemoryService memory,
