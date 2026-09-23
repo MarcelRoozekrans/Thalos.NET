@@ -212,23 +212,28 @@ public sealed partial class MemoryService(
     }
 
     /// <summary>
-    /// The store-backed <see cref="MemoryRecallTier.Recency"/> path: every non-archived record of <paramref name="scope"/>'s
-    /// owner (and shared owner, when configured), filtered through <see cref="MemoryScope.Includes"/> — the same single
-    /// visibility rule the semantic path applies at hydration — ordered by <c>UpdatedAt</c> descending, then the same
-    /// TopK/MaxChars budget the semantic path applies. Score is reported as 0 (no similarity was computed).
+    /// The store-backed <see cref="MemoryRecallTier.Recency"/> path: one exact-filtered, capped query per
+    /// <see cref="MemoryScope.Partitions"/> entry — same pattern as <c>RagNetMemoryIndex.SearchAsync</c> — so a page boundary can
+    /// never discard an in-scope row behind a noisier partition (e.g. another agent pinned to the same owner). Each partition's
+    /// query still passes through <see cref="MemoryScope.Includes"/> as a post-filter: the query bounds what is fetched, the
+    /// filter bounds what is returned. Merged, ordered by <c>UpdatedAt</c> descending, then the same TopK/MaxChars budget the
+    /// semantic path applies. Score is reported as 0 (no similarity was computed — nothing here matched the query text).
     /// </summary>
     private async ValueTask<Result<List<RecalledMemory>, AgentError>> RecencyFallbackAsync(MemoryScope scope, int topK, int maxChars, CancellationToken ct)
     {
-        var owners = new List<string> { scope.OwnerId };
-        if (scope.SharedOwnerId is { } shared && !string.Equals(shared, scope.OwnerId, StringComparison.Ordinal))
-        {
-            owners.Add(shared);
-        }
-
+        var fetchPerPartition = (int)Math.Min(MemoryQuery.MaxPageSize, Math.Max(4L * topK, 20));
         var candidates = new List<RecalledMemory>();
-        foreach (var owner in owners)
+        foreach (var (owner, agent) in scope.Partitions())
         {
-            var query = new MemoryQuery { OwnerIds = [owner], IncludeArchived = false, Page = 1, PageSize = MemoryQuery.MaxPageSize };
+            var query = new MemoryQuery
+            {
+                OwnerIds = [owner],
+                AgentId = agent,
+                OwnerWideOnly = agent is null,
+                IncludeArchived = false,
+                Page = 1,
+                PageSize = fetchPerPartition,
+            };
             var page = await store.ListAsync(query, ct).ConfigureAwait(false);
             if (page.IsFailure)
             {

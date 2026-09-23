@@ -96,6 +96,48 @@ public sealed class MemoryServiceRecallDegradationTests
     }
 
     [Fact]
+    public async Task Recency_fallback_does_not_lose_in_scope_rows_behind_another_agents_page_boundary()
+    {
+        // Reproduction from review: owner alice, 5 rows pinned to myAgent, then MORE than MaxPageSize newer rows pinned to
+        // otherAgent. A query that lists the owner's records without an agent filter, ordered by UpdatedAt desc, would put
+        // every otherAgent row ahead of the 5 in-scope ones on page 1 and never see them at all. One exact-filtered query per
+        // MemoryScope.Partitions() entry must not have this failure mode: myAgent's partition is queried on its own.
+        var f = new MemoryServiceFixture(UnavailableMemoryIndex.Instance);
+        var svc = f.Build();
+        var myAgent = AgentId.New();
+        var otherAgent = AgentId.New();
+        var mine = new List<MemoryId>();
+        for (var i = 0; i < 5; i++)
+        {
+            mine.Add((await svc.RememberAsync(MemoryServiceFixture.Remember($"mine {i}", agent: myAgent), default)).Value.Id);
+        }
+
+        for (var i = 0; i < MemoryQuery.MaxPageSize + 5; i++)
+        {
+            await svc.RememberAsync(MemoryServiceFixture.Remember($"other agent noise {i}", agent: otherAgent), default);
+        }
+
+        var r = await svc.RecallAsync("mine", new MemoryScope("alice", myAgent), new RecallOptions { TopK = 20 }, default);
+
+        r.IsSuccess.Should().BeTrue();
+        r.Value.Tier.Should().Be(MemoryRecallTier.Recency, "the store genuinely holds in-scope rows; this must never present as None");
+        r.Value.Memories.Select(m => m.Record.Id).Should().BeEquivalentTo(mine, "none of the caller's own pinned rows may be dropped behind another agent's page of noise");
+    }
+
+    [Fact]
+    public async Task Recency_fallback_store_failure_is_returned_not_swallowed_into_an_empty_success()
+    {
+        var f = new MemoryServiceFixture(UnavailableMemoryIndex.Instance);
+        var store = new HookedStore(f.Store) { OnList = _ => AgentError.MemoryStoreFailed("store down", "Test") };
+        var svc = f.Build(store);
+
+        var r = await svc.RecallAsync("anything", new MemoryScope("alice", null), new RecallOptions(), default);
+
+        r.IsFailure.Should().BeTrue("a genuine store failure during the recency fallback must surface, not degrade to an empty success");
+        r.Error.Code.Should().Be(AgentErrorCode.MemoryStoreFailed);
+    }
+
+    [Fact]
     public async Task Tool_output_carries_the_degraded_note_only_when_the_tier_is_not_Semantic()
     {
         var (warmFixture, warmSource) = MemoryToolsTests.Build();

@@ -67,6 +67,7 @@ internal sealed class HookedStore(IMemoryStore inner) : IMemoryStore
     public Func<MemoryId, AgentError?>? OnGet { get; set; }
     public Func<MemoryId, MemoryUpdate, AgentError?>? OnUpdate { get; set; }
     public Func<AgentError?>? OnMarkRecalled { get; set; }
+    public Func<MemoryQuery, AgentError?>? OnList { get; set; }
 
     /// <summary>When set, <see cref="StreamAsync"/> yields this many records and then throws the exception (an <c>IAsyncEnumerable</c> cannot return a <c>Result</c>).</summary>
     public (int After, Exception Throw)? OnStream { get; set; }
@@ -80,7 +81,8 @@ internal sealed class HookedStore(IMemoryStore inner) : IMemoryStore
         OnUpdate?.Invoke(id, update) is { } error ? new(Result<MemoryRecord, AgentError>.Failure(error)) : inner.UpdateAsync(id, update, ct);
 
     public ValueTask<UnitResult<AgentError>> DeleteAsync(MemoryId id, CancellationToken ct) => inner.DeleteAsync(id, ct);
-    public ValueTask<Result<MemoryPage, AgentError>> ListAsync(MemoryQuery query, CancellationToken ct) => inner.ListAsync(query, ct);
+    public ValueTask<Result<MemoryPage, AgentError>> ListAsync(MemoryQuery query, CancellationToken ct) =>
+        OnList?.Invoke(query) is { } error ? new(Result<MemoryPage, AgentError>.Failure(error)) : inner.ListAsync(query, ct);
 
     public ValueTask<UnitResult<AgentError>> MarkRecalledAsync(IReadOnlyList<MemoryId> ids, DateTimeOffset at, CancellationToken ct) =>
         OnMarkRecalled?.Invoke() is { } error ? new(UnitResult<AgentError>.Failure(error)) : inner.MarkRecalledAsync(ids, at, ct);
