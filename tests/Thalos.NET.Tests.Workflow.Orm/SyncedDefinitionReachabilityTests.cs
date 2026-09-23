@@ -72,7 +72,7 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
         var synced = await _sync.SyncAsync(CancellationToken.None);
         synced.IsSuccess.Should().BeTrue(synced.IsFailure ? synced.Error : "");
 
-        var runId = await _store.StartAsync("pipeline", 1, "c-reach", "implement", CancellationToken.None);
+        var runId = await _store.StartAsync("pipeline", 1, "c-reach", "implement", initialVariables: null, CancellationToken.None);
 
         // No message is constructed here: StartAsync enqueued 'implement''s own dispatch, and the drain takes it
         // off the table exactly as a host's outbox consumer would.
@@ -99,7 +99,7 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
         _source.Write(PipelineV1);
         (await _sync.SyncAsync(CancellationToken.None)).IsSuccess.Should().BeTrue();
 
-        var runId = await _store.StartAsync("pipeline", 1, "c-pinned", "implement", CancellationToken.None);
+        var runId = await _store.StartAsync("pipeline", 1, "c-pinned", "implement", initialVariables: null, CancellationToken.None);
 
         // The hot reload a live run must survive untouched.
         _source.Write(PipelineV2);
@@ -124,7 +124,7 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
     {
         // Started without ever syncing anything: StartAsync stamps the pin independently of this store, so a run
         // can legitimately exist pointing at a version no row backs.
-        var runId = await _store.StartAsync("pipeline", 7, "c-missing", "implement", CancellationToken.None);
+        var runId = await _store.StartAsync("pipeline", 7, "c-missing", "implement", initialVariables: null, CancellationToken.None);
         var dispatcher = NewDispatcher();
 
         var dispatch = async () => await OutboxDrain.DispatchNextAsync(pg.ConnectionString, dispatcher);
@@ -156,7 +156,7 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
         _source.Write(gated);
         (await _sync.SyncAsync(CancellationToken.None)).IsSuccess.Should().BeTrue();
 
-        var runId = await _store.StartAsync("gated", 1, "c-gate-resume", "start", CancellationToken.None);
+        var runId = await _store.StartAsync("gated", 1, "c-gate-resume", "start", initialVariables: null, CancellationToken.None);
 
         // Two dispatches park the gate: the first completes 'start' and moves the run to 'gate'; the second,
         // enqueued by that very transition, is what Advance parks at Awaiting. Both come off the outbox — the

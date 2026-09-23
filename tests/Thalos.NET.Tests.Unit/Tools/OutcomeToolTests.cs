@@ -31,16 +31,81 @@ public sealed class OutcomeToolTests
         outcome.GetProperty("enum").EnumerateArray().Select(e => e.GetString()).Should().Equal("approved", "rejected");
     }
 
-    /// <summary>Red if the schema stops requiring the argument or starts tolerating extra properties.</summary>
+    /// <summary>
+    /// Red if the schema stops requiring the outcome argument, starts requiring the optional variables argument,
+    /// starts tolerating properties beyond the two it declares, or grows a third.
+    /// </summary>
     [Fact]
-    public void Schema_requires_the_outcome_argument_and_closes_the_object()
+    public void Schema_requires_only_the_outcome_argument_and_closes_the_object()
     {
         var tool = new OutcomeTool(Approval);
 
         tool.JsonSchema.GetProperty("type").GetString().Should().Be("object");
         tool.JsonSchema.GetProperty("required").EnumerateArray().Select(e => e.GetString()).Should().Equal(OutcomeToolSchema.ArgumentName);
         tool.JsonSchema.GetProperty("additionalProperties").GetBoolean().Should().BeFalse();
-        tool.JsonSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name).Should().Equal(OutcomeToolSchema.ArgumentName);
+        tool.JsonSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name)
+            .Should().Equal(OutcomeToolSchema.ArgumentName, OutcomeToolSchema.VariablesArgumentName);
+    }
+
+    /// <summary>
+    /// The variables argument rides on this one tool rather than a second <c>set_variables</c> tool, so that
+    /// there is one read path instead of two that can drift. Red if <c>BuildSchema</c> stops writing the
+    /// property, or writes it as something other than an object — the read side merges an object and discards the
+    /// whole call for anything else.
+    /// </summary>
+    [Fact]
+    public void Schema_offers_an_optional_object_valued_variables_argument()
+    {
+        var tool = new OutcomeTool(Approval);
+
+        var variables = tool.JsonSchema.GetProperty("properties").GetProperty(OutcomeToolSchema.VariablesArgumentName);
+        variables.GetProperty("type").GetString().Should().Be("object");
+        variables.GetProperty("additionalProperties").GetBoolean().Should().BeTrue("the caller chooses the keys, so the object itself must stay open");
+        variables.GetProperty("description").GetString().Should().NotBeNullOrWhiteSpace();
+        tool.Description.Should().Contain(OutcomeToolSchema.VariablesArgumentName,
+            "the tool's own description is what a model reads first, so it has to mention the argument exists");
+    }
+
+    /// <summary>
+    /// A variables argument in the wrong shape is refused rather than ignored, because the read side discards the
+    /// entire call — outcome included — when it cannot merge the object. Red if the shape check in
+    /// <c>InvokeCoreAsync</c> is removed: the model would be told its outcome was recorded and the node would
+    /// then fail with "no outcome reported", which is the least debuggable pair of messages available.
+    /// </summary>
+    [Theory]
+    [InlineData("\"just a string\"")]
+    [InlineData("[1,2]")]
+    [InlineData("7")]
+    public async Task Variables_argument_in_the_wrong_shape_is_refused(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        var arguments = new AIFunctionArguments(StringComparer.Ordinal)
+        {
+            [OutcomeToolSchema.ArgumentName] = "approved",
+            [OutcomeToolSchema.VariablesArgumentName] = document.RootElement,
+        };
+
+        var result = await new OutcomeTool(Approval).InvokeAsync(arguments);
+
+        result.Should().BeOfType<string>().Which.Should().StartWith("'variables' must be a JSON object.");
+    }
+
+    /// <summary>Red if the shape check starts rejecting the shapes the read side actually accepts — a JSON object, or an omitted-as-null argument.</summary>
+    [Theory]
+    [InlineData("{\"a\":1}")]
+    [InlineData("null")]
+    public async Task Variables_argument_in_an_accepted_shape_records_the_outcome(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        var arguments = new AIFunctionArguments(StringComparer.Ordinal)
+        {
+            [OutcomeToolSchema.ArgumentName] = "approved",
+            [OutcomeToolSchema.VariablesArgumentName] = document.RootElement,
+        };
+
+        var result = await new OutcomeTool(Approval).InvokeAsync(arguments);
+
+        result.Should().Be("Outcome 'approved' recorded.");
     }
 
     /// <summary>

@@ -17,7 +17,29 @@ public interface IWorkflowStore
     /// returns its id. Seeds <see cref="WorkflowRun.Visits"/> with <paramref name="startNode"/> already counted
     /// as one entry — the run has entered it by virtue of starting there — so a start node that also carries a
     /// <c>maxVisits</c> cap is bounded correctly from its very first run, not given one free, uncounted entry.
+    /// <paramref name="initialVariables"/> seeds <see cref="WorkflowRun.Variables"/> so the run starts holding
+    /// the work item it exists to perform.
     /// </summary>
+    /// <param name="process">The process name to run.</param>
+    /// <param name="version">The process version to pin this run to.</param>
+    /// <param name="correlationKey">The globally unique idempotency key — see this method's remarks.</param>
+    /// <param name="startNode">The node the run begins at.</param>
+    /// <param name="initialVariables">
+    /// The run's opening <see cref="WorkflowRun.Variables"/> bag — the issue, branch, diff or whatever else the
+    /// first node needs to act on — or <see langword="null"/> for a run that starts with nothing. Null and an
+    /// empty dictionary are the same thing here: both leave <see cref="WorkflowRun.Variables"/> an <em>empty</em>
+    /// dictionary, never <see langword="null"/>, so a caller reading it back never has to null-check. A required
+    /// parameter rather than a defaulted one deliberately: an omitted-by-default seed on the one method that can
+    /// give a run its work item is exactly the silent no-op this signature change exists to rule out. Seeded only
+    /// on the path that actually starts a run: a call whose <paramref name="correlationKey"/> an earlier run
+    /// already used starts nothing and therefore seeds nothing, leaving that earlier run's own bag as it stands.
+    /// <para>
+    /// Bounded: an implementation throws <see cref="ArgumentException"/> for a bag holding more keys than a run
+    /// may carry. The cap is what lets the engine name every variable it has to leave out of a node's task text,
+    /// so a store that accepted an unbounded seed would silently weaken that guarantee for every run it started.
+    /// </para>
+    /// </param>
+    /// <param name="ct">Cancels the start.</param>
     /// <remarks>
     /// <para>
     /// <b>A started run is a dispatched run.</b> An implementation must schedule <paramref name="startNode"/>'s
@@ -37,7 +59,13 @@ public interface IWorkflowStore
     /// rather than from a business identity that recurs.
     /// </para>
     /// </remarks>
-    ValueTask<Guid> StartAsync(string process, int version, string correlationKey, string startNode, CancellationToken ct);
+    ValueTask<Guid> StartAsync(
+        string process,
+        int version,
+        string correlationKey,
+        string startNode,
+        IReadOnlyDictionary<string, object?>? initialVariables,
+        CancellationToken ct);
 
     /// <summary>Finds a run by id, or <see langword="null"/> if none exists.</summary>
     ValueTask<WorkflowRun?> FindAsync(Guid runId, CancellationToken ct);

@@ -47,8 +47,17 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
         return null;
     }
 
-    public ValueTask<Guid> StartAsync(string process, int version, string correlationKey, string startNode, CancellationToken ct)
+    public ValueTask<Guid> StartAsync(
+        string process,
+        int version,
+        string correlationKey,
+        string startNode,
+        IReadOnlyDictionary<string, object?>? initialVariables,
+        CancellationToken ct)
     {
+        // Mirrors OrmWorkflowStore.StartAsync, which calls the same one guard.
+        WorkflowVariableBlock.ThrowIfOverKeyLimit(initialVariables, nameof(initialVariables));
+
         var id = Guid.NewGuid();
         _runs[id] = new WorkflowRun
         {
@@ -60,6 +69,11 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
             Status = WorkflowStatus.Running,
             AwaitingSignal = null,
             Visits = new Dictionary<string, int>(StringComparer.Ordinal) { [startNode] = 1 },
+            // Mirrors OrmWorkflowStore.StartAsync: a null seed and an empty one are the same thing, and both
+            // leave the run with an empty bag rather than a null one.
+            Variables = initialVariables is null
+                ? new Dictionary<string, object?>(StringComparer.Ordinal)
+                : new Dictionary<string, object?>(initialVariables, StringComparer.Ordinal),
         };
 
         // The start node's own dispatch, exactly as OrmWorkflowStore.StartAsync enqueues it. A fake that skipped

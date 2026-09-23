@@ -72,7 +72,7 @@ static async Task<int> WriteAsync(string connectionString, CancellationToken ct)
 
     var store = NewStore(connectionString);
 
-    var runId = await store.StartAsync("manufacture", 1, Guid.NewGuid().ToString(), "implement", ct).ConfigureAwait(false);
+    var runId = await store.StartAsync("manufacture", 1, Guid.NewGuid().ToString(), "implement", initialVariables: null, ct).ConfigureAwait(false);
 
     await store.CompleteNodeAsync(
         runId,

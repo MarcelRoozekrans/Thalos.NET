@@ -44,6 +44,10 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     /// <summary>The seq <see cref="StartAsync"/> records the seeded "Entered" event at — see <see cref="InitialCurrentSeq"/>.</summary>
     private const long SeedEventSeq = InitialCurrentSeq - 1;
 
+    /// <summary>The bag a run started without initial variables gets — empty, never SQL NULL. See <see cref="StartAsync"/>.</summary>
+    private static readonly IReadOnlyDictionary<string, object?> EmptyVariables =
+        new Dictionary<string, object?>(StringComparer.Ordinal);
+
     private readonly WorkflowOrmOptions _options = options ?? throw new ArgumentNullException(nameof(options));
 
     /// <summary>
@@ -75,17 +79,27 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     private readonly IProcessDefinitionStore _definitions = definitions ?? throw new ArgumentNullException(nameof(definitions));
 
     /// <inheritdoc/>
-    public async ValueTask<Guid> StartAsync(string process, int version, string correlationKey, string startNode, CancellationToken ct)
+    public async ValueTask<Guid> StartAsync(
+        string process,
+        int version,
+        string correlationKey,
+        string startNode,
+        IReadOnlyDictionary<string, object?>? initialVariables,
+        CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(process);
         ArgumentException.ThrowIfNullOrWhiteSpace(correlationKey);
         ArgumentException.ThrowIfNullOrWhiteSpace(startNode);
+        WorkflowVariableBlock.ThrowIfOverKeyLimit(initialVariables, nameof(initialVariables));
 
         await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
         await using var tx = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
 
         var id = Guid.NewGuid();
-        var inserted = await InsertRunAsync(connection, tx, id, process, version, correlationKey, startNode, ct).ConfigureAwait(false);
+        // Null and an empty bag are the same thing to the column: both store '{}', never SQL NULL, so a run's
+        // variables read back as an empty dictionary rather than something a consumer has to null-check.
+        var seeded = initialVariables ?? EmptyVariables;
+        var inserted = await InsertRunAsync(connection, tx, id, process, version, correlationKey, startNode, seeded, ct).ConfigureAwait(false);
 
         if (inserted == 0)
         {
@@ -106,7 +120,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             connection, tx, id, seq: SeedEventSeq,
             fromNode: null, toNode: startNode,
             status: WorkflowStatus.Running, awaitingSignal: null,
-            outcome: null, variables: null, error: null,
+            outcome: null, variables: seeded.Count == 0 ? null : seeded, error: null,
             kind: nameof(WorkflowEventKind.Entered), ct).ConfigureAwait(false);
 
         // The start node's own dispatch, on this same transaction. Without it a run created through this API
@@ -123,19 +137,23 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
 
     /// <summary>
     /// <see cref="StartAsync"/>'s <c>INSERT</c>, split out only to keep that method inside the analyzer's length
-    /// limit. Returns the number of rows inserted: one for a genuinely new run, zero when
+    /// limit. <paramref name="initialVariables"/> is written into the <c>variables</c> column as it stands, so a
+    /// run starts holding exactly what it was seeded with — and, on the zero-row path below, nothing is written
+    /// at all, leaving the run that already owns the key with its own bag untouched.
+    /// Returns the number of rows inserted: one for a genuinely new run, zero when
     /// <c>ON CONFLICT (correlation_key) DO NOTHING</c> found the key already taken — which is how
     /// <see cref="StartAsync"/> tells the two paths apart without a separate probing read.
     /// </summary>
     private static async Task<int> InsertRunAsync(
         NpgsqlConnection connection, NpgsqlTransaction tx, Guid id,
-        string process, int version, string correlationKey, string startNode, CancellationToken ct)
+        string process, int version, string correlationKey, string startNode,
+        IReadOnlyDictionary<string, object?> initialVariables, CancellationToken ct)
     {
         await using var insert = connection.CreateCommand();
         insert.Transaction = tx;
         insert.CommandText = """
             INSERT INTO workflow_run (id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error)
-            VALUES (@id, @process, @version, @correlationKey, @currentNode, @currentSeq, @status, NULL, @visits::jsonb, '{}'::jsonb, NULL)
+            VALUES (@id, @process, @version, @correlationKey, @currentNode, @currentSeq, @status, NULL, @visits::jsonb, @variables::jsonb, NULL)
             ON CONFLICT (correlation_key) DO NOTHING
             """;
         insert.Parameters.AddWithValue("id", id);
@@ -146,6 +164,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         insert.Parameters.AddWithValue("currentSeq", InitialCurrentSeq);
         insert.Parameters.AddWithValue("status", nameof(WorkflowStatus.Running));
         insert.Parameters.AddWithValue("visits", JsonSerializer.Serialize(new Dictionary<string, int>(StringComparer.Ordinal) { [startNode] = 1 }));
+        insert.Parameters.AddWithValue("variables", JsonSerializer.Serialize(initialVariables));
 
         return await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
@@ -647,32 +666,23 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     /// Deserializing straight to <c>Dictionary&lt;string, object?&gt;</c> leaves every value a boxed
     /// <see cref="JsonElement"/>, not the plain CLR value a consumer reading <see cref="WorkflowRun.Variables"/>
     /// would expect — comparing a boxed <see cref="JsonElement"/> string against a bare <see cref="string"/>
-    /// never succeeds. Deserializes through <see cref="JsonElement"/> instead and unwraps each value with
-    /// <see cref="ToPlainValue"/> so the bag holds ordinary strings, numbers, booleans, nulls, dictionaries and
-    /// lists.
+    /// never succeeds. Parses to a <see cref="JsonElement"/> instead and hands it to
+    /// <c>WorkflowVariableBlock.ReadObject</c>, so the bag holds ordinary strings, numbers, booleans, nulls,
+    /// dictionaries and lists.
     /// </summary>
+    /// <remarks>
+    /// That method, and not a copy of it here, on purpose: it is also what <c>WorkflowNodeDispatcher</c> unwraps
+    /// a reported variables object with on the way <em>in</em>. Two copies would let a value come back out of
+    /// this column as a different CLR type than it went in as — which is precisely what happened while the
+    /// unwrapping did live in two places.
+    /// </remarks>
     private static Dictionary<string, object?> DeserializeVariables(string json)
     {
-        var raw = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(json) ?? [];
-        var result = new Dictionary<string, object?>(raw.Count, StringComparer.Ordinal);
-        foreach (var (key, element) in raw)
-        {
-            result[key] = ToPlainValue(element);
-        }
-
-        return result;
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.ValueKind == JsonValueKind.Object
+            ? WorkflowVariableBlock.ReadObject(document.RootElement)
+            : new Dictionary<string, object?>(StringComparer.Ordinal);
     }
-
-    private static object? ToPlainValue(JsonElement element) => element.ValueKind switch
-    {
-        JsonValueKind.String => element.GetString(),
-        JsonValueKind.Number => element.TryGetInt64(out var longValue) ? longValue : element.GetDouble(),
-        JsonValueKind.True => true,
-        JsonValueKind.False => false,
-        JsonValueKind.Object => element.EnumerateObject().ToDictionary(p => p.Name, p => ToPlainValue(p.Value), StringComparer.Ordinal),
-        JsonValueKind.Array => element.EnumerateArray().Select(ToPlainValue).ToList(),
-        _ => null,
-    };
 
     /// <summary>Whether <paramref name="status"/> is one a run cannot leave: no further transition, completion, or termination is meaningful once reached.</summary>
     private static bool IsTerminal(WorkflowStatus status) =>

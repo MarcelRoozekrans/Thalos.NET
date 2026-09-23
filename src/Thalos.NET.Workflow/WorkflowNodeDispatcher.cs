@@ -1,4 +1,5 @@
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using ZeroAlloc.Authorization;
 using ZeroAlloc.Results;
 
@@ -32,12 +33,13 @@ namespace Thalos.Workflow;
 /// already won the race to complete this node — is allowed to propagate, because those genuinely are the
 /// transient, infrastructure-shaped failures a retry can fix.
 /// </remarks>
-public sealed class WorkflowNodeDispatcher(
+public sealed partial class WorkflowNodeDispatcher(
     IWorkflowStore store,
     ISubagentRunner runner,
     IWorkflowReferenceResolver resolver,
     IProcessDefinitionStore definitions,
-    Func<WorkflowRun, ISecurityContext> resolveCaller)
+    Func<WorkflowRun, ISecurityContext> resolveCaller,
+    ILogger<WorkflowNodeDispatcher>? logger = null)
 {
     /// <summary>
     /// The qualified tool name a node with declared <see cref="ProcessNode.Outcomes"/> is instructed to call to
@@ -54,6 +56,14 @@ public sealed class WorkflowNodeDispatcher(
     /// </summary>
     internal const string OutcomeArgumentName = OutcomeToolSchema.ArgumentName;
 
+    /// <summary>
+    /// The optional second argument name a call to <see cref="OutcomeToolName"/> may carry: a JSON object of
+    /// variables to merge into the run. Aliases <see cref="OutcomeToolSchema.VariablesArgumentName"/> for the
+    /// same reason <see cref="OutcomeArgumentName"/> aliases its counterpart - the offering side spells it from
+    /// that constant, and a second literal here could drift from it silently.
+    /// </summary>
+    internal const string VariablesArgumentName = OutcomeToolSchema.VariablesArgumentName;
+
     private static readonly IReadOnlyDictionary<string, object?> EmptyVariables =
         new Dictionary<string, object?>(StringComparer.Ordinal);
 
@@ -63,6 +73,13 @@ public sealed class WorkflowNodeDispatcher(
     private readonly IProcessDefinitionStore _definitions = definitions ?? throw new ArgumentNullException(nameof(definitions));
     private readonly Func<WorkflowRun, ISecurityContext> _resolveCaller =
         resolveCaller ?? throw new ArgumentNullException(nameof(resolveCaller));
+
+    /// <summary>
+    /// Where this dispatcher tells a host operator what the reading agent can already see. Optional and last so
+    /// every existing five-argument construction still compiles, and defaulted to a no-op rather than made
+    /// required: a host that wires no logger loses the operator's view of dropped variables, not the dispatch.
+    /// </summary>
+    private readonly ILogger _logger = logger ?? (ILogger)Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
 
     /// <summary>
     /// Advances the run named in <paramref name="message"/> by one node: loads it, runs its agent turn, and
@@ -203,7 +220,7 @@ public sealed class WorkflowNodeDispatcher(
         var request = new SubagentRunRequest
         {
             AgentId = agentId,
-            Task = BuildTaskText(node, outcomeTool),
+            Task = BuildTaskText(run, node, outcomeTool),
             Caller = _resolveCaller(run),
             RequiredOutcome = outcomeTool,
         };
@@ -217,7 +234,7 @@ public sealed class WorkflowNodeDispatcher(
             return;
         }
 
-        var nodeResult = BuildNodeResult(run.CurrentNode, turn.Value, outcomeTool);
+        var nodeResult = BuildNodeResult(run, turn.Value, outcomeTool);
         if (nodeResult.IsFailure)
         {
             await _store.FailAsync(run.Id, nodeResult.Error, ct).ConfigureAwait(false);
@@ -257,53 +274,136 @@ public sealed class WorkflowNodeDispatcher(
 
     /// <summary>
     /// Builds the node result Advance evaluates. For a node with no declared outcomes, the outcome is always
-    /// <see langword="null"/> — nothing to constrain. For a node with declared outcomes, the value comes only
+    /// <see langword="null"/> and the variable bag is always empty — there is no outcome tool for such a node, so
+    /// it has no read path to report either through, which is correct rather than a gap: a node that declares
+    /// nothing produces nothing. For a node with declared outcomes, both the value and the variables come only
     /// from a call to <paramref name="outcomeTool"/>'s <see cref="OutcomeToolSchema.ToolName"/> in
     /// <see cref="AgentTurnResult.ToolCalls"/>: never from <see cref="AgentTurnResult.Text"/>. A model that never
-    /// called the tool fails the node right here, with a message that names <paramref name="nodeName"/> and says
+    /// called the tool fails the node right here, with a message that names <paramref name="run"/>'s current node and says
     /// plainly that no outcome was reported — distinct from the message <see cref="WorkflowInterpreter.Advance"/>
     /// produces for a call that reported a value outside the declared set, so the event log can tell a silent
     /// model apart from a miscategorising one. This method does not otherwise pre-validate the reported value
     /// against <see cref="OutcomeToolSchema.AllowedValues"/> itself, because <c>Advance</c> is the single place
     /// that check already lives and duplicating it here would only create a second place for the two to drift.
+    /// <para>
+    /// <paramref name="run"/> rather than just its node name, because the two key-space caps are checked here and
+    /// the bag cap needs the keys the run already holds: overwriting one of those is always allowed, minting a
+    /// new one past the limit is not. See <see cref="CheckKeyLimits"/>.
+    /// </para>
     /// </summary>
-    private static Result<NodeResult> BuildNodeResult(string nodeName, AgentTurnResult turn, OutcomeToolSchema? outcomeTool)
+    private static Result<NodeResult> BuildNodeResult(WorkflowRun run, AgentTurnResult turn, OutcomeToolSchema? outcomeTool)
     {
+        var nodeName = run.CurrentNode;
         if (outcomeTool is null)
         {
             return Result<NodeResult>.Success(new NodeResult(null, EmptyVariables));
         }
 
-        var extraction = ExtractOutcome(turn, outcomeTool.ToolName);
+        var extraction = ExtractReport(turn, outcomeTool.ToolName);
         if (extraction.IsFailure)
         {
             return Result<NodeResult>.Failure($"node '{nodeName}' {extraction.Error}");
         }
 
-        if (extraction.Value is null)
+        var report = extraction.Value;
+        if (report.Outcome is null)
         {
             return Result<NodeResult>.Failure($"node '{nodeName}' completed without calling '{outcomeTool.ToolName}' to report an outcome.");
         }
 
-        return Result<NodeResult>.Success(new NodeResult(extraction.Value, EmptyVariables));
+        if (report.Variables is { Count: > 0 } reported && CheckKeyLimits(nodeName, run.Variables, reported) is { } limitError)
+        {
+            return Result<NodeResult>.Failure(limitError);
+        }
+
+        return Result<NodeResult>.Success(new NodeResult(report.Outcome, report.Variables ?? EmptyVariables));
     }
 
     /// <summary>
-    /// Reads the outcome strictly from tool calls named <paramref name="toolName"/> — never from
-    /// <see cref="AgentTurnResult.Text"/>. This is the read-side half of the structural constraint: even a model
-    /// that ignored the tool's schema and free-texted its answer into <c>Text</c> gets no consideration here, the
-    /// same as a model that never called the tool at all. Malformed <see cref="ToolCallSummary.ArgumentsJson"/> —
-    /// not valid JSON, or missing/non-string <see cref="OutcomeArgumentName"/> — is treated as though that
-    /// particular call did not report a value, rather than thrown: it is still a turn that completed, just one
-    /// call this dispatcher cannot make sense of. Two or more matching calls that disagree on the value fail
-    /// outright — picking one would be exactly the guess this task exists to eliminate — while repeated calls
-    /// that agree, or a single call, resolve to that one value. A <see langword="null"/> success value means no
-    /// call reported anything usable at all, which <see cref="BuildNodeResult"/> turns into its own explicit
-    /// "no outcome reported" failure rather than letting a silent <see langword="null"/> reach <c>Advance</c>.
+    /// Enforces the two caps on the variable key space, returning the failure message for a report that breaches
+    /// either, or <see langword="null"/> when it does not.
     /// </summary>
-    private static Result<string?> ExtractOutcome(AgentTurnResult turn, string toolName)
+    /// <remarks>
+    /// <para>
+    /// <b>Why the key space is bounded at all, and why rejecting is the right answer.</b> The omission notice can
+    /// only name every key it left out if the number of keys that can exist is itself bounded — otherwise an
+    /// agent mints enough names to push a real one out of any fixed-size list, and widening the list only moves
+    /// the threshold. So the bound lives here, on what may be written, rather than on what is displayed.
+    /// </para>
+    /// <para>
+    /// A breach fails the node rather than trimming the report, because a rejected report is a contract a process
+    /// author can read back out of <see cref="WorkflowRun.LastError"/> and the event log, while a silently
+    /// trimmed one looks exactly like a node that chose to report less. Both messages name the cap and the
+    /// numbers so the author can see which one was hit.
+    /// </para>
+    /// <para>
+    /// The per-report cap counts the whole turn's contribution, already merged across every matching call, so it
+    /// cannot be sidestepped by splitting one report over several calls. The bag cap counts <em>distinct</em>
+    /// keys after the merge: overwriting a key that already exists never moves that count, which is what lets a
+    /// capped loop overwrite the same few keys lap after lap without ever hitting this.
+    /// </para>
+    /// </remarks>
+    private static string? CheckKeyLimits(string nodeName, IReadOnlyDictionary<string, object?> existing, IReadOnlyDictionary<string, object?> reported)
+    {
+        if (reported.Count > WorkflowVariableBlock.MaxVariablesPerReport)
+        {
+            return $"node '{nodeName}' reported {reported.Count} variables in one turn, more than the {WorkflowVariableBlock.MaxVariablesPerReport} a single node may contribute. Report fewer, larger-grained variables.";
+        }
+
+        var distinct = existing.Count;
+        foreach (var key in reported.Keys)
+        {
+            if (!existing.ContainsKey(key))
+            {
+                distinct++;
+            }
+        }
+
+        return distinct > WorkflowVariableBlock.MaxVariableKeys
+            ? $"node '{nodeName}' would take the run's variable bag to {distinct} distinct keys, past the limit of {WorkflowVariableBlock.MaxVariableKeys}. Overwriting a key the run already holds is always allowed; minting a new one past the limit is not."
+            : null;
+    }
+
+    /// <summary>
+    /// Reads the outcome, and any variables reported alongside it, strictly from tool calls named
+    /// <paramref name="toolName"/> — never from <see cref="AgentTurnResult.Text"/>. This is the read-side half of
+    /// the structural constraint: even a model that ignored the tool's schema and free-texted its answer into
+    /// <c>Text</c> gets no consideration here, the same as a model that never called the tool at all. Variables
+    /// travel that same single read path deliberately, rather than a second tool: two paths would be two places
+    /// to keep in step, and a free-texted variable gets exactly as much consideration as a free-texted outcome,
+    /// which is none.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Malformed <see cref="ToolCallSummary.ArgumentsJson"/> is treated as though that particular call did not
+    /// report a value, rather than thrown: it is still a turn that completed, just one call this dispatcher
+    /// cannot make sense of. Malformed means any of — not valid JSON; a root that is not a JSON object; a missing
+    /// or non-string <see cref="OutcomeArgumentName"/>; or a <see cref="VariablesArgumentName"/> that is present
+    /// and is neither a JSON object nor JSON <c>null</c>. That last one discards the call's outcome as well, and
+    /// that is the point: the alternative is accepting the outcome while quietly dropping what the node reported
+    /// alongside it, which is a silent discard of a node's own output. A JSON <c>null</c> is <em>not</em>
+    /// malformed — the argument is optional, and an explicit null is an ordinary way to spell an omitted optional
+    /// argument, so it reads as "no variables" exactly like leaving it out.
+    /// </para>
+    /// <para>
+    /// Two or more matching calls that disagree on the outcome fail outright — picking one would be exactly the
+    /// guess this task exists to eliminate — while repeated calls that agree, or a single call, resolve to that
+    /// one value. Because disagreement fails before anything is merged, variables can only ever accumulate across
+    /// calls that agreed on the outcome; within those, later writes win on key collision, the same rule
+    /// <see cref="WorkflowRun.Variables"/> documents for the run-level bag. That is not the same kind of guess an
+    /// outcome would be: a bag accumulates by definition, a branch decision does not.
+    /// </para>
+    /// <para>
+    /// A <see langword="null"/> outcome on success means no call reported anything usable at all, which
+    /// <see cref="BuildNodeResult"/> turns into its own explicit "no outcome reported" failure rather than letting
+    /// a silent <see langword="null"/> reach <c>Advance</c>.
+    /// </para>
+    /// </remarks>
+    private static Result<ReportedResult> ExtractReport(AgentTurnResult turn, string toolName)
     {
         string? outcome = null;
+        Dictionary<string, object?>? variables = null;
+
         foreach (var call in turn.ToolCalls)
         {
             if (!string.Equals(call.ToolName, toolName, StringComparison.Ordinal))
@@ -311,32 +411,64 @@ public sealed class WorkflowNodeDispatcher(
                 continue;
             }
 
-            var value = TryReadOutcomeArgument(call.ArgumentsJson);
-            if (value is null)
+            if (TryReadReportedCall(call.ArgumentsJson) is not { } reported)
             {
                 continue;
             }
 
-            if (outcome is not null && !string.Equals(outcome, value, StringComparison.Ordinal))
+            if (outcome is not null && !string.Equals(outcome, reported.Outcome, StringComparison.Ordinal))
             {
-                return Result<string?>.Failure(
-                    $"called '{toolName}' more than once with disagreeing values ('{outcome}' and '{value}') — refusing to guess which one to use");
+                return Result<ReportedResult>.Failure(
+                    $"called '{toolName}' more than once with disagreeing values ('{outcome}' and '{reported.Outcome}') — refusing to guess which one to use");
             }
 
-            outcome = value;
+            outcome = reported.Outcome;
+
+            if (reported.Variables is { Count: > 0 } reportedVariables)
+            {
+                variables ??= new Dictionary<string, object?>(StringComparer.Ordinal);
+                foreach (var (key, value) in reportedVariables)
+                {
+                    variables[key] = value;
+                }
+            }
         }
 
-        return Result<string?>.Success(outcome);
+        return Result<ReportedResult>.Success(new ReportedResult(outcome, variables));
     }
 
-    /// <summary>Reads the <see cref="OutcomeArgumentName"/> string argument out of one tool call's JSON, or <see langword="null"/> if it isn't there or isn't a string.</summary>
-    private static string? TryReadOutcomeArgument(string argumentsJson)
+    /// <summary>
+    /// Reads one tool call's arguments into the outcome it reported and the variables it carried, or
+    /// <see langword="null"/> when this call reported nothing usable — see <see cref="ExtractReport"/>'s remarks
+    /// for exactly which shapes that covers and why.
+    /// </summary>
+    /// <remarks>
+    /// The root's <see cref="JsonValueKind"/> is checked before any property is read because
+    /// <see cref="JsonElement.TryGetProperty(string, out JsonElement)"/> throws
+    /// <see cref="InvalidOperationException"/> — not <see cref="JsonException"/> — on a root that is not an
+    /// object, so the <c>catch</c> below would not contain it and the throw would escape the dispatcher into an
+    /// outbox retry instead of failing the node.
+    /// </remarks>
+    private static ReportedCall? TryReadReportedCall(string argumentsJson)
     {
         try
         {
             using var arguments = JsonDocument.Parse(argumentsJson);
-            return arguments.RootElement.TryGetProperty(OutcomeArgumentName, out var value) && value.ValueKind == JsonValueKind.String
-                ? value.GetString()
+            var root = arguments.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty(OutcomeArgumentName, out var outcome)
+                || outcome.ValueKind != JsonValueKind.String)
+            {
+                return null;
+            }
+
+            if (!root.TryGetProperty(VariablesArgumentName, out var variables) || variables.ValueKind == JsonValueKind.Null)
+            {
+                return new ReportedCall(outcome.GetString()!, null);
+            }
+
+            return variables.ValueKind == JsonValueKind.Object
+                ? new ReportedCall(outcome.GetString()!, WorkflowVariableBlock.ReadObject(variables))
                 : null;
         }
         catch (JsonException)
@@ -345,14 +477,39 @@ public sealed class WorkflowNodeDispatcher(
         }
     }
 
+    /// <summary>What one call to the outcome tool reported: its outcome, and the variables it carried, if any.</summary>
+    private sealed record ReportedCall(string Outcome, IReadOnlyDictionary<string, object?>? Variables);
+
     /// <summary>
-    /// Builds the single user-message instruction sent as <see cref="SubagentRunRequest.Task"/>. <see cref="ProcessNode"/>
-    /// carries no free-text unit-of-work description today — Tasks 1 through 4 never added one — so this is built
-    /// purely from the node's skill pin and, when present, its outcome contract. Wiring in the actual work item
-    /// (an issue, a diff, prior turns' variables) is a host concern layered on top, exactly as
-    /// <see cref="SubagentRunRequest.Caller"/> is; see this class's remarks.
+    /// What every matching call in one turn reported, resolved: the single agreed outcome — <see langword="null"/>
+    /// when no call reported a usable one — and the merged variables, <see langword="null"/> when no call carried
+    /// any. <see langword="null"/> rather than an empty dictionary so "carried nothing" stays distinguishable from
+    /// "carried an empty object"; both merge nothing, but only one of them is a claim the node made.
     /// </summary>
-    private static string BuildTaskText(ProcessNode node, OutcomeToolSchema? outcomeTool)
+    private sealed record ReportedResult(string? Outcome, IReadOnlyDictionary<string, object?>? Variables);
+
+    /// <summary>
+    /// Builds the single user-message instruction sent as <see cref="SubagentRunRequest.Task"/>: the node's skill
+    /// pin, the run's accumulated <see cref="WorkflowRun.Variables"/>, and — for a node with declared outcomes —
+    /// its outcome contract, in that order. <see cref="ProcessNode"/> still carries no free-text unit-of-work
+    /// description of its own; the work item reaches a run through <see cref="IWorkflowStore.StartAsync"/>'s
+    /// initial variables and through what each node reports, and it is those variables that this method renders.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>The variables are framed as untrusted, and that framing is load-bearing.</b> A variable is written by
+    /// one agent and read here into another agent's prompt, so without the framing an implementer could write
+    /// instructions into a variable and steer the reviewer that reads it back — which would defeat the
+    /// independence a two-agent pipeline is built for. <see cref="WorkflowVariableBlock"/> renders the delimited
+    /// block, escapes any attempt by a value or a key to close it, and bounds its size; see that type for what
+    /// happens when the bag outgrows the block.
+    /// </para>
+    /// <para>
+    /// A run whose bag is empty gets no block at all rather than an empty one, and a node with no declared
+    /// outcomes is not told about the variables argument, because it is offered no outcome tool to pass one to.
+    /// </para>
+    /// </remarks>
+    private string BuildTaskText(WorkflowRun run, ProcessNode node, OutcomeToolSchema? outcomeTool)
     {
         var lines = new List<string>();
         if (!string.IsNullOrEmpty(node.Skill))
@@ -360,11 +517,40 @@ public sealed class WorkflowNodeDispatcher(
             lines.Add($"Use skill '{node.Skill}' to complete this task.");
         }
 
+        var rendered = WorkflowVariableBlock.Render(run.Variables);
+        if (rendered.Block is { } block)
+        {
+            lines.Add(block);
+        }
+
+        // The notice inside the block tells the reading agent that entries were dropped; nothing tells the host
+        // operator, and a node quietly starved of the variable naming its work item is exactly the failure that
+        // has to be visible from outside the conversation.
+        //
+        // OmittedKeyList, never the keys themselves. It is the same already-escaped, already-bounded string the
+        // block's own notice carries, built once inside Render. Joining the raw keys here instead gave the same
+        // data two sinks under two sets of rules: a key containing CRLF forged an extra line inside this very
+        // warning, and an unbounded key count made the record hundreds of kilobytes. There is now no raw form to
+        // reach for. The IsEnabled guard is belt and braces — the string is already built either way — so that a
+        // future argument here cannot become work a disabled logger still pays for.
+        if (rendered.OmittedCount > 0 && _logger.IsEnabled(LogLevel.Warning))
+        {
+            LogVariablesOmitted(
+                _logger, run.Id, run.CurrentNode, rendered.OmittedCount, run.Variables.Count, rendered.OmittedKeyList);
+        }
+
         if (outcomeTool is not null)
         {
             lines.Add($"When finished, report your result by calling the '{outcomeTool.ToolName}' tool with '{OutcomeArgumentName}' set to exactly one of: {string.Join(", ", outcomeTool.AllowedValues)}.");
+            lines.Add($"On that same call you may also pass '{VariablesArgumentName}': a JSON object of values later steps of this workflow should be able to read. It is the only way to hand anything on; nothing else you write is carried forward.");
         }
 
         return string.Join('\n', lines);
     }
+
+    [LoggerMessage(
+        EventId = 900,
+        Level = LogLevel.Warning,
+        Message = "Workflow run {RunId} at node '{Node}': {Omitted} of {Total} variables were left out of the task text because the rendered block would have exceeded its size ceiling. Omitted keys: {Keys}")]
+    private static partial void LogVariablesOmitted(ILogger logger, Guid runId, string node, int omitted, int total, string keys);
 }

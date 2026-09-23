@@ -22,11 +22,16 @@ public sealed class NodeResult
     public string? Outcome { get; }
 
     /// <summary>
-    /// Variables the node produced, to be merged into the run's state by the caller. <see cref="WorkflowNodeDispatcher"/>
-    /// always passes an empty dictionary here — it extracts an outcome from the agent turn and nothing else — so
-    /// on the shipped dispatch path this is never populated. A consumer driving its own dispatch loop can supply
-    /// values and <see cref="IWorkflowStore.CompleteNodeAsync"/> will merge them into
-    /// <see cref="WorkflowRun.Variables"/>.
+    /// Variables the node produced, to be merged into the run's state by the caller.
+    /// <see cref="IWorkflowStore.CompleteNodeAsync"/> merges them into <see cref="WorkflowRun.Variables"/>;
+    /// an empty dictionary merges nothing and clears nothing.
     /// </summary>
+    /// <remarks>
+    /// On the shipped dispatch path <see cref="WorkflowNodeDispatcher"/> populates this from the variables
+    /// argument of the node's outcome tool call — the same single call the outcome itself is read from, never
+    /// from the turn's text. A node with no declared <c>outcomes</c> is offered no outcome tool and so always
+    /// produces an empty bag here: it has no read path to report through, which is correct for a node that
+    /// declares nothing. A consumer driving its own dispatch loop can of course supply values directly.
+    /// </remarks>
     public IReadOnlyDictionary<string, object?> Variables { get; }
 }

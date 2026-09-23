@@ -23,4 +23,14 @@ public sealed record OutcomeToolSchema(string ToolName, IReadOnlyList<string> Al
     /// fail silently — a well-formed call whose argument nobody recognises reads as "no outcome reported".
     /// </summary>
     public const string ArgumentName = "outcome";
+
+    /// <summary>
+    /// The optional second argument name a call may carry alongside <see cref="ArgumentName"/>: a JSON object of
+    /// key/value pairs the node wants recorded against the run it belongs to. Optional in the tool's own schema —
+    /// <see cref="ArgumentName"/> is the only <c>required</c> property — so a node with nothing to hand on simply
+    /// omits it. A constant here for the same reason <see cref="ArgumentName"/> is: the side that offers the tool
+    /// and the side that reads the call back must spell it identically, and two independently written literals
+    /// would drift silently into "this call reported no variables".
+    /// </summary>
+    public const string VariablesArgumentName = "variables";
 }
