@@ -16,6 +16,11 @@ internal sealed class FakeSubagentRunner : ISubagentRunner
     /// <summary>How many times <see cref="RunAsync"/> has been called.</summary>
     public int CallCount { get; private set; }
 
+    /// <summary>Every request <see cref="RunAsync"/> has been called with, in call order.</summary>
+    public IReadOnlyList<SubagentRunRequest> Requests => _requests;
+
+    private readonly List<SubagentRunRequest> _requests = [];
+
     /// <summary>
     /// Produces the result for the next (and every subsequent) call, given the request that was passed. Must be
     /// set before <see cref="RunAsync"/> is called; a test that calls without configuring this gets an
@@ -27,6 +32,7 @@ internal sealed class FakeSubagentRunner : ISubagentRunner
     {
         LastRequest = request;
         CallCount++;
+        _requests.Add(request);
 
         if (NextResult is null)
         {

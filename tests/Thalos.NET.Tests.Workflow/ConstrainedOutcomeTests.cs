@@ -1,4 +1,5 @@
 using Thalos;
+using Thalos.Skills;
 using Thalos.Workflow;
 using ZeroAlloc.Results;
 
@@ -114,7 +115,9 @@ public sealed class ConstrainedOutcomeTests : IAsyncLifetime
 
         _store = new FakeWorkflowStore(_definitions);
         _runner = new FakeSubagentRunner();
-        _dispatcher = new WorkflowNodeDispatcher(_store, _runner, resolver, _definitions, _ => new FakeSecurityContext("workflow-engine"));
+        // No run here is started with a manifest, so this dispatcher's ISkillStore is never actually read from —
+        // an empty InMemorySkillStore stands in purely to satisfy the constructor.
+        _dispatcher = new WorkflowNodeDispatcher(_store, _runner, resolver, _definitions, new InMemorySkillStore(TimeProvider.System), _ => new FakeSecurityContext("workflow-engine"));
     }
 
     /// <summary>

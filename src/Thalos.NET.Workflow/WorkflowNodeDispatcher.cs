@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
+using Thalos.Skills;
 using ZeroAlloc.Authorization;
 using ZeroAlloc.Results;
 
@@ -20,6 +21,17 @@ namespace Thalos.Workflow;
 /// resolved per dispatch on the run's pinned <c>(Process, ProcessVersion)</c> — the store is the single source of
 /// truth for what a process is, so a definition that was synced is runnable and one that was not is not, with no
 /// separately populated registry able to hold a different answer.
+/// <para>
+/// A run started with a <see cref="RunManifest"/> (<see cref="WorkflowRun.Manifest"/> non-null) dispatches every
+/// task node against the exact <see cref="NodePin"/> it was started with, never against whatever
+/// <see cref="IWorkflowReferenceResolver"/> or <see cref="ISkillStore.GetAsync"/> would resolve live: the pinned
+/// <see cref="NodePin.AgentId"/> and <see cref="NodePin.AgentRevision"/> go straight onto
+/// <see cref="SubagentRunRequest"/>, and the pinned skill's body — loaded through
+/// <see cref="ISkillStore.GetVersionAsync"/>, the one read path that can still return a superseded version — is
+/// inlined into the task text in place of the "use skill 'X'" instruction an unpinned node gets. A manifest is all
+/// or nothing: a task node the manifest does not name fails rather than falling back to live resolution, because a
+/// gap there would silently un-pin exactly the node a caller most needed pinned.
+/// </para>
 /// </summary>
 /// <remarks>
 /// <b>A node failure must not throw.</b> A throw would hand the message back to the outbox for eight retries with
@@ -38,6 +50,7 @@ public sealed partial class WorkflowNodeDispatcher(
     ISubagentRunner runner,
     IWorkflowReferenceResolver resolver,
     IProcessDefinitionStore definitions,
+    ISkillStore skills,
     Func<WorkflowRun, ISecurityContext> resolveCaller,
     ILogger<WorkflowNodeDispatcher>? logger = null)
 {
@@ -71,6 +84,7 @@ public sealed partial class WorkflowNodeDispatcher(
     private readonly ISubagentRunner _runner = runner ?? throw new ArgumentNullException(nameof(runner));
     private readonly IWorkflowReferenceResolver _resolver = resolver ?? throw new ArgumentNullException(nameof(resolver));
     private readonly IProcessDefinitionStore _definitions = definitions ?? throw new ArgumentNullException(nameof(definitions));
+    private readonly ISkillStore _skills = skills ?? throw new ArgumentNullException(nameof(skills));
     private readonly Func<WorkflowRun, ISecurityContext> _resolveCaller =
         resolveCaller ?? throw new ArgumentNullException(nameof(resolveCaller));
 
@@ -136,13 +150,38 @@ public sealed partial class WorkflowNodeDispatcher(
             return;
         }
 
-        var agentId = await ResolveAgentAsync(run, target.Node, ct).ConfigureAwait(false);
+        await DispatchTaskNodeAsync(run, target.Process, target.Node, message.Seq, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Runs a task node's agent turn: pinned, through <see cref="RunPinnedNodeAsync"/>, when
+    /// <see cref="WorkflowRun.Manifest"/> is set — never falling back to live resolution when the manifest does not
+    /// name this node, since a manifest is all or nothing — or unpinned, through today's own name resolution and
+    /// <see cref="RunNodeAsync"/>, when the run carries no manifest at all.
+    /// </summary>
+    private async ValueTask DispatchTaskNodeAsync(WorkflowRun run, ProcessDefinition process, ProcessNode node, long seq, CancellationToken ct)
+    {
+        if (run.Manifest is { } manifest)
+        {
+            // A manifest is all or nothing: a task node it does not name is a gap in the pin, not an invitation to
+            // resolve this one node live while every other node in the run stays pinned.
+            if (!manifest.Nodes.TryGetValue(run.CurrentNode, out var pin))
+            {
+                await _store.FailAsync(run.Id, $"node '{run.CurrentNode}' is missing from the run manifest.", ct).ConfigureAwait(false);
+                return;
+            }
+
+            await RunPinnedNodeAsync(run, process, node, pin, seq, ct).ConfigureAwait(false);
+            return;
+        }
+
+        var agentId = await ResolveAgentAsync(run, node, ct).ConfigureAwait(false);
         if (agentId is not { } resolvedAgentId)
         {
             return;
         }
 
-        await RunNodeAsync(run, target.Process, target.Node, resolvedAgentId, message.Seq, ct).ConfigureAwait(false);
+        await RunNodeAsync(run, process, node, resolvedAgentId, seq, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -225,6 +264,59 @@ public sealed partial class WorkflowNodeDispatcher(
             RequiredOutcome = outcomeTool,
         };
 
+        await RunRequestAsync(run, process, request, outcomeTool, seq, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The pinned counterpart to <see cref="RunNodeAsync"/>: <paramref name="pin"/>'s <see cref="NodePin.AgentId"/>
+    /// and <see cref="NodePin.AgentRevision"/> go straight onto the request — no
+    /// <see cref="IWorkflowReferenceResolver"/> call, ever, for a pinned node — and the task text is built from the
+    /// exact skill body <see cref="NodePin.SkillHash"/> names, loaded through <see cref="ISkillStore.GetVersionAsync"/>
+    /// rather than <see cref="ISkillStore.GetAsync"/>: the latter would silently hand a pinned node whatever the
+    /// skill has become since the run started, defeating the pin. Fails the node — never throws, and never falls
+    /// back to the latest version — when the pinned hash does not resolve, naming it <c>name@hash</c> so the
+    /// failure is traceable to exactly which version went missing.
+    /// </summary>
+    private async ValueTask RunPinnedNodeAsync(WorkflowRun run, ProcessDefinition process, ProcessNode node, NodePin pin, long seq, CancellationToken ct)
+    {
+        if (!SkillName.TryParse(pin.SkillName, out var skillName))
+        {
+            await _store.FailAsync(run.Id, $"node '{run.CurrentNode}' pinned skill {pin.SkillName}@{pin.SkillHash} could not be loaded: '{pin.SkillName}' is not a valid skill name.", ct).ConfigureAwait(false);
+            return;
+        }
+
+        var skill = await _skills.GetVersionAsync(skillName, pin.SkillHash, ct).ConfigureAwait(false);
+        if (skill.IsFailure)
+        {
+            await _store.FailAsync(run.Id, $"node '{run.CurrentNode}' pinned skill {pin.SkillName}@{pin.SkillHash} could not be loaded: {skill.Error}", ct).ConfigureAwait(false);
+            return;
+        }
+
+        var outcomeTool = node.Outcomes.Count > 0
+            ? new OutcomeToolSchema(OutcomeToolName, node.Outcomes)
+            : null;
+
+        var request = new SubagentRunRequest
+        {
+            AgentId = pin.AgentId,
+            AgentRevision = pin.AgentRevision,
+            Task = BuildTaskText(run, node, outcomeTool, skill.Value),
+            Caller = _resolveCaller(run),
+            RequiredOutcome = outcomeTool,
+        };
+
+        await RunRequestAsync(run, process, request, outcomeTool, seq, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The shared tail of <see cref="RunNodeAsync"/> and <see cref="RunPinnedNodeAsync"/> once each has built its
+    /// own <see cref="SubagentRunRequest"/>: runs the turn, reads its outcome, and hands the result to
+    /// <see cref="AdvanceAndPersistAsync"/>. Split out because everything past "the request is built" — the turn
+    /// failing outright, an outcome the node rejects, advancing and persisting — is identical whichever way the
+    /// request itself was assembled.
+    /// </summary>
+    private async ValueTask RunRequestAsync(WorkflowRun run, ProcessDefinition process, SubagentRunRequest request, OutcomeToolSchema? outcomeTool, long seq, CancellationToken ct)
+    {
         var turn = await _runner.RunAsync(request, ct).ConfigureAwait(false);
         if (turn.IsFailure)
         {
@@ -494,6 +586,11 @@ public sealed partial class WorkflowNodeDispatcher(
     /// its outcome contract, in that order. <see cref="ProcessNode"/> still carries no free-text unit-of-work
     /// description of its own; the work item reaches a run through <see cref="IWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/>'s
     /// initial variables and through what each node reports, and it is those variables that this method renders.
+    /// <paramref name="pinnedSkill"/>, when given, replaces only the opening line: an unpinned node is told the
+    /// skill's name and left to load it itself through <c>skills__load</c>, while a pinned node is handed the exact
+    /// body <see cref="RunPinnedNodeAsync"/> loaded, wrapped in the same <see cref="SkillBlock"/> delimiters and
+    /// sanitization the catalogue's own skill-loading path uses — so a value inside the body cannot forge or close
+    /// the tag any more than an untrusted variable can forge the variables block below it.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -509,10 +606,16 @@ public sealed partial class WorkflowNodeDispatcher(
     /// outcomes is not told about the variables argument, because it is offered no outcome tool to pass one to.
     /// </para>
     /// </remarks>
-    private string BuildTaskText(WorkflowRun run, ProcessNode node, OutcomeToolSchema? outcomeTool)
+    private string BuildTaskText(WorkflowRun run, ProcessNode node, OutcomeToolSchema? outcomeTool, SkillDocument? pinnedSkill = null)
     {
         var lines = new List<string>();
-        if (!string.IsNullOrEmpty(node.Skill))
+        if (pinnedSkill is { } skill)
+        {
+            lines.Add(SkillBlock.SkillOpen(skill.Name));
+            lines.Add(SkillBlock.SanitizeBody(skill.Body));
+            lines.Add(SkillBlock.SkillClose);
+        }
+        else if (!string.IsNullOrEmpty(node.Skill))
         {
             lines.Add($"Use skill '{node.Skill}' to complete this task.");
         }

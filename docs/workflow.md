@@ -68,14 +68,20 @@ services.AddSingleton(sp => new WorkflowNodeDispatcher(
     sp.GetRequiredService<ISubagentRunner>(),
     sp.GetRequiredService<IWorkflowReferenceResolver>(),
     sp.GetRequiredService<IProcessDefinitionStore>(),
+    sp.GetRequiredService<ISkillStore>(),
     resolveCaller: run => new WorkflowCaller(run)));
 ```
 
-The last argument is the one only you can supply: the `ISecurityContext` each run executes as. The dispatcher never
-inspects what comes back from it — it forwards the value into `SubagentRunRequest.Caller`, and Thalos's tool
-authorization does the rest. A host with no per-run identity can return one fixed service principal; a host that
-runs workflows on behalf of people should return theirs, because that is what decides which tools the node's agent
-is allowed to call.
+`ISkillStore` is what a pinned run's task node loads its exact skill body through
+(`ISkillStore.GetVersionAsync`) — `AddThalos`'s `UseSkills` already registers it, the same instance
+`IWorkflowReferenceResolver` resolves `skill:` names against above. A run started with no `RunManifest` never
+reads from it at all.
+
+The `resolveCaller` argument is the one only you can supply: the `ISecurityContext` each run executes as. The
+dispatcher never inspects what comes back from it — it forwards the value into `SubagentRunRequest.Caller`, and
+Thalos's tool authorization does the rest. A host with no per-run identity can return one fixed service principal; a
+host that runs workflows on behalf of people should return theirs, because that is what decides which tools the
+node's agent is allowed to call.
 
 ```csharp
 using ZeroAlloc.Authorization;   // ISecurityContext lives here, not in Thalos
