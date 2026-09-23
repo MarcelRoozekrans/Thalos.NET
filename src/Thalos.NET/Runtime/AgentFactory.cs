@@ -22,12 +22,15 @@ namespace Thalos.Runtime;
 /// <see cref="IChatClientProvider.CreateChatClient"/>).
 /// </para>
 /// <para>
-/// Builds are single-flight per <see cref="AgentId"/>: N concurrent first calls result in one
-/// <see cref="IChatClientProvider.CreateChatClient"/> call and reference-equal agents. Failed builds are not cached.
+/// Builds are single-flight per (<see cref="AgentId"/>, <see cref="AgentDefinition.Revision"/>) pair: N concurrent first calls
+/// for the same pair result in one <see cref="IChatClientProvider.CreateChatClient"/> call and reference-equal agents. Two
+/// pinned revisions of the same id build and cache independently, so alternating between them never evicts the other. Failed
+/// builds are not cached.
 /// </para>
 /// <para>
 /// A cached agent is reused while the supplied <see cref="AgentDefinition"/> is equal by value (id, name, description,
-/// instructions, model, max output tokens, tool globs, skill globs, memory settings); a changed definition rebuilds and disposes the old pipeline.
+/// instructions, model, max output tokens, tool globs, skill globs, memory settings, revision); a changed definition rebuilds
+/// and disposes the old pipeline.
 /// </para>
 /// <para>
 /// Every registered <see cref="IAgentContextProviderSource"/> is asked once per build; the non-null
