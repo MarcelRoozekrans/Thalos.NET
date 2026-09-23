@@ -37,15 +37,19 @@ public static class CharterThalosBuilderExtensions
     /// <summary>
     /// Same as <see cref="UseRoleCharters(ThalosBuilder, Action{CharterOptions}?)"/>, binding only
     /// <see cref="CharterOptions.Roots"/> from the <c>Thalos:Charters</c> section of <paramref name="configuration"/>.
-    /// <see cref="CharterOptions.Envelopes"/> is get-only and never touched by this overload — use the
-    /// <see cref="Action{CharterOptions}"/> overload (or call both; later registrations layer configuration) to add
-    /// envelopes in code.
+    /// Deliberately does not bind the whole <see cref="CharterOptions"/> object: the configuration binder can and does
+    /// populate a get-only list property like <see cref="CharterOptions.Envelopes"/> from a matching section, but every
+    /// entry it would produce is missing its <see cref="AgentEnvelope.Id"/> — there is no way to express a typed
+    /// <see cref="AgentId"/> in configuration — so a whole-object bind would silently register invalid envelopes.
+    /// Use the <see cref="Action{CharterOptions}"/> overload (or call both; later registrations layer configuration) to
+    /// add envelopes in code.
     /// </summary>
     public static ThalosBuilder UseRoleCharters(this ThalosBuilder builder, IConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(configuration);
-        var options = builder.Services.AddOptions<CharterOptions>().Bind(configuration.GetSection(CharterOptions.SectionName));
+        var roots = configuration.GetSection(CharterOptions.SectionName).GetSection(nameof(CharterOptions.Roots));
+        var options = builder.Services.AddOptions<CharterOptions>().Configure(o => o.Roots = roots.Get<List<string>>() ?? []);
         return Register(builder, options);
     }
 
@@ -80,23 +84,47 @@ public static class CharterThalosBuilderExtensions
         return builder;
     }
 
-    /// <summary>The first violation as text, or null when the options are valid.</summary>
+    /// <summary>
+    /// The first violation as text, or null when the options are valid. Every id and name involved — a config agent's,
+    /// or another envelope's — must be unique: <see cref="CharteredAgentCatalog"/> keys its snapshot by
+    /// <see cref="AgentEnvelope.Id"/> and composes by <see cref="AgentEnvelope.Name"/>, so a collision on either would
+    /// silently overwrite one agent with another instead of failing loudly here.
+    /// </summary>
     internal static string? Describe(CharterOptions options, ThalosOptions thalos)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(thalos);
 
         var configNames = new HashSet<string>(StringComparer.Ordinal);
+        var configIds = new HashSet<AgentId>();
         foreach (var agent in thalos.Agents)
         {
             configNames.Add(agent.Name);
+            configIds.Add(agent.Id);
         }
 
+        var seenNames = new HashSet<string>(StringComparer.Ordinal);
+        var seenIds = new HashSet<AgentId>();
         foreach (var envelope in options.Envelopes)
         {
             if (configNames.Contains(envelope.Name))
             {
                 return $"Envelopes: '{envelope.Name}' collides with a Thalos:Agents entry of the same name; a chartered role and a config agent may not share a name.";
+            }
+
+            if (configIds.Contains(envelope.Id))
+            {
+                return $"Envelopes: '{envelope.Name}' (id '{envelope.Id}') collides with a Thalos:Agents entry of the same id; a chartered role and a config agent may not share an id.";
+            }
+
+            if (!seenNames.Add(envelope.Name))
+            {
+                return $"Envelopes: '{envelope.Name}' is registered more than once; envelope names must be unique.";
+            }
+
+            if (!seenIds.Add(envelope.Id))
+            {
+                return $"Envelopes: id '{envelope.Id}' (name '{envelope.Name}') is registered more than once; envelope ids must be unique.";
             }
         }
 
