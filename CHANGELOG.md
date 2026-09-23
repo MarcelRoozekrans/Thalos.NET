@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.9.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.8.0...v0.9.0) (2026-09-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* **workflow:** IWorkflowStore.StartAsync takes an IReadOnlyDictionary<string, object?>? initialVariables parameter before its CancellationToken. Every implementer and every call site must pass it; pass null to keep the old behaviour. It throws ArgumentException for a bag over the run key cap.
+
+### Features
+
+* **workflow:** carry variables through the dispatch path ([#158](https://github.com/MarcelRoozekrans/Thalos.NET/issues/158)) ([8c5a7b4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8c5a7b40208f45e3f6548ab30dc2e4994bb803fb))
+
 ## [0.8.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.7.0...v0.8.0) (2026-09-23)
 
 
