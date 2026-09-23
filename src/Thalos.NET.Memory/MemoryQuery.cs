@@ -12,6 +12,14 @@ public sealed record MemoryQuery
     /// <summary>Only records pinned to this agent. Null = no agent filter (owner-wide and pinned alike).</summary>
     public AgentId? AgentId { get; init; }
 
+    /// <summary>
+    /// When true, only owner-wide records (<see cref="MemoryRecord.AgentId"/> is null) match, independent of <see cref="AgentId"/>
+    /// (normally left null when this is set). <see cref="AgentId"/> alone cannot express "must be null" — it means "no filter" —
+    /// so this exists for callers that need to query one exact <see cref="MemoryScope.Partitions"/> entry at a time (e.g. degraded
+    /// recall's recency fallback), where a page boundary must never let another agent's pinned rows crowd out the owner-wide ones.
+    /// </summary>
+    public bool OwnerWideOnly { get; init; }
+
     /// <summary>Only records of one of these kinds. Null/empty = all kinds.</summary>
     public IReadOnlyList<MemoryKind>? Kinds { get; init; }
 
@@ -40,6 +48,11 @@ public sealed record MemoryQuery
         }
 
         if (AgentId is { } agent && record.AgentId != agent)
+        {
+            return false;
+        }
+
+        if (OwnerWideOnly && record.AgentId is not null)
         {
             return false;
         }

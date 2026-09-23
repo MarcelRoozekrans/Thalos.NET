@@ -11,7 +11,10 @@ namespace Thalos.Memory;
 
 /// <summary>
 /// The <c>memory</c> tool source's methods. Owner and agent always come from the ambient <see cref="TurnScope"/> — never
-/// from parameters — and the tools never write under the host's shared owner. Results are short strings for the model;
+/// from parameters — and the tools never write under the host's shared owner. The owner is the caller's
+/// <see cref="ISecurityContext.Id"/> unless the caller also implements <see cref="IMemoryOwner"/>, in which case its
+/// <see cref="IMemoryOwner.MemoryOwnerId"/> is used instead (see <see cref="Caller"/>) — every read and write below goes
+/// through that same resolution, so a caller always reads back what it wrote. Results are short strings for the model;
 /// errors are reported as text, never thrown. Memory text returned by <c>recall</c>/<c>list</c> is untrusted content: it is
 /// scanned by the <see cref="IUntrustedContentScanner"/> when one is registered (quarantined items are dropped and a
 /// <see cref="MemoryQuarantinedEvent"/> is published), sanitised like the auto-recall block and prefaced with a
@@ -31,7 +34,11 @@ public sealed partial class MemoryTools(
 
     private readonly ILogger _logger = logger ?? NullLogger<MemoryTools>.Instance;
 
-    /// <summary><c>memory__remember</c>: stores a memory under the turn's caller (pinned to the turn's agent when <paramref name="shared"/> is false and an agent is in scope).</summary>
+    /// <summary>
+    /// <c>memory__remember</c>: stores a memory under the turn's owner, pinned to the turn's agent when an agent is in
+    /// scope and either <paramref name="shared"/> is false or the caller's <see cref="IMemoryOwner.PinMemoriesToAgent"/>
+    /// is true — the latter overrides <paramref name="shared"/> rather than being combined with it.
+    /// </summary>
     [ThalosTool("remember")]
     [Description("Store a durable memory about the user or the work (a fact, preference, decision, learning or note) so it can be recalled in later conversations. One idea per memory.")]
     public async Task<string> RememberAsync(
@@ -52,7 +59,8 @@ public sealed partial class MemoryTools(
             return $"Could not remember: unknown kind '{kind}'. Use fact, preference, decision, learning or note.";
         }
 
-        var pinToAgent = !shared && caller.AgentId is not null;
+        var wantsPinned = caller.PinMemoriesToAgent || !shared;
+        var pinToAgent = wantsPinned && caller.AgentId is not null;
         var result = await memory.RememberAsync(new RememberRequest
         {
             OwnerId = caller.OwnerId,
@@ -76,7 +84,7 @@ public sealed partial class MemoryTools(
             sb.Append(" Note: not yet searchable (memory index unavailable).");
         }
 
-        if (!shared && !pinToAgent)
+        if (wantsPinned && !pinToAgent)
         {
             sb.Append(" Note: no agent in scope; stored as shared.");
         }
@@ -84,7 +92,12 @@ public sealed partial class MemoryTools(
         return sb.ToString();
     }
 
-    /// <summary><c>memory__recall</c>: semantic search over the caller's, the agent's pinned and the shared owner's memories; returns numbered lines with ids.</summary>
+    /// <summary>
+    /// <c>memory__recall</c>: semantic search over the caller's, the agent's pinned and the shared owner's memories; returns
+    /// numbered lines with ids. When <see cref="IMemoryService.RecallAsync"/> degrades to <see cref="MemoryRecallTier.Recency"/>
+    /// (the index was unavailable or empty-handed), the output is prefaced with <see cref="MemoryRecallBlock.DegradedRecallNote"/>
+    /// so the model does not mistake "nothing semantically ranked" for "nothing to know".
+    /// </summary>
     [ThalosTool("recall")]
     [Description("Search long-term memory for information relevant to a query. Returns the best matches with their ids (use memory__forget with an id to archive one).")]
     public async Task<string> RecallAsync(
@@ -105,8 +118,8 @@ public sealed partial class MemoryTools(
             return $"Could not recall: {result.Error.Message}";
         }
 
-        var kept = new List<RecalledMemory>(result.Value.Count);
-        foreach (var m in result.Value)
+        var kept = new List<RecalledMemory>(result.Value.Memories.Count);
+        foreach (var m in result.Value.Memories)
         {
             if (await IsAllowedAsync(m.Record, cancellationToken).ConfigureAwait(false))
             {
@@ -120,6 +133,11 @@ public sealed partial class MemoryTools(
         }
 
         var sb = new StringBuilder(MemoryRecallBlock.ToolNote);
+        if (result.Value.Tier != MemoryRecallTier.Semantic)
+        {
+            sb.Append('\n').Append(MemoryRecallBlock.DegradedRecallNote);
+        }
+
         for (var i = 0; i < kept.Count; i++)
         {
             var m = kept[i];
@@ -247,16 +265,24 @@ public sealed partial class MemoryTools(
         return false;
     }
 
-    /// <summary>The turn's owner and agent, or null when there is no turn or the caller is anonymous.</summary>
-    internal static (string OwnerId, AgentId? AgentId)? Caller()
+    /// <summary>
+    /// The turn's memory owner, agent and pin flag, or null when there is no turn or the caller is anonymous. The
+    /// authorization identity that gates whether there is a caller at all is always <see cref="ISecurityContext.Id"/> —
+    /// that is deliberately what <see cref="Thalos.Tools.DefaultToolAuthorizer"/>-style authorization evaluates, and it
+    /// must stay per-run for a caller such as a workflow run. The memory owner itself is resolved by
+    /// <see cref="MemoryOwnerResolver.Resolve"/> — the same resolution <see cref="MemoryContextProvider"/> uses for
+    /// auto-recall — so a caller that reports a stable owner always reads back what it (or another caller reporting
+    /// the same owner) wrote, on every read and write path.
+    /// </summary>
+    internal static (string OwnerId, AgentId? AgentId, bool PinMemoriesToAgent)? Caller()
     {
         var scope = TurnScope.Current;
-        if (scope is null || string.IsNullOrWhiteSpace(scope.Caller.Id) || string.Equals(scope.Caller.Id, AnonymousSecurityContext.AnonymousId, StringComparison.Ordinal))
+        if (scope is null || MemoryOwnerResolver.Resolve(scope.Caller) is not { } resolved)
         {
             return null;
         }
 
-        return (scope.Caller.Id, scope.AgentId == default ? null : scope.AgentId);
+        return (resolved.OwnerId, scope.AgentId == default ? null : scope.AgentId, resolved.PinMemoriesToAgent);
     }
 
     [LoggerMessage(EventId = 520, Level = LogLevel.Warning, Message = "Memory {Memory} returned by a memory tool was quarantined and dropped: {Detail}")]

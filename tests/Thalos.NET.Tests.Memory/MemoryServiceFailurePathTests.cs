@@ -131,7 +131,7 @@ public sealed class MemoryServiceFailurePathTests
         var r = await svc.RecallAsync("papa quebec", new MemoryScope("alice", null), new RecallOptions { MinScore = 0.1 }, default);
 
         r.IsSuccess.Should().BeTrue();
-        r.Value.Should().ContainSingle(x => x.Record.Id == m.Id);
+        r.Value.Memories.Should().ContainSingle(x => x.Record.Id == m.Id);
         (await f.Store.GetAsync(m.Id, default)).Value.RecallCount.Should().Be(0);
         f.Logger.Entries.Should().Contain((502, LogLevel.Warning));
     }
@@ -159,9 +159,9 @@ public sealed class MemoryServiceFailurePathTests
         await svc.RememberAsync(MemoryServiceFixture.Remember("tango uniform " + new string('x', 500)), default);
         await svc.RememberAsync(MemoryServiceFixture.Remember("tango uniform " + new string('y', 500)), default);
 
-        (await svc.RecallAsync("tango uniform", new MemoryScope("alice", null), new RecallOptions { MinScore = 0.1, MaxChars = 0 }, default)).Value.Should().HaveCount(2);
-        (await svc.RecallAsync("tango uniform", new MemoryScope("alice", null), new RecallOptions { MinScore = 0.1, MaxChars = -1 }, default)).Value.Should().HaveCount(2);
-        (await svc.RecallAsync("tango uniform", new MemoryScope("alice", null), new RecallOptions { MinScore = 0.1, MaxChars = 600 }, default)).Value.Should().HaveCount(1);
+        (await svc.RecallAsync("tango uniform", new MemoryScope("alice", null), new RecallOptions { MinScore = 0.1, MaxChars = 0 }, default)).Value.Memories.Should().HaveCount(2);
+        (await svc.RecallAsync("tango uniform", new MemoryScope("alice", null), new RecallOptions { MinScore = 0.1, MaxChars = -1 }, default)).Value.Memories.Should().HaveCount(2);
+        (await svc.RecallAsync("tango uniform", new MemoryScope("alice", null), new RecallOptions { MinScore = 0.1, MaxChars = 600 }, default)).Value.Memories.Should().HaveCount(1);
     }
 
     [Fact]

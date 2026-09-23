@@ -19,8 +19,9 @@ public sealed class MemoryServiceRecallTests
         var r = await svc.RecallAsync("deploy the api with blue green releases", new MemoryScope("alice", null), Opts(), default);
 
         r.IsSuccess.Should().BeTrue();
-        r.Value.Select(m => m.Record.Id).Should().Equal(exact.Id, partial.Id);
-        r.Value[0].Score.Should().BeGreaterThan(r.Value[1].Score);
+        r.Value.Tier.Should().Be(MemoryRecallTier.Semantic);
+        r.Value.Memories.Select(m => m.Record.Id).Should().Equal(exact.Id, partial.Id);
+        r.Value.Memories[0].Score.Should().BeGreaterThan(r.Value.Memories[1].Score);
         var got = (await f.Store.GetAsync(exact.Id, default)).Value;
         got.RecallCount.Should().Be(1);
         got.LastRecalledAt.Should().Be(f.Clock.GetUtcNow());
@@ -38,7 +39,7 @@ public sealed class MemoryServiceRecallTests
         var newer = (await svc.RememberAsync(MemoryServiceFixture.Remember("kilo lima", importance: 0.8), default)).Value;
 
         var r = (await svc.RecallAsync("kilo lima", new MemoryScope("alice", null), Opts(), default)).Value;
-        r.Select(m => m.Record.Id).Should().Equal(newer.Id, high.Id, low.Id);
+        r.Memories.Select(m => m.Record.Id).Should().Equal(newer.Id, high.Id, low.Id);
     }
 
     [Fact]
@@ -52,7 +53,7 @@ public sealed class MemoryServiceRecallTests
         await f.Store.DeleteAsync(deleted.Id, default); // vector still in the index
         await svc.RememberAsync(MemoryServiceFixture.Remember("mike november papa", owner: "bob"), default);
 
-        (await svc.RecallAsync("mike november", new MemoryScope("alice", null), Opts(), default)).Value.Should().BeEmpty();
+        (await svc.RecallAsync("mike november", new MemoryScope("alice", null), Opts(), default)).Value.Memories.Should().BeEmpty();
     }
 
     [Fact]
@@ -65,23 +66,26 @@ public sealed class MemoryServiceRecallTests
         var small1 = (await svc.RememberAsync(MemoryServiceFixture.Remember("quebec romeo sierra", importance: 0.5), default)).Value;
         var small2 = (await svc.RememberAsync(MemoryServiceFixture.Remember("quebec romeo tango", importance: 0.5), default)).Value;
 
-        (await svc.RecallAsync("quebec romeo", new MemoryScope("alice", null), Opts(topK: 2, maxChars: 2000), default)).Value.Should().HaveCount(2);
-        var budgeted = (await svc.RecallAsync("quebec romeo", new MemoryScope("alice", null), Opts(topK: 5, maxChars: 60), default)).Value;
+        (await svc.RecallAsync("quebec romeo", new MemoryScope("alice", null), Opts(topK: 2, maxChars: 2000), default)).Value.Memories.Should().HaveCount(2);
+        var budgeted = (await svc.RecallAsync("quebec romeo", new MemoryScope("alice", null), Opts(topK: 5, maxChars: 60), default)).Value.Memories;
         budgeted.Select(m => m.Record.Id).Should().BeEquivalentTo([small1.Id, small2.Id], "the 163-char memory does not fit; smaller ones still do");
         budgeted.Should().NotContain(m => m.Record.Id == big.Id);
     }
 
     [Fact]
-    public async Task Blank_query_is_empty_and_index_failure_is_returned()
+    public async Task Blank_query_or_blank_owner_is_empty_with_tier_None_and_never_touches_the_index_or_store()
     {
         var f = new MemoryServiceFixture();
         var svc = f.Build();
-        (await svc.RecallAsync("  ", new MemoryScope("alice", null), Opts(), default)).Value.Should().BeEmpty();
+        await svc.RememberAsync(MemoryServiceFixture.Remember("something to find"), default);
 
-        f.Index = UnavailableMemoryIndex.Instance;
-        var r = await f.Build().RecallAsync("anything", new MemoryScope("alice", null), Opts(), default);
-        r.IsFailure.Should().BeTrue();
-        r.Error.Code.Should().Be(AgentErrorCode.MemoryIndexUnavailable);
+        var blankQuery = (await svc.RecallAsync("  ", new MemoryScope("alice", null), Opts(), default)).Value;
+        blankQuery.Memories.Should().BeEmpty();
+        blankQuery.Tier.Should().Be(MemoryRecallTier.None);
+
+        var blankOwner = (await svc.RecallAsync("something", new MemoryScope("", null), Opts(), default)).Value;
+        blankOwner.Memories.Should().BeEmpty();
+        blankOwner.Tier.Should().Be(MemoryRecallTier.None);
     }
 
     [Fact]
@@ -94,7 +98,7 @@ public sealed class MemoryServiceRecallTests
 
         var r = await svc.RecallAsync("victor whiskey", new MemoryScope("alice", null), opts, default);
 
-        r.Value.Should().ContainSingle();
+        r.Value.Memories.Should().ContainSingle();
         opts.TopK.Should().Be(0, "the bound options object is shared and must never be mutated");
     }
 }

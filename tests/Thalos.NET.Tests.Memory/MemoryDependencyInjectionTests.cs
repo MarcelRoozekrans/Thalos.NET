@@ -130,6 +130,43 @@ public sealed class MemoryDependencyInjectionTests
         act.Should().Throw<OptionsValidationException>().WithMessage("*Recall.TopK*");
     }
 
+    [Fact]
+    public void A_recall_TopK_above_MaxPageSize_fails_option_validation()
+    {
+        // a recall fetches at most one page per scope partition (MemoryQuery.MaxPageSize); above that, TopK must be
+        // rejected at startup rather than silently truncated at the recall call site
+        using var sp = Build(configure: o => o.Recall.TopK = MemoryQuery.MaxPageSize + 1);
+        var act = () => sp.GetRequiredService<IOptions<MemoryOptions>>().Value;
+        act.Should().Throw<OptionsValidationException>().WithMessage("*Recall.TopK*");
+    }
+
+    [Fact]
+    public void A_recall_TopK_at_exactly_MaxPageSize_is_accepted()
+    {
+        using var sp = Build(configure: o => o.Recall.TopK = MemoryQuery.MaxPageSize);
+        sp.GetRequiredService<IOptions<MemoryOptions>>().Value.Recall.TopK.Should().Be(MemoryQuery.MaxPageSize);
+    }
+
+    [Fact]
+    public void An_agent_Memory_TopK_above_MaxPageSize_fails_option_validation_at_host_start()
+    {
+        var agent = new AgentDefinition { Id = AgentId.New(), Name = "a", Instructions = "i", Memory = new AgentMemorySettings { TopK = MemoryQuery.MaxPageSize + 1 } };
+        using var sp = Build(extra: t => t.AddAgent(agent));
+
+        var act = () => sp.GetRequiredService<IOptions<ThalosOptions>>().Value;
+
+        act.Should().Throw<OptionsValidationException>().WithMessage("*Memory.TopK*");
+    }
+
+    [Fact]
+    public void An_agent_Memory_TopK_at_exactly_MaxPageSize_is_accepted()
+    {
+        var agent = new AgentDefinition { Id = AgentId.New(), Name = "a", Instructions = "i", Memory = new AgentMemorySettings { TopK = MemoryQuery.MaxPageSize } };
+        using var sp = Build(extra: t => t.AddAgent(agent));
+
+        sp.GetRequiredService<IOptions<ThalosOptions>>().Value.Agents.Should().ContainSingle();
+    }
+
     [Theory]
     [InlineData(-0.1)] [InlineData(1.1)] [InlineData(double.NaN)]
     public void A_recall_MinScore_outside_zero_to_one_fails_option_validation(double minScore)
