@@ -63,7 +63,10 @@ public interface IWorkflowStore
     /// default interface method that forwards to it with <see cref="WorkflowStartRequest.Manifest"/> left
     /// <see langword="null"/> — a run started this way carries no pin, the same as any run started before
     /// manifests existed. An implementation only needs to provide the request-based overload; it never needs to
-    /// implement this one itself.
+    /// implement this one itself. The blank-argument guards below run against this overload's own parameter
+    /// names before <see cref="WorkflowStartRequest"/> is built, so a caller of this overload — including one
+    /// reaching it purely through this default implementation, with no override of its own — sees
+    /// <c>ArgumentException.ParamName</c> "process", "correlationKey" or "startNode", not "request".
     /// </para>
     /// </remarks>
     ValueTask<Guid> StartAsync(
@@ -72,8 +75,13 @@ public interface IWorkflowStore
         string correlationKey,
         string startNode,
         IReadOnlyDictionary<string, object?>? initialVariables,
-        CancellationToken ct) =>
-        StartAsync(
+        CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(process);
+        ArgumentException.ThrowIfNullOrWhiteSpace(correlationKey);
+        ArgumentException.ThrowIfNullOrWhiteSpace(startNode);
+
+        return StartAsync(
             new WorkflowStartRequest
             {
                 Process = process,
@@ -83,6 +91,7 @@ public interface IWorkflowStore
                 InitialVariables = initialVariables,
             },
             ct);
+    }
 
     /// <summary>
     /// Starts a new run exactly as <see cref="StartAsync(string,int,string,string,IReadOnlyDictionary{string,object?}?,CancellationToken)"/>

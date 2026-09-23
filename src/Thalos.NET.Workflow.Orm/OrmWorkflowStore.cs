@@ -94,7 +94,10 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     /// store through an <see cref="OrmWorkflowStore"/>-typed field, not an <see cref="IWorkflowStore"/>-typed
     /// one, and a default interface method is only reachable through a reference typed as the interface that
     /// declares it. Forwards exactly as the interface's own default implementation does, so the two are
-    /// indistinguishable in behaviour.
+    /// indistinguishable in behaviour — including the <see cref="ArgumentException.ParamName"/> a blank
+    /// argument throws with: validated here, against this overload's own parameter names, before the
+    /// <see cref="WorkflowStartRequest"/> is even built, so a caller of this overload still sees "process",
+    /// "correlationKey" or "startNode" — not "request" — exactly as it did before this overload existed.
     /// </summary>
     public ValueTask<Guid> StartAsync(
         string process,
@@ -102,8 +105,13 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         string correlationKey,
         string startNode,
         IReadOnlyDictionary<string, object?>? initialVariables,
-        CancellationToken ct) =>
-        StartAsync(
+        CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(process);
+        ArgumentException.ThrowIfNullOrWhiteSpace(correlationKey);
+        ArgumentException.ThrowIfNullOrWhiteSpace(startNode);
+
+        return StartAsync(
             new WorkflowStartRequest
             {
                 Process = process,
@@ -113,6 +121,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
                 InitialVariables = initialVariables,
             },
             ct);
+    }
 
     /// <inheritdoc/>
     public async ValueTask<Guid> StartAsync(WorkflowStartRequest request, CancellationToken ct)
