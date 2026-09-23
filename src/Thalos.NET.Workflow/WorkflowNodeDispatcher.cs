@@ -590,7 +590,11 @@ public sealed partial class WorkflowNodeDispatcher(
     /// skill's name and left to load it itself through <c>skills__load</c>, while a pinned node is handed the exact
     /// body <see cref="RunPinnedNodeAsync"/> loaded, wrapped in the same <see cref="SkillBlock"/> delimiters and
     /// sanitization the catalogue's own skill-loading path uses — so a value inside the body cannot forge or close
-    /// the tag any more than an untrusted variable can forge the variables block below it.
+    /// the tag any more than an untrusted variable can forge the variables block below it. The body also goes
+    /// through <see cref="WorkflowVariableBlock.NeutralizeTag"/>, because it lands in the same <c>Task</c> string
+    /// as the variables block below it: <see cref="SkillBlock.SanitizeBody"/> alone only escapes the
+    /// skill/skills/memories family, so without this a pinned skill's own body could forge a
+    /// <c>&lt;workflow-variables&gt;</c> block ahead of the genuine one.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -612,7 +616,7 @@ public sealed partial class WorkflowNodeDispatcher(
         if (pinnedSkill is { } skill)
         {
             lines.Add(SkillBlock.SkillOpen(skill.Name));
-            lines.Add(SkillBlock.SanitizeBody(skill.Body));
+            lines.Add(WorkflowVariableBlock.NeutralizeTag(SkillBlock.SanitizeBody(skill.Body)));
             lines.Add(SkillBlock.SkillClose);
         }
         else if (!string.IsNullOrEmpty(node.Skill))
