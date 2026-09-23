@@ -16,6 +16,16 @@ internal sealed class TestCaller(string id, params string[] roles) : ISecurityCo
     public IReadOnlyDictionary<string, string> Claims { get; } = new Dictionary<string, string>(StringComparer.Ordinal);
 }
 
+/// <summary>A caller whose authorization id (<see cref="Id"/>, e.g. a per-run workflow id) differs from its stable memory owner.</summary>
+internal sealed class TestOwnerCaller(string id, string memoryOwnerId, bool pinMemoriesToAgent = false) : ISecurityContext, IMemoryOwner
+{
+    public string Id { get; } = id;
+    public IReadOnlySet<string> Roles { get; } = new HashSet<string>(StringComparer.Ordinal);
+    public IReadOnlyDictionary<string, string> Claims { get; } = new Dictionary<string, string>(StringComparer.Ordinal);
+    public string MemoryOwnerId { get; } = memoryOwnerId;
+    public bool PinMemoriesToAgent { get; } = pinMemoriesToAgent;
+}
+
 /// <summary>Real store, real cosine index over the bag-of-words generator, real hub — swap the index or wrap the store to test degradation.</summary>
 internal sealed class MemoryServiceFixture
 {
