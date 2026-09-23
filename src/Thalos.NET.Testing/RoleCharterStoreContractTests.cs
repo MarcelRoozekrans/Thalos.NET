@@ -52,14 +52,50 @@ public abstract class RoleCharterStoreContractTests
     [Fact]
     public async Task DeactivateMissing_deactivates_the_role_but_keeps_its_versions()
     {
-        var store = await CreateStoreAsync(NewClock());
+        var clock = NewClock();
+        var store = await CreateStoreAsync(clock);
         await store.UpsertAsync(NewCharter("reviewer", "hash-1"), CancellationToken.None);
         await store.UpsertAsync(NewCharter("implementer", "hash-i"), CancellationToken.None);
 
+        clock.Advance(TimeSpan.FromMinutes(5));
         await store.DeactivateMissingAsync(["implementer"], CancellationToken.None);
 
         var all = (await store.ListVersionsAsync(CancellationToken.None)).Value;
-        all.Should().Contain(c => c.Role == "reviewer" && !c.IsActive);
-        all.Should().Contain(c => c.Role == "implementer" && c.IsActive);
+        var reviewer = all.Single(c => string.Equals(c.Role, "reviewer", StringComparison.Ordinal));
+        reviewer.IsActive.Should().BeFalse();
+        reviewer.UpdatedAt.Should().Be(clock.GetUtcNow(), "deactivation stamps the version from the store's clock, not a database-side now()");
+        all.Should().Contain(c => string.Equals(c.Role, "implementer", StringComparison.Ordinal) && c.IsActive);
+    }
+
+    [Fact]
+    public async Task Reupserting_a_deactivated_role_reactivates_it()
+    {
+        var clock = NewClock();
+        var store = await CreateStoreAsync(clock);
+        await store.UpsertAsync(NewCharter("reviewer", "hash-1"), CancellationToken.None);
+        await store.DeactivateMissingAsync([], CancellationToken.None);
+
+        clock.Advance(TimeSpan.FromMinutes(1));
+        await store.UpsertAsync(NewCharter("reviewer", "hash-2"), CancellationToken.None);
+
+        var all = (await store.ListVersionsAsync(CancellationToken.None)).Value;
+        all.Should().Contain(
+            c => string.Equals(c.Role, "reviewer", StringComparison.Ordinal) && string.Equals(c.ContentHash, "hash-1", StringComparison.Ordinal) && !c.IsActive,
+            "the deactivated version is kept, not deleted");
+        all.Single(c => c.IsActive).ContentHash.Should().Be("hash-2");
+    }
+
+    [Fact]
+    public async Task Reupserting_an_older_hash_makes_it_current()
+    {
+        var store = await CreateStoreAsync(NewClock());
+        await store.UpsertAsync(NewCharter("reviewer", "hash-1"), CancellationToken.None);
+        await store.UpsertAsync(NewCharter("reviewer", "hash-2"), CancellationToken.None);
+
+        await store.UpsertAsync(NewCharter("reviewer", "hash-1"), CancellationToken.None);
+
+        var all = (await store.ListVersionsAsync(CancellationToken.None)).Value;
+        all.Should().HaveCount(2, "re-upserting an existing hash must not create a third version");
+        all.Single(c => c.IsActive).ContentHash.Should().Be("hash-1", "the most recently upserted hash is current, even if it was seen before");
     }
 }

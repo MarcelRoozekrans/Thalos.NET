@@ -31,8 +31,8 @@ public static class RoleCharterFileLoader
     private const string SkillsKey = "skills";
     private const string MarkdownExtension = ".md";
 
-    private static readonly FrozenSet<string> ScalarKeys = new[] { NameKey, DescriptionKey, ModelKey }.ToFrozenSet(StringComparer.Ordinal);
-    private static readonly FrozenSet<string> SequenceKeys = new[] { SkillsKey }.ToFrozenSet(StringComparer.Ordinal);
+    private static readonly IReadOnlyList<string> ScalarKeys = [NameKey, DescriptionKey, ModelKey];
+    private static readonly IReadOnlyList<string> SequenceKeys = [SkillsKey];
 
     private static readonly FrozenDictionary<string, string> Forbidden = new Dictionary<string, string>(StringComparer.Ordinal)
     {
@@ -46,7 +46,7 @@ public static class RoleCharterFileLoader
         ArgumentException.ThrowIfNullOrWhiteSpace(expectedRole);
         ArgumentNullException.ThrowIfNull(text);
 
-        var parsed = Frontmatter.Parse(text, ScalarKeys, SequenceKeys, Forbidden);
+        var parsed = Frontmatter.Parse(text, ScalarKeys, SequenceKeys, Forbidden, "role charter");
         if (parsed.IsFailure)
         {
             return Result<RoleCharter, AgentError>.Failure(AgentError.SkillValidationFailed($"{sourcePath}: {parsed.Error}"));

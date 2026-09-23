@@ -32,8 +32,8 @@ public static class SkillFileLoader
     private const string TagsKey = "tags";
     private const string MarkdownExtension = ".md";
 
-    private static readonly FrozenSet<string> ScalarKeys = new[] { NameKey, DescriptionKey }.ToFrozenSet(StringComparer.Ordinal);
-    private static readonly FrozenSet<string> SequenceKeys = new[] { TagsKey }.ToFrozenSet(StringComparer.Ordinal);
+    private static readonly IReadOnlyList<string> ScalarKeys = [NameKey, DescriptionKey];
+    private static readonly IReadOnlyList<string> SequenceKeys = [TagsKey];
     private static readonly FrozenDictionary<string, string> Forbidden = FrozenDictionary<string, string>.Empty;
 
     /// <summary>Parses already-read <paramref name="text"/> as the skill named <paramref name="expectedName"/>; <paramref name="sourcePath"/> is the root-relative path used in error messages.</summary>
@@ -43,7 +43,7 @@ public static class SkillFileLoader
         ArgumentException.ThrowIfNullOrWhiteSpace(expectedName);
         ArgumentNullException.ThrowIfNull(text);
 
-        var parsed = Frontmatter.Parse(text, ScalarKeys, SequenceKeys, Forbidden);
+        var parsed = Frontmatter.Parse(text, ScalarKeys, SequenceKeys, Forbidden, "skill");
         if (parsed.IsFailure)
         {
             return Result<SkillDocument, AgentError>.Failure(AgentError.SkillValidationFailed($"{sourcePath}: {parsed.Error}"));

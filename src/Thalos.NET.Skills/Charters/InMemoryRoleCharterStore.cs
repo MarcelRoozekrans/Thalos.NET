@@ -15,14 +15,18 @@ public sealed class InMemoryRoleCharterStore(TimeProvider clock) : IRoleCharterS
     public ValueTask<Result<RoleCharter, AgentError>> UpsertAsync(RoleCharter charter, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(charter);
+
+        // The stored (and returned) charter just became its role's current, active version: IsActive is store
+        // state, not something the caller gets to dictate.
+        var stored = charter with { IsActive = true };
         lock (_gate)
         {
-            _versions[(charter.Role, charter.ContentHash)] = charter;
-            _current[charter.Role] = charter.ContentHash;
-            _activeRoles.Add(charter.Role);
+            _versions[(stored.Role, stored.ContentHash)] = stored;
+            _current[stored.Role] = stored.ContentHash;
+            _activeRoles.Add(stored.Role);
         }
 
-        return new(Result<RoleCharter, AgentError>.Success(charter));
+        return new(Result<RoleCharter, AgentError>.Success(stored));
     }
 
     /// <inheritdoc />

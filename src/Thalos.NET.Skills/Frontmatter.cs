@@ -18,24 +18,31 @@ internal static class Frontmatter
 
     private readonly record struct Split(string Text, string Body);
 
-    private const char Bom = '﻿';
+    private const char Bom = '\uFEFF';
     private const string ReservedScalarStarts = "|>&*!?%@{[`";
 
     /// <summary>Parses <paramref name="text"/>'s frontmatter and body against the given key grammar.</summary>
     /// <param name="text">The raw file text, exactly as read (BOM and any line ending style permitted).</param>
-    /// <param name="scalarKeys">Keys allowed as single-line scalars.</param>
-    /// <param name="sequenceKeys">Keys allowed as flow sequences.</param>
+    /// <param name="scalarKeys">Keys allowed as single-line scalars, in the order they are listed in an "unknown key" error.</param>
+    /// <param name="sequenceKeys">Keys allowed as flow sequences, in the order they are listed in an "unknown key" error (after <paramref name="scalarKeys"/>).</param>
     /// <param name="forbidden">Keys that are rejected with a specific reason instead of "unknown key".</param>
+    /// <param name="kind">
+    /// The document's name as it reads in a generic grammar-violation message that names no particular key, e.g.
+    /// <c>"skill"</c> or <c>"role charter"</c> (as in "block scalars, anchors and flow mappings are not supported in
+    /// {kind} frontmatter").
+    /// </param>
     internal static Result<Parsed, string> Parse(
         string text,
-        IReadOnlySet<string> scalarKeys,
-        IReadOnlySet<string> sequenceKeys,
-        IReadOnlyDictionary<string, string> forbidden)
+        IReadOnlyList<string> scalarKeys,
+        IReadOnlyList<string> sequenceKeys,
+        IReadOnlyDictionary<string, string> forbidden,
+        string kind)
     {
         ArgumentNullException.ThrowIfNull(text);
         ArgumentNullException.ThrowIfNull(scalarKeys);
         ArgumentNullException.ThrowIfNull(sequenceKeys);
         ArgumentNullException.ThrowIfNull(forbidden);
+        ArgumentException.ThrowIfNullOrWhiteSpace(kind);
 
         var normalized = text.TrimStart(Bom).ReplaceLineEndings("\n");
         var split = SplitFrontmatter(normalized);
@@ -44,7 +51,7 @@ internal static class Frontmatter
             return Result<Parsed, string>.Failure(split.Error);
         }
 
-        var entries = ParseEntries(split.Value.Text, scalarKeys, sequenceKeys, forbidden);
+        var entries = ParseEntries(split.Value.Text, scalarKeys, sequenceKeys, forbidden, kind);
         return entries.IsFailure
             ? Result<Parsed, string>.Failure(entries.Error)
             : Result<Parsed, string>.Success(new Parsed(entries.Value.Scalars, entries.Value.Sequences, split.Value.Body, normalized));
@@ -84,10 +91,13 @@ internal static class Frontmatter
 
     private sealed record Entries(Dictionary<string, string> Scalars, Dictionary<string, IReadOnlyList<string>> Sequences);
 
-    private static Result<Entries, string> ParseEntries(string frontmatter, IReadOnlySet<string> scalarKeys, IReadOnlySet<string> sequenceKeys, IReadOnlyDictionary<string, string> forbidden)
+    private static Result<Entries, string> ParseEntries(string frontmatter, IReadOnlyList<string> scalarKeys, IReadOnlyList<string> sequenceKeys, IReadOnlyDictionary<string, string> forbidden, string kind)
     {
         var scalars = new Dictionary<string, string>(StringComparer.Ordinal);
         var sequences = new Dictionary<string, IReadOnlyList<string>>(StringComparer.Ordinal);
+        var scalarKeySet = new HashSet<string>(scalarKeys, StringComparer.Ordinal);
+        var sequenceKeySet = new HashSet<string>(sequenceKeys, StringComparer.Ordinal);
+        var allowedKeys = FormatAllowedKeys(scalarKeys, sequenceKeys);
         var seen = new HashSet<string>(StringComparer.Ordinal);
         var lastKey = "";
 
@@ -104,9 +114,9 @@ internal static class Frontmatter
             {
                 // A block sequence under a sequence key is the one indented shape the grammar names explicitly; its
                 // message tells the author what to write instead, so it wins over the generic indentation error.
-                return Result<Entries, string>.Failure(trimmed[0] == '-' && sequenceKeys.Contains(lastKey)
-                    ? $"'{lastKey}' must be a flow sequence, e.g. {lastKey}: [a, b]"
-                    : "indented YAML is not supported in frontmatter");
+                return Result<Entries, string>.Failure(trimmed[0] == '-' && sequenceKeySet.Contains(lastKey)
+                    ? $"{lastKey} must be a flow sequence, e.g. {lastKey}: [a, b]"
+                    : $"indented YAML is not supported in {kind} frontmatter");
             }
 
             var colon = line.IndexOf(':');
@@ -127,7 +137,7 @@ internal static class Frontmatter
             }
 
             var value = line[(colon + 1)..].TrimStart(' ', '\t');
-            var error = Apply(key, value, scalarKeys, sequenceKeys, forbidden, scalars, sequences);
+            var error = Apply(key, value, scalarKeySet, sequenceKeySet, forbidden, scalars, sequences, allowedKeys, kind);
             if (error is not null)
             {
                 return Result<Entries, string>.Failure(error);
@@ -139,15 +149,48 @@ internal static class Frontmatter
         return Result<Entries, string>.Success(new Entries(scalars, sequences));
     }
 
+    /// <summary>English list of every allowed key, in the caller's order (e.g. <c>"name, description and tags"</c>); used only in the "unknown key" message.</summary>
+    private static string FormatAllowedKeys(IReadOnlyList<string> scalarKeys, IReadOnlyList<string> sequenceKeys)
+    {
+        var all = new List<string>(scalarKeys.Count + sequenceKeys.Count);
+        all.AddRange(scalarKeys);
+        all.AddRange(sequenceKeys);
+        if (all.Count == 0)
+        {
+            return "";
+        }
+
+        if (all.Count == 1)
+        {
+            return all[0];
+        }
+
+        var sb = new System.Text.StringBuilder();
+        for (var i = 0; i < all.Count - 1; i++)
+        {
+            if (i > 0)
+            {
+                sb.Append(", ");
+            }
+
+            sb.Append(all[i]);
+        }
+
+        sb.Append(" and ").Append(all[^1]);
+        return sb.ToString();
+    }
+
     /// <summary>Applies one <c>key: value</c> entry, mutating <paramref name="scalars"/> or <paramref name="sequences"/>; returns the failure reason, or null on success.</summary>
     private static string? Apply(
         string key,
         string value,
-        IReadOnlySet<string> scalarKeys,
-        IReadOnlySet<string> sequenceKeys,
+        HashSet<string> scalarKeys,
+        HashSet<string> sequenceKeys,
         IReadOnlyDictionary<string, string> forbidden,
         Dictionary<string, string> scalars,
-        Dictionary<string, IReadOnlyList<string>> sequences)
+        Dictionary<string, IReadOnlyList<string>> sequences,
+        string allowedKeys,
+        string kind)
     {
         if (forbidden.TryGetValue(key, out var reason))
         {
@@ -156,7 +199,7 @@ internal static class Frontmatter
 
         if (sequenceKeys.Contains(key))
         {
-            var parsed = ParseSequence(key, value);
+            var parsed = ParseSequence(key, value, kind);
             if (parsed.IsFailure)
             {
                 return parsed.Error;
@@ -168,7 +211,7 @@ internal static class Frontmatter
 
         if (scalarKeys.Contains(key))
         {
-            var parsed = ParseScalar(key, value);
+            var parsed = ParseScalar(key, value, kind);
             if (parsed.IsFailure)
             {
                 return parsed.Error;
@@ -178,10 +221,10 @@ internal static class Frontmatter
             return null;
         }
 
-        return $"unknown frontmatter key '{key}'";
+        return $"unknown frontmatter key '{key}' (only {allowedKeys} are recognised)";
     }
 
-    private static Result<string, string> ParseScalar(string key, string value)
+    private static Result<string, string> ParseScalar(string key, string value, string kind)
     {
         if (value.Length == 0)
         {
@@ -199,7 +242,7 @@ internal static class Frontmatter
         }
 
         return ReservedScalarStarts.Contains(value[0], StringComparison.Ordinal)
-            ? Result<string, string>.Failure("block scalars, anchors and flow mappings are not supported in frontmatter")
+            ? Result<string, string>.Failure($"block scalars, anchors and flow mappings are not supported in {kind} frontmatter")
             : Result<string, string>.Success(value);
     }
 
@@ -245,7 +288,7 @@ internal static class Frontmatter
         return Result<string, string>.Success(sb.ToString());
     }
 
-    private static Result<IReadOnlyList<string>, string> ParseSequence(string key, string value)
+    private static Result<IReadOnlyList<string>, string> ParseSequence(string key, string value, string kind)
     {
         if (value.Length == 0)
         {
@@ -254,7 +297,7 @@ internal static class Frontmatter
 
         if (value[0] != '[' || value[^1] != ']')
         {
-            return Result<IReadOnlyList<string>, string>.Failure($"'{key}' must be a flow sequence, e.g. {key}: [a, b]");
+            return Result<IReadOnlyList<string>, string>.Failure($"{key} must be a flow sequence, e.g. {key}: [a, b]");
         }
 
         var inner = value[1..^1].Trim();
@@ -265,14 +308,14 @@ internal static class Frontmatter
 
         if (inner.Contains('[', StringComparison.Ordinal) || inner.Contains(']', StringComparison.Ordinal))
         {
-            return Result<IReadOnlyList<string>, string>.Failure($"nested sequences are not supported in '{key}'");
+            return Result<IReadOnlyList<string>, string>.Failure($"nested sequences are not supported in {key}");
         }
 
         var items = inner.Split(',');
         var list = new List<string>(items.Length);
         for (var i = 0; i < items.Length; i++)
         {
-            var scalar = ParseScalar(key, items[i].Trim());
+            var scalar = ParseScalar(key, items[i].Trim(), kind);
             if (scalar.IsFailure)
             {
                 return Result<IReadOnlyList<string>, string>.Failure(scalar.Error);
