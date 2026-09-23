@@ -3,7 +3,6 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Thalos.Runtime;
-using ZeroAlloc.Authorization;
 
 namespace Thalos.Memory;
 
@@ -11,7 +10,10 @@ namespace Thalos.Memory;
 /// Auto-recall: once per agent run (MAF invokes context providers before the run's first model call, not again inside the
 /// tool-call loop), recalls memories relevant to the last user message for the turn's caller
 /// (<see cref="TurnScope.Caller"/>), this agent and the configured shared owner, and injects them as a delimited
-/// <c>&lt;memories&gt;</c> block via <see cref="AIContext.Instructions"/>. Recall never fails a turn: any error is logged,
+/// <c>&lt;memories&gt;</c> block via <see cref="AIContext.Instructions"/>. The owner is resolved by
+/// <see cref="MemoryOwnerResolver.Resolve"/> — the same resolution <see cref="MemoryTools"/> uses for the explicit
+/// tools — so this, the primary read path MAF invokes before every turn, never disagrees with what
+/// <c>memory__remember</c> just wrote. Recall never fails a turn: any error is logged,
 /// a <see cref="MemoryRecallFailedEvent"/> is published and the turn proceeds without memories. Recalled text is
 /// untrusted: when an <see cref="IUntrustedContentScanner"/> is available every memory is scanned and quarantined ones are
 /// dropped (<see cref="MemoryQuarantinedEvent"/>). Nothing is stored after the turn (explicit writes only).
@@ -37,11 +39,12 @@ public sealed partial class MemoryContextProvider(
     {
         ArgumentNullException.ThrowIfNull(context);
         var scope = TurnScope.Current;
-        var owner = scope?.Caller.Id;
-        if (scope is null || string.IsNullOrWhiteSpace(owner) || string.Equals(owner, AnonymousSecurityContext.AnonymousId, StringComparison.Ordinal))
+        if (scope is null || MemoryOwnerResolver.Resolve(scope.Caller) is not { } resolved)
         {
             return new AIContext();
         }
+
+        var owner = resolved.OwnerId;
 
         var query = LastUserText(context.AIContext.Messages);
         if (string.IsNullOrWhiteSpace(query))

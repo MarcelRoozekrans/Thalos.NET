@@ -259,32 +259,20 @@ public sealed partial class MemoryTools(
     /// The turn's memory owner, agent and pin flag, or null when there is no turn or the caller is anonymous. The
     /// authorization identity that gates whether there is a caller at all is always <see cref="ISecurityContext.Id"/> —
     /// that is deliberately what <see cref="Thalos.Tools.DefaultToolAuthorizer"/>-style authorization evaluates, and it
-    /// must stay per-run for a caller such as a workflow run. The memory owner returned here is a separate value: it is
-    /// that same <see cref="ISecurityContext.Id"/> unless the caller implements <see cref="IMemoryOwner"/> and reports a
-    /// non-blank, non-anonymous <see cref="IMemoryOwner.MemoryOwnerId"/>, in which case the owner id is that stable id
-    /// instead. Every call site below resolves through this one method, for both reads and writes, so a caller that
-    /// reports a stable owner always reads back what it (or another caller reporting the same owner) wrote.
+    /// must stay per-run for a caller such as a workflow run. The memory owner itself is resolved by
+    /// <see cref="MemoryOwnerResolver.Resolve"/> — the same resolution <see cref="MemoryContextProvider"/> uses for
+    /// auto-recall — so a caller that reports a stable owner always reads back what it (or another caller reporting
+    /// the same owner) wrote, on every read and write path.
     /// </summary>
     internal static (string OwnerId, AgentId? AgentId, bool PinMemoriesToAgent)? Caller()
     {
         var scope = TurnScope.Current;
-        if (scope is null || string.IsNullOrWhiteSpace(scope.Caller.Id) || string.Equals(scope.Caller.Id, AnonymousSecurityContext.AnonymousId, StringComparison.Ordinal))
+        if (scope is null || MemoryOwnerResolver.Resolve(scope.Caller) is not { } resolved)
         {
             return null;
         }
 
-        var ownerId = scope.Caller.Id;
-        var pinMemoriesToAgent = false;
-        if (scope.Caller is IMemoryOwner owner)
-        {
-            pinMemoriesToAgent = owner.PinMemoriesToAgent;
-            if (!string.IsNullOrWhiteSpace(owner.MemoryOwnerId) && !string.Equals(owner.MemoryOwnerId, AnonymousSecurityContext.AnonymousId, StringComparison.Ordinal))
-            {
-                ownerId = owner.MemoryOwnerId;
-            }
-        }
-
-        return (ownerId, scope.AgentId == default ? null : scope.AgentId, pinMemoriesToAgent);
+        return (resolved.OwnerId, scope.AgentId == default ? null : scope.AgentId, resolved.PinMemoriesToAgent);
     }
 
     [LoggerMessage(EventId = 520, Level = LogLevel.Warning, Message = "Memory {Memory} returned by a memory tool was quarantined and dropped: {Detail}")]

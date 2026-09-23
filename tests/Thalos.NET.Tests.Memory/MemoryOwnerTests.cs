@@ -42,6 +42,29 @@ public sealed class MemoryOwnerTests
     }
 
     [Fact]
+    public async Task Auto_recall_reads_the_stable_owner_across_runs_with_different_authorization_ids()
+    {
+        // same shape as the explicit-recall symmetry test above, one layer up: MemoryContextProvider is auto-recall,
+        // the read path MAF invokes before every turn's first model call, and it must resolve the owner the same way
+        // MemoryTools does or writes and auto-recall silently disagree about where a stable owner's memories live.
+        var (f, source) = MemoryToolsTests.Build();
+        var remember = await MemoryToolsTests.Tool(source, "remember");
+        using (TurnScope.Begin(SessionId.New(), TurnId.New(), new TestOwnerCaller("workflow:review:run-1", "role:reviewer")))
+        {
+            (await remember.InvokeAsync(MemoryToolsTests.Args(("text", "deploy notes: use blue green"))))!.ToString().Should().StartWith("Remembered ");
+        }
+
+        var agent = AgentId.New();
+        var provider = MemoryContextProviderTests.Provider(f, agent);
+        // a different run of the same role — a different authorization id, the same stable owner
+        using var second = TurnScope.Begin(SessionId.New(), TurnId.New(), new TestOwnerCaller("workflow:review:run-2", "role:reviewer"), agent);
+
+        var ctx = await provider.InvokingAsync(MemoryContextProviderTests.Invoking("deploy notes"), default);
+
+        ctx.Instructions.Should().NotBeNull().And.Contain("blue green");
+    }
+
+    [Fact]
     public async Task PinMemoriesToAgent_pins_the_stored_record_even_when_shared_is_true()
     {
         var (f, source) = MemoryToolsTests.Build();
