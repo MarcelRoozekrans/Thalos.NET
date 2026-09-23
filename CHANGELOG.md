@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.8.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.7.0...v0.8.0) (2026-09-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* **memory:** IMemoryService.RecallAsync returns Result<MemoryRecallResult, AgentError> instead of Result<IReadOnlyList<RecalledMemory>, AgentError>. Callers read result.Value.Memories and result.Value.Tier. Every implementer and test fake is updated.
+
+### Features
+
+* **memory:** stable memory owner and degraded recall ([#151](https://github.com/MarcelRoozekrans/Thalos.NET/issues/151)) ([a8b9c60](https://github.com/MarcelRoozekrans/Thalos.NET/commit/a8b9c600de0508a0799fe3f8cd3e1209311af20a))
+
 ## [0.7.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.6.0...v0.7.0) (2026-09-22)
 
 
