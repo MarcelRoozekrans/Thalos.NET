@@ -34,8 +34,12 @@ public static class WorkflowOrmThalosBuilderExtensions
     /// earlier registration of either. Does not register <see cref="ProcessDefinitionSync"/> or an
     /// <c>IProcessDefinitionSource</c> — syncing is an engine-level concern and where definitions come from is
     /// host policy, so a host composes those itself from the <see cref="IProcessDefinitionStore"/> registered
-    /// here. When <see cref="WorkflowOrmOptions.EnsureSchemaOnStartup"/> is set (the default), also registers a
-    /// hosted service that applies the outbox and workflow migrations at startup.
+    /// here. Also registers <see cref="IRunManifestResolver"/> (as <see cref="CatalogRunManifestResolver"/>) and
+    /// <see cref="WorkflowRunStarter"/> with <c>TryAdd</c>, so a host that wants a pinned run can resolve
+    /// <see cref="WorkflowRunStarter"/> straight away once it has also registered its own
+    /// <see cref="IWorkflowReferenceResolver"/>. When <see cref="WorkflowOrmOptions.EnsureSchemaOnStartup"/> is
+    /// set (the default), also registers a hosted service that applies the outbox and workflow migrations at
+    /// startup.
     /// </summary>
     public static ThalosBuilder AddWorkflowOrm(this ThalosBuilder builder, Action<WorkflowOrmOptions> configure)
     {
@@ -59,6 +63,13 @@ public static class WorkflowOrmThalosBuilderExtensions
             new CachingProcessDefinitionStore(new OrmProcessDefinitionStore(sp.GetRequiredService<WorkflowOrmOptions>()))));
         services.Replace(ServiceDescriptor.Singleton<IWorkflowStore>(sp =>
             new OrmWorkflowStore(sp.GetRequiredService<WorkflowOrmOptions>(), sp.GetRequiredService<IProcessDefinitionStore>())));
+
+        // Pinning is additive, not ORM-specific — TryAdd so a host that already registered its own
+        // IRunManifestResolver (or WorkflowRunStarter) keeps that registration, and a second AddWorkflowOrm call
+        // does not fight the first over either. Both resolve their own dependencies (IWorkflowReferenceResolver,
+        // IAgentCatalog, ISkillStore) from whatever else the host composed; none of that is this package's to own.
+        services.TryAddSingleton<IRunManifestResolver, CatalogRunManifestResolver>();
+        services.TryAddSingleton<WorkflowRunStarter>();
 
         for (var i = services.Count - 1; i >= 0; i--)
         {

@@ -1,4 +1,3 @@
-using System.Diagnostics.CodeAnalysis;
 using Thalos.Skills;
 using Thalos.Workflow;
 
@@ -81,15 +80,4 @@ public sealed class WorkflowReferenceResolverTests
         ContentHash = "hash",
         UpdatedAt = Clock.GetUtcNow(),
     };
-
-    private sealed class FakeAgentCatalog(IReadOnlyList<AgentDefinition> agents) : IAgentCatalog
-    {
-        public IReadOnlyList<AgentDefinition> Agents { get; } = agents;
-
-        public bool TryGet(AgentId id, [MaybeNullWhen(false)] out AgentDefinition definition)
-        {
-            definition = Agents.FirstOrDefault(a => a.Id == id);
-            return definition is not null;
-        }
-    }
 }
