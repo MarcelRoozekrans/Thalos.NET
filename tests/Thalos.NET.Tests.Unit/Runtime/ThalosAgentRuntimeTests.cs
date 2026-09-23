@@ -48,6 +48,25 @@ public sealed class ThalosAgentRuntimeTests
     }
 
     [Fact]
+    public async Task A_turn_with_an_agent_revision_runs_the_revisioned_definition()
+    {
+        AgentDefinition? captured = null;
+        var f = new RuntimeFixture();
+        var current = f.Agent with { Instructions = "One." };
+        var revisioned = current with { Instructions = "Two.", Revision = "r2" };
+        f.CatalogOverride = new RevisionAwareCatalog(current, "r2", revisioned);
+        f.ChatClientFactory = definition => { captured = definition; return f.Client; };
+        f.Build();
+        f.Client.ThenText("ok");
+        var s = (await f.Runtime.CreateSessionAsync(f.Agent.Id, RuntimeFixture.User(), default)).Value;
+
+        var r = await f.Runtime.RunTurnAsync(new AgentTurnRequest(s, "hi", RuntimeFixture.User()) { AgentRevision = "r2" }, default);
+
+        r.IsSuccess.Should().BeTrue();
+        captured!.Instructions.Should().Be("Two.");
+    }
+
+    [Fact]
     public async Task Tool_turn_invokes_tool_sums_usage_and_reports_tool_calls()
     {
         var f = new RuntimeFixture().WithTool(AIFunctionFactory.Create((string text) => "echo:" + text, "echo")).Build();

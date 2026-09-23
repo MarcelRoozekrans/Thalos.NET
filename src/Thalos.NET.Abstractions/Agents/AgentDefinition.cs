@@ -41,4 +41,12 @@ public sealed record AgentDefinition
     /// definitions serialised before that (or by hosts without memory) simply carry <see langword="null"/> here.
     /// </summary>
     public AgentMemorySettings? Memory { get; init; }
+
+    /// <summary>
+    /// Opaque pin for the charter content this definition was built from; <see langword="null"/> means unrevisioned, as before
+    /// this existed. Never part of <see cref="Id"/>: a session and its memory stay keyed on <see cref="Id"/> alone while two
+    /// runs hold two revisions of the same agent concurrently. The agent factory caches one pipeline per (<see cref="Id"/>,
+    /// <see cref="Revision"/>) pair — see <c>AgentFactory</c>.
+    /// </summary>
+    public string? Revision { get; init; }
 }

@@ -50,8 +50,12 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
     private readonly ILoggerFactory? _loggerFactory;
     private readonly ILogger _logger;
     private readonly IReadOnlyList<IAgentContextProviderSource> _contextProviderSources;
-    private readonly ConcurrentDictionary<AgentId, Lazy<Task<Result<Entry, AgentError>>>> _cache = new();
+    private readonly ConcurrentDictionary<CacheKey, Lazy<Task<Result<Entry, AgentError>>>> _cache = new();
     private volatile bool _disposed;
+
+    /// <summary>Cache key: an agent pipeline is built once per (<see cref="AgentDefinition.Id"/>, <see cref="AgentDefinition.Revision"/>)
+    /// pair, so two runs holding two revisions of the same agent get two independent pipelines that don't evict each other.</summary>
+    private readonly record struct CacheKey(AgentId Id, string? Revision);
 
     /// <summary>Resolved by DI; <paramref name="contextProviderSources"/> are every registered <see cref="IAgentContextProviderSource"/> (Thalos.NET.Memory registers one).</summary>
     public AgentFactory(
@@ -77,19 +81,20 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
     public async ValueTask<Result<AIAgent, AgentError>> GetOrCreateAsync(AgentDefinition definition, CancellationToken ct)
     {
         var retriedStaleFailure = false;
+        var key = new CacheKey(definition.Id, definition.Revision);
         while (true)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
 
-            var lazy = _cache.GetOrAdd(definition.Id, static (_, state) =>
+            var lazy = _cache.GetOrAdd(key, static (_, state) =>
                 new Lazy<Task<Result<Entry, AgentError>>>(() => state.self.BuildAsync(state.definition), LazyThreadSafetyMode.ExecutionAndPublication),
                 (self: this, definition));
             var wasCompleted = lazy.IsValueCreated && lazy.Value.IsCompleted;
 
-            var built = await AwaitBuildAsync(definition.Id, lazy, ct).ConfigureAwait(false);
+            var built = await AwaitBuildAsync(key, lazy, ct).ConfigureAwait(false);
             if (built.IsFailure)
             {
-                _cache.TryRemove(KeyValuePair.Create(definition.Id, lazy)); // don't cache failures; next call retries
+                _cache.TryRemove(KeyValuePair.Create(key, lazy)); // don't cache failures; next call retries
                 if (wasCompleted && !retriedStaleFailure)
                 {
                     retriedStaleFailure = true; // a failure left behind by an earlier caller — retry once rather than report it
@@ -102,12 +107,12 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
             var entry = built.Value;
             if (_disposed)
             {
-                _cache.TryRemove(KeyValuePair.Create(definition.Id, lazy));
+                _cache.TryRemove(KeyValuePair.Create(key, lazy));
                 entry.Dispose(_logger); // completed after Dispose() swept the cache
                 ObjectDisposedException.ThrowIf(_disposed, this);
             }
 
-            if (!_cache.TryGetValue(definition.Id, out var current) || !ReferenceEquals(current, lazy))
+            if (!_cache.TryGetValue(key, out var current) || !ReferenceEquals(current, lazy))
             {
                 entry.Dispose(_logger); // invalidated while building — rebuild
                 continue;
@@ -115,8 +120,8 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
 
             if (!SameDefinition(entry.Definition, definition))
             {
-                // The definition changed for a cached id: treat as invalidated and rebuild with the new one.
-                if (_cache.TryRemove(KeyValuePair.Create(definition.Id, lazy)))
+                // The definition changed for a cached key: treat as invalidated and rebuild with the new one.
+                if (_cache.TryRemove(KeyValuePair.Create(key, lazy)))
                 {
                     entry.Dispose(_logger);
                 }
@@ -135,9 +140,12 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
     /// </remarks>
     public void Invalidate(AgentId agentId)
     {
-        if (_cache.TryRemove(agentId, out var lazy))
+        foreach (var key in _cache.Keys)
         {
-            DisposeCompleted(lazy);
+            if (key.Id == agentId && _cache.TryRemove(key, out var lazy))
+            {
+                DisposeCompleted(lazy);
+            }
         }
     }
 
@@ -147,15 +155,18 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
         _disposed = true;
         while (!_cache.IsEmpty)
         {
-            foreach (var id in _cache.Keys)
+            foreach (var key in _cache.Keys)
             {
-                Invalidate(id);
+                if (_cache.TryRemove(key, out var lazy))
+                {
+                    DisposeCompleted(lazy);
+                }
             }
         }
     }
 
     /// <summary>Waits for a shared build with the caller's own token (the build itself is not cancelled by any single caller); a build that threw is evicted so it doesn't poison the cache.</summary>
-    private async Task<Result<Entry, AgentError>> AwaitBuildAsync(AgentId id, Lazy<Task<Result<Entry, AgentError>>> lazy, CancellationToken ct)
+    private async Task<Result<Entry, AgentError>> AwaitBuildAsync(CacheKey key, Lazy<Task<Result<Entry, AgentError>>> lazy, CancellationToken ct)
     {
         try
         {
@@ -163,7 +174,7 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
         }
         catch (Exception) when (lazy.Value.IsCompleted && !lazy.Value.IsCompletedSuccessfully)
         {
-            _cache.TryRemove(KeyValuePair.Create(id, lazy));
+            _cache.TryRemove(KeyValuePair.Create(key, lazy));
             throw;
         }
     }
@@ -177,7 +188,8 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
         && a.MaxOutputTokens == b.MaxOutputTokens
         && a.Tools.SequenceEqual(b.Tools, StringComparer.Ordinal)
         && a.Skills.SequenceEqual(b.Skills, StringComparer.Ordinal)
-        && Equals(a.Memory, b.Memory);
+        && Equals(a.Memory, b.Memory)
+        && string.Equals(a.Revision, b.Revision, StringComparison.Ordinal);
 
     private async Task<Result<Entry, AgentError>> BuildAsync(AgentDefinition definition)
     {

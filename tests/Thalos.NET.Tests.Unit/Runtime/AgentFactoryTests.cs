@@ -1,7 +1,9 @@
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using NSubstitute;
+using Thalos.Agents;
 using Thalos.Runtime;
 using Thalos.Sessions;
 using Thalos.Testing;
@@ -315,5 +317,54 @@ public sealed class AgentFactoryTests
 
         var rebuilt = (await h.Factory.GetOrCreateAsync(def with { Skills = ["release", "dotnet-*"] }, default)).Value;
         rebuilt.Should().NotBeSameAs(first, "a changed skill glob list must rebuild the agent");
+    }
+
+    [Fact]
+    public async Task Two_revisions_of_one_agent_get_two_pipelines_and_neither_evicts_the_other()
+    {
+        var h = Build();
+        var v1 = Def() with { Instructions = "One.", Revision = "r1" };
+        var v2 = v1 with { Instructions = "Two.", Revision = "r2" };
+
+        var a1 = (await h.Factory.GetOrCreateAsync(v1, CancellationToken.None)).Value;
+        var a2 = (await h.Factory.GetOrCreateAsync(v2, CancellationToken.None)).Value;
+        var a1Again = (await h.Factory.GetOrCreateAsync(v1, CancellationToken.None)).Value;
+
+        a2.Should().NotBeSameAs(a1);
+        a1Again.Should().BeSameAs(a1, "alternating two pinned revisions must not rebuild the pipeline each turn");
+    }
+
+    [Fact]
+    public async Task Invalidate_removes_every_revision_of_the_agent()
+    {
+        var h = Build();
+        var v1 = Def() with { Revision = "r1" };
+        var a1 = (await h.Factory.GetOrCreateAsync(v1, CancellationToken.None)).Value;
+
+        h.Factory.Invalidate(v1.Id);
+
+        (await h.Factory.GetOrCreateAsync(v1, CancellationToken.None)).Value.Should().NotBeSameAs(a1);
+    }
+
+    private static ThalosOptions OptionsWith(AgentDefinition definition)
+    {
+        var options = new ThalosOptions();
+        options.Agents.Add(definition);
+        return options;
+    }
+
+    [Fact]
+    public void A_catalog_without_revision_support_refuses_a_pinned_revision()
+    {
+        var definition = Def();
+        // Interface-typed on purpose: the pinned-revision TryGet is an IAgentCatalog default method, not a member
+        // OptionsAgentCatalog overrides, so a concrete-typed reference would not expose it.
+#pragma warning disable CA1859
+        IAgentCatalog catalog = new OptionsAgentCatalog(Options.Create(OptionsWith(definition)));
+#pragma warning restore CA1859
+
+        catalog.TryGet(definition.Id, "r1", out _).Should().BeFalse();
+        catalog.TryGet(definition.Id, null, out var current).Should().BeTrue();
+        current.Should().BeSameAs(catalog.Agents[0]);
     }
 }

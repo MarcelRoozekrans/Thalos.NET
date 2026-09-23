@@ -35,6 +35,9 @@ internal sealed class RuntimeFixture
     /// <summary>What the provider returns from <c>CreateChatClient</c>; defaults to <see cref="Client"/>. May throw.</summary>
     public Func<AgentDefinition, IChatClient>? ChatClientFactory { get; set; }
 
+    /// <summary>Replaces the default single-agent <see cref="StaticAgentCatalog"/>; set before <see cref="Build"/> to test revision resolution.</summary>
+    public IAgentCatalog? CatalogOverride { get; set; }
+
     public RuntimeFixture(params string[] allowTools)
     {
         Agent = new AgentDefinition { Id = AgentId.New(), Name = "a", Instructions = "sys", Model = "m1", Tools = allowTools.Length == 0 ? ["*"] : allowTools };
@@ -62,7 +65,7 @@ internal sealed class RuntimeFixture
         var history = new SessionStoreChatHistoryProvider(store);
         var services = new ServiceCollection().BuildServiceProvider();
         var factory = new AgentFactory(provider, [], catalog, history, services, null);
-        var agents = new StaticAgentCatalog([Agent]);
+        var agents = CatalogOverride ?? new StaticAgentCatalog([Agent]);
         // The real factory, over the same authorizer the catalog uses: an outcome tool is authorized exactly like any other.
         OutcomeTools = new OutcomeToolFactory(Authorizer, publisher, TimeProvider.System);
         Runtime = new ThalosAgentRuntime(agents, factory, store, history, publisher, Hub, TimeProvider.System, OutcomeTools, null);
@@ -78,6 +81,29 @@ internal sealed class StaticAgentCatalog(IReadOnlyList<AgentDefinition> agents) 
     public bool TryGet(AgentId id, [MaybeNullWhen(false)] out AgentDefinition definition)
     {
         definition = agents.FirstOrDefault(a => a.Id == id)!;
+        return definition is not null;
+    }
+}
+
+/// <summary>Serves one unrevisioned definition plus exactly one pinned revision of it, for testing revision resolution end to end.</summary>
+internal sealed class RevisionAwareCatalog(AgentDefinition current, string revision, AgentDefinition revisioned) : IAgentCatalog
+{
+    public IReadOnlyList<AgentDefinition> Agents => [current];
+
+    public bool TryGet(AgentId id, [MaybeNullWhen(false)] out AgentDefinition definition)
+    {
+        definition = id == current.Id ? current : null;
+        return definition is not null;
+    }
+
+    public bool TryGet(AgentId id, string? pinnedRevision, [MaybeNullWhen(false)] out AgentDefinition definition)
+    {
+        if (pinnedRevision is null)
+        {
+            return TryGet(id, out definition);
+        }
+
+        definition = id == current.Id && string.Equals(pinnedRevision, revision, StringComparison.Ordinal) ? revisioned : null;
         return definition is not null;
     }
 }

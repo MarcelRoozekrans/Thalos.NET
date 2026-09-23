@@ -21,4 +21,12 @@ public sealed record AgentTurnRequest(
     /// list, the same request to the provider.
     /// </summary>
     public OutcomeToolSchema? RequiredOutcome { get; init; }
+
+    /// <summary>
+    /// Pins this turn to a specific <see cref="AgentDefinition.Revision"/> of the session's agent; <see langword="null"/> (the
+    /// default) resolves the agent's current definition, exactly as before this existed. Resolved through
+    /// <c>IAgentCatalog.TryGet(AgentId, string?, out AgentDefinition)</c> — a catalog that cannot serve the pinned revision
+    /// fails the turn rather than silently falling back to current.
+    /// </summary>
+    public string? AgentRevision { get; init; }
 }
