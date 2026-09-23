@@ -236,4 +236,47 @@ public abstract class SkillStoreContractTests
 
         (await store.ListAsync(new SkillQuery(), CancellationToken.None)).Value.Should().HaveCount(20);
     }
+
+    [Fact]
+    public async Task Old_version_is_retrievable_by_hash_after_newer_upserts()
+    {
+        var clock = NewClock();
+        var store = await CreateStoreAsync(clock);
+        var v1 = NewSkill(clock, "release", body: "Version one.", hash: "hash-v1");
+        var v2 = NewSkill(clock, "release", body: "Version two.", hash: "hash-v2");
+        (await store.UpsertAsync(v1, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        (await store.UpsertAsync(v2, CancellationToken.None)).IsSuccess.Should().BeTrue();
+
+        var old = await store.GetVersionAsync(SkillName.Parse("release"), "hash-v1", CancellationToken.None);
+        old.IsSuccess.Should().BeTrue(old.IsFailure ? old.Error.ToString() : "");
+        old.Value.Body.Should().Be("Version one.");
+
+        var current = await store.GetAsync(SkillName.Parse("release"), CancellationToken.None);
+        current.Value.Body.Should().Be("Version two.", "history must not change what GetAsync returns");
+    }
+
+    [Fact]
+    public async Task Version_of_a_deactivated_skill_is_still_retrievable()
+    {
+        var clock = NewClock();
+        var store = await CreateStoreAsync(clock);
+        await store.UpsertAsync(NewSkill(clock, "gone", hash: "hash-gone"), CancellationToken.None);
+        await store.DeactivateMissingAsync([], CancellationToken.None);
+
+        var pinned = await store.GetVersionAsync(SkillName.Parse("gone"), "hash-gone", CancellationToken.None);
+        pinned.IsSuccess.Should().BeTrue("a run pinned before deletion must still load what it pinned");
+    }
+
+    [Fact]
+    public async Task Unknown_hash_names_skill_and_hash()
+    {
+        var clock = NewClock();
+        var store = await CreateStoreAsync(clock);
+        await store.UpsertAsync(NewSkill(clock, "release", hash: "hash-v1"), CancellationToken.None);
+
+        var missing = await store.GetVersionAsync(SkillName.Parse("release"), "hash-nope", CancellationToken.None);
+        missing.IsFailure.Should().BeTrue();
+        missing.Error.Code.Should().Be(AgentErrorCode.SkillNotFound);
+        missing.Error.Message.Should().Contain("release").And.Contain("hash-nope");
+    }
 }

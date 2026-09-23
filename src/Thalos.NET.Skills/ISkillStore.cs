@@ -20,6 +20,14 @@ public interface ISkillStore
     [Trace("thalos.skills.get")]
     ValueTask<Result<SkillDocument, AgentError>> GetAsync(SkillName name, CancellationToken ct);
 
+    /// <summary>
+    /// Returns the exact version of <paramref name="name"/> whose <see cref="SkillDocument.ContentHash"/> is
+    /// <paramref name="contentHash"/>, whether or not it is still the current or an active version. This is how a
+    /// pinned workflow run loads the text it was started with. Versions are never pruned in this release.
+    /// </summary>
+    [Trace("thalos.skills.get-version")]
+    ValueTask<Result<SkillDocument, AgentError>> GetVersionAsync(SkillName name, string contentHash, CancellationToken ct);
+
     /// <summary>Every match of <paramref name="query"/> (see <see cref="SkillQuery.Matches"/>), ordered by <see cref="SkillDocument.Name"/> ascending (ordinal). No paging: a skill library is a folder of files.</summary>
     [Trace("thalos.skills.list")]
     ValueTask<Result<IReadOnlyList<SkillDocument>, AgentError>> ListAsync(SkillQuery query, CancellationToken ct);

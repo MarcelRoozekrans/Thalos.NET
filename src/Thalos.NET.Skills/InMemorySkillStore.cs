@@ -8,6 +8,7 @@ namespace Thalos.Skills;
 public sealed class InMemorySkillStore(TimeProvider clock) : ISkillStore
 {
     private readonly ConcurrentDictionary<SkillName, SkillDocument> _skills = new();
+    private readonly ConcurrentDictionary<(SkillName Name, string Hash), SkillDocument> _versions = new();
     private readonly object _gate = new(); // DeactivateMissing is a read-modify-write over the whole set
 
     /// <inheritdoc />
@@ -18,6 +19,7 @@ public sealed class InMemorySkillStore(TimeProvider clock) : ISkillStore
         lock (_gate)
         {
             _skills[stored.Name] = stored;
+            _versions.TryAdd((stored.Name, stored.ContentHash), stored);
         }
 
         return new(Result<SkillDocument, AgentError>.Success(stored));
@@ -28,6 +30,15 @@ public sealed class InMemorySkillStore(TimeProvider clock) : ISkillStore
         new(_skills.TryGetValue(name, out var skill)
             ? Result<SkillDocument, AgentError>.Success(skill)
             : Result<SkillDocument, AgentError>.Failure(AgentError.SkillNotFound(name.Value)));
+
+    /// <inheritdoc />
+    public ValueTask<Result<SkillDocument, AgentError>> GetVersionAsync(SkillName name, string contentHash, CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(contentHash);
+        return new(_versions.TryGetValue((name, contentHash), out var skill)
+            ? Result<SkillDocument, AgentError>.Success(skill)
+            : Result<SkillDocument, AgentError>.Failure(AgentError.SkillNotFound($"{name.Value}@{contentHash}")));
+    }
 
     /// <inheritdoc />
     public ValueTask<Result<IReadOnlyList<SkillDocument>, AgentError>> ListAsync(SkillQuery query, CancellationToken ct)
