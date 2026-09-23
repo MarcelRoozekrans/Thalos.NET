@@ -62,7 +62,7 @@ public sealed partial class MemoryContextProvider(
                 return new AIContext();
             }
 
-            var kept = await FilterAsync(recalled.Value, cancellationToken).ConfigureAwait(false);
+            var kept = await FilterAsync(recalled.Value.Memories, cancellationToken).ConfigureAwait(false);
             if (kept.Count == 0)
             {
                 return new AIContext();

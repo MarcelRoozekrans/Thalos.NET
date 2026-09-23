@@ -16,12 +16,16 @@ public interface IMemoryService
 
     /// <summary>
     /// Search within <paramref name="scope"/> (over-fetching 2 × TopK), hydrate, drop archived/missing/out-of-scope, order by score ↓
-    /// importance ↓ UpdatedAt ↓ id, apply TopK/MaxChars, mark recalled. Fewer than TopK may come back when many hits were archived or
-    /// do not fit the budget. Index failures are returned (callers decide); blank query → empty. <c>MarkRecalledAsync</c> runs here, before
-    /// the provider/tools apply the untrusted-content scanner, so <c>RecallCount</c>/<c>LastRecalledAt</c> may over-report memories that
-    /// were then quarantined and never shown.
+    /// importance ↓ UpdatedAt ↓ id, apply TopK/MaxChars, mark recalled — <see cref="MemoryRecallTier.Semantic"/>. When the index probe
+    /// says unavailable or the raw search comes back with zero hits, this falls through to the store instead of failing: the scope's
+    /// partitions ordered by <c>UpdatedAt</c> descending, the same TopK/MaxChars budget applied — <see cref="MemoryRecallTier.Recency"/>,
+    /// or <see cref="MemoryRecallTier.None"/> when there are no rows in scope at all. Fewer than TopK may come back when many hits were
+    /// archived, out of budget, or the store simply has fewer. Blank query or blank owner → <see cref="MemoryRecallTier.None"/>, empty.
+    /// Only a genuine store failure (not "the index is down") is returned as a <see cref="Result{TValue, TError}.Failure"/>.
+    /// <c>MarkRecalledAsync</c> runs here, before the provider/tools apply the untrusted-content scanner, so
+    /// <c>RecallCount</c>/<c>LastRecalledAt</c> may over-report memories that were then quarantined and never shown.
     /// </summary>
-    ValueTask<Result<IReadOnlyList<RecalledMemory>, AgentError>> RecallAsync(string query, MemoryScope scope, RecallOptions options, CancellationToken ct);
+    ValueTask<Result<MemoryRecallResult, AgentError>> RecallAsync(string query, MemoryScope scope, RecallOptions options, CancellationToken ct);
 
     /// <summary>
     /// Archive (<paramref name="hard"/> = false) or delete a memory owned by <c>scope.OwnerId</c>; other owners → <see cref="AgentErrorCode.MemoryForbidden"/>.

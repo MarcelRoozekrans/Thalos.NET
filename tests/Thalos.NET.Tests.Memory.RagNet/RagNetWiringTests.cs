@@ -135,7 +135,7 @@ public sealed class RagNetWiringDockerTests(PgVectorFixture pg)
             var svc = sp.GetRequiredService<IMemoryService>();
             var r = await svc.RememberAsync(new RememberRequest { OwnerId = "alice", Text = "papa quebec romeo" }, default);
             r.Value.IndexPending.Should().BeFalse();
-            (await svc.RecallAsync("papa quebec romeo", new MemoryScope("alice", null), new RecallOptions { MinScore = 0.5 }, default)).Value.Should().ContainSingle();
+            (await svc.RecallAsync("papa quebec romeo", new MemoryScope("alice", null), new RecallOptions { MinScore = 0.5 }, default)).Value.Memories.Should().ContainSingle();
         }
 
         using var mismatched = RagNetWiringTests.Services(pg.ConnectionString, 128, 128).BuildServiceProvider();

@@ -51,8 +51,14 @@ public readonly record struct MemorySearchOptions(int TopK, double MinScore);
 [StructLayout(LayoutKind.Auto)] // MA0008: all-blittable
 public readonly record struct MemoryHit(MemoryId Id, double Score);
 
-/// <summary>A hydrated recall result.</summary>
+/// <summary>A hydrated recall result. <see cref="Score"/> is a similarity in the <see cref="MemoryRecallTier.Semantic"/> tier; the recency fallback carries no similarity and reports 0.</summary>
 public sealed record RecalledMemory(MemoryRecord Record, double Score);
+
+/// <summary>
+/// Outcome of <see cref="IMemoryService.RecallAsync"/>: the memories plus which tier answered them (<see cref="MemoryRecallTier"/>),
+/// so a caller — host or model — can tell an empty/degraded recall apart from "there is genuinely nothing to know".
+/// </summary>
+public readonly record struct MemoryRecallResult(IReadOnlyList<RecalledMemory> Memories, MemoryRecallTier Tier);
 
 /// <summary>Index health from <see cref="IMemoryIndex.ProbeAsync"/>.</summary>
 public sealed record MemoryIndexHealth(bool Available, int? Dimensions, string? Detail = null);

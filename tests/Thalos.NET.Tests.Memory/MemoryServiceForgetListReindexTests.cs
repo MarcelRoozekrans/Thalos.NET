@@ -41,7 +41,7 @@ public sealed class MemoryServiceForgetListReindexTests
         await f.Store.UpdateAsync(a.Id, new MemoryUpdate { IsArchived = false }, default);
         (await svc.ReindexAsync(new ReindexOptions(), default)).Value.Should().Be(new ReindexReport(1, 1, 0));
         (await f.Store.GetAsync(a.Id, default)).Value.IndexPending.Should().BeFalse();
-        (await svc.RecallAsync("whiskey xray yankee", new MemoryScope("alice", null), new RecallOptions(), default)).Value.Should().ContainSingle(m => m.Record.Id == a.Id);
+        (await svc.RecallAsync("whiskey xray yankee", new MemoryScope("alice", null), new RecallOptions(), default)).Value.Memories.Should().ContainSingle(m => m.Record.Id == a.Id);
     }
 
     [Fact]
@@ -83,7 +83,7 @@ public sealed class MemoryServiceForgetListReindexTests
         report.IsSuccess.Should().BeTrue();
         report.Value.Should().Be(new ReindexReport(Scanned: 1, Indexed: 1, Failed: 0));
         (await f.Store.GetAsync(pending.Id, default)).Value.IndexPending.Should().BeFalse();
-        (await svc2.RecallAsync("alpha beta gamma", new MemoryScope("alice", null), new RecallOptions { MinScore = 0.5 }, default)).Value.Should().ContainSingle();
+        (await svc2.RecallAsync("alpha beta gamma", new MemoryScope("alice", null), new RecallOptions { MinScore = 0.5 }, default)).Value.Memories.Should().ContainSingle();
         (await svc2.ReindexAsync(new ReindexOptions(), default)).Value.Scanned.Should().Be(0, "nothing pending any more");
         (await svc2.ReindexAsync(new ReindexOptions { PendingOnly = false }, default)).Value.Scanned.Should().Be(1);
     }

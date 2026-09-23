@@ -131,31 +131,46 @@ public sealed partial class MemoryService(
     }
 
     /// <inheritdoc />
-    public async ValueTask<Result<IReadOnlyList<RecalledMemory>, AgentError>> RecallAsync(string query, MemoryScope scope, RecallOptions options, CancellationToken ct)
+    public async ValueTask<Result<MemoryRecallResult, AgentError>> RecallAsync(string query, MemoryScope scope, RecallOptions options, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(options);
         if (string.IsNullOrWhiteSpace(query) || string.IsNullOrEmpty(scope.OwnerId))
         {
-            return Result<IReadOnlyList<RecalledMemory>, AgentError>.Success([]);
+            return Result<MemoryRecallResult, AgentError>.Success(new MemoryRecallResult([], MemoryRecallTier.None));
         }
 
         var topK = Math.Max(1, options.TopK); // options is a shared bound instance — read, never mutate
-        var fetch = (int)Math.Min(int.MaxValue, 2L * topK); // over-fetch: archived/stale hits are dropped below
-        var hits = await index.SearchAsync(query, scope, new MemorySearchOptions(fetch, options.MinScore), ct).ConfigureAwait(false);
-        if (hits.IsFailure)
+        var maxChars = options.MaxChars > 0 ? options.MaxChars : int.MaxValue; // MaxChars <= 0 = no char budget
+        var semantic = await SemanticRecallAsync(query, scope, topK, options.MinScore, maxChars, ct).ConfigureAwait(false);
+        if (semantic.IsFailure)
         {
-            return Result<IReadOnlyList<RecalledMemory>, AgentError>.Failure(hits.Error);
+            return Result<MemoryRecallResult, AgentError>.Failure(semantic.Error);
         }
 
-        var hydrated = await HydrateAsync(hits.Value, scope, ct).ConfigureAwait(false);
-        if (hydrated.IsFailure)
+        List<RecalledMemory> selected;
+        MemoryRecallTier tier;
+        if (semantic.Value.RawHitCount > 0)
         {
-            return Result<IReadOnlyList<RecalledMemory>, AgentError>.Failure(hydrated.Error);
+            // The index answered (even if every hit was archived/out of scope by the time it was hydrated): that is a
+            // genuine "nothing relevant", not the index being down or empty-handed, so the tier stays Semantic.
+            selected = semantic.Value.Selected;
+            tier = MemoryRecallTier.Semantic;
+        }
+        else
+        {
+            // Index unavailable or raw search came back with zero hits: per IMemoryIndex's contract, on failure none of
+            // the hits are valid, so this falls through to the store rather than returning a partial/failed recall.
+            var recency = await RecencyFallbackAsync(scope, topK, maxChars, ct).ConfigureAwait(false);
+            if (recency.IsFailure)
+            {
+                return Result<MemoryRecallResult, AgentError>.Failure(recency.Error);
+            }
+
+            selected = recency.Value;
+            tier = selected.Count > 0 ? MemoryRecallTier.Recency : MemoryRecallTier.None;
+            LogRecallDegraded(_logger, scope.OwnerId, tier);
         }
 
-        var candidates = hydrated.Value;
-        candidates.Sort(CandidateOrder);
-        var selected = SelectWithinBudget(candidates, topK, options.MaxChars > 0 ? options.MaxChars : int.MaxValue); // MaxChars <= 0 = no char budget
         if (selected.Count > 0)
         {
             var marked = await store.MarkRecalledAsync(selected.Select(s => s.Record.Id).ToList(), clock.GetUtcNow(), ct).ConfigureAwait(false);
@@ -165,7 +180,77 @@ public sealed partial class MemoryService(
             }
         }
 
-        return Result<IReadOnlyList<RecalledMemory>, AgentError>.Success(selected);
+        return Result<MemoryRecallResult, AgentError>.Success(new MemoryRecallResult(selected, tier));
+    }
+
+    /// <summary>The <see cref="MemoryRecallTier.Semantic"/> attempt: hydrated, ordered, budgeted hits, plus the raw (pre-hydration) hit count the caller uses to decide whether to fall back.</summary>
+    private readonly record struct SemanticAttempt(List<RecalledMemory> Selected, int RawHitCount);
+
+    /// <summary>
+    /// Searches the index and, only when it actually returned hits, hydrates/orders/budgets them. An index failure or a
+    /// zero-hit search reports <c>RawHitCount == 0</c> and an empty selection without failing — the caller decides whether
+    /// that means "fall back to recency".
+    /// </summary>
+    private async ValueTask<Result<SemanticAttempt, AgentError>> SemanticRecallAsync(string query, MemoryScope scope, int topK, double minScore, int maxChars, CancellationToken ct)
+    {
+        var fetch = (int)Math.Min(int.MaxValue, 2L * topK); // over-fetch: archived/stale hits are dropped below
+        var hits = await index.SearchAsync(query, scope, new MemorySearchOptions(fetch, minScore), ct).ConfigureAwait(false);
+        if (hits.IsFailure || hits.Value.Count == 0)
+        {
+            return Result<SemanticAttempt, AgentError>.Success(new SemanticAttempt([], 0));
+        }
+
+        var hydrated = await HydrateAsync(hits.Value, scope, ct).ConfigureAwait(false);
+        if (hydrated.IsFailure)
+        {
+            return Result<SemanticAttempt, AgentError>.Failure(hydrated.Error);
+        }
+
+        var candidates = hydrated.Value;
+        candidates.Sort(CandidateOrder);
+        return Result<SemanticAttempt, AgentError>.Success(new SemanticAttempt(SelectWithinBudget(candidates, topK, maxChars), hits.Value.Count));
+    }
+
+    /// <summary>
+    /// The store-backed <see cref="MemoryRecallTier.Recency"/> path: every non-archived record of <paramref name="scope"/>'s
+    /// owner (and shared owner, when configured), filtered through <see cref="MemoryScope.Includes"/> — the same single
+    /// visibility rule the semantic path applies at hydration — ordered by <c>UpdatedAt</c> descending, then the same
+    /// TopK/MaxChars budget the semantic path applies. Score is reported as 0 (no similarity was computed).
+    /// </summary>
+    private async ValueTask<Result<List<RecalledMemory>, AgentError>> RecencyFallbackAsync(MemoryScope scope, int topK, int maxChars, CancellationToken ct)
+    {
+        var owners = new List<string> { scope.OwnerId };
+        if (scope.SharedOwnerId is { } shared && !string.Equals(shared, scope.OwnerId, StringComparison.Ordinal))
+        {
+            owners.Add(shared);
+        }
+
+        var candidates = new List<RecalledMemory>();
+        foreach (var owner in owners)
+        {
+            var query = new MemoryQuery { OwnerIds = [owner], IncludeArchived = false, Page = 1, PageSize = MemoryQuery.MaxPageSize };
+            var page = await store.ListAsync(query, ct).ConfigureAwait(false);
+            if (page.IsFailure)
+            {
+                return Result<List<RecalledMemory>, AgentError>.Failure(page.Error);
+            }
+
+            foreach (var record in page.Value.Items)
+            {
+                if (scope.Includes(record.OwnerId, record.AgentId))
+                {
+                    candidates.Add(new RecalledMemory(record, 0));
+                }
+            }
+        }
+
+        candidates.Sort(static (a, b) =>
+        {
+            var byUpdatedAt = b.Record.UpdatedAt.CompareTo(a.Record.UpdatedAt);
+            return byUpdatedAt != 0 ? byUpdatedAt : a.Record.Id.CompareTo(b.Record.Id); // deterministic ties
+        });
+
+        return Result<List<RecalledMemory>, AgentError>.Success(SelectWithinBudget(candidates, topK, maxChars));
     }
 
     /// <summary>Loads each hit from the store; drops stale (not found), archived and out-of-scope records; any other store failure is returned.</summary>
@@ -401,4 +486,7 @@ public sealed partial class MemoryService(
 
     [LoggerMessage(EventId = 507, Level = LogLevel.Warning, Message = "Reindex aborted: the store's record stream threw {ExceptionType} after {Scanned} records (unflushed records stay pending)")]
     private static partial void LogReindexStreamFailed(ILogger logger, int scanned, string exceptionType, Exception exception);
+
+    [LoggerMessage(EventId = 508, Level = LogLevel.Warning, Message = "Recall for owner {Owner} degraded to {Tier}: the semantic index was unavailable or returned no hits")]
+    private static partial void LogRecallDegraded(ILogger logger, string owner, MemoryRecallTier tier);
 }

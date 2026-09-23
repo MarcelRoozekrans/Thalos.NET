@@ -14,8 +14,9 @@ public interface IMemoryOwner
     string MemoryOwnerId { get; }
 
     /// <summary>
-    ///     When true, every memory this caller writes is pinned to the turn's agent and the tool's
-    ///     <c>shared</c> parameter is ignored.
+    ///     When true and an agent is in scope, every memory this caller writes is pinned to the turn's agent and the
+    ///     tool's <c>shared</c> parameter is ignored. With no agent in scope there is nothing to pin to, so the write
+    ///     falls back to shared regardless of this flag.
     /// </summary>
     bool PinMemoriesToAgent { get; }
 }

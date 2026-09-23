@@ -79,23 +79,38 @@ public sealed class MemoryContextProviderTests
     }
 
     [Fact]
-    public async Task Index_failure_publishes_MemoryRecallFailed_and_yields_no_instructions()
+    public async Task Index_unavailable_degrades_to_recency_and_still_injects_instructions()
+    {
+        var f = new MemoryServiceFixture(UnavailableMemoryIndex.Instance);
+        var agent = AgentId.New();
+        await f.Build().RememberAsync(MemoryServiceFixture.Remember("The user prefers xUnit over NUnit."), default);
+        var provider = Provider(f, agent);
+        using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), new TestCaller("alice"), agent);
+
+        var ctx = await provider.InvokingAsync(Invoking("xUnit or NUnit?"), default);
+
+        ctx.Instructions.Should().NotBeNull().And.Contain("The user prefers xUnit over NUnit.", "an index outage falls back to the store instead of going silent");
+        scope.Events.TryRead(out var evt).Should().BeTrue();
+        evt.Should().BeOfType<MemoryRecalledEvent>("a degraded-but-successful recall is not a recall failure");
+    }
+
+    [Fact]
+    public async Task Index_unavailable_with_nothing_in_the_store_yields_no_instructions_and_no_failure_event()
     {
         var f = new MemoryServiceFixture(UnavailableMemoryIndex.Instance);
         var agent = AgentId.New();
         var provider = Provider(f, agent);
         using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), new TestCaller("alice"), agent);
 
-        (await provider.InvokingAsync(Invoking("q"), default)).Instructions.Should().BeNull();
-        scope.Events.TryRead(out var evt).Should().BeTrue();
-        evt.Should().BeOfType<MemoryRecallFailedEvent>().Which.Code.Should().Be(AgentErrorCode.MemoryIndexUnavailable);
+        (await provider.InvokingAsync(Invoking("q"), default)).Instructions.Should().BeNull("there is truly nothing in scope, not merely an index outage");
+        scope.Events.TryRead(out var evt).Should().BeFalse("tier None with an empty result is not a recall failure");
     }
 
     [Fact]
     public async Task A_throwing_memory_service_is_isolated()
     {
         var svc = Substitute.For<IMemoryService>();
-        svc.RecallAsync(default!, default, default!, default).ReturnsForAnyArgs<ZeroAlloc.Results.Result<IReadOnlyList<RecalledMemory>, AgentError>>(_ => throw new InvalidOperationException("boom"));
+        svc.RecallAsync(default!, default, default!, default).ReturnsForAnyArgs<ZeroAlloc.Results.Result<MemoryRecallResult, AgentError>>(_ => throw new InvalidOperationException("boom"));
         var f = new MemoryServiceFixture();
         var provider = new MemoryContextProvider(svc, AgentId.New(), new RecallOptions(), null, f.Clock, f.Hub);
         using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), new TestCaller("alice"));
@@ -189,18 +204,22 @@ public sealed class MemoryContextProviderTests
     }
 
     [Fact]
-    public async Task With_a_scanner_registered_a_service_failure_still_yields_MemoryRecallFailed_and_never_scans()
+    public async Task With_a_scanner_registered_a_genuine_service_failure_still_yields_MemoryRecallFailed_and_never_scans()
     {
-        var f = new MemoryServiceFixture(UnavailableMemoryIndex.Instance);
+        // a real store/hydration failure (not "the index is down") is the only way RecallAsync still fails outright
+        var svc = Substitute.For<IMemoryService>();
+        svc.RecallAsync(default!, default, default!, default)
+            .ReturnsForAnyArgs<ZeroAlloc.Results.Result<MemoryRecallResult, AgentError>>(_ => ZeroAlloc.Results.Result<MemoryRecallResult, AgentError>.Failure(AgentError.MemoryStoreFailed("store down", "Test")));
+        var f = new MemoryServiceFixture();
         var agent = AgentId.New();
         var scanner = Substitute.For<IUntrustedContentScanner>();
-        var provider = Provider(f, agent, scanner);
+        var provider = new MemoryContextProvider(svc, agent, new RecallOptions { MinScore = 0.1 }, f.Options.SharedOwnerId, f.Clock, f.Hub, scanner);
         using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), new TestCaller("alice"), agent);
 
         (await provider.InvokingAsync(Invoking("q"), default)).Instructions.Should().BeNull();
 
         scope.Events.TryRead(out var evt).Should().BeTrue();
-        evt.Should().BeOfType<MemoryRecallFailedEvent>().Which.Code.Should().Be(AgentErrorCode.MemoryIndexUnavailable);
+        evt.Should().BeOfType<MemoryRecallFailedEvent>().Which.Code.Should().Be(AgentErrorCode.MemoryStoreFailed);
         await scanner.DidNotReceiveWithAnyArgs().ScanAsync(default!, default);
     }
 }

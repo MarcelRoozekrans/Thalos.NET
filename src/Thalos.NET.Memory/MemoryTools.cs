@@ -92,7 +92,12 @@ public sealed partial class MemoryTools(
         return sb.ToString();
     }
 
-    /// <summary><c>memory__recall</c>: semantic search over the caller's, the agent's pinned and the shared owner's memories; returns numbered lines with ids.</summary>
+    /// <summary>
+    /// <c>memory__recall</c>: semantic search over the caller's, the agent's pinned and the shared owner's memories; returns
+    /// numbered lines with ids. When <see cref="IMemoryService.RecallAsync"/> degrades to <see cref="MemoryRecallTier.Recency"/>
+    /// (the index was unavailable or empty-handed), the output is prefaced with <see cref="MemoryRecallBlock.DegradedRecallNote"/>
+    /// so the model does not mistake "nothing semantically ranked" for "nothing to know".
+    /// </summary>
     [ThalosTool("recall")]
     [Description("Search long-term memory for information relevant to a query. Returns the best matches with their ids (use memory__forget with an id to archive one).")]
     public async Task<string> RecallAsync(
@@ -113,8 +118,8 @@ public sealed partial class MemoryTools(
             return $"Could not recall: {result.Error.Message}";
         }
 
-        var kept = new List<RecalledMemory>(result.Value.Count);
-        foreach (var m in result.Value)
+        var kept = new List<RecalledMemory>(result.Value.Memories.Count);
+        foreach (var m in result.Value.Memories)
         {
             if (await IsAllowedAsync(m.Record, cancellationToken).ConfigureAwait(false))
             {
@@ -128,6 +133,11 @@ public sealed partial class MemoryTools(
         }
 
         var sb = new StringBuilder(MemoryRecallBlock.ToolNote);
+        if (result.Value.Tier != MemoryRecallTier.Semantic)
+        {
+            sb.Append('\n').Append(MemoryRecallBlock.DegradedRecallNote);
+        }
+
         for (var i = 0; i < kept.Count; i++)
         {
             var m = kept[i];
