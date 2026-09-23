@@ -44,7 +44,7 @@ public sealed record WorkflowRun
     /// <summary>
     /// How many times the run has entered each node so far, keyed by node name; a node absent from this
     /// dictionary has never been entered. Incremented when the run moves onto a node — the start node counts as
-    /// one as of <see cref="IWorkflowStore.StartAsync"/> — not when it finishes running. This is a count of
+    /// one as of <see cref="IWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/> — not when it finishes running. This is a count of
     /// visits, not of completions: <see cref="WorkflowInterpreter.Advance"/> reads it to enforce a node's
     /// <see cref="ProcessNode.MaxVisits"/> cap, comparing <c>Visits[target] + 1</c> — where <c>target</c> is the
     /// node an outgoing edge resolves to, not the node reporting the result — against the cap before that entry
@@ -61,7 +61,7 @@ public sealed record WorkflowRun
     /// <remarks>
     /// <para>
     /// <b>What writes to this bag.</b> Three things, all of them shipped.
-    /// <see cref="IWorkflowStore.StartAsync"/>'s initial variables seed it, so a run begins holding the work item
+    /// <see cref="IWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/>'s initial variables seed it, so a run begins holding the work item
     /// it exists to perform. <see cref="WorkflowNodeDispatcher"/> merges whatever a node reported through the
     /// variables argument of its outcome tool call. <see cref="IWorkflowStore.ResumeAsync"/>'s <c>payload</c>
     /// lands under the literal key <c>"payload"</c>.
@@ -77,4 +77,14 @@ public sealed record WorkflowRun
 
     /// <summary>The most recent error recorded against this run, or <see langword="null"/> if it has not failed.</summary>
     public string? LastError { get; init; }
+
+    /// <summary>
+    /// The write-once pin <see cref="IWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/> gave
+    /// this run at creation, or <see langword="null"/> when the run has none — started before manifests existed,
+    /// or through the legacy positional <c>StartAsync</c> overload, which always leaves this
+    /// <see langword="null"/>. Nothing ever updates this property after the run is created: not
+    /// <see cref="IWorkflowStore.CompleteNodeAsync"/>, not <see cref="IWorkflowStore.ResumeAsync"/>, not any
+    /// other member of <see cref="IWorkflowStore"/>.
+    /// </summary>
+    public RunManifest? Manifest { get; init; }
 }

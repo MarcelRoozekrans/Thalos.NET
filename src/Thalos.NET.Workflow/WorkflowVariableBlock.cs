@@ -263,13 +263,13 @@ internal static partial class WorkflowVariableBlock
 
     /// <summary>
     /// Rejects an initial-variables bag over <see cref="MaxVariableKeys"/>, for every
-    /// <see cref="IWorkflowStore.StartAsync"/> implementation to call.
+    /// <see cref="IWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/> implementation to call.
     /// </summary>
     /// <remarks>
     /// One implementation rather than one per store: the cap is what makes the omitted-key list provably
     /// complete, and a store that enforced a different number would quietly break that guarantee for runs it
     /// started. A seed is host-supplied rather than agent-supplied, so this is a caller mistake and throws, the
-    /// same way <see cref="IWorkflowStore.StartAsync"/> already throws for a blank process name — unlike a node's
+    /// same way <see cref="IWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/> already throws for a blank process name — unlike a node's
     /// report, which is untrusted input and fails the run instead.
     /// </remarks>
     internal static void ThrowIfOverKeyLimit(IReadOnlyDictionary<string, object?>? variables, string paramName)
@@ -392,7 +392,7 @@ internal static partial class WorkflowVariableBlock
     /// Member-wise shortening covers the shapes this engine itself produces — <see cref="ToPlainValue"/> yields
     /// <c>List&lt;object?&gt;</c> and <c>Dictionary&lt;string, object?&gt;</c>, and those are what a reported
     /// variables object and a bag read back from the database both consist of. A host that seeds
-    /// <see cref="IWorkflowStore.StartAsync"/> with some other structured type falls through to the last branch
+    /// <see cref="IWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/> with some other structured type falls through to the last branch
     /// and gets a character cut, which for a deeply nested custom type can leave invalid JSON behind the notice.
     /// Stated rather than glossed: the parseable-after-shortening guarantee is for the engine's own shapes.
     /// </remarks>

@@ -9,7 +9,7 @@ namespace Thalos.Workflow.Orm;
 /// <summary>
 /// Runs <c>OutboxOrmMigrations.Postgres</c> and then <see cref="WorkflowOrmMigrations.Postgres"/> against
 /// <see cref="WorkflowOrmOptions.ConnectionString"/> at startup, before the host accepts work. The outbox schema
-/// runs first because <see cref="OrmWorkflowStore.StartAsync"/> and <see cref="OrmWorkflowStore.CompleteNodeAsync"/>
+/// runs first because <see cref="OrmWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/> and <see cref="OrmWorkflowStore.CompleteNodeAsync"/>
 /// both enqueue into it in the same transaction as the workflow tables they write — the very first thing a new run
 /// does is write to both, so neither can be missing.
 /// </summary>

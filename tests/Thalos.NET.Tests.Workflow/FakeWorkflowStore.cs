@@ -22,9 +22,19 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
 {
     private readonly Dictionary<Guid, WorkflowRun> _runs = [];
     private readonly List<WorkflowDispatchMessage> _outbox = [];
+    private readonly List<WorkflowStartRequest> _startedRuns = [];
 
     /// <summary>How many dispatch messages are waiting to be taken, across every run.</summary>
     public int OutboxCount => _outbox.Count;
+
+    /// <summary>
+    /// Every <see cref="WorkflowStartRequest"/> this store has been asked to start, in call order — including
+    /// idempotent calls whose correlation key was already taken and that therefore started nothing. Exists so a
+    /// test can assert on what a caller passed to <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/>
+    /// without hand-constructing the request itself, most importantly the <see cref="WorkflowStartRequest.Manifest"/>
+    /// a caller pinned a run with.
+    /// </summary>
+    public IReadOnlyList<WorkflowStartRequest> StartedRuns => _startedRuns;
 
     /// <summary>
     /// Takes the oldest queued dispatch message for <paramref name="runId"/>, or <see langword="null"/> when that
@@ -47,14 +57,42 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
         return null;
     }
 
+    /// <summary>
+    /// The legacy positional overload, kept as a plain member on this concrete type — not only inherited as
+    /// <see cref="IWorkflowStore"/>'s default interface method — because every existing caller in this test
+    /// project holds its store through a <see cref="FakeWorkflowStore"/>-typed field, not an
+    /// <see cref="IWorkflowStore"/>-typed one, and a default interface method is only reachable through a
+    /// reference typed as the interface that declares it. Forwards exactly as the interface's own default
+    /// implementation does, so the two are indistinguishable in behaviour.
+    /// </summary>
     public ValueTask<Guid> StartAsync(
         string process,
         int version,
         string correlationKey,
         string startNode,
         IReadOnlyDictionary<string, object?>? initialVariables,
-        CancellationToken ct)
+        CancellationToken ct) =>
+        StartAsync(
+            new WorkflowStartRequest
+            {
+                Process = process,
+                Version = version,
+                CorrelationKey = correlationKey,
+                StartNode = startNode,
+                InitialVariables = initialVariables,
+            },
+            ct);
+
+    public ValueTask<Guid> StartAsync(WorkflowStartRequest request, CancellationToken ct)
     {
+        ArgumentNullException.ThrowIfNull(request);
+        _startedRuns.Add(request);
+
+        var process = request.Process;
+        var version = request.Version;
+        var startNode = request.StartNode;
+        var initialVariables = request.InitialVariables;
+
         // Mirrors OrmWorkflowStore.StartAsync, which calls the same one guard.
         WorkflowVariableBlock.ThrowIfOverKeyLimit(initialVariables, nameof(initialVariables));
 
@@ -74,6 +112,9 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
             Variables = initialVariables is null
                 ? new Dictionary<string, object?>(StringComparer.Ordinal)
                 : new Dictionary<string, object?>(initialVariables, StringComparer.Ordinal),
+            // Written once, here, mirroring OrmWorkflowStore's InsertRunAsync — nothing below ever assigns
+            // Manifest again, so FindAsync always returns exactly what this call was given.
+            Manifest = request.Manifest,
         };
 
         // The start node's own dispatch, exactly as OrmWorkflowStore.StartAsync enqueues it. A fake that skipped

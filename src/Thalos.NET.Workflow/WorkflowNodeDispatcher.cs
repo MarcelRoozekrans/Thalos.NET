@@ -492,7 +492,7 @@ public sealed partial class WorkflowNodeDispatcher(
     /// Builds the single user-message instruction sent as <see cref="SubagentRunRequest.Task"/>: the node's skill
     /// pin, the run's accumulated <see cref="WorkflowRun.Variables"/>, and — for a node with declared outcomes —
     /// its outcome contract, in that order. <see cref="ProcessNode"/> still carries no free-text unit-of-work
-    /// description of its own; the work item reaches a run through <see cref="IWorkflowStore.StartAsync"/>'s
+    /// description of its own; the work item reaches a run through <see cref="IWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/>'s
     /// initial variables and through what each node reports, and it is those variables that this method renders.
     /// </summary>
     /// <remarks>

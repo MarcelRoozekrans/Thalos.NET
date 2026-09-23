@@ -118,7 +118,7 @@ public sealed class ConstrainedOutcomeTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// Starts the shared <c>gate-check</c> run through <see cref="IWorkflowStore.StartAsync"/> rather than seeding
+    /// Starts the shared <c>gate-check</c> run through <see cref="IWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/> rather than seeding
     /// a row directly, so its first dispatch message is one the store produced. No test here builds that message
     /// itself: they take it off <see cref="FakeWorkflowStore.TakeNext"/>, which is the only shape in which a store
     /// that stopped enqueuing would make these tests visibly do nothing.
