@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.10.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.9.0...v0.10.0) (2026-09-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* ISkillStore has a new member; custom stores must implement GetVersionAsync.
+
+### Features
+
+* pin workflow runs to skill versions, charter revisions and documents ([#163](https://github.com/MarcelRoozekrans/Thalos.NET/issues/163)) ([97d584b](https://github.com/MarcelRoozekrans/Thalos.NET/commit/97d584b6a444cb530361d4a2efff590dd7a3af26))
+
 ## [0.9.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.8.0...v0.9.0) (2026-09-23)
 
 
