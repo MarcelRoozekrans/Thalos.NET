@@ -58,6 +58,16 @@ public interface IWorkflowStore
     /// ever used, so keys are worth minting with the attempt in them (a run id, a timestamp, an attempt counter)
     /// rather than from a business identity that recurs.
     /// </para>
+    /// <para>
+    /// <b>Superseded by <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/>.</b> This overload is a
+    /// default interface method that forwards to it with <see cref="WorkflowStartRequest.Manifest"/> left
+    /// <see langword="null"/> — a run started this way carries no pin, the same as any run started before
+    /// manifests existed. An implementation only needs to provide the request-based overload; it never needs to
+    /// implement this one itself. The blank-argument guards below run against this overload's own parameter
+    /// names before <see cref="WorkflowStartRequest"/> is built, so a caller of this overload — including one
+    /// reaching it purely through this default implementation, with no override of its own — sees
+    /// <c>ArgumentException.ParamName</c> "process", "correlationKey" or "startNode", not "request".
+    /// </para>
     /// </remarks>
     ValueTask<Guid> StartAsync(
         string process,
@@ -65,7 +75,38 @@ public interface IWorkflowStore
         string correlationKey,
         string startNode,
         IReadOnlyDictionary<string, object?>? initialVariables,
-        CancellationToken ct);
+        CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(process);
+        ArgumentException.ThrowIfNullOrWhiteSpace(correlationKey);
+        ArgumentException.ThrowIfNullOrWhiteSpace(startNode);
+
+        return StartAsync(
+            new WorkflowStartRequest
+            {
+                Process = process,
+                Version = version,
+                CorrelationKey = correlationKey,
+                StartNode = startNode,
+                InitialVariables = initialVariables,
+            },
+            ct);
+    }
+
+    /// <summary>
+    /// Starts a new run exactly as <see cref="StartAsync(string,int,string,string,IReadOnlyDictionary{string,object?}?,CancellationToken)"/>
+    /// does, from the fields of <paramref name="request"/>, and additionally writes
+    /// <see cref="WorkflowStartRequest.Manifest"/> onto the created run as <see cref="WorkflowRun.Manifest"/> —
+    /// once, at the same <c>INSERT</c> that creates the row. Nothing after that ever updates it: not
+    /// <see cref="CompleteNodeAsync"/>, not <see cref="ResumeAsync"/>, not any other member of this interface. A
+    /// run found through the idempotent path — <see cref="WorkflowStartRequest.CorrelationKey"/> already in use —
+    /// keeps whatever manifest its original call gave it; <paramref name="request"/>'s own
+    /// <see cref="WorkflowStartRequest.Manifest"/> is discarded along with the rest of that no-op start, the same
+    /// way its <see cref="WorkflowStartRequest.InitialVariables"/> already is.
+    /// </summary>
+    /// <param name="request">The run to start.</param>
+    /// <param name="ct">Cancels the start.</param>
+    ValueTask<Guid> StartAsync(WorkflowStartRequest request, CancellationToken ct);
 
     /// <summary>Finds a run by id, or <see langword="null"/> if none exists.</summary>
     ValueTask<WorkflowRun?> FindAsync(Guid runId, CancellationToken ct);

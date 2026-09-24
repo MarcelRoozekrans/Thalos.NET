@@ -259,7 +259,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     }
 
     /// <summary>
-    /// A bare <see cref="OrmWorkflowStore.StartAsync"/> — nothing else called, nothing hand-constructed — must
+    /// A bare <see cref="OrmWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/> — nothing else called, nothing hand-constructed — must
     /// leave exactly one dispatch message in the outbox, naming the run's start node at its initial seq. Without
     /// it a run created through the shipped public API sits at <see cref="WorkflowStatus.Running"/> with an empty
     /// outbox and nothing that will ever dispatch its start node; the reconciler then sweeps it as stranded.

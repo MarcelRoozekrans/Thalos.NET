@@ -1,3 +1,4 @@
+using Thalos.Skills;
 using Thalos.Workflow;
 using Thalos.Workflow.Orm;
 using ZeroAlloc.Authorization;
@@ -179,7 +180,9 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
     /// well-formed result rather than a shortcut.
     /// </summary>
     private WorkflowNodeDispatcher NewDispatcher() =>
-        new(_store, new AlwaysSucceedsRunner(), new AlwaysResolves(), _definitions, _ => new StubSecurityContext());
+        // No run started by these tests carries a manifest, so this ISkillStore is never actually read from —
+        // an empty InMemorySkillStore stands in purely to satisfy the constructor.
+        new(_store, new AlwaysSucceedsRunner(), new AlwaysResolves(), _definitions, new InMemorySkillStore(TimeProvider.System), _ => new StubSecurityContext());
 
     private sealed class FakeSource : IProcessDefinitionSource
     {

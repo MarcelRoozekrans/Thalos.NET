@@ -186,7 +186,7 @@ public sealed partial class SubagentRunner : ISubagentRunner
         // node fails as "completed without reporting an outcome".
         var turn = await _runtime
             .RunTurnAsync(
-                new AgentTurnRequest(sessionId, request.Task, request.Caller) { RequiredOutcome = request.RequiredOutcome },
+                new AgentTurnRequest(sessionId, request.Task, request.Caller) { RequiredOutcome = request.RequiredOutcome, AgentRevision = request.AgentRevision },
                 ct)
             .ConfigureAwait(false);
 

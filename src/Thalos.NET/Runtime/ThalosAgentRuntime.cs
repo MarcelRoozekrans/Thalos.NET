@@ -374,7 +374,7 @@ public sealed partial class ThalosAgentRuntime(
         }
 
         var session = loaded.Value;
-        if (!agents.TryGet(session.AgentId, out var definition))
+        if (!agents.TryGet(session.AgentId, request.AgentRevision, out var definition))
         {
             return Result<AgentDefinition, AgentError>.Failure(AgentError.AgentNotFound(session.AgentId));
         }

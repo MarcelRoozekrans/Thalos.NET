@@ -42,4 +42,11 @@ public sealed record SubagentRunRequest
     /// for a run with no closed-set outcome to report (a plain sequence step with nothing to branch on).
     /// </summary>
     public OutcomeToolSchema? RequiredOutcome { get; init; }
+
+    /// <summary>
+    /// Pins this run to a specific <see cref="AgentDefinition.Revision"/> of <see cref="AgentId"/>; <see langword="null"/> (the
+    /// default) resolves the agent's current definition. Forwarded onto the detached run's <see cref="AgentTurnRequest"/> —
+    /// see its own <see cref="AgentTurnRequest.AgentRevision"/> for resolution semantics.
+    /// </summary>
+    public string? AgentRevision { get; init; }
 }

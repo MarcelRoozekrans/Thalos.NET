@@ -20,5 +20,9 @@
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Thalos.NET.Tests.Skills" />
+    <!-- WorkflowNodeDispatcher inlines a pinned node's skill body straight into the task text, through the same
+         delimiters and sanitization SkillTools uses to inject the catalogue block, so there is one place the
+         "escape any forged tag" rule lives rather than a second copy that could drift from it. -->
+    <InternalsVisibleTo Include="Thalos.NET.Workflow" />
   </ItemGroup>
 </Project>

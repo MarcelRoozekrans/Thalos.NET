@@ -251,7 +251,7 @@ public sealed class OrmProcessDefinitionStore(WorkflowOrmOptions options) : IPro
     /// <inheritdoc/>
     /// <remarks>
     /// Deliberately does not require a <c>process_definition</c> row to exist for <paramref name="version"/>:
-    /// <see cref="IWorkflowStore.StartAsync"/> stamps <see cref="WorkflowRun.ProcessVersion"/> onto a run
+    /// <see cref="IWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/> stamps <see cref="WorkflowRun.ProcessVersion"/> onto a run
     /// independently of this store, so a run can pin a version this store never held a row for (or has already
     /// removed the row of). Removing a version with no stored row is a no-op success, the same as removing an
     /// entry that was already gone — the property this method enforces is purely "does a non-terminal run still
@@ -286,7 +286,7 @@ public sealed class OrmProcessDefinitionStore(WorkflowOrmOptions options) : IPro
     /// <summary>
     /// The pin this store exists to enforce: a run started against this exact (process, version) pair keeps
     /// <see cref="WorkflowRun.ProcessVersion"/> fixed at that value for its whole life
-    /// (<see cref="IWorkflowStore.StartAsync"/> captures it once and nothing ever changes it), so a run that has
+    /// (<see cref="IWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/> captures it once and nothing ever changes it), so a run that has
     /// not yet reached a terminal status needs this shape resolvable for as long as it runs. Filtered on
     /// <c>process_version</c>, not just <c>process</c>: a run pinned to a <em>different</em> version of the same
     /// process must never block removing this one — dropping this filter is exactly the regression

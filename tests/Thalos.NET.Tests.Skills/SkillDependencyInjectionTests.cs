@@ -359,6 +359,8 @@ public sealed class SkillDependencyInjectionTests
 
         public ValueTask<Result<SkillDocument, AgentError>> GetAsync(SkillName name, CancellationToken ct) => new(Result<SkillDocument, AgentError>.Failure(AgentError.SkillNotFound(name.Value)));
 
+        public ValueTask<Result<SkillDocument, AgentError>> GetVersionAsync(SkillName name, string contentHash, CancellationToken ct) => new(Result<SkillDocument, AgentError>.Failure(AgentError.SkillNotFound($"{name.Value}@{contentHash}")));
+
         public ValueTask<Result<IReadOnlyList<SkillDocument>, AgentError>> ListAsync(SkillQuery query, CancellationToken ct) => new(Result<IReadOnlyList<SkillDocument>, AgentError>.Success([]));
 
         public ValueTask<UnitResult<AgentError>> DeactivateMissingAsync(IReadOnlyList<SkillName> seen, CancellationToken ct) => new(UnitResult<AgentError>.Success());

@@ -32,6 +32,8 @@ internal sealed class RecordingSkillStore(ISkillStore inner) : ISkillStore
 
     public ValueTask<Result<SkillDocument, AgentError>> GetAsync(SkillName name, CancellationToken ct) => inner.GetAsync(name, ct);
 
+    public ValueTask<Result<SkillDocument, AgentError>> GetVersionAsync(SkillName name, string contentHash, CancellationToken ct) => inner.GetVersionAsync(name, contentHash, ct);
+
     public ValueTask<Result<IReadOnlyList<SkillDocument>, AgentError>> ListAsync(SkillQuery query, CancellationToken ct) =>
         OnList?.Invoke() is { } error ? new(Result<IReadOnlyList<SkillDocument>, AgentError>.Failure(error)) : inner.ListAsync(query, ct);
 

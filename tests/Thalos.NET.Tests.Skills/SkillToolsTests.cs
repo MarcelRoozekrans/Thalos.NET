@@ -20,6 +20,8 @@ internal sealed class ThrowingSkillStore : ISkillStore
 
     public ValueTask<Result<SkillDocument, AgentError>> GetAsync(SkillName name, CancellationToken ct) => throw new InvalidOperationException("the store exploded");
 
+    public ValueTask<Result<SkillDocument, AgentError>> GetVersionAsync(SkillName name, string contentHash, CancellationToken ct) => throw new InvalidOperationException("the store exploded");
+
     public ValueTask<Result<IReadOnlyList<SkillDocument>, AgentError>> ListAsync(SkillQuery query, CancellationToken ct) => throw new InvalidOperationException("the store exploded");
 
     public ValueTask<UnitResult<AgentError>> DeactivateMissingAsync(IReadOnlyList<SkillName> seen, CancellationToken ct) => throw new InvalidOperationException("the store exploded");

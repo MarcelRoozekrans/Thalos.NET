@@ -156,14 +156,8 @@ public sealed class WorkflowRunReconcilerTests(PostgresFixture pg) : IAsyncLifet
     /// <summary>Delegates every call to <paramref name="inner"/> except <see cref="FailStrandedAsync"/> for <paramref name="throwsForRunId"/>, which always throws — simulating an infrastructure fault on one run in a batch without needing to actually break the database mid-sweep.</summary>
     private sealed class ThrowsOnFailStrandedFor(IWorkflowStore inner, Guid throwsForRunId) : IWorkflowStore
     {
-        public ValueTask<Guid> StartAsync(
-            string process,
-            int version,
-            string correlationKey,
-            string startNode,
-            IReadOnlyDictionary<string, object?>? initialVariables,
-            CancellationToken ct) =>
-            inner.StartAsync(process, version, correlationKey, startNode, initialVariables, ct);
+        public ValueTask<Guid> StartAsync(WorkflowStartRequest request, CancellationToken ct) =>
+            inner.StartAsync(request, ct);
 
         public ValueTask<WorkflowRun?> FindAsync(Guid runId, CancellationToken ct) => inner.FindAsync(runId, ct);
 
