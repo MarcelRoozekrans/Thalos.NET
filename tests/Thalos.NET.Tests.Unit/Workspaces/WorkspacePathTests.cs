@@ -363,21 +363,163 @@ public sealed class WorkspacePathTests : IDisposable
     }
 
     [SkippableFact]
-    public void Refuses_a_path_beyond_the_platform_length_limit_with_a_symlink_in_the_would_be_tail()
+    public void Refuses_links_to_a_missing_an_unreadable_and_an_existing_outside_target_with_one_message()
     {
-        Skip.IfNot(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS(), "PATH_MAX/NAME_MAX are POSIX concepts");
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+        {
+            Skip.If(true, "POSIX permission bits");
+            return;
+        }
 
-        // A real symlink that would escape if the existence probe ever reached it.
-        CreateRealSymlinkOrSkip(Path.Combine(_workspace, "escape"), _outside);
+        RefusesLinksToMissingUnreadableAndExistingTargetsWithOneMessage();
+    }
 
-        // A single path segment beyond NAME_MAX (255 bytes on ext4 and most Linux filesystems) makes the existence
-        // probe fail with ENAMETOOLONG partway through — before it would ever reach "escape" — so this exercises
-        // the "fail closed" rule directly: if the probe silently treated that failure as "does not exist" (the
-        // pre-fix behaviour), "escape/x.txt" would be appended unresolved onto the canonicalised root, textually
-        // inside the workspace, while a real write would land in _outside via the symlink.
-        var tooLong = new string('a', 300);
+    [SupportedOSPlatform("linux")]
+    [SupportedOSPlatform("macos")]
+    private void RefusesLinksToMissingUnreadableAndExistingTargetsWithOneMessage()
+    {
+        // Links reach the workspace through repository content checked out with symlinks. Resolving the link
+        // itself makes the kernel canonicalise its outside target: ENOENT for the missing one, EACCES for the one
+        // under a mode-000 directory, success for the existing one. If any of those outcomes reached the message,
+        // the model could probe whether a host path exists or is readable.
+        var locked = Path.Combine(_outside, "locked");
+        Directory.CreateDirectory(locked);
+        File.WriteAllText(Path.Combine(locked, "secret.txt"), "secret");
+        File.SetUnixFileMode(locked, UnixFileMode.None);
 
-        WorkspacePath.Resolve(_workspace, $"{tooLong}/escape/x.txt").IsFailure.Should().BeTrue();
+        try
+        {
+            Skip.If(CanListDespiteNoPermissions(locked), "running with a privilege that bypasses POSIX permission bits");
+
+            CreateRealSymlinkOrSkip(Path.Combine(_workspace, "to-missing"), Path.Combine(_outside, "nope"));
+            CreateRealSymlinkOrSkip(Path.Combine(_workspace, "to-unreadable"), Path.Combine(locked, "secret.txt"));
+            CreateRealSymlinkOrSkip(Path.Combine(_workspace, "to-existing"), Path.Combine(_outside, "secret.txt"));
+
+            var missing = WorkspacePath.Resolve(_workspace, "to-missing");
+            var unreadable = WorkspacePath.Resolve(_workspace, "to-unreadable");
+            var existing = WorkspacePath.Resolve(_workspace, "to-existing");
+
+            new[] { missing.IsFailure, unreadable.IsFailure, existing.IsFailure }.Should().AllBeEquivalentTo(true);
+            new[] { missing.Error.Message, unreadable.Error.Message, existing.Error.Message }
+                .Distinct(StringComparer.Ordinal).Should().ContainSingle("a missing, an unreadable and an existing host target must be indistinguishable");
+        }
+        finally
+        {
+            File.SetUnixFileMode(locked, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    [SkippableFact]
+    public void Refuses_directory_links_to_a_missing_and_an_existing_outside_target_with_one_message()
+    {
+        // The cross-platform half of the test above: a junction on Windows, a symlink elsewhere. On Windows the
+        // kernel reports ERROR_FILE_NOT_FOUND for the dangling junction and succeeds for the existing one.
+        var gone = Path.Combine(_outside, "gone");
+        Directory.CreateDirectory(gone);
+        CreateDirectoryLinkOrSkip(Path.Combine(_workspace, "to-gone"), gone);
+        Directory.Delete(gone);
+
+        CreateDirectoryLinkOrSkip(Path.Combine(_workspace, "to-outside"), _outside);
+
+        var missing = WorkspacePath.Resolve(_workspace, "to-gone");
+        var existing = WorkspacePath.Resolve(_workspace, "to-outside");
+
+        missing.IsFailure.Should().BeTrue();
+        existing.IsFailure.Should().BeTrue();
+        missing.Error.Message.Should().Be(existing.Error.Message);
+    }
+
+    [SkippableFact]
+    public void Refuses_a_link_at_the_bottom_of_a_directory_chain_beyond_the_platform_length_limit()
+    {
+        Skip.IfNot(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS(), "PATH_MAX is a POSIX concept");
+
+        // A real chain of directories inside the workspace whose absolute path is longer than PATH_MAX (4096 on
+        // Linux), with a symlink to _outside at its bottom. An absolute path this long cannot be created or
+        // probed in one call, so the chain is built by a shell doing relative mkdir and cd -P, one level at a time;
+        // -P keeps the shell from rebuilding the absolute path, which it could not chdir to.
+        // Past PATH_MAX, the existence probe fails with ENAMETOOLONG before it reaches "escape". If that failure
+        // were read as "does not exist", "…/escape/x.txt" would be appended unresolved onto a canonicalised
+        // ancestor, pass the textual containment check, and be returned; a writer that walks down the chain
+        // relatively, as the shell does here, would then follow "escape" and write into _outside.
+        var segment = new string('d', 200);
+        const int depth = 24; // 24 * 201 bytes, plus the temp root, is over 4096
+        var chain = string.Join('/', Enumerable.Repeat(segment, depth));
+
+        RunShell(
+            _workspace,
+            $"i=0; while [ $i -lt {depth} ]; do mkdir {segment} && cd -P {segment} || exit 1; i=$((i+1)); done; ln -s '{_outside}' escape");
+
+        try
+        {
+            Path.Combine(_workspace, chain).Length.Should().BeGreaterThan(4096, "the chain must really exceed PATH_MAX");
+
+            WorkspacePath.Resolve(_workspace, $"{chain}/escape/x.txt").IsFailure.Should().BeTrue();
+        }
+        finally
+        {
+            RunShell(
+                _workspace,
+                $"i=0; while [ $i -lt {depth} ]; do cd -P {segment} || exit 1; i=$((i+1)); done; rm escape; "
+                + $"i=0; while [ $i -lt {depth} ]; do cd -P .. && rmdir {segment} || exit 1; i=$((i+1)); done");
+        }
+    }
+
+    [Fact]
+    public void Allows_a_path_inside_the_workspace_beyond_the_windows_max_path()
+    {
+        // MAX_PATH is 260 on Windows. Without the extended-length prefix, CreateFileW refuses a longer existing
+        // ancestor with ERROR_PATH_NOT_FOUND and a legitimate write is refused. On Linux this path is well within
+        // PATH_MAX and must resolve too.
+        var deep = Path.Combine(Enumerable.Repeat(new string('d', 60), 6).Prepend(_workspace).ToArray());
+        Directory.CreateDirectory(deep);
+        var relative = Path.GetRelativePath(_workspace, Path.Combine(deep, "Class1.cs"));
+
+        var result = WorkspacePath.Resolve(_workspace, relative);
+
+        Path.Combine(deep, "Class1.cs").Length.Should().BeGreaterThan(260, "the path must really exceed MAX_PATH");
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Should().Be(Path.Combine(deep, "Class1.cs"));
+    }
+
+    [SkippableFact]
+    public void Allows_a_path_inside_a_unc_workspace_beyond_the_windows_max_path()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "UNC paths are a Windows concept");
+
+        // The workspace reached through the local administrative share, so its root is \\localhost\C$\...
+        // An extended-length UNC path is \\?\UNC\server\share\..., not \\?\ followed by the UNC path.
+        var drive = Path.GetPathRoot(_workspace)!;
+        var share = $@"\\localhost\{drive[0]}$\";
+        Skip.IfNot(Directory.Exists(share), $"the administrative share {share} is not reachable on this machine");
+
+        var uncWorkspace = share + _workspace[drive.Length..];
+        var deep = Path.Combine(Enumerable.Repeat(new string('d', 60), 6).Prepend(uncWorkspace).ToArray());
+        Directory.CreateDirectory(deep);
+        var relative = Path.GetRelativePath(uncWorkspace, Path.Combine(deep, "Class1.cs"));
+
+        var result = WorkspacePath.Resolve(uncWorkspace, relative);
+
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Should().Be(Path.Combine(uncWorkspace, relative));
+    }
+
+    private static void RunShell(string workingDirectory, string script)
+    {
+        var psi = new System.Diagnostics.ProcessStartInfo("/bin/sh")
+        {
+            WorkingDirectory = workingDirectory,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+        };
+        psi.ArgumentList.Add("-c");
+        psi.ArgumentList.Add(script);
+
+        using var process = System.Diagnostics.Process.Start(psi)!;
+        var stderr = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        if (process.ExitCode != 0)
+            throw new InvalidOperationException($"shell script failed with exit code {process.ExitCode}: {stderr}");
     }
 
     private static bool CanListDespiteNoPermissions(string path)

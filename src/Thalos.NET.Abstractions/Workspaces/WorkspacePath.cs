@@ -1,5 +1,3 @@
-using System.Runtime.InteropServices;
-using System.Runtime.Versioning;
 using ZeroAlloc.Results;
 
 namespace Thalos.Workspaces;
@@ -26,8 +24,8 @@ public static partial class WorkspacePath
     /// ending in a trailing dot or space; a rooted or absolute <paramref name="relativePath"/>, refused outright as
     /// a lexical step before any filesystem access — including one that happens to resolve inside the workspace,
     /// which is refused too, since a caller using this contract correctly never has a reason to supply one; a
-    /// combined path that does not lexically fall under the canonical root; and a workspace root that does not
-    /// resolve to a directory.
+    /// workspace root that does not resolve to a directory; and any path whose resolution fails or lands outside
+    /// the workspace.
     /// </summary>
     /// <remarks>
     /// <para>
@@ -54,11 +52,16 @@ public static partial class WorkspacePath
     /// reachable kernel canonicalisation, every path that needs one is refused.
     /// </para>
     /// <para>
-    /// A rooted/absolute input, an input outside the workspace either lexically or after full resolution, and a
-    /// filesystem error during the existence probe all fail with the exact same fixed message (see
-    /// <see cref="GenericRefusal"/>) — none of it derived from <paramref name="relativePath"/> or from the host
-    /// filesystem — so the failure channel cannot be used to learn whether a host path exists, is missing, or is
-    /// merely inaccessible.
+    /// The segment checks name their reason, and echo only <paramref name="relativePath"/>: they look at nothing
+    /// but the caller's own input. A rooted input, and every failure after the lexical checks, fail with one fixed
+    /// message (see <see cref="GenericRefusal"/>) that carries no path, <c>errno</c> or Win32 error code. That
+    /// includes an ancestor the kernel cannot canonicalise, which is where a link inside the workspace to a
+    /// missing or unreadable host path fails, so the message cannot tell a missing host path from an unreadable
+    /// one or from one that exists outside. <see cref="WorkspacePath"/> is static and has no logger, so the
+    /// kernel's reason is dropped rather than logged. The message is not the only channel: a link whose target
+    /// passes through a host directory on its way back into the workspace, such as
+    /// <c>/host/dir/../../workspace/src</c>, resolves only if <c>/host/dir</c> exists, so success against refusal
+    /// still reveals that much to whoever placed the link.
     /// </para>
     /// </remarks>
     /// <param name="workspaceRoot">The workspace's root directory.</param>
@@ -75,40 +78,32 @@ public static partial class WorkspacePath
         if (Path.IsPathRooted(relativePath))
             return GenericRefusal();
 
-        var rootCanonical = Canonicalize(Path.GetFullPath(workspaceRoot));
-        if (rootCanonical.IsFailure)
-            return Failure(relativePath, $"the workspace root could not be resolved ({rootCanonical.Error.Message})");
-        var root = rootCanonical.Value;
-
-        if (!Directory.Exists(root))
-            return Failure(relativePath, "the workspace root is not a directory");
+        // Every failure from here on returns GenericRefusal, whatever its cause: the canonicalisation of a link's
+        // outside target reports whether that host path exists or is readable, so no detail of it may reach the
+        // message. WorkspacePath is static and has no logger, so that detail is dropped, not logged.
+        var root = Canonicalize(Path.GetFullPath(workspaceRoot));
+        if (root is null || !Directory.Exists(root))
+            return GenericRefusal();
 
         var full = Path.GetFullPath(Path.Combine(root, relativePath));
 
-        // Lexical step, still before any further filesystem access: refuse anything whose combined path is not
-        // textually under the canonical root. Given the checks above — no rooted input, no ".." or "." segment —
-        // this likely can never trigger for well-formed input, but it costs nothing and states the invariant
-        // explicitly rather than relying on it staying true as the checks above evolve.
-        if (!IsContained(full, root))
+        var ancestor = DeepestExistingAncestor(root, full);
+        if (ancestor is null)
             return GenericRefusal();
 
-        var ancestorResult = DeepestExistingAncestor(root, full);
-        if (ancestorResult.IsFailure)
+        var ancestorCanonical = Canonicalize(ancestor);
+        if (ancestorCanonical is null)
             return GenericRefusal();
 
-        var ancestorCanonical = Canonicalize(ancestorResult.Value);
-        if (ancestorCanonical.IsFailure)
-            return Failure(relativePath, $"could not be resolved ({ancestorCanonical.Error.Message})");
-
-        var tail = Path.GetRelativePath(ancestorResult.Value, full);
+        var tail = Path.GetRelativePath(ancestor, full);
         var resolved = string.Equals(tail, ".", StringComparison.Ordinal)
-            ? ancestorCanonical.Value
-            : Path.Combine(ancestorCanonical.Value, tail);
+            ? ancestorCanonical
+            : Path.Combine(ancestorCanonical, tail);
 
-        if (!IsContained(resolved, root))
+        if (!IsContained(resolved, root) || ReachesGitDirectory(root, resolved))
             return GenericRefusal();
 
-        return GitSegmentFailure(relativePath, root, resolved) ?? Result<string, AgentError>.Success(resolved);
+        return Result<string, AgentError>.Success(resolved);
     }
 
     private static Result<string, AgentError>? ValidateSegments(string relativePath)
@@ -173,19 +168,19 @@ public static partial class WorkspacePath
     /// <see cref="ValidateSegments"/> only sees what the caller typed; a junction or symlink to <c>.git</c>, or a
     /// short name that <see cref="Path.GetFullPath(string)"/> silently expands to <c>.git</c>, only shows up here.
     /// </summary>
-    private static Result<string, AgentError>? GitSegmentFailure(string relativePath, string root, string resolvedPath)
+    private static bool ReachesGitDirectory(string root, string resolvedPath)
     {
         var relative = Path.GetRelativePath(root, resolvedPath);
         if (string.Equals(relative, ".", StringComparison.Ordinal))
-            return null;
+            return false;
 
         foreach (var segment in relative.Split(Path.DirectorySeparatorChar))
         {
             if (IsGitSegment(segment))
-                return Failure(relativePath, "reaches into the git directory");
+                return true;
         }
 
-        return null;
+        return false;
     }
 
     private static bool IsReservedDeviceName(string segment)
@@ -222,7 +217,7 @@ public static partial class WorkspacePath
     /// but only because <see cref="LExists"/> fails the whole walk, rather than guessing "does not exist", for any
     /// probe outcome other than a conclusive not-found.
     /// </summary>
-    private static Result<string, AgentError> DeepestExistingAncestor(string root, string full)
+    private static string? DeepestExistingAncestor(string root, string full)
     {
         var relative = Path.GetRelativePath(root, full);
         var segments = string.Equals(relative, ".", StringComparison.Ordinal) ? [] : relative.Split(Path.DirectorySeparatorChar);
@@ -232,21 +227,22 @@ public static partial class WorkspacePath
         {
             var candidate = Path.Combine(current, segment);
             var exists = LExists(candidate);
-            if (exists.IsFailure)
-                return Result<string, AgentError>.Failure(exists.Error);
+            if (exists is null)
+                return null;
 
-            if (!exists.Value)
+            if (exists == false)
                 break;
 
             current = candidate;
         }
 
-        return Result<string, AgentError>.Success(current);
+        return current;
     }
 
     /// <summary>
     /// Reports whether <paramref name="path"/> has a filesystem entry, without following a final symlink or
-    /// junction — a dangling link still "exists" for this check, the same as POSIX <c>lstat</c> — or fails.
+    /// junction — a dangling link still "exists" for this check, the same as POSIX <c>lstat</c> — or returns
+    /// <see langword="null"/> when that cannot be determined.
     /// <see cref="File.GetAttributes(string)"/> queries the entry itself on both Windows (<c>GetFileAttributesW</c>
     /// never follows reparse points) and Unix (an initial <c>lstat</c>), so a plain not-found result is already
     /// lstat-style on every supported platform. Only <see cref="FileNotFoundException"/> and
@@ -257,20 +253,20 @@ public static partial class WorkspacePath
     /// <see cref="DeepestExistingAncestor"/>'s "the tail cannot contain a link" invariant actually true, rather
     /// than an unverified assumption a filesystem error could quietly violate.
     /// </summary>
-    private static Result<bool, AgentError> LExists(string path)
+    private static bool? LExists(string path)
     {
         try
         {
             _ = File.GetAttributes(path);
-            return Result<bool, AgentError>.Success(true);
+            return true;
         }
         catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
         {
-            return Result<bool, AgentError>.Success(false);
+            return false;
         }
         catch (Exception)
         {
-            return Result<bool, AgentError>.Failure(AgentError.Validation("could not determine whether the path exists."));
+            return null;
         }
     }
 
@@ -278,37 +274,19 @@ public static partial class WorkspacePath
     /// Canonicalises <paramref name="path"/> using the operating system's own path resolution, so every symlink and
     /// junction along it — including one nested inside another's target, and a <c>".."</c> inside a link's target,
     /// applied only after the link is followed — is resolved exactly as the kernel would resolve it for a real
-    /// open. Fails, rather than throwing, for a dangling link, a link loop, or any other resolution failure.
+    /// open. Returns <see langword="null"/>, rather than throwing, for a dangling link, a link loop, or any other
+    /// resolution failure, and on a platform with no reachable kernel canonicalisation. The kernel's reason is
+    /// dropped: it tells missing from unreadable, and <see cref="Resolve"/> must not.
     /// </summary>
-    private static Result<string, AgentError> Canonicalize(string path)
+    private static string? Canonicalize(string path)
     {
         if (OperatingSystem.IsWindows())
-            return CanonicalizeOnWindows(path);
+            return Windows.GetFinalPath(path);
 
         if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
-            return CanonicalizeOnUnix(path);
+            return Unix.RealPath(path);
 
-        return Result<string, AgentError>.Failure(
-            AgentError.Validation("no kernel path canonicalisation is reachable on this platform."));
-    }
-
-    [SupportedOSPlatform("linux")]
-    [SupportedOSPlatform("macos")]
-    private static Result<string, AgentError> CanonicalizeOnUnix(string path)
-    {
-        var resolved = Unix.RealPath(path);
-        return resolved is not null
-            ? Result<string, AgentError>.Success(resolved)
-            : Result<string, AgentError>.Failure(AgentError.Validation($"errno {Marshal.GetLastPInvokeError()}"));
-    }
-
-    [SupportedOSPlatform("windows")]
-    private static Result<string, AgentError> CanonicalizeOnWindows(string path)
-    {
-        var resolved = Windows.GetFinalPath(path, out var win32Error);
-        return resolved is not null
-            ? Result<string, AgentError>.Success(resolved)
-            : Result<string, AgentError>.Failure(AgentError.Validation($"Win32 error {win32Error}"));
+        return null;
     }
 
     private static bool IsContained(string path, string root)
@@ -321,12 +299,13 @@ public static partial class WorkspacePath
         Result<string, AgentError>.Failure(AgentError.Validation($"path '{relativePath}' {reason}."));
 
     /// <summary>
-    /// The single, fixed failure every "not permitted" case returns: a rooted or absolute input, an input outside
-    /// the workspace either lexically or after full resolution, and a filesystem error encountered while probing
-    /// for the deepest existing ancestor. Nothing here is derived from the caller's input or from the host
-    /// filesystem, and every case that reaches it returns the exact same message, so the failure channel cannot be
-    /// used to learn whether a host path exists, is missing, or is merely inaccessible — two calls refused this way
-    /// are indistinguishable from one another, regardless of what is actually on disk.
+    /// The single, fixed failure returned for a rooted or absolute input and for every failure after the lexical
+    /// checks: a workspace root that cannot be canonicalised or is not a directory, a filesystem error while
+    /// probing for the deepest existing ancestor, an ancestor the kernel cannot canonicalise — a dangling link, a
+    /// link loop, a link whose target is missing or unreadable — a resolved path outside the workspace, and a
+    /// resolved path inside the git directory. The message carries nothing derived from the caller's input or the
+    /// host filesystem: no path, no <c>errno</c>, no Win32 error code. Every case returns the exact same message, so
+    /// the message cannot tell a missing host path from an unreadable one or from one that exists outside.
     /// </summary>
     private static Result<string, AgentError> GenericRefusal() =>
         Result<string, AgentError>.Failure(AgentError.Validation("the path is not permitted."));
