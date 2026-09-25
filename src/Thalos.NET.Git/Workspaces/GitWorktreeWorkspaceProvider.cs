@@ -63,7 +63,7 @@ namespace Thalos.Git.Workspaces;
 /// race for it. Because the record only ever appears complete, a
 /// reader racing the claim sees either no record or the whole one — never a sharing violation and never a
 /// half-written file — and a claimant that crashes mid-claim leaves only its own temp file, which
-/// <see cref="ListAsync"/> sweeps once it is older than <see cref="ProvisionalGracePeriod"/>. The call that loses
+/// <see cref="ListAsync"/> sweeps once it is older than <see cref="PendingTempGracePeriod"/>. The call that loses
 /// the publish — including every call for the same run id against a <em>different</em> repository, since the sidecar
 /// path is keyed on the run id alone — deletes its own temp file and returns a failure
 /// <see cref="Result{T,E}"/>, touching nothing else.
@@ -78,24 +78,29 @@ namespace Thalos.Git.Workspaces;
 /// exists, so the undo never deletes something it found.
 /// </para>
 /// <para>
-/// <b>A record is provisional until its create completes.</b> The claim is replaced, again by a whole-file move,
-/// with a <see cref="WorkspaceSidecarState.Ready"/> record just before observers are told the workspace is ready.
-/// <see cref="FindAsync"/> reports only ready workspaces. <see cref="ListAsync"/> reports both, so a sweeper sees a
-/// crashed claimant's record. <see cref="RemoveAsync"/> refuses a provisional record younger than
-/// <see cref="ProvisionalGracePeriod"/>, because its create may still be running, possibly in another process, and
-/// removing its worktree mid-create is exactly the race it must not lose; an older one belongs to a dead claimant and
-/// is removed.
+/// <b>A record is provisional until its create completes, and a run lock says whether its create is alive.</b> The
+/// claim is replaced, again by a whole-file move, with a <see cref="WorkspaceSidecarState.Ready"/> record just before
+/// observers are told the workspace is ready. <see cref="FindAsync"/> reports only ready workspaces.
+/// <see cref="ListAsync"/> reports both, so a sweeper sees a crashed claimant's record. A create holds the run's
+/// <see cref="CrossProcessFileLock"/>, <c>locks/runs/&lt;run-id&gt;.lock</c>, from before its claim until its undo, if
+/// any, has finished; a create that cannot take it at once fails. <see cref="RemoveAsync"/> tries the same lock
+/// without waiting. Held means a create — or another remove — is running for that run, possibly in another process,
+/// and the remove is refused however old the record is. Free means no live claimant: the OS released the lock when
+/// the claimant finished or died, so the record is removed at once. Age plays no part, so a slow create can never
+/// be removed under itself, and a crashed one never waits out a grace period. The lock file is deleted, by its holder,
+/// together with the run.
 /// </para>
 /// <para>
 /// <b>Git on a mirror is serialised across processes; that lock has nothing to do with ownership.</b> Every git call
 /// this provider makes against a repository's mirror — clone, fetch, worktree add, worktree remove, and branch
 /// delete — runs under that repository's lock, which is two locks taken in order: a <see cref="SemaphoreSlim"/> for
-/// this process's own callers, and a <see cref="CrossProcessFileLock"/> on <c>mirrors/.&lt;repository&gt;.lock</c>
+/// this process's own callers, and a <see cref="CrossProcessFileLock"/> on <c>locks/mirrors/&lt;repository&gt;.lock</c>
 /// for every other process sharing the <see cref="GitWorkspaceOptions.DataRoot"/>. Git's own lock files
 /// (<c>config.lock</c>, ref locks, <c>index.lock</c>) prevent corruption, but they make a concurrent second git call
 /// fail — "could not lock config file" — rather than wait, so two hosts creating workspaces for one repository at
 /// once would fail each other's creates without it. The lock is taken only after ownership is settled by the claim
-/// above, and it plays no part in who owns a run.
+/// above, and it plays no part in who owns a run. Every lock file lives under <c>&lt;DataRoot&gt;/locks</c>, a
+/// namespace no repository or run name can reach, so a repository named like a lock file cannot collide with one.
 /// </para>
 /// <para>
 /// <b><see cref="RemoveAsync"/> converges when git has nothing left to act on.</b> A record whose mirror is gone has
@@ -124,14 +129,22 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     IGitCredentialSource? credentials = null) : IRunWorkspaceProvider
 {
     /// <summary>
-    /// Ruling R9's orphan grace period. A provisional record younger than this may belong to a create still in
-    /// flight, so <see cref="RemoveAsync"/> refuses it; a claim temp file older than this belongs to a crashed
-    /// claimant, so <see cref="ListAsync"/> sweeps it.
+    /// How old a claim or publish temp file must be before <see cref="ListAsync"/> sweeps it. A write takes
+    /// milliseconds, so one this old belongs to a writer that died before its move. Ruling R9's grace, which the
+    /// sweeper applies to records with no run row, is the host's own; a provisional record's liveness is its run
+    /// lock, not an age.
     /// </summary>
-    internal static readonly TimeSpan ProvisionalGracePeriod = TimeSpan.FromMinutes(10);
+    internal static readonly TimeSpan PendingTempGracePeriod = TimeSpan.FromMinutes(10);
 
     private const string SidecarSuffix = ".workspace.json";
     private const string PendingSidecarSuffix = ".sidecar.tmp";
+
+    /// <summary>
+    /// <see cref="GitWorkspaceOptions.DataRoot"/> in canonical form, taken once. Every path handed to git or to libc
+    /// is built from it: the kernel resolves <c>..</c> literally, so a spelling such as <c>root/missing/../data</c>,
+    /// which .NET's own file APIs normalise away, fails in <c>link(2)</c> and in git.
+    /// </summary>
+    private readonly string _dataRoot = Path.GetFullPath(options.DataRoot);
 
     private readonly GitCli _git = new(options);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _repositoryLocks = new(StringComparer.Ordinal);
@@ -150,28 +163,50 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         var root = WorktreeRoot(request.RunId);
         var (secretConfig, secret) = CredentialConfig(request.Remote);
 
-        var claim = await ClaimAsync(request, root, ct).ConfigureAwait(false);
-        if (claim.IsFailure)
+        // The run lock is this create's liveness signal: held from before the claim until the undo has finished,
+        // and released by the OS if this process dies. See the class remarks.
+        var runLock = await TryLockRunAsync(request.RunId, ct).ConfigureAwait(false);
+        if (runLock.IsFailure)
         {
-            return Result<RunWorkspace, AgentError>.Failure(claim.Error);
+            return Result<RunWorkspace, AgentError>.Failure(runLock.Error);
         }
 
-        // From here this call owns the run. Every way out that is not a completed create — a failure Result, an
-        // exception, a cancellation — runs the same undo, so no claimed record outlives its create.
-        var progress = new CreateProgress();
-        var completed = false;
+        if (runLock.Value is not { } heldRunLock)
+        {
+            return Result<RunWorkspace, AgentError>.Failure(AgentError.Validation(
+                $"A workspace for run '{request.RunId}' is already being created or removed."));
+        }
+
+        var runGone = false;
         try
         {
-            var created = await CreateClaimedAsync(request, mirror, root, claim.Value, secretConfig, secret, progress, ct).ConfigureAwait(false);
-            completed = created.IsSuccess;
-            return created;
+            var claim = await ClaimAsync(request, root, ct).ConfigureAwait(false);
+            if (claim.IsFailure)
+            {
+                return Result<RunWorkspace, AgentError>.Failure(claim.Error);
+            }
+
+            // From here this call owns the run. Every way out that is not a completed create — a failure Result, an
+            // exception, a cancellation — runs the same undo, so no claimed record outlives its create.
+            var progress = new CreateProgress();
+            var completed = false;
+            try
+            {
+                var created = await CreateClaimedAsync(request, mirror, root, claim.Value, secretConfig, secret, progress, ct).ConfigureAwait(false);
+                completed = created.IsSuccess;
+                return created;
+            }
+            finally
+            {
+                if (!completed)
+                {
+                    runGone = await UndoCreateAsync(request, mirror, root, progress).ConfigureAwait(false);
+                }
+            }
         }
         finally
         {
-            if (!completed)
-            {
-                await UndoCreateAsync(request, mirror, root, progress).ConfigureAwait(false);
-            }
+            ReleaseRunLock(heldRunLock, request.RunId, deleteFile: runGone);
         }
     }
 
@@ -305,9 +340,11 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     /// Undoes an incomplete create: tells observers the workspace is going if they were told it was ready, removes
     /// the worktree, its registration and the run branch if this call attempted to add them, and deletes the claimed
     /// sidecar last, so a crash part-way through the undo still leaves a record a sweeper can see. Runs uncancelled —
-    /// the caller's token may be the very reason this runs — and never throws: every step's failure is logged.
+    /// the caller's token may be the very reason this runs — and does not throw: a git step's failure is logged, and
+    /// a repository lock that cannot be taken is logged and leaves the record in place, provisional, for a later
+    /// <see cref="RemoveAsync"/> to finish once this create's run lock is released. Returns whether the record is gone.
     /// </summary>
-    private async Task UndoCreateAsync(RunWorkspaceRequest request, string mirror, string root, CreateProgress progress)
+    private async Task<bool> UndoCreateAsync(RunWorkspaceRequest request, string mirror, string root, CreateProgress progress)
     {
         if (progress.Ready is { } ready)
         {
@@ -316,7 +353,18 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
         if (progress.WorktreeAttempted)
         {
-            using (await LockRepositoryAsync(request.Repository, CancellationToken.None).ConfigureAwait(false))
+            MirrorLease lease;
+            try
+            {
+                lease = await LockRepositoryAsync(request.Repository, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                LogCleanupFailed(logger, "take the repository lock to undo an incomplete create; its record is left for a later remove", ex.Message);
+                return false;
+            }
+
+            using (lease)
             {
                 await RemoveCreatedWorktreeAsync(mirror, root, request.Branch).ConfigureAwait(false);
             }
@@ -326,7 +374,10 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         if (deleted.IsFailure)
         {
             LogCleanupFailed(logger, "delete the claimed sidecar", deleted.Error.ToString());
+            return false;
         }
+
+        return true;
     }
 
     /// <inheritdoc />
@@ -354,7 +405,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     /// <inheritdoc />
     /// <remarks>
     /// Reports provisional records too, so a sweeper can see a crashed claimant's record and remove it once it is
-    /// older than <see cref="ProvisionalGracePeriod"/>. Also sweeps claim temp files older than that grace period.
+    /// older than <see cref="PendingTempGracePeriod"/>. Also sweeps claim temp files older than that grace period.
     /// </remarks>
     public async ValueTask<IReadOnlyList<RunWorkspace>> ListAsync(CancellationToken ct)
     {
@@ -390,6 +441,36 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     /// <inheritdoc />
     public async ValueTask<UnitResult<AgentError>> RemoveAsync(Guid runId, CancellationToken ct)
     {
+        // Never waits: a held run lock means a create or another remove is running for this run right now. See the
+        // class remarks.
+        var runLock = await TryLockRunAsync(runId, ct).ConfigureAwait(false);
+        if (runLock.IsFailure)
+        {
+            return UnitResult<AgentError>.Failure(runLock.Error);
+        }
+
+        if (runLock.Value is not { } heldRunLock)
+        {
+            return UnitResult<AgentError>.Failure(AgentError.Validation(
+                $"The workspace for run '{runId}' is still being created or removed by another call; it can be removed once that call finishes."));
+        }
+
+        var runGone = false;
+        try
+        {
+            var removed = await RemoveLockedAsync(runId, ct).ConfigureAwait(false);
+            runGone = removed.IsSuccess;
+            return removed;
+        }
+        finally
+        {
+            ReleaseRunLock(heldRunLock, runId, deleteFile: runGone);
+        }
+    }
+
+    /// <summary><see cref="RemoveAsync"/> once it holds the run lock, so no create for the run is alive.</summary>
+    private async Task<UnitResult<AgentError>> RemoveLockedAsync(Guid runId, CancellationToken ct)
+    {
         var read = await ReadSidecarAsync(SidecarPath(runId), ct).ConfigureAwait(false);
         if (read.Error is { } error)
         {
@@ -403,13 +484,8 @@ public sealed partial class GitWorktreeWorkspaceProvider(
             return UnitResult<AgentError>.Success();
         }
 
+        // A provisional record here belongs to a claimant that is gone: it would still hold the run lock otherwise.
         var workspace = sidecar.Workspace;
-        if (sidecar.State == WorkspaceSidecarState.Provisional && clock.GetUtcNow() - workspace.CreatedAt < ProvisionalGracePeriod)
-        {
-            return UnitResult<AgentError>.Failure(AgentError.Validation(
-                $"The workspace for run '{runId}' is still being created; it can be removed once its create finishes, or once its claim is older than {ProvisionalGracePeriod}."));
-        }
-
         if (!IsValidRepositoryName(workspace.Repository))
         {
             return UnitResult<AgentError>.Failure(AgentError.Validation(
@@ -508,7 +584,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
     private async Task<UnitResult<AgentError>> CloneMirrorAsync(string mirror, string remote, IReadOnlyList<(string Key, string Value)>? secretConfig, string? secret, CancellationToken ct)
     {
-        var mirrorsDir = Path.Combine(options.DataRoot, "mirrors");
+        var mirrorsDir = Path.Combine(_dataRoot, "mirrors");
         Directory.CreateDirectory(mirrorsDir);
         var temp = Path.Combine(mirrorsDir, ".tmp-" + Guid.NewGuid().ToString("N"));
         try
@@ -905,9 +981,52 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
     // ---------- paths ----------
 
-    private string RunsDirectory => Path.Combine(options.DataRoot, "runs");
+    private string RunsDirectory => Path.Combine(_dataRoot, "runs");
 
-    private string MirrorPath(string repository) => Path.Combine(options.DataRoot, "mirrors", repository);
+    /// <summary>Every lock file, and nothing else, lives here: no repository or run name can reach it.</summary>
+    private string LocksDirectory => Path.Combine(_dataRoot, "locks");
+
+    private string RunLockPath(Guid runId) => Path.Combine(LocksDirectory, "runs", runId.ToString() + ".lock");
+
+    /// <summary>
+    /// Takes the run's lock without waiting: the held lock, <see langword="null"/> when another call holds it, or a
+    /// failure when the lock file cannot be opened at all.
+    /// </summary>
+    private async Task<Result<FileStream?, AgentError>> TryLockRunAsync(Guid runId, CancellationToken ct)
+    {
+        try
+        {
+            return Result<FileStream?, AgentError>.Success(await CrossProcessFileLock.TryAcquireAsync(RunLockPath(runId), ct).ConfigureAwait(false));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return Result<FileStream?, AgentError>.Failure(AgentError.StoreError($"Could not open the lock for run '{runId}'.", ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// Releases the run's lock, deleting its file first, while still held, when the run is gone. A failed delete is
+    /// logged: a leftover lock file is empty and harmless, and the next holder of that run reuses it.
+    /// </summary>
+    private void ReleaseRunLock(FileStream held, Guid runId, bool deleteFile)
+    {
+        if (!deleteFile)
+        {
+            held.Dispose();
+            return;
+        }
+
+        try
+        {
+            CrossProcessFileLock.DeleteHeld(held, RunLockPath(runId));
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            LogCleanupFailed(logger, $"delete the lock file of run '{runId}'", ex.Message);
+        }
+    }
+
+    private string MirrorPath(string repository) => Path.Combine(_dataRoot, "mirrors", repository);
 
     private string WorktreeRoot(Guid runId) => Path.Combine(RunsDirectory, runId.ToString());
 
@@ -923,7 +1042,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     /// <summary>
     /// Serialises git on one repository's mirror: first within this process, through a <see cref="SemaphoreSlim"/>,
     /// so this process's own callers queue without polling, then across processes, through a
-    /// <see cref="CrossProcessFileLock"/> on <c>mirrors/.&lt;repository&gt;.lock</c>. Dispose the lease to release both.
+    /// <see cref="CrossProcessFileLock"/> on <c>locks/mirrors/&lt;repository&gt;.lock</c>. Dispose the lease to release both.
     /// </summary>
     private async Task<MirrorLease> LockRepositoryAsync(string repository, CancellationToken ct)
     {
@@ -932,9 +1051,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         var leased = false;
         try
         {
-            var mirrorsDir = Path.Combine(options.DataRoot, "mirrors");
-            Directory.CreateDirectory(mirrorsDir);
-            var file = await CrossProcessFileLock.AcquireAsync(Path.Combine(mirrorsDir, $".{repository}.lock"), ct).ConfigureAwait(false);
+            var file = await CrossProcessFileLock.AcquireAsync(Path.Combine(LocksDirectory, "mirrors", repository + ".lock"), ct).ConfigureAwait(false);
             leased = true;
             return new MirrorLease(gate, file);
         }
@@ -1066,7 +1183,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     }
 
     /// <summary>
-    /// Deletes claim and publish temp files older than <see cref="ProvisionalGracePeriod"/>: a write takes
+    /// Deletes claim and publish temp files older than <see cref="PendingTempGracePeriod"/>: a write takes
     /// milliseconds, so one that old belongs to a writer that crashed before its move. A younger one may still be
     /// about to be moved into place, and is left alone.
     /// </summary>
@@ -1075,7 +1192,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         var now = clock.GetUtcNow().UtcDateTime;
         foreach (var file in Directory.EnumerateFiles(runsDir, "*" + PendingSidecarSuffix))
         {
-            if (now - File.GetLastWriteTimeUtc(file) >= ProvisionalGracePeriod)
+            if (now - File.GetLastWriteTimeUtc(file) >= PendingTempGracePeriod)
             {
                 DeleteFileIfPresent(file, "sweep a stale workspace record temp file");
             }

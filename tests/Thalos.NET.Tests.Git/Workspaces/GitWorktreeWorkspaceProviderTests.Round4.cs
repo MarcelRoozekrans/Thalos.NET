@@ -68,28 +68,34 @@ public sealed partial class GitWorktreeWorkspaceProviderTests
     }
 
     /// <summary>
-    /// A provisional record belongs to a create still in flight, possibly in another process. Remove refuses it
-    /// until it is older than the R9 grace period; after that the claimant is presumed dead and remove proceeds.
-    /// Find does not report a record that is still being created.
+    /// Round 5 ruling: a provisional record's liveness is its run lock, not its age. While the lock is held — here by
+    /// this test, standing in for a live claimant — remove refuses the record even a day after it was claimed; once
+    /// the lock is free the claimant is gone and remove deletes the record at once, with no grace period. Find does
+    /// not report a record that is still being created.
     /// </summary>
     [Fact]
-    public async Task Remove_refuses_a_fresh_provisional_record_and_accepts_one_older_than_the_grace_period()
+    public async Task A_provisional_record_is_removable_exactly_when_its_run_lock_is_free()
     {
         var clock = new FakeTimeProvider(DateTimeOffset.UtcNow);
         var provider = Provider(out _, clock);
         var runId = Guid.NewGuid();
         var request = new RunWorkspaceRequest(runId, "sandbox", "https://example.invalid/repo.git", "main", $"manufacture/{runId}", null);
         (await provider.ClaimAsync(request, Path.Combine(_dataRoot, "runs", runId.ToString()), CancellationToken.None)).IsSuccess.Should().BeTrue();
-
         (await provider.FindAsync(runId, CancellationToken.None)).Should().BeNull("a record still being created is not a workspace yet");
-        var fresh = await provider.RemoveAsync(runId, CancellationToken.None);
-        fresh.IsFailure.Should().BeTrue("a remove must never pull an in-flight create's workspace out from under it");
-        File.Exists(SidecarPath(runId)).Should().BeTrue("a refused remove leaves the in-flight claim alone");
 
-        clock.Advance(TimeSpan.FromMinutes(11));
-        var stale = await provider.RemoveAsync(runId, CancellationToken.None);
-        stale.IsSuccess.Should().BeTrue("a provisional record older than the grace period belongs to a dead claimant");
+        using (var liveClaimant = CrossProcessFileLock.TryAcquire(RunLockPath(runId)))
+        {
+            liveClaimant.Should().NotBeNull();
+            clock.Advance(TimeSpan.FromDays(1));
+            var held = await provider.RemoveAsync(runId, CancellationToken.None);
+            held.IsFailure.Should().BeTrue("a remove must never pull a live create's workspace out from under it, however old its record");
+            File.Exists(SidecarPath(runId)).Should().BeTrue("a refused remove leaves the in-flight claim alone");
+        }
+
+        var free = await provider.RemoveAsync(runId, CancellationToken.None);
+        free.IsSuccess.Should().BeTrue("a free run lock means the claimant is gone, so its record is removed at once");
         File.Exists(SidecarPath(runId)).Should().BeFalse();
+        File.Exists(RunLockPath(runId)).Should().BeFalse("the run lock file is deleted together with the run");
     }
 
     /// <summary>

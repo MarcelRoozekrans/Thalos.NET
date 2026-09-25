@@ -14,6 +14,12 @@ namespace Thalos.Git.Workspaces;
 /// and both renames then succeed, the second replacing the first — observed as six winners out of ten racing claims.
 /// On Unix this type therefore uses <c>link(2)</c>, which the kernel refuses with <c>EEXIST</c> when the destination
 /// exists, and leaves removing the source name to the caller.
+/// <para>
+/// Over NFSv3, a <c>link</c> request whose reply is lost is retransmitted, and the server answers the retry with
+/// <c>EEXIST</c> for the link the first request already made. So <c>EEXIST</c> is checked: the source is a temp file
+/// only this caller ever links, so if its link count is 2 the second name is the destination, and the publish won.
+/// Where the count cannot be read, <c>EEXIST</c> stays a loss.
+/// </para>
 /// </remarks>
 internal static partial class AtomicPublish
 {
@@ -43,6 +49,13 @@ internal static partial class AtomicPublish
         return Unix.TryLink(source, destination);
     }
 
+    /// <summary>
+    /// Whether a <c>link</c> that failed with <c>EEXIST</c> in fact made the destination: true when the source, a
+    /// file no one else links, has <paramref name="sourceLinkCount"/> 2 — its own name and the destination. See the
+    /// remarks. <see langword="null"/>, an unreadable count, is a loss.
+    /// </summary>
+    internal static bool EexistStillWon(long? sourceLinkCount) => sourceLinkCount == 2;
+
     [UnsupportedOSPlatform("windows")]
     private static partial class Unix
     {
@@ -56,7 +69,7 @@ internal static partial class AtomicPublish
             var errno = Marshal.GetLastPInvokeError();
             if (errno == UnixEExist)
             {
-                return false;
+                return EexistStillWon(OperatingSystem.IsLinux() ? UnixLinkCount.OfPath(source) : null);
             }
 
             throw new IOException($"Could not link '{source}' to '{destination}': {Marshal.GetPInvokeErrorMessage(errno)}", errno);

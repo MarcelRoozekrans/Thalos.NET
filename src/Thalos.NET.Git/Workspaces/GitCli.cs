@@ -98,12 +98,14 @@ internal readonly record struct GitCliResult(int ExitCode, string StdOut, string
 /// recursively, whatever is nested in it and whether or not it is read-only: everything except the hooks directory,
 /// the home directory and the global config file is deleted, the two directories are emptied, and the global config
 /// is truncated. A link is deleted as a link, never followed, so a planted link cannot make the constructor delete
-/// anything outside <c>.git-isolation</c>. Only "already gone" is tolerated while deleting; any other failure
-/// propagates. The constructor then verifies that the hooks and home directories are empty, the global config is an
+/// anything outside <c>.git-isolation</c>. <see cref="GitWorkspaceOptions.DataRoot"/> is canonicalised once with
+/// <see cref="Path.GetFullPath(string)"/>, and the three kept entries are recognised by name, so any spelling of the
+/// same directory — forward slashes, <c>..</c>, doubled separators — works. Only "already gone" is tolerated while
+/// deleting; any other failure propagates. The constructor then verifies that the hooks and home directories are empty, the global config is an
 /// empty file, and nothing else is there, and throws <see cref="InvalidOperationException"/> if anything remains:
 /// git never runs over a planted file this type could not remove. Constructors sharing a
 /// <see cref="GitWorkspaceOptions.DataRoot"/> — this provider is a DI singleton, and an API host and a CLI host may
-/// share one — take turns, through a <see cref="CrossProcessFileLock"/> on <c>&lt;DataRoot&gt;/.git-isolation.lock</c>
+/// share one — take turns, through a <see cref="CrossProcessFileLock"/> on <c>&lt;DataRoot&gt;/locks/isolation.lock</c>
 /// held for the whole empty-and-verify, bounded by <see cref="GitWorkspaceOptions.CommandTimeout"/>. Without it, two
 /// constructors deleting the same entries at once fail on Windows, where a file another thread is deleting reports
 /// access denied rather than not found. Nothing but a constructor writes into these directories, so a git call
@@ -129,26 +131,33 @@ internal sealed partial class GitCli
     private readonly string _globalConfigPath;
     private volatile bool _versionConfirmed;
 
+    private const string HooksName = "hooks";
+    private const string HomeName = "home";
+    private const string GlobalConfigName = "global.config";
+
     public GitCli(GitWorkspaceOptions options)
     {
         _options = options;
 
-        var isolationDirectory = Path.Combine(options.DataRoot, ".git-isolation");
-        _hooksDirectory = Path.Combine(isolationDirectory, "hooks");
-        _homeDirectory = Path.Combine(isolationDirectory, "home");
-        _globalConfigPath = Path.Combine(isolationDirectory, "global.config");
+        // Canonical once, here: a DataRoot spelled with forward slashes, "..", "." or doubled separators names the
+        // same directory, and every path below is built from this one form. Entries are recognised by name, never by
+        // comparing a built path with a normalised FullName, so no spelling of DataRoot can make a match fail.
+        var dataRoot = Path.GetFullPath(options.DataRoot);
+        var isolationDirectory = Path.Combine(dataRoot, ".git-isolation");
+        _hooksDirectory = Path.Combine(isolationDirectory, HooksName);
+        _homeDirectory = Path.Combine(isolationDirectory, HomeName);
+        _globalConfigPath = Path.Combine(isolationDirectory, GlobalConfigName);
 
         // Emptied every time, never assumed already empty, then verified — see the class remarks. One constructor at a
         // time per DataRoot, across processes, so no two ever delete the same entries at once.
-        Directory.CreateDirectory(options.DataRoot);
-        using (CrossProcessFileLock.Acquire(Path.Combine(options.DataRoot, ".git-isolation.lock"), options.CommandTimeout))
+        using (CrossProcessFileLock.Acquire(Path.Combine(dataRoot, "locks", "isolation.lock"), options.CommandTimeout))
         {
             EnsureRealDirectory(isolationDirectory);
-            EmptyIsolationDirectory(isolationDirectory, _hooksDirectory, _homeDirectory, _globalConfigPath);
+            EmptyIsolationDirectory(isolationDirectory);
             EnsureRealDirectory(_hooksDirectory);
             EnsureRealDirectory(_homeDirectory);
             ClearGlobalConfig(_globalConfigPath);
-            VerifyIsolation(isolationDirectory, _hooksDirectory, _homeDirectory, _globalConfigPath);
+            VerifyIsolation(isolationDirectory);
         }
     }
 
@@ -171,16 +180,16 @@ internal sealed partial class GitCli
     /// Deletes everything in <paramref name="isolationDirectory"/> except the hooks directory, the home directory and
     /// the global config, and empties those two directories recursively.
     /// </summary>
-    private static void EmptyIsolationDirectory(string isolationDirectory, string hooksDirectory, string homeDirectory, string globalConfigPath)
+    private static void EmptyIsolationDirectory(string isolationDirectory)
     {
         foreach (var entry in EnumerateEntries(isolationDirectory))
         {
             var isLink = entry.LinkTarget is not null;
-            if (!isLink && entry is DirectoryInfo && (IsPath(entry, hooksDirectory) || IsPath(entry, homeDirectory)))
+            if (!isLink && entry is DirectoryInfo && IsKeptDirectory(entry))
             {
                 EmptyDirectory(entry.FullName);
             }
-            else if (!isLink && entry is FileInfo && IsPath(entry, globalConfigPath))
+            else if (!isLink && entry is FileInfo && IsName(entry, GlobalConfigName))
             {
                 ClearReadOnly(entry);
             }
@@ -191,8 +200,14 @@ internal sealed partial class GitCli
         }
     }
 
-    private static bool IsPath(FileSystemInfo entry, string path) =>
-        string.Equals(Path.TrimEndingDirectorySeparator(entry.FullName), Path.TrimEndingDirectorySeparator(path), StringComparison.Ordinal);
+    /// <summary>
+    /// Whether <paramref name="entry"/>, a direct entry of the isolation directory, has exactly <paramref name="name"/>.
+    /// Ordinal: on a case-insensitive file system a planted <c>HOOKS</c> is deleted and <c>hooks</c> recreated, which
+    /// is safe.
+    /// </summary>
+    private static bool IsName(FileSystemInfo entry, string name) => string.Equals(entry.Name, name, StringComparison.Ordinal);
+
+    private static bool IsKeptDirectory(FileSystemInfo entry) => IsName(entry, HooksName) || IsName(entry, HomeName);
 
     /// <summary>Deletes every entry inside <paramref name="directory"/>, recursively, leaving the directory itself.</summary>
     private static void EmptyDirectory(string directory)
@@ -272,11 +287,11 @@ internal sealed partial class GitCli
     /// Throws unless the isolation directory holds exactly an empty hooks directory, an empty home directory and an
     /// empty global config file — so git never runs over anything the emptying could not remove.
     /// </summary>
-    private static void VerifyIsolation(string isolationDirectory, string hooksDirectory, string homeDirectory, string globalConfigPath)
+    private static void VerifyIsolation(string isolationDirectory)
     {
         foreach (var entry in new DirectoryInfo(isolationDirectory).GetFileSystemInfos())
         {
-            if (!IsExpectedIsolationEntry(entry, hooksDirectory, homeDirectory, globalConfigPath))
+            if (!IsExpectedIsolationEntry(entry))
             {
                 throw new InvalidOperationException(
                     $"The git isolation directory '{isolationDirectory}' could not be emptied: '{entry.FullName}' remains. Git will not run over it.");
@@ -284,7 +299,7 @@ internal sealed partial class GitCli
         }
     }
 
-    private static bool IsExpectedIsolationEntry(FileSystemInfo entry, string hooksDirectory, string homeDirectory, string globalConfigPath)
+    private static bool IsExpectedIsolationEntry(FileSystemInfo entry)
     {
         if (entry.LinkTarget is not null)
         {
@@ -293,8 +308,8 @@ internal sealed partial class GitCli
 
         return entry switch
         {
-            DirectoryInfo directory => (IsPath(directory, hooksDirectory) || IsPath(directory, homeDirectory)) && directory.GetFileSystemInfos().Length == 0,
-            FileInfo file => IsPath(file, globalConfigPath) && file.Length == 0,
+            DirectoryInfo directory => IsKeptDirectory(directory) && directory.GetFileSystemInfos().Length == 0,
+            FileInfo file => IsName(file, GlobalConfigName) && file.Length == 0,
             _ => false,
         };
     }
