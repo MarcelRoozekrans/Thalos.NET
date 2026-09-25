@@ -57,35 +57,13 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
         return null;
     }
 
-    /// <summary>
-    /// The legacy positional overload, kept as a plain member on this concrete type — not only inherited as
-    /// <see cref="IWorkflowStore"/>'s default interface method — because every existing caller in this test
-    /// project holds its store through a <see cref="FakeWorkflowStore"/>-typed field, not an
-    /// <see cref="IWorkflowStore"/>-typed one, and a default interface method is only reachable through a
-    /// reference typed as the interface that declares it. Forwards exactly as the interface's own default
-    /// implementation does, so the two are indistinguishable in behaviour.
-    /// </summary>
-    public ValueTask<Guid> StartAsync(
-        string process,
-        int version,
-        string correlationKey,
-        string startNode,
-        IReadOnlyDictionary<string, object?>? initialVariables,
-        CancellationToken ct) =>
-        StartAsync(
-            new WorkflowStartRequest
-            {
-                Process = process,
-                Version = version,
-                CorrelationKey = correlationKey,
-                StartNode = startNode,
-                InitialVariables = initialVariables,
-            },
-            ct);
-
     public ValueTask<Guid> StartAsync(WorkflowStartRequest request, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(request);
+        // Every start names its starter (ruling R26): mirrors OrmWorkflowStore.StartAsync's own guard, checked
+        // before this call records anything. nameof(request), not the property path, is what MA0015 wants —
+        // same convention OrmWorkflowStore.StartAsync uses.
+        ArgumentNullException.ThrowIfNull(request.StartedBy, nameof(request));
         _startedRuns.Add(request);
 
         var process = request.Process;
@@ -96,7 +74,9 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
         // Mirrors OrmWorkflowStore.StartAsync, which calls the same one guard.
         WorkflowVariableBlock.ThrowIfOverKeyLimit(initialVariables, nameof(initialVariables));
 
-        var id = Guid.NewGuid();
+        // The host's own id when it supplied one, mirroring OrmWorkflowStore.StartAsync — otherwise this mints
+        // one, exactly as it always has.
+        var id = request.RunId ?? Guid.NewGuid();
         _runs[id] = new WorkflowRun
         {
             Id = id,
@@ -113,8 +93,9 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
                 ? new Dictionary<string, object?>(StringComparer.Ordinal)
                 : new Dictionary<string, object?>(initialVariables, StringComparer.Ordinal),
             // Written once, here, mirroring OrmWorkflowStore's InsertRunAsync — nothing below ever assigns
-            // Manifest again, so FindAsync always returns exactly what this call was given.
+            // Manifest or StartedBy again, so FindAsync always returns exactly what this call was given.
             Manifest = request.Manifest,
+            StartedBy = request.StartedBy,
         };
 
         // The start node's own dispatch, exactly as OrmWorkflowStore.StartAsync enqueues it. A fake that skipped

@@ -80,11 +80,16 @@ public sealed record WorkflowRun
 
     /// <summary>
     /// The write-once pin <see cref="IWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/> gave
-    /// this run at creation, or <see langword="null"/> when the run has none — started before manifests existed,
-    /// or through the legacy positional <c>StartAsync</c> overload, which always leaves this
-    /// <see langword="null"/>. Nothing ever updates this property after the run is created: not
+    /// this run at creation, or <see langword="null"/> when the run has none — started before manifests existed.
+    /// Nothing ever updates this property after the run is created: not
     /// <see cref="IWorkflowStore.CompleteNodeAsync"/>, not <see cref="IWorkflowStore.ResumeAsync"/>, not any
     /// other member of <see cref="IWorkflowStore"/>.
     /// </summary>
     public RunManifest? Manifest { get; init; }
+
+    /// <summary>
+    /// Write-once, like <see cref="Manifest"/>. <see langword="null"/> only for a run started before 0.11.0;
+    /// every 0.11.0 start records one.
+    /// </summary>
+    public RunPrincipal? StartedBy { get; init; }
 }

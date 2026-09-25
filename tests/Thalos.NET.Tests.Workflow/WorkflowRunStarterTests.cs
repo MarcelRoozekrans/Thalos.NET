@@ -34,7 +34,9 @@ public sealed class WorkflowRunStarterTests
             agents: [Def("implementer"), Def("reviewer")],
             skills: [Skill("manufacture-implement", "h")]); // review's skill is missing
 
-        var started = await starter.StartAsync("manufacture", "k1", null, null, CancellationToken.None);
+        var started = await starter.StartAsync(
+            new WorkflowRunStartOptions { Process = "manufacture", CorrelationKey = "k1", StartedBy = TestPrincipals.Starter },
+            CancellationToken.None);
 
         started.IsFailure.Should().BeTrue();
         started.Error.Should().Contain("review");
@@ -48,7 +50,9 @@ public sealed class WorkflowRunStarterTests
             agents: [Def("implementer", "r-imp"), Def("reviewer", "r-rev")],
             skills: [Skill("manufacture-implement", "h-imp"), Skill("manufacture-review", "h-rev")]);
 
-        var started = await starter.StartAsync("manufacture", "k1", null, null, CancellationToken.None);
+        var started = await starter.StartAsync(
+            new WorkflowRunStartOptions { Process = "manufacture", CorrelationKey = "k1", StartedBy = TestPrincipals.Starter },
+            CancellationToken.None);
 
         started.IsSuccess.Should().BeTrue(started.IsFailure ? started.Error : "");
         store.StartedRuns.Should().ContainSingle();
@@ -66,7 +70,9 @@ public sealed class WorkflowRunStarterTests
             skills: [Skill("manufacture-implement", "h-imp"), Skill("manufacture-review", "h-rev")]);
         var documents = new Dictionary<string, string>(StringComparer.Ordinal) { ["standing_instructions"] = "Run dotnet test." };
 
-        await starter.StartAsync("manufacture", "k1", null, documents, CancellationToken.None);
+        await starter.StartAsync(
+            new WorkflowRunStartOptions { Process = "manufacture", CorrelationKey = "k1", Documents = documents, StartedBy = TestPrincipals.Starter },
+            CancellationToken.None);
 
         store.StartedRuns.Single().Manifest!.Documents["standing_instructions"].Should().Be("Run dotnet test.");
     }
@@ -82,7 +88,9 @@ public sealed class WorkflowRunStarterTests
             new InMemorySkillStore(Clock));
         var starter = new WorkflowRunStarter(definitions, resolver, store);
 
-        var started = await starter.StartAsync("manufacture", "k1", null, null, CancellationToken.None);
+        var started = await starter.StartAsync(
+            new WorkflowRunStartOptions { Process = "manufacture", CorrelationKey = "k1", StartedBy = TestPrincipals.Starter },
+            CancellationToken.None);
 
         started.IsFailure.Should().BeTrue();
         started.Error.Should().Contain("manufacture").And.Contain("no active version", "GetAsync would fail with a similarly-shaped 'manufacture'-naming message too — the wording must show this is the version check, not a fallback to that other failure path");
@@ -109,9 +117,53 @@ public sealed class WorkflowRunStarterTests
             overCap[$"key-{i}"] = i;
         }
 
-        var started = await starter.StartAsync("manufacture", "k1", overCap, null, CancellationToken.None);
+        var started = await starter.StartAsync(
+            new WorkflowRunStartOptions { Process = "manufacture", CorrelationKey = "k1", Variables = overCap, StartedBy = TestPrincipals.Starter },
+            CancellationToken.None);
 
         started.IsFailure.Should().BeTrue("an over-cap bag is a caller input problem the store's own guard already names — it must come back as a Result, not a thrown exception");
+    }
+
+    /// <summary>
+    /// <see cref="WorkflowRunStartOptions.StartedBy"/> and <see cref="WorkflowRunStartOptions.RunId"/> both reach
+    /// the store's <see cref="WorkflowStartRequest"/> unchanged — <see cref="WorkflowRunStarter.StartAsync"/> is a
+    /// pass-through for both, not just for <see cref="WorkflowRunStartOptions.Variables"/> and
+    /// <see cref="WorkflowRunStartOptions.Documents"/>.
+    /// </summary>
+    [Fact]
+    public async Task The_options_overload_carries_the_starter_and_the_run_id_to_the_store()
+    {
+        var (store, starter) = await StarterWith(
+            agents: [Def("implementer"), Def("reviewer")],
+            skills: [Skill("manufacture-implement", "h-imp"), Skill("manufacture-review", "h-rev")]);
+        var runId = Guid.NewGuid();
+
+        var started = await starter.StartAsync(
+            new WorkflowRunStartOptions { Process = "manufacture", CorrelationKey = "k1", RunId = runId, StartedBy = new RunPrincipal("u", ["admin"]) },
+            CancellationToken.None);
+
+        started.Value.Should().Be(runId);
+        store.StartedRuns.Single().StartedBy.Id.Should().Be("u");
+    }
+
+    /// <summary>
+    /// Every start names its starter (ruling R26): refused before the store is ever called, so the fake's own
+    /// <see cref="ArgumentNullException"/> guard — which names <c>request.StartedBy</c>, not
+    /// <c>options.StartedBy</c> — never fires.
+    /// </summary>
+    [Fact]
+    public async Task A_start_with_no_starter_is_refused_before_the_store_is_called()
+    {
+        var (store, starter) = await StarterWith(
+            agents: [Def("implementer"), Def("reviewer")],
+            skills: [Skill("manufacture-implement", "h-imp"), Skill("manufacture-review", "h-rev")]);
+
+        var act = async () => await starter.StartAsync(
+            new WorkflowRunStartOptions { Process = "manufacture", CorrelationKey = "k2", StartedBy = null! },
+            CancellationToken.None);
+
+        (await act.Should().ThrowAsync<ArgumentNullException>()).WithParameterName("options.StartedBy", "the starter refuses it before the store sees it");
+        store.StartedRuns.Should().BeEmpty();
     }
 
     private static async Task<(FakeWorkflowStore Store, WorkflowRunStarter Starter)> StarterWith(IReadOnlyList<AgentDefinition> agents, IReadOnlyList<SkillDocument> skills)

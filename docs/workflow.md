@@ -251,14 +251,20 @@ content is refused, so editing a process file means bumping its `version`.
 
 ```csharp
 var runId = await store.StartAsync(
-    process: "pipeline",
-    version: await definitions.GetActiveVersionAsync("pipeline", ct) ?? throw new InvalidOperationException("pipeline is not synced"),
-    correlationKey: $"issue-42:attempt-{Guid.NewGuid()}",
-    startNode: "implement",
-    initialVariables: new Dictionary<string, object?>(StringComparer.Ordinal)
+    new WorkflowStartRequest
     {
-        ["issue"] = "gh-42",
-        ["branch"] = "fix/null-guard",
+        Process = "pipeline",
+        Version = await definitions.GetActiveVersionAsync("pipeline", ct) ?? throw new InvalidOperationException("pipeline is not synced"),
+        CorrelationKey = $"issue-42:attempt-{Guid.NewGuid()}",
+        StartNode = "implement",
+        InitialVariables = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["issue"] = "gh-42",
+            ["branch"] = "fix/null-guard",
+        },
+        // Every start names its starter. A caller with a human behind the request passes that human's identity;
+        // a host with no human behind it — a timer, a webhook, a test harness — passes its own system principal.
+        StartedBy = new RunPrincipal(currentUser.Id, currentUser.Roles),
     },
     ct);
 ```
@@ -267,10 +273,14 @@ That is the whole start. `StartAsync` writes the run, seeds its `Entered` event,
 dispatch — all in one transaction, so a run never exists without the work behind its first node already scheduled.
 You do not construct a `WorkflowDispatchMessage` yourself; step 4's consumer picks it up on the next poll.
 
-`initialVariables` is the run's opening `Variables` bag: the work item the first node is meant to act on. Pass
+`InitialVariables` is the run's opening `Variables` bag: the work item the first node is meant to act on. Pass
 `null` for a run that starts with nothing — the bag is then empty, never null. It is seeded only on the path that
-actually starts a run, so a call whose `correlationKey` an earlier run already used starts nothing and seeds
+actually starts a run, so a call whose `CorrelationKey` an earlier run already used starts nothing and seeds
 nothing.
+
+`StartedBy` is required and non-null: every run records who started it, written once and never updated. `RunId`
+is optional — leave it `null` and the store mints one, or supply your own so you can prepare a resource keyed by
+the run's id, such as a git worktree, before the first node is ever dispatched.
 
 ## 8. Passing work from one node to the next
 

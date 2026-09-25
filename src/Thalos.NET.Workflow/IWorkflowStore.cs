@@ -12,100 +12,50 @@ namespace Thalos.Workflow;
 public interface IWorkflowStore
 {
     /// <summary>
-    /// Starts a new run of <paramref name="process"/> version <paramref name="version"/> at
-    /// <paramref name="startNode"/>, keyed for idempotent lookup by <paramref name="correlationKey"/>, and
-    /// returns its id. Seeds <see cref="WorkflowRun.Visits"/> with <paramref name="startNode"/> already counted
-    /// as one entry — the run has entered it by virtue of starting there — so a start node that also carries a
-    /// <c>maxVisits</c> cap is bounded correctly from its very first run, not given one free, uncounted entry.
-    /// <paramref name="initialVariables"/> seeds <see cref="WorkflowRun.Variables"/> so the run starts holding
-    /// the work item it exists to perform.
-    /// </summary>
-    /// <param name="process">The process name to run.</param>
-    /// <param name="version">The process version to pin this run to.</param>
-    /// <param name="correlationKey">The globally unique idempotency key — see this method's remarks.</param>
-    /// <param name="startNode">The node the run begins at.</param>
-    /// <param name="initialVariables">
-    /// The run's opening <see cref="WorkflowRun.Variables"/> bag — the issue, branch, diff or whatever else the
-    /// first node needs to act on — or <see langword="null"/> for a run that starts with nothing. Null and an
-    /// empty dictionary are the same thing here: both leave <see cref="WorkflowRun.Variables"/> an <em>empty</em>
-    /// dictionary, never <see langword="null"/>, so a caller reading it back never has to null-check. A required
-    /// parameter rather than a defaulted one deliberately: an omitted-by-default seed on the one method that can
-    /// give a run its work item is exactly the silent no-op this signature change exists to rule out. Seeded only
-    /// on the path that actually starts a run: a call whose <paramref name="correlationKey"/> an earlier run
-    /// already used starts nothing and therefore seeds nothing, leaving that earlier run's own bag as it stands.
-    /// <para>
-    /// Bounded: an implementation throws <see cref="ArgumentException"/> for a bag holding more keys than a run
-    /// may carry. The cap is what lets the engine name every variable it has to leave out of a node's task text,
-    /// so a store that accepted an unbounded seed would silently weaken that guarantee for every run it started.
-    /// </para>
-    /// </param>
-    /// <param name="ct">Cancels the start.</param>
-    /// <remarks>
-    /// <para>
-    /// <b>A started run is a dispatched run.</b> An implementation must schedule <paramref name="startNode"/>'s
-    /// own execution as part of this call, in the same unit of work that writes the run: a caller does not — and
-    /// must not have to — mint the first <see cref="WorkflowDispatchMessage"/> itself. An implementation that
-    /// only writes the row leaves every run it creates at <see cref="WorkflowStatus.Running"/> with nothing that
-    /// will ever advance it, and <see cref="WorkflowRunReconciler.SweepAsync"/> will eventually terminate each
-    /// one as stranded.
-    /// </para>
-    /// <para>
-    /// <b><paramref name="correlationKey"/> is unique across every process and for all time.</b> The key space
-    /// is global: it is not scoped per <paramref name="process"/>, and it is not released when a run reaches a
-    /// terminal status. A second call with a key some earlier run already used returns <em>that</em> run's id —
-    /// whatever process and version it belonged to, and whether it is still running, succeeded, failed or
-    /// cancelled months ago — and starts nothing. A caller that wants a fresh run must supply a key nothing has
-    /// ever used, so keys are worth minting with the attempt in them (a run id, a timestamp, an attempt counter)
-    /// rather than from a business identity that recurs.
-    /// </para>
-    /// <para>
-    /// <b>Superseded by <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/>.</b> This overload is a
-    /// default interface method that forwards to it with <see cref="WorkflowStartRequest.Manifest"/> left
-    /// <see langword="null"/> — a run started this way carries no pin, the same as any run started before
-    /// manifests existed. An implementation only needs to provide the request-based overload; it never needs to
-    /// implement this one itself. The blank-argument guards below run against this overload's own parameter
-    /// names before <see cref="WorkflowStartRequest"/> is built, so a caller of this overload — including one
-    /// reaching it purely through this default implementation, with no override of its own — sees
-    /// <c>ArgumentException.ParamName</c> "process", "correlationKey" or "startNode", not "request".
-    /// </para>
-    /// </remarks>
-    ValueTask<Guid> StartAsync(
-        string process,
-        int version,
-        string correlationKey,
-        string startNode,
-        IReadOnlyDictionary<string, object?>? initialVariables,
-        CancellationToken ct)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(process);
-        ArgumentException.ThrowIfNullOrWhiteSpace(correlationKey);
-        ArgumentException.ThrowIfNullOrWhiteSpace(startNode);
-
-        return StartAsync(
-            new WorkflowStartRequest
-            {
-                Process = process,
-                Version = version,
-                CorrelationKey = correlationKey,
-                StartNode = startNode,
-                InitialVariables = initialVariables,
-            },
-            ct);
-    }
-
-    /// <summary>
-    /// Starts a new run exactly as <see cref="StartAsync(string,int,string,string,IReadOnlyDictionary{string,object?}?,CancellationToken)"/>
-    /// does, from the fields of <paramref name="request"/>, and additionally writes
-    /// <see cref="WorkflowStartRequest.Manifest"/> onto the created run as <see cref="WorkflowRun.Manifest"/> —
-    /// once, at the same <c>INSERT</c> that creates the row. Nothing after that ever updates it: not
+    /// Starts a new run from the fields of <paramref name="request"/>, keyed for idempotent lookup by
+    /// <see cref="WorkflowStartRequest.CorrelationKey"/>, and returns its id — <see cref="WorkflowStartRequest.RunId"/>
+    /// when the caller supplied one, otherwise one this method generates. Seeds <see cref="WorkflowRun.Visits"/>
+    /// with <see cref="WorkflowStartRequest.StartNode"/> already counted as one entry — the run has entered it by
+    /// virtue of starting there — so a start node that also carries a <c>maxVisits</c> cap is bounded correctly
+    /// from its very first run, not given one free, uncounted entry. <see cref="WorkflowStartRequest.InitialVariables"/>
+    /// seeds <see cref="WorkflowRun.Variables"/> so the run starts holding the work item it exists to perform, and
+    /// <see cref="WorkflowStartRequest.Manifest"/> is written onto the created run as <see cref="WorkflowRun.Manifest"/>
+    /// and <see cref="WorkflowStartRequest.StartedBy"/> onto it as <see cref="WorkflowRun.StartedBy"/> — both once,
+    /// at the same <c>INSERT</c> that creates the row. Nothing after that ever updates either: not
     /// <see cref="CompleteNodeAsync"/>, not <see cref="ResumeAsync"/>, not any other member of this interface. A
     /// run found through the idempotent path — <see cref="WorkflowStartRequest.CorrelationKey"/> already in use —
-    /// keeps whatever manifest its original call gave it; <paramref name="request"/>'s own
-    /// <see cref="WorkflowStartRequest.Manifest"/> is discarded along with the rest of that no-op start, the same
-    /// way its <see cref="WorkflowStartRequest.InitialVariables"/> already is.
+    /// keeps whatever manifest and starter its original call gave it; <paramref name="request"/>'s own
+    /// <see cref="WorkflowStartRequest.Manifest"/>, <see cref="WorkflowStartRequest.StartedBy"/> and
+    /// <see cref="WorkflowStartRequest.InitialVariables"/> are all discarded along with the rest of that no-op
+    /// start.
     /// </summary>
     /// <param name="request">The run to start.</param>
     /// <param name="ct">Cancels the start.</param>
+    /// <remarks>
+    /// <para>
+    /// <b>A started run is a dispatched run.</b> An implementation must schedule the start node's own execution
+    /// as part of this call, in the same unit of work that writes the run: a caller does not — and must not have
+    /// to — mint the first <see cref="WorkflowDispatchMessage"/> itself. An implementation that only writes the
+    /// row leaves every run it creates at <see cref="WorkflowStatus.Running"/> with nothing that will ever
+    /// advance it, and <see cref="WorkflowRunReconciler.SweepAsync"/> will eventually terminate each one as
+    /// stranded.
+    /// </para>
+    /// <para>
+    /// <b><see cref="WorkflowStartRequest.CorrelationKey"/> is unique across every process and for all time.</b>
+    /// The key space is global: it is not scoped per <see cref="WorkflowStartRequest.Process"/>, and it is not
+    /// released when a run reaches a terminal status. A second call with a key some earlier run already used
+    /// returns <em>that</em> run's id — whatever process and version it belonged to, and whether it is still
+    /// running, succeeded, failed or cancelled months ago — and starts nothing. A caller that wants a fresh run
+    /// must supply a key nothing has ever used, so keys are worth minting with the attempt in them (a run id, a
+    /// timestamp, an attempt counter) rather than from a business identity that recurs.
+    /// </para>
+    /// <para>
+    /// <b>Every start names its starter.</b> <see cref="WorkflowStartRequest.StartedBy"/> is required and
+    /// non-null; an implementation guards it with <see cref="ArgumentNullException.ThrowIfNull(object?,string?)"/>
+    /// next to its existing <see cref="ArgumentException"/> guards, since <c>required</c> alone does not stop a
+    /// caller passing <see langword="null"/> at the language boundary.
+    /// </para>
+    /// </remarks>
     ValueTask<Guid> StartAsync(WorkflowStartRequest request, CancellationToken ct);
 
     /// <summary>Finds a run by id, or <see langword="null"/> if none exists.</summary>

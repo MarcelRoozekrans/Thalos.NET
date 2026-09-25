@@ -28,7 +28,7 @@ namespace Thalos.Workflow.Orm;
 public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinitionStore definitions) : IWorkflowStore
 {
     private const string SelectRunSql = """
-        SELECT id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, manifest, xmin::text::bigint AS xmin
+        SELECT id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, manifest, started_by, xmin::text::bigint AS xmin
         FROM workflow_run
         """;
 
@@ -88,52 +88,10 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     /// </remarks>
     private readonly IProcessDefinitionStore _definitions = definitions ?? throw new ArgumentNullException(nameof(definitions));
 
-    /// <summary>
-    /// The legacy positional overload, kept as a plain member on this concrete type — not only inherited as
-    /// <see cref="IWorkflowStore"/>'s default interface method — because this project's own test suite holds its
-    /// store through an <see cref="OrmWorkflowStore"/>-typed field, not an <see cref="IWorkflowStore"/>-typed
-    /// one, and a default interface method is only reachable through a reference typed as the interface that
-    /// declares it. Forwards exactly as the interface's own default implementation does, so the two are
-    /// indistinguishable in behaviour — including the <see cref="ArgumentException.ParamName"/> a blank
-    /// argument throws with: validated here, against this overload's own parameter names, before the
-    /// <see cref="WorkflowStartRequest"/> is even built, so a caller of this overload still sees "process",
-    /// "correlationKey" or "startNode" — not "request" — exactly as it did before this overload existed.
-    /// </summary>
-    public ValueTask<Guid> StartAsync(
-        string process,
-        int version,
-        string correlationKey,
-        string startNode,
-        IReadOnlyDictionary<string, object?>? initialVariables,
-        CancellationToken ct)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(process);
-        ArgumentException.ThrowIfNullOrWhiteSpace(correlationKey);
-        ArgumentException.ThrowIfNullOrWhiteSpace(startNode);
-
-        return StartAsync(
-            new WorkflowStartRequest
-            {
-                Process = process,
-                Version = version,
-                CorrelationKey = correlationKey,
-                StartNode = startNode,
-                InitialVariables = initialVariables,
-            },
-            ct);
-    }
-
     /// <inheritdoc/>
     public async ValueTask<Guid> StartAsync(WorkflowStartRequest request, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.Process, nameof(request));
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.CorrelationKey, nameof(request));
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.StartNode, nameof(request));
-        // Literal, not nameof(request.InitialVariables): the caller-facing parameter this cap validates is the
-        // legacy positional overload's initialVariables — OrmWorkflowStoreTests.StartAsync_refuses_a_seed_over_the_key_cap_and_writes_nothing
-        // asserts on that exact name, and it must stay stable across the request/positional split.
-        WorkflowVariableBlock.ThrowIfOverKeyLimit(request.InitialVariables, "initialVariables");
+        ValidateStartRequest(request);
 
         var process = request.Process;
         var version = request.Version;
@@ -141,15 +99,19 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         var startNode = request.StartNode;
         var initialVariables = request.InitialVariables;
         var manifest = request.Manifest;
+        var startedBy = request.StartedBy;
 
         await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
         await using var tx = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
 
-        var id = Guid.NewGuid();
+        // The host's own id when it supplied one (ruling R27) — this is what lets a caller create the run's git
+        // worktree, or any other resource keyed by run id, before the first node is ever dispatched. Otherwise
+        // this method mints one, exactly as it always has.
+        var id = request.RunId ?? Guid.NewGuid();
         // Null and an empty bag are the same thing to the column: both store '{}', never SQL NULL, so a run's
         // variables read back as an empty dictionary rather than something a consumer has to null-check.
         var seeded = initialVariables ?? EmptyVariables;
-        var inserted = await InsertRunAsync(connection, tx, id, process, version, correlationKey, startNode, seeded, manifest, ct).ConfigureAwait(false);
+        var inserted = await InsertRunAsync(connection, tx, id, process, version, correlationKey, startNode, seeded, manifest, startedBy, ct).ConfigureAwait(false);
 
         if (inserted == 0)
         {
@@ -186,6 +148,26 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     }
 
     /// <summary>
+    /// <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/>'s argument guards, split out only to keep
+    /// that method inside the analyzer's length limit.
+    /// </summary>
+    private static void ValidateStartRequest(WorkflowStartRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Process, nameof(request));
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.CorrelationKey, nameof(request));
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.StartNode, nameof(request));
+        // Every start names its starter (ruling R26): required does not stop StartedBy = null! at the language
+        // boundary, so this guard is the runtime half of the rule — checked before anything is written. Same
+        // nameof(request) convention as the three guards above: MA0015 wants paramName to match an actual
+        // parameter of this method, not the property path.
+        ArgumentNullException.ThrowIfNull(request.StartedBy, nameof(request));
+        // Literal, not nameof(request.InitialVariables): OrmWorkflowStoreTests.StartAsync_refuses_a_seed_over_the_key_cap_and_writes_nothing
+        // asserts on this exact lowercase name, kept stable since before the request/positional split.
+        WorkflowVariableBlock.ThrowIfOverKeyLimit(request.InitialVariables, "initialVariables");
+    }
+
+    /// <summary>
     /// <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/>'s <c>INSERT</c>, split out only to keep that method inside the analyzer's length
     /// limit. <paramref name="initialVariables"/> is written into the <c>variables</c> column as it stands, so a
     /// run starts holding exactly what it was seeded with — and, on the zero-row path below, nothing is written
@@ -197,13 +179,13 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     private static async Task<int> InsertRunAsync(
         NpgsqlConnection connection, NpgsqlTransaction tx, Guid id,
         string process, int version, string correlationKey, string startNode,
-        IReadOnlyDictionary<string, object?> initialVariables, RunManifest? manifest, CancellationToken ct)
+        IReadOnlyDictionary<string, object?> initialVariables, RunManifest? manifest, RunPrincipal startedBy, CancellationToken ct)
     {
         await using var insert = connection.CreateCommand();
         insert.Transaction = tx;
         insert.CommandText = """
-            INSERT INTO workflow_run (id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, manifest)
-            VALUES (@id, @process, @version, @correlationKey, @currentNode, @currentSeq, @status, NULL, @visits::jsonb, @variables::jsonb, NULL, @manifest::jsonb)
+            INSERT INTO workflow_run (id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, manifest, started_by)
+            VALUES (@id, @process, @version, @correlationKey, @currentNode, @currentSeq, @status, NULL, @visits::jsonb, @variables::jsonb, NULL, @manifest::jsonb, @startedBy::jsonb)
             ON CONFLICT (correlation_key) DO NOTHING
             """;
         insert.Parameters.AddWithValue("id", id);
@@ -217,8 +199,12 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         insert.Parameters.AddWithValue("variables", JsonSerializer.Serialize(initialVariables));
         // Written once, here, and never touched again — ApplyTransitionAsync's UPDATE (CompleteNodeAsync,
         // ResumeAsync) and the FailAsync/CancelAsync UPDATEs all name every column they change explicitly and
-        // none of them lists manifest, so this INSERT is the only statement in this class that ever writes it.
+        // none of them lists manifest or started_by, so this INSERT is the only statement in this class that
+        // ever writes either.
         insert.Parameters.AddWithValue("manifest", manifest is null ? DBNull.Value : JsonSerializer.Serialize(manifest, ManifestJsonOptions));
+        // startedBy is required on WorkflowStartRequest and guarded non-null above — unlike manifest, this is
+        // never DBNull.Value on the path that actually inserts a row (ruling R26).
+        insert.Parameters.AddWithValue("startedBy", JsonSerializer.Serialize(startedBy, ManifestJsonOptions));
 
         return await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
@@ -715,7 +701,8 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         Variables: DeserializeVariables(reader.GetString(9)),
         LastError: reader.IsDBNull(10) ? null : reader.GetString(10),
         Manifest: reader.IsDBNull(11) ? null : JsonSerializer.Deserialize<RunManifest>(reader.GetString(11), ManifestJsonOptions),
-        Xmin: reader.GetInt64(12));
+        StartedBy: reader.IsDBNull(12) ? null : JsonSerializer.Deserialize<RunPrincipal>(reader.GetString(12), ManifestJsonOptions),
+        Xmin: reader.GetInt64(13));
 
     /// <summary>
     /// Deserializing straight to <c>Dictionary&lt;string, object?&gt;</c> leaves every value a boxed
@@ -756,6 +743,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         Variables = row.Variables,
         LastError = row.LastError,
         Manifest = row.Manifest,
+        StartedBy = row.StartedBy,
     };
 
     private sealed record RunRow(
@@ -771,5 +759,6 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         Dictionary<string, object?> Variables,
         string? LastError,
         RunManifest? Manifest,
+        RunPrincipal? StartedBy,
         long Xmin);
 }

@@ -44,9 +44,7 @@ public sealed class RunManifestTests(PostgresFixture pg) : IAsyncLifetime
             Documents = new Dictionary<string, string>(StringComparer.Ordinal) { ["standing_instructions"] = longDoc },
         };
 
-        var id = await _store.StartAsync(
-            new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = $"k:{Guid.NewGuid()}", StartNode = "implement", Manifest = manifest },
-            CancellationToken.None);
+        var id = await _store.StartAsync(new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = $"k:{Guid.NewGuid()}", StartNode = "implement", Manifest = manifest, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
 
         var run = await _store.FindAsync(id, CancellationToken.None);
 
@@ -70,9 +68,7 @@ public sealed class RunManifestTests(PostgresFixture pg) : IAsyncLifetime
             Nodes = new Dictionary<string, NodePin>(StringComparer.Ordinal) { ["a"] = new NodePin("x", AgentId.New(), "r", "s", "h") },
         };
 
-        var id = await _store.StartAsync(
-            new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = $"k:{Guid.NewGuid()}", StartNode = "a", Manifest = manifest },
-            CancellationToken.None);
+        var id = await _store.StartAsync(new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = $"k:{Guid.NewGuid()}", StartNode = "a", Manifest = manifest, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
 
         var run = await _store.FindAsync(id, CancellationToken.None);
         await _store.CompleteNodeAsync(
@@ -85,32 +81,13 @@ public sealed class RunManifestTests(PostgresFixture pg) : IAsyncLifetime
     }
 
     /// <summary>
-    /// Red if the legacy positional overload synthesises anything other than a <see langword="null"/> manifest —
-    /// deliberately introduced and reverted to watch this assertion fail; see the task report. A caller on the
-    /// pre-0.10.0 API surface, or one that genuinely wants no pin, must get a run indistinguishable from one
-    /// started before manifests existed.
-    /// </summary>
-    [Fact]
-    public async Task The_legacy_overload_starts_a_run_with_no_manifest()
-    {
-        var id = await _store.StartAsync("p", 1, $"k:{Guid.NewGuid()}", "implement", initialVariables: null, CancellationToken.None);
-
-        (await _store.FindAsync(id, CancellationToken.None))!.Manifest.Should().BeNull();
-    }
-
-    /// <summary>
     /// A run started with no manifest at all — the request's <see cref="WorkflowStartRequest.Manifest"/> left
-    /// <see langword="null"/> — must read back <see langword="null"/> too, the same as the legacy overload.
-    /// Distinct from the legacy-overload test above: this one goes through the request-based overload directly,
-    /// so a bug that only affects the request path and not the positional-to-request forwarding would be missed
-    /// by that test alone.
+    /// <see langword="null"/> — must read back <see langword="null"/>.
     /// </summary>
     [Fact]
     public async Task A_request_with_no_manifest_starts_a_run_with_no_manifest()
     {
-        var id = await _store.StartAsync(
-            new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = $"k:{Guid.NewGuid()}", StartNode = "implement" },
-            CancellationToken.None);
+        var id = await _store.StartAsync(new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = $"k:{Guid.NewGuid()}", StartNode = "implement", StartedBy = TestPrincipals.Starter }, CancellationToken.None);
 
         (await _store.FindAsync(id, CancellationToken.None))!.Manifest.Should().BeNull();
     }
@@ -134,12 +111,8 @@ public sealed class RunManifestTests(PostgresFixture pg) : IAsyncLifetime
             Nodes = new Dictionary<string, NodePin>(StringComparer.Ordinal) { ["a"] = new NodePin("second", AgentId.New(), "r2", "s2", "h2") },
         };
 
-        var first = await _store.StartAsync(
-            new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = key, StartNode = "a", Manifest = firstManifest },
-            CancellationToken.None);
-        var second = await _store.StartAsync(
-            new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = key, StartNode = "a", Manifest = secondManifest },
-            CancellationToken.None);
+        var first = await _store.StartAsync(new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = key, StartNode = "a", Manifest = firstManifest, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var second = await _store.StartAsync(new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = key, StartNode = "a", Manifest = secondManifest, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
 
         second.Should().Be(first);
         (await _store.FindAsync(first, CancellationToken.None))!.Manifest.Should().BeEquivalentTo(firstManifest);

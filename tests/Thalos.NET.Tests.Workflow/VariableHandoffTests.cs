@@ -81,7 +81,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
     }
 
     public async Task InitializeAsync() =>
-        _runId = await _store.StartAsync("handoff", 1, "c-handoff", "implement", initialVariables: null, CancellationToken.None);
+        _runId = await _store.StartAsync(new WorkflowStartRequest { Process = "handoff", Version = 1, CorrelationKey = "c-handoff", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
 
     public Task DisposeAsync() => Task.CompletedTask;
 
@@ -310,7 +310,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
     public async Task A_node_with_no_declared_outcomes_completes_and_writes_nothing_to_the_bag()
     {
         var seed = new Dictionary<string, object?>(StringComparer.Ordinal) { ["issue"] = "42" };
-        var silentRunId = await _store.StartAsync("silent", 1, "c-silent", "step", seed, CancellationToken.None);
+        var silentRunId = await _store.StartAsync(new WorkflowStartRequest { Process = "silent", Version = 1, CorrelationKey = "c-silent", StartNode = "step", InitialVariables = seed, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
         // The turn reports an outcome anyway; with no outcome tool offered there is nothing to read it with.
         GivenAgentReports("anything", """{"sneaked":"in"}""");
 
@@ -361,7 +361,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
     public async Task A_json_null_variables_argument_reads_as_no_variables_rather_than_as_malformed()
     {
         var seed = new Dictionary<string, object?>(StringComparer.Ordinal) { ["issue"] = "42" };
-        var nullRunId = await _store.StartAsync("handoff", 1, "c-null-vars", "implement", seed, CancellationToken.None);
+        var nullRunId = await _store.StartAsync(new WorkflowStartRequest { Process = "handoff", Version = 1, CorrelationKey = "c-null-vars", StartNode = "implement", InitialVariables = seed, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
         GivenAgentRaises("""{"outcome":"done","variables":null}""");
 
         (await DispatchNextAsync(nullRunId)).Should().BeTrue();
@@ -469,7 +469,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
     public async Task StartAsync_seeds_the_runs_variables_and_the_first_node_is_told_them()
     {
         var seed = new Dictionary<string, object?>(StringComparer.Ordinal) { ["issue"] = "42", ["branch"] = "fix/guard" };
-        var seededId = await _store.StartAsync("handoff", 1, "c-seeded", "implement", seed, CancellationToken.None);
+        var seededId = await _store.StartAsync(new WorkflowStartRequest { Process = "handoff", Version = 1, CorrelationKey = "c-seeded", StartNode = "implement", InitialVariables = seed, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
         GivenAgentReportsOnly("done");
 
         (await DispatchNextAsync(seededId)).Should().BeTrue();
@@ -516,7 +516,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
     public async Task A_node_reporting_no_variables_leaves_the_bag_untouched()
     {
         var seed = new Dictionary<string, object?>(StringComparer.Ordinal) { ["issue"] = "42" };
-        var seededId = await _store.StartAsync("handoff", 1, "c-untouched", "implement", seed, CancellationToken.None);
+        var seededId = await _store.StartAsync(new WorkflowStartRequest { Process = "handoff", Version = 1, CorrelationKey = "c-untouched", StartNode = "implement", InitialVariables = seed, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
         GivenAgentReportsOnly("done");
 
         (await DispatchNextAsync(seededId)).Should().BeTrue();
@@ -531,7 +531,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
     public async Task A_node_reporting_an_empty_variables_object_leaves_the_bag_untouched()
     {
         var seed = new Dictionary<string, object?>(StringComparer.Ordinal) { ["issue"] = "42" };
-        var seededId = await _store.StartAsync("handoff", 1, "c-untouched-empty", "implement", seed, CancellationToken.None);
+        var seededId = await _store.StartAsync(new WorkflowStartRequest { Process = "handoff", Version = 1, CorrelationKey = "c-untouched-empty", StartNode = "implement", InitialVariables = seed, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
         GivenAgentReports("done", "{}");
 
         (await DispatchNextAsync(seededId)).Should().BeTrue();
@@ -552,7 +552,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
     {
         var big = MaxedOutBag("key");
 
-        var bigId = await _store.StartAsync("handoff", 1, "c-big", "implement", big, CancellationToken.None);
+        var bigId = await _store.StartAsync(new WorkflowStartRequest { Process = "handoff", Version = 1, CorrelationKey = "c-big", StartNode = "implement", InitialVariables = big, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
         GivenAgentReportsOnly("done");
 
         (await DispatchNextAsync(bigId)).Should().BeTrue();
@@ -585,7 +585,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
         // Sorts after every "filler..." key, so it is guaranteed to be among the omitted.
         big["task_brief"] = "review the null guard in src/Guard.cs";
 
-        var bigId = await _store.StartAsync("handoff", 1, "c-named", "implement", big, CancellationToken.None);
+        var bigId = await _store.StartAsync(new WorkflowStartRequest { Process = "handoff", Version = 1, CorrelationKey = "c-named", StartNode = "implement", InitialVariables = big, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
         GivenAgentReportsOnly("done");
 
         (await DispatchNextAsync(bigId)).Should().BeTrue();
@@ -690,7 +690,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
         {
             ["diff"] = new string('d', WorkflowVariableBlock.MaxValueLength + 250),
         };
-        var bigId = await _store.StartAsync("handoff", 1, "c-big-value", "implement", seed, CancellationToken.None);
+        var bigId = await _store.StartAsync(new WorkflowStartRequest { Process = "handoff", Version = 1, CorrelationKey = "c-big-value", StartNode = "implement", InitialVariables = seed, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
         GivenAgentReportsOnly("done");
 
         (await DispatchNextAsync(bigId)).Should().BeTrue();
@@ -712,7 +712,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
     {
         var files = Enumerable.Range(0, 25).Select(i => (object?)$"src/Some/Rather/Long/Path/Number{i:D2}/Component.cs").ToList();
         var seed = new Dictionary<string, object?>(StringComparer.Ordinal) { ["files_touched"] = files };
-        var bigId = await _store.StartAsync("handoff", 1, "c-list", "implement", seed, CancellationToken.None);
+        var bigId = await _store.StartAsync(new WorkflowStartRequest { Process = "handoff", Version = 1, CorrelationKey = "c-list", StartNode = "implement", InitialVariables = seed, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
         GivenAgentReportsOnly("done");
 
         (await DispatchNextAsync(bigId)).Should().BeTrue();
@@ -803,7 +803,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
         var dispatcher = DispatcherWith(log);
         var big = MaxedOutBag("filler", WorkflowVariableBlock.MaxVariableKeys - 1);
         big["task_brief"] = "review the null guard";
-        var bigId = await _store.StartAsync("handoff", 1, "c-logged", "implement", big, CancellationToken.None);
+        var bigId = await _store.StartAsync(new WorkflowStartRequest { Process = "handoff", Version = 1, CorrelationKey = "c-logged", StartNode = "implement", InitialVariables = big, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
         GivenAgentReportsOnly("done");
 
         await dispatcher.DispatchAsync(_store.TakeNext(bigId)!, CancellationToken.None);
@@ -820,7 +820,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
         var log = new CapturingLogger();
         var dispatcher = DispatcherWith(log);
         var seed = new Dictionary<string, object?>(StringComparer.Ordinal) { ["issue"] = "42" };
-        var runId = await _store.StartAsync("handoff", 1, "c-not-logged", "implement", seed, CancellationToken.None);
+        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "handoff", Version = 1, CorrelationKey = "c-not-logged", StartNode = "implement", InitialVariables = seed, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
         GivenAgentReportsOnly("done");
 
         await dispatcher.DispatchAsync(_store.TakeNext(runId)!, CancellationToken.None);
@@ -845,7 +845,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
         // Short enough that both injections land inside the notice's per-name cut, so the test proves both
         // are neutralised rather than one of them merely being cut off.
         bag["zz\r\nINFO all ok\" ok=\"yes"] = "x";
-        var runId = await _store.StartAsync("handoff", 1, "c-log-inject", "implement", bag, CancellationToken.None);
+        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "handoff", Version = 1, CorrelationKey = "c-log-inject", StartNode = "implement", InitialVariables = bag, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
         GivenAgentReportsOnly("done");
 
         await dispatcher.DispatchAsync(_store.TakeNext(runId)!, CancellationToken.None);
@@ -872,7 +872,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
     {
         var log = new CapturingLogger { Enabled = false };
         var dispatcher = DispatcherWith(log);
-        var runId = await _store.StartAsync("handoff", 1, "c-log-off", "implement", MaxedOutBag("key"), CancellationToken.None);
+        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "handoff", Version = 1, CorrelationKey = "c-log-off", StartNode = "implement", InitialVariables = MaxedOutBag("key"), StartedBy = TestPrincipals.Starter }, CancellationToken.None);
         GivenAgentReportsOnly("done");
 
         await dispatcher.DispatchAsync(_store.TakeNext(runId)!, CancellationToken.None);
@@ -1008,7 +1008,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
             full[$"seeded{i:D2}"] = "v";
         }
 
-        var fullId = await _store.StartAsync("handoff", 1, "c-full", "implement", full, CancellationToken.None);
+        var fullId = await _store.StartAsync(new WorkflowStartRequest { Process = "handoff", Version = 1, CorrelationKey = "c-full", StartNode = "implement", InitialVariables = full, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
         GivenAgentReports("done", """{"one_more":"v"}""");
 
         (await DispatchNextAsync(fullId)).Should().BeTrue();
@@ -1032,7 +1032,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
             full[$"seeded{i:D2}"] = "old";
         }
 
-        var fullId = await _store.StartAsync("handoff", 1, "c-overwrite", "implement", full, CancellationToken.None);
+        var fullId = await _store.StartAsync(new WorkflowStartRequest { Process = "handoff", Version = 1, CorrelationKey = "c-overwrite", StartNode = "implement", InitialVariables = full, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
         GivenAgentReports("done", """{"seeded00":"new","seeded01":"new"}""");
 
         (await DispatchNextAsync(fullId)).Should().BeTrue();
@@ -1053,7 +1053,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
             oversized[$"k{i:D2}"] = "v";
         }
 
-        var start = async () => await _store.StartAsync("handoff", 1, "c-oversized", "implement", oversized, CancellationToken.None);
+        var start = async () => await _store.StartAsync(new WorkflowStartRequest { Process = "handoff", Version = 1, CorrelationKey = "c-oversized", StartNode = "implement", InitialVariables = oversized, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
 
         (await start.Should().ThrowAsync<ArgumentException>()).And.ParamName.Should().Be("initialVariables");
     }
@@ -1118,7 +1118,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
     [Fact]
     public async Task A_node_with_no_declared_outcomes_is_not_told_to_report_variables()
     {
-        var silentRunId = await _store.StartAsync("silent", 1, "c-silent-text", "step", initialVariables: null, CancellationToken.None);
+        var silentRunId = await _store.StartAsync(new WorkflowStartRequest { Process = "silent", Version = 1, CorrelationKey = "c-silent-text", StartNode = "step", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
         GivenAgentReportsOnly("whatever");
 
         (await DispatchNextAsync(silentRunId)).Should().BeTrue();
