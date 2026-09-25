@@ -15,6 +15,9 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
 {
     private static readonly IReadOnlyDictionary<string, object?> Empty = new Dictionary<string, object?>(StringComparer.Ordinal);
 
+    /// <summary>A resumer fixture for tests that need one but are not testing who it is.</summary>
+    private static readonly RunPrincipal TestApprover = new("test-approver", ["admin"]);
+
     private OrmWorkflowStore _store = null!;
 
     public async Task InitializeAsync()
@@ -339,7 +342,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
             new WorkflowTransition("gate", WorkflowStatus.Awaiting, "ok", WorkflowEventKind.Awaiting),
             new NodeResult(null, Empty), CancellationToken.None);
 
-        var result = await store.ResumeAsync(runId, "ok", "approved", CancellationToken.None);
+        var result = await store.ResumeAsync(runId, new WorkflowResumeRequest { Signal = "ok", Payload = "approved", ResumedBy = TestApprover }, CancellationToken.None);
 
         result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error : "");
         var run = await store.FindAsync(runId, CancellationToken.None);
@@ -361,7 +364,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
             new WorkflowTransition("gate", WorkflowStatus.Awaiting, "ok", WorkflowEventKind.Awaiting),
             new NodeResult(null, Empty), CancellationToken.None);
 
-        var result = await store.ResumeAsync(runId, "wrong-signal", null, CancellationToken.None);
+        var result = await store.ResumeAsync(runId, new WorkflowResumeRequest { Signal = "wrong-signal", ResumedBy = TestApprover }, CancellationToken.None);
 
         result.IsFailure.Should().BeTrue();
     }

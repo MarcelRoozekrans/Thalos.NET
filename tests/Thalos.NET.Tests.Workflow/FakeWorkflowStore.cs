@@ -144,8 +144,19 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
         return ValueTask.CompletedTask;
     }
 
-    public async ValueTask<Result> ResumeAsync(Guid runId, string signal, string? payload, CancellationToken ct)
+    public async ValueTask<Result> ResumeAsync(Guid runId, WorkflowResumeRequest request, CancellationToken ct)
     {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Signal);
+        // Every resume names its approver (ruling R20): mirrors OrmWorkflowStore.ResumeAsync's own guard,
+        // checked before this call records anything. No explicit paramName: CallerArgumentExpression supplies
+        // "request.ResumedBy" itself. A missing approver is a programming error and stays a throw, mirroring
+        // OrmWorkflowStore — not the caller-triggerable failures below, which return a Result instead.
+        ArgumentNullException.ThrowIfNull(request.ResumedBy);
+
+        var signal = request.Signal;
+        var payload = request.Payload;
+
         if (!_runs.TryGetValue(runId, out var run))
         {
             return Result.Failure($"Workflow run '{runId}' was not found.");
@@ -176,7 +187,10 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
             return Result.Failure(transition.Error);
         }
 
-        _runs[runId] = Apply(run, run.CurrentSeq, transition.Value, variables);
+        var updated = Apply(run, run.CurrentSeq, transition.Value, variables);
+        // Mirrors OrmWorkflowStore.RecordResumeAsync: recorded only once the transition itself has succeeded, so
+        // a refused resume — signal mismatch or a failing Advance — leaves LastResume untouched.
+        _runs[runId] = updated with { LastResume = new RunResume(request.ResumedBy, DateTimeOffset.UtcNow, signal) };
         EnqueueIfRunning(_runs[runId], transition.Value);
         return Result.Success();
     }

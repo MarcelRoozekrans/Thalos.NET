@@ -91,18 +91,23 @@ public interface IWorkflowStore
     ValueTask CompleteNodeAsync(Guid runId, long seq, WorkflowTransition transition, NodeResult result, CancellationToken ct);
 
     /// <summary>
-    /// Resumes a run parked at a gate awaiting <paramref name="signal"/>, carrying <paramref name="payload"/>
-    /// into the run's variables under the literal key <c>"payload"</c> — a store that merges
-    /// <paramref name="payload"/> in some other shape binds a different, undocumented contract than a caller
-    /// reading <see cref="WorkflowRun.Variables"/>["payload"] expects.
+    /// Resumes a run parked at a gate awaiting <see cref="WorkflowResumeRequest.Signal"/>, carrying
+    /// <see cref="WorkflowResumeRequest.Payload"/> into the run's variables under the literal key
+    /// <c>"payload"</c> — a store that merges the payload in some other shape binds a different, undocumented
+    /// contract than a caller reading <see cref="WorkflowRun.Variables"/>["payload"] expects. On success, records
+    /// <see cref="WorkflowResumeRequest.ResumedBy"/>, the commit time and the signal onto
+    /// <see cref="WorkflowRun.LastResume"/>, in the same transaction as the transition itself: a run whose resume
+    /// is refused — signal mismatch, unresolvable definition, lost concurrency race — must show no trace of the
+    /// attempt, and a run whose resume succeeds must never leave <see cref="WorkflowRun.LastResume"/> stale
+    /// against the write that actually happened.
     /// </summary>
     /// <remarks>
-    /// This method does not decide where the run goes next — it verifies <paramref name="signal"/> matches
-    /// <see cref="WorkflowRun.AwaitingSignal"/>, then defers entirely to
-    /// <see cref="WorkflowInterpreter.Advance"/> for that decision, the same way <see cref="CompleteNodeAsync"/>
-    /// does for a task node's completion. Critically, it must call <c>Advance</c> with the run's
-    /// <see cref="WorkflowRun.Status"/> still <see cref="WorkflowStatus.Awaiting"/> — that is the only signal
-    /// <c>Advance</c> has to tell a resume from a fresh arrival at the same gate, and calling it with
+    /// This method does not decide where the run goes next — it verifies
+    /// <see cref="WorkflowResumeRequest.Signal"/> matches <see cref="WorkflowRun.AwaitingSignal"/>, then defers
+    /// entirely to <see cref="WorkflowInterpreter.Advance"/> for that decision, the same way
+    /// <see cref="CompleteNodeAsync"/> does for a task node's completion. Critically, it must call <c>Advance</c>
+    /// with the run's <see cref="WorkflowRun.Status"/> still <see cref="WorkflowStatus.Awaiting"/> — that is the
+    /// only signal <c>Advance</c> has to tell a resume from a fresh arrival at the same gate, and calling it with
     /// <see cref="WorkflowStatus.Running"/> already set would make it park all over again. <c>Advance</c>
     /// returns a <see cref="WorkflowTransition"/> whose <see cref="WorkflowTransition.NextStatus"/> is what
     /// actually flips the run to <see cref="WorkflowStatus.Running"/> (or further, if a cap redirects it) —
@@ -111,9 +116,13 @@ public interface IWorkflowStore
     /// second place, and the two will drift. Every failure mode — the run not found, the signal not matching,
     /// the process unregistered, or an optimistic-concurrency loss applying the transition — surfaces as
     /// <see cref="Result.Failure"/>, not a thrown exception: a caller that only matches on this method's
-    /// <see cref="Result"/> should never need a second, exception-based error channel to also handle.
+    /// <see cref="Result"/> should never need a second, exception-based error channel to also handle. A missing
+    /// <see cref="WorkflowResumeRequest.ResumedBy"/> is different: it is a programming error, not a caller-input
+    /// mistake a well-behaved host can make at runtime, so an implementation throws
+    /// <see cref="ArgumentNullException"/> for it, before anything is written, next to its existing
+    /// <see cref="ArgumentException"/> guards on <see cref="WorkflowResumeRequest.Signal"/>.
     /// </remarks>
-    ValueTask<Result> ResumeAsync(Guid runId, string signal, string? payload, CancellationToken ct);
+    ValueTask<Result> ResumeAsync(Guid runId, WorkflowResumeRequest request, CancellationToken ct);
 
     /// <summary>Marks a run failed with <paramref name="errorMessage"/>, outside the normal node/outcome flow.</summary>
     ValueTask FailAsync(Guid runId, string errorMessage, CancellationToken ct);

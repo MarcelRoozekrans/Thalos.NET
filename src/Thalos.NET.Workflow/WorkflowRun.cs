@@ -92,4 +92,11 @@ public sealed record WorkflowRun
     /// every 0.11.0 start records one.
     /// </summary>
     public RunPrincipal? StartedBy { get; init; }
+
+    /// <summary>
+    /// The most recent successful resume, or <see langword="null"/> when the run was never resumed. A run with a
+    /// non-null <see cref="LastResume"/> has passed a gate: <c>RunWorkspaceSweeper</c> keeps its workspace if the
+    /// run then fails or is cancelled, and removes it once the run is <see cref="WorkflowStatus.Succeeded"/>.
+    /// </summary>
+    public RunResume? LastResume { get; init; }
 }

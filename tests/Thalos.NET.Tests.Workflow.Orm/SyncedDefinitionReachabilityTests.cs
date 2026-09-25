@@ -19,6 +19,9 @@ namespace Thalos.Tests.Workflow.Orm;
 [Trait("Category", "Docker")]
 public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsyncLifetime
 {
+    /// <summary>A resumer fixture for tests that need one but are not testing who it is.</summary>
+    private static readonly RunPrincipal TestApprover = new("test-approver", ["admin"]);
+
     /// <summary>A two-node sequence: one task node run by an agent, then a terminal.</summary>
     private const string PipelineV1 = """
         process: pipeline
@@ -168,7 +171,7 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
         var parked = await _store.FindAsync(runId, CancellationToken.None);
         parked!.Status.Should().Be(WorkflowStatus.Awaiting, "the run must be parked before resume is meaningful. Error: {0}", parked.LastError ?? "<none>");
 
-        var resumed = await _store.ResumeAsync(runId, "human_approval", "approved", CancellationToken.None);
+        var resumed = await _store.ResumeAsync(runId, new WorkflowResumeRequest { Signal = "human_approval", Payload = "approved", ResumedBy = TestApprover }, CancellationToken.None);
 
         resumed.IsSuccess.Should().BeTrue(resumed.IsFailure ? resumed.Error : "");
         (await _store.FindAsync(runId, CancellationToken.None))!.CurrentNode.Should().Be("done");

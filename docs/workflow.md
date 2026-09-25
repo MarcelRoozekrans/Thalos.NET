@@ -331,12 +331,29 @@ A run that reaches a node with `await:` parks at `Awaiting` with the signal name
 until something calls:
 
 ```csharp
-var resumed = await store.ResumeAsync(runId, signal: "human_approval", payload: "approved", ct);
+var resumed = await store.ResumeAsync(
+    runId,
+    new WorkflowResumeRequest
+    {
+        Signal = "human_approval",
+        Payload = "approved",
+        // Every resume names its approver: a human gate exists to record who cleared it. A host with no human
+        // behind the resume passes its own system principal, the same as WorkflowStartRequest.StartedBy.
+        ResumedBy = new RunPrincipal(approvingUser.Id, approvingUser.Roles),
+    },
+    ct);
 ```
 
 Wire that to whatever approves — an HTTP endpoint, a chat command, a webhook. The payload lands in the run's
 variables under the literal key `"payload"`. Every failure — run not found, signal mismatch, definition
-unresolvable, optimistic-concurrency loss — comes back as a `Result` failure, not an exception.
+unresolvable, optimistic-concurrency loss — comes back as a `Result` failure, not an exception. `ResumedBy` is
+required and non-null; a missing approver throws rather than returning one of these failures, because it is a
+programming error, not something a caller can legitimately trigger.
+
+A successful resume also records itself onto `WorkflowRun.LastResume`: who resumed the run, when, and which
+signal they satisfied. `LastResume` is `null` for a run never resumed, and a refused resume — a signal mismatch,
+an unresolvable definition, a lost concurrency race — leaves it exactly as it was; nothing is recorded until the
+gate's own transition has already succeeded.
 
 ## Limits worth knowing before you author a process
 
