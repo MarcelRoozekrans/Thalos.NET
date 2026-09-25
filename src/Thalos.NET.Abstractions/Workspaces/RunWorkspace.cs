@@ -17,8 +17,9 @@ namespace Thalos.Workspaces;
 /// <param name="Branch">The branch the workspace checks out and commits to.</param>
 /// <param name="Root">The worktree's root directory on disk.</param>
 /// <param name="SolutionPath">
-/// Path to the solution file to build, relative to <see cref="Root"/>. <see langword="null"/> when the repository
-/// has no solution file, or the run does not need one.
+/// Path to the solution file to build: absolute, canonical and confined to <see cref="Root"/> — the value
+/// <see cref="WorkspacePath.Resolve"/> returns, not a path relative to <see cref="Root"/>. <see langword="null"/>
+/// when the repository has no solution file, or the run does not need one.
 /// </param>
 public sealed record RunWorkspace(Guid RunId, string Repository, string Remote, string DefaultBranch, string Branch, string Root, string? SolutionPath)
 {

@@ -28,12 +28,39 @@ namespace Thalos.Git.Workspaces;
 /// other mechanism populated.
 /// </para>
 /// <para>
+/// <b>The mirror is isolated from host git configuration and never trusts a stale <c>origin</c>.</b> Every git call
+/// goes through <see cref="GitCli"/>, which ignores the host's system and user gitconfig entirely (see its own
+/// remarks) — a global hook or a permissive <c>protocol.*.allow</c> on the machine this runs on cannot affect a
+/// checkout this provider performs. Before every fetch, <c>remote.origin.url</c> is set to
+/// <see cref="RunWorkspaceRequest.Remote"/>, so a mirror that was first cloned for one remote and is later reused
+/// under a changed configuration always fetches from, and sends credentials to, the remote the current request
+/// names — never a stale one left over from the mirror's first clone.
+/// </para>
+/// <para>
+/// <b>A first clone is atomic.</b> The mirror is cloned into a temporary directory beside its final location and
+/// moved into place only once the clone and its follow-up config calls all succeed; a failure at any point leaves
+/// nothing at the mirror's real path. An existing mirror is validated — bare, with <c>remote.origin.fetch</c> set —
+/// before it is trusted; an invalid one is deleted and re-cloned rather than used as-is.
+/// </para>
+/// <para>
+/// <b>A run's root and sidecar are checked before anything is created.</b> <see cref="CreateAsync"/> refuses, with
+/// a failure <see cref="Result{T,E}"/>, a request whose run already has a worktree directory or a sidecar record —
+/// a second create for a run that already has a live workspace never touches it. A provisional sidecar (the same
+/// <see cref="RunWorkspace"/>, with <see cref="RunWorkspace.SolutionPath"/> not yet resolved) is written before
+/// <c>git worktree add</c> runs, so a crash between the worktree's creation and the create's own completion still
+/// leaves a sidecar a sweeper can find and act on, rather than an orphan directory with no record at all.
+/// </para>
+/// <para>
 /// <b>The per-repository lock.</b> A <see cref="SemaphoreSlim"/>, one per <see cref="RunWorkspaceRequest.Repository"/>,
 /// is held across every git call this provider makes against that repository's mirror — clone, fetch, worktree
 /// add, worktree remove, and branch delete — because two runs sharing a repository must not clone or fetch the one
 /// mirror directory at the same time. No test exercises the race directly (a red for it would depend on git losing
 /// a timing race that cannot be forced, so none could be verified — ruling R16), but the lock stays: the hazard it
-/// prevents is real even though it cannot be demonstrated with a deterministic test.
+/// prevents is real even though it cannot be demonstrated with a deterministic test. The lock is scoped to this
+/// process only; it does nothing for two separate host processes racing the same mirror. Git's own lock files
+/// (<c>index.lock</c>, the per-worktree administrative locks under <c>.git/worktrees/&lt;name&gt;</c>, and so on)
+/// are what prevent corruption across processes — this provider relies on them for that, rather than reimplementing
+/// cross-process locking itself.
 /// </para>
 /// </remarks>
 /// <param name="options">Where mirrors, worktrees and sidecar records live, and how the git child process is run.</param>
@@ -66,37 +93,48 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
         var mirror = MirrorPath(request.Repository);
         var root = WorktreeRoot(request.RunId);
-        var (extraConfig, secret) = CredentialConfig(request.Remote);
+
+        if (Directory.Exists(root) || File.Exists(SidecarPath(request.RunId)))
+        {
+            return Result<RunWorkspace, AgentError>.Failure(
+                AgentError.Validation($"A workspace for run '{request.RunId}' already exists."));
+        }
+
+        var (secretConfig, secret) = CredentialConfig(request.Remote);
 
         var gate = LockFor(request.Repository);
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var prepared = await PrepareMirrorAsync(mirror, request.Remote, extraConfig, secret, ct).ConfigureAwait(false);
+            var prepared = await PrepareMirrorAsync(mirror, request.Remote, secretConfig, secret, ct).ConfigureAwait(false);
             if (prepared.IsFailure)
             {
                 return Result<RunWorkspace, AgentError>.Failure(prepared.Error);
             }
 
+            var createdAt = clock.GetUtcNow();
+            var provisional = new RunWorkspace(request.RunId, request.Repository, request.Remote, request.DefaultBranch, request.Branch, root, SolutionPath: null)
+            {
+                CreatedAt = createdAt,
+            };
+            await WriteSidecarAsync(provisional, ct).ConfigureAwait(false);
+
             var added = await AddWorktreeAsync(mirror, root, request, ct).ConfigureAwait(false);
             if (added.IsFailure)
             {
+                DeleteSidecar(request.RunId);
                 return Result<RunWorkspace, AgentError>.Failure(added.Error);
             }
 
-            var createdAt = clock.GetUtcNow();
             var solution = ResolveSolution(root, request.Solution);
             if (solution.IsFailure)
             {
                 await CleanupCreatedWorktreeAsync(mirror, root, request.Branch, ct).ConfigureAwait(false);
+                DeleteSidecar(request.RunId);
                 return Result<RunWorkspace, AgentError>.Failure(solution.Error);
             }
 
-            var workspace = new RunWorkspace(request.RunId, request.Repository, request.Remote, request.DefaultBranch, request.Branch, root, solution.Value)
-            {
-                CreatedAt = createdAt,
-            };
-
+            var workspace = provisional with { SolutionPath = solution.Value };
             await WriteSidecarAsync(workspace, ct).ConfigureAwait(false);
             await NotifyObserversAsync(workspace, removing: false, ct).ConfigureAwait(false);
             return Result<RunWorkspace, AgentError>.Success(workspace);
@@ -116,11 +154,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
             return null;
         }
 
-        var stream = File.OpenRead(path);
-        await using (stream.ConfigureAwait(false))
-        {
-            return await JsonSerializer.DeserializeAsync(stream, GitWorkspaceJsonContext.Default.RunWorkspace, ct).ConfigureAwait(false);
-        }
+        return await ReadSidecarAsync(path, ct).ConfigureAwait(false);
     }
 
     /// <inheritdoc />
@@ -136,13 +170,23 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         foreach (var file in Directory.EnumerateFiles(runsDir, "*.workspace.json"))
         {
             ct.ThrowIfCancellationRequested();
-            var stream = File.OpenRead(file);
-            await using (stream.ConfigureAwait(false))
+
+            RunWorkspace? workspace;
+            try
             {
-                if (await JsonSerializer.DeserializeAsync(stream, GitWorkspaceJsonContext.Default.RunWorkspace, ct).ConfigureAwait(false) is { } workspace)
-                {
-                    workspaces.Add(workspace);
-                }
+                workspace = await ReadSidecarAsync(file, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or JsonException)
+            {
+                // A sidecar the sweeper cannot read is not a reason to abandon the sweep for every other run —
+                // skip it and log, rather than letting one bad file abort ListAsync for everything else.
+                LogUnreadableSidecar(logger, file, ex.Message);
+                continue;
+            }
+
+            if (workspace is not null)
+            {
+                workspaces.Add(workspace);
             }
         }
 
@@ -167,14 +211,24 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         UnitResult<AgentError> result;
         try
         {
-            var (removed, branchDeleted) = await RemoveWorktreeAndBranchAsync(mirror, workspace.Root, workspace.Branch, ct).ConfigureAwait(false);
+            var (removed, pruned, branchDeleted) = await RemoveWorktreeAndBranchAsync(mirror, workspace.Root, workspace.Branch, ct).ConfigureAwait(false);
             if (!removed.Succeeded)
             {
-                result = UnitResult<AgentError>.Failure(GitFailure("git worktree remove failed.", removed.StdErr, secret: null));
+                if (pruned is { Succeeded: false } p)
+                {
+                    LogCleanupFailed(logger, "prune the stale worktree registration", ExtractErrorDetail(p.StdErr));
+                }
+
+                if (!branchDeleted.Succeeded)
+                {
+                    LogCleanupFailed(logger, "delete the run branch", ExtractErrorDetail(branchDeleted.StdErr));
+                }
+
+                result = UnitResult<AgentError>.Failure(GitFailure("git worktree remove failed.", removed, secret: null));
             }
-            else if (branchDeleted is { Succeeded: false })
+            else if (!branchDeleted.Succeeded)
             {
-                result = UnitResult<AgentError>.Failure(GitFailure("git branch -D failed.", branchDeleted.Value.StdErr, secret: null));
+                result = UnitResult<AgentError>.Failure(GitFailure("git branch -D failed.", branchDeleted, secret: null));
             }
             else
             {
@@ -196,50 +250,87 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
     // ---------- mirror + worktree ----------
 
-    private async Task<UnitResult<AgentError>> PrepareMirrorAsync(string mirror, string remote, IReadOnlyList<string>? extraConfig, string? secret, CancellationToken ct)
+    private async Task<UnitResult<AgentError>> PrepareMirrorAsync(string mirror, string remote, IReadOnlyList<(string Key, string Value)>? secretConfig, string? secret, CancellationToken ct)
     {
-        var mirrorExisted = Directory.Exists(mirror);
-        if (!mirrorExisted)
+        if (Directory.Exists(mirror) && !await ValidateMirrorAsync(mirror, ct).ConfigureAwait(false))
         {
-            var mirrorsDir = Path.Combine(options.DataRoot, "mirrors");
-            Directory.CreateDirectory(mirrorsDir);
+            TryDeleteDirectory(mirror, "remove the invalid mirror before re-cloning");
+        }
 
-            var cloned = await _git.RunAsync(mirrorsDir, ["clone", "--bare", "--", remote, mirror], extraConfig, ct).ConfigureAwait(false);
+        if (!Directory.Exists(mirror))
+        {
+            var cloned = await CloneMirrorAsync(mirror, remote, secretConfig, secret, ct).ConfigureAwait(false);
+            if (cloned.IsFailure)
+            {
+                return cloned;
+            }
+        }
+
+        // Before every fetch, not only on first clone: a mirror kept for a repository name can otherwise go on
+        // fetching (and sending credentials to) a remote the current request no longer names.
+        var setUrl = await _git.RunAsync(mirror, ["config", "remote.origin.url", remote], null, null, ct).ConfigureAwait(false);
+        if (!setUrl.Succeeded)
+        {
+            return UnitResult<AgentError>.Failure(GitFailure("git config remote.origin.url failed.", setUrl, secret: null));
+        }
+
+        var fetched = await _git.RunAsync(mirror, ["fetch", "-q", "origin", "--prune"], null, secretConfig, ct).ConfigureAwait(false);
+        if (!fetched.Succeeded)
+        {
+            return UnitResult<AgentError>.Failure(GitFailure("git fetch failed.", fetched, secret));
+        }
+
+        return UnitResult<AgentError>.Success();
+    }
+
+    private async Task<UnitResult<AgentError>> CloneMirrorAsync(string mirror, string remote, IReadOnlyList<(string Key, string Value)>? secretConfig, string? secret, CancellationToken ct)
+    {
+        var mirrorsDir = Path.Combine(options.DataRoot, "mirrors");
+        Directory.CreateDirectory(mirrorsDir);
+        var temp = Path.Combine(mirrorsDir, ".tmp-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var cloned = await _git.RunAsync(mirrorsDir, ["clone", "--bare", "-q", "--", remote, temp], null, secretConfig, ct).ConfigureAwait(false);
             if (!cloned.Succeeded)
             {
-                TryDeleteDirectory(mirror, "remove the partially cloned mirror");
-                return UnitResult<AgentError>.Failure(GitFailure("git clone --bare failed.", cloned.StdErr, secret));
+                return UnitResult<AgentError>.Failure(GitFailure("git clone --bare failed.", cloned, secret));
             }
 
-            var fetchSpec = await _git.RunAsync(mirror, ["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], null, ct).ConfigureAwait(false);
+            var fetchSpec = await _git.RunAsync(temp, ["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], null, null, ct).ConfigureAwait(false);
             if (!fetchSpec.Succeeded)
             {
-                TryDeleteDirectory(mirror, "remove the partially cloned mirror");
-                return UnitResult<AgentError>.Failure(GitFailure("git config remote.origin.fetch failed.", fetchSpec.StdErr, secret));
+                return UnitResult<AgentError>.Failure(GitFailure("git config remote.origin.fetch failed.", fetchSpec, secret: null));
             }
 
             // Persisted on the mirror in addition to being passed again on every worktree checkout below — see the
             // class remarks for why symlinks must never reach a workspace this provider creates.
-            var noSymlinks = await _git.RunAsync(mirror, ["config", "core.symlinks", "false"], null, ct).ConfigureAwait(false);
+            var noSymlinks = await _git.RunAsync(temp, ["config", "core.symlinks", "false"], null, null, ct).ConfigureAwait(false);
             if (!noSymlinks.Succeeded)
             {
-                TryDeleteDirectory(mirror, "remove the partially cloned mirror");
-                return UnitResult<AgentError>.Failure(GitFailure("git config core.symlinks failed.", noSymlinks.StdErr, secret));
+                return UnitResult<AgentError>.Failure(GitFailure("git config core.symlinks failed.", noSymlinks, secret: null));
             }
-        }
 
-        var fetched = await _git.RunAsync(mirror, ["fetch", "origin", "--prune"], extraConfig, ct).ConfigureAwait(false);
-        if (!fetched.Succeeded)
+            Directory.Move(temp, mirror);
+            return UnitResult<AgentError>.Success();
+        }
+        finally
         {
-            if (!mirrorExisted)
-            {
-                TryDeleteDirectory(mirror, "remove the partially cloned mirror");
-            }
+            // Runs whether the clone succeeded (the temp directory has already been moved away and this is a
+            // no-op) or failed at any step (nothing is left half-cloned at either the temp or the real path).
+            TryDeleteDirectory(temp, "remove the temporary clone directory");
+        }
+    }
 
-            return UnitResult<AgentError>.Failure(GitFailure("git fetch failed.", fetched.StdErr, secret));
+    private async Task<bool> ValidateMirrorAsync(string mirror, CancellationToken ct)
+    {
+        var isBare = await _git.RunAsync(mirror, ["rev-parse", "--is-bare-repository"], null, null, ct).ConfigureAwait(false);
+        if (!isBare.Succeeded || !string.Equals(isBare.StdOut.Trim(), "true", StringComparison.Ordinal))
+        {
+            return false;
         }
 
-        return UnitResult<AgentError>.Success();
+        var fetchSpec = await _git.RunAsync(mirror, ["config", "--get", "remote.origin.fetch"], null, null, ct).ConfigureAwait(false);
+        return fetchSpec.Succeeded && !string.IsNullOrWhiteSpace(fetchSpec.StdOut);
     }
 
     private async Task<UnitResult<AgentError>> AddWorktreeAsync(string mirror, string root, RunWorkspaceRequest request, CancellationToken ct)
@@ -248,6 +339,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
             mirror,
             ["worktree", "add", "-b", request.Branch, "--", root, $"origin/{request.DefaultBranch}"],
             ["core.symlinks=false"],
+            null,
             ct).ConfigureAwait(false);
 
         if (added.Succeeded)
@@ -259,41 +351,52 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
         // git may have registered the worktree in the mirror's administrative files before the checkout itself
         // failed; prune drops that stale registration so a later create for the same repository is not blocked by it.
-        var pruned = await _git.RunAsync(mirror, ["worktree", "prune"], null, ct).ConfigureAwait(false);
+        var pruned = await _git.RunAsync(mirror, ["worktree", "prune"], null, null, ct).ConfigureAwait(false);
         if (!pruned.Succeeded)
         {
-            LogCleanupFailed(logger, "prune the stale worktree registration", FirstLine(pruned.StdErr));
+            LogCleanupFailed(logger, "prune the stale worktree registration", ExtractErrorDetail(pruned.StdErr));
         }
 
-        return UnitResult<AgentError>.Failure(GitFailure("git worktree add failed.", added.StdErr, secret: null));
+        return UnitResult<AgentError>.Failure(GitFailure("git worktree add failed.", added, secret: null));
     }
 
     private async Task CleanupCreatedWorktreeAsync(string mirror, string root, string branch, CancellationToken ct)
     {
-        var (removed, branchDeleted) = await RemoveWorktreeAndBranchAsync(mirror, root, branch, ct).ConfigureAwait(false);
+        var (removed, pruned, branchDeleted) = await RemoveWorktreeAndBranchAsync(mirror, root, branch, ct).ConfigureAwait(false);
         if (!removed.Succeeded)
         {
-            LogCleanupFailed(logger, "remove the worktree", FirstLine(removed.StdErr));
+            LogCleanupFailed(logger, "remove the worktree", ExtractErrorDetail(removed.StdErr));
+            if (pruned is { Succeeded: false } p)
+            {
+                LogCleanupFailed(logger, "prune the stale worktree registration", ExtractErrorDetail(p.StdErr));
+            }
+
             TryDeleteDirectory(root, "remove the worktree directory directly, after git worktree remove failed");
-            return;
         }
 
-        if (branchDeleted is { Succeeded: false })
+        if (!branchDeleted.Succeeded)
         {
-            LogCleanupFailed(logger, "delete the run branch", FirstLine(branchDeleted.Value.StdErr));
+            LogCleanupFailed(logger, "delete the run branch", ExtractErrorDetail(branchDeleted.StdErr));
         }
     }
 
-    private async Task<(GitCliResult Removed, GitCliResult? BranchDeleted)> RemoveWorktreeAndBranchAsync(string mirror, string root, string branch, CancellationToken ct)
+    /// <summary>
+    /// Removes the worktree, and — whether or not that succeeds — always also attempts <c>worktree prune</c> (only
+    /// when the removal failed, to drop a stale registration) and <c>branch -D</c>, so a repository already missing
+    /// its worktree directory on disk, or otherwise in a bad state, still gets as much cleanup as git can do.
+    /// </summary>
+    private async Task<(GitCliResult Removed, GitCliResult? Pruned, GitCliResult BranchDeleted)> RemoveWorktreeAndBranchAsync(string mirror, string root, string branch, CancellationToken ct)
     {
-        var removed = await _git.RunAsync(mirror, ["worktree", "remove", "--force", "--", root], null, ct).ConfigureAwait(false);
+        var removed = await _git.RunAsync(mirror, ["worktree", "remove", "--force", "--", root], null, null, ct).ConfigureAwait(false);
+
+        GitCliResult? pruned = null;
         if (!removed.Succeeded)
         {
-            return (removed, null);
+            pruned = await _git.RunAsync(mirror, ["worktree", "prune"], null, null, ct).ConfigureAwait(false);
         }
 
-        var branchDeleted = await _git.RunAsync(mirror, ["branch", "-D", "--", branch], null, ct).ConfigureAwait(false);
-        return (removed, branchDeleted);
+        var branchDeleted = await _git.RunAsync(mirror, ["branch", "-D", "--", branch], null, null, ct).ConfigureAwait(false);
+        return (removed, pruned, branchDeleted);
     }
 
     private static Result<string?, AgentError> ResolveSolution(string root, string? solution)
@@ -335,7 +438,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
     // ---------- credentials ----------
 
-    private (IReadOnlyList<string>? ExtraConfig, string? Secret) CredentialConfig(string remoteUrl)
+    private (IReadOnlyList<(string Key, string Value)>? SecretConfig, string? Secret) CredentialConfig(string remoteUrl)
     {
         if (credentials?.GetCredentials(remoteUrl) is not { } creds)
         {
@@ -343,20 +446,47 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         }
 
         var token = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{creds.Username}:{creds.Password}"));
-        return ([$"http.extraHeader=AUTHORIZATION: basic {token}"], token);
+        return ([("http.extraHeader", $"AUTHORIZATION: basic {token}")], token);
     }
 
-    private static AgentError GitFailure(string message, string stdErr, string? secret) =>
-        AgentError.GitOperationFailed(message, FirstLine(Scrub(stdErr, secret)));
+    private static AgentError GitFailure(string message, GitCliResult result, string? secret)
+    {
+        if (result.TimedOut)
+        {
+            return AgentError.GitOperationFailed($"{message} The git command timed out.");
+        }
+
+        return AgentError.GitOperationFailed(message, Scrub(ExtractErrorDetail(result.StdErr), secret));
+    }
 
     private static string Scrub(string text, string? secret) =>
         secret is null ? text : text.Replace(secret, "***", StringComparison.Ordinal);
 
-    private static string FirstLine(string text)
+    /// <summary>
+    /// The first line starting with <c>fatal:</c> or <c>error:</c> — git's own convention for the line that names
+    /// what went wrong, buried among progress and hint lines <c>-q</c> does not suppress — or, when no line
+    /// matches, the last non-empty line, which is usually the most specific one available.
+    /// </summary>
+    private static string ExtractErrorDetail(string stdErr)
     {
-        var trimmed = text.AsSpan().Trim();
-        var newline = trimmed.IndexOfAny('\r', '\n');
-        return (newline < 0 ? trimmed : trimmed[..newline]).ToString();
+        string? lastNonEmpty = null;
+        using var reader = new StringReader(stdErr);
+        while (reader.ReadLine() is { } line)
+        {
+            var trimmed = line.Trim();
+            if (trimmed.Length == 0)
+            {
+                continue;
+            }
+
+            lastNonEmpty = trimmed;
+            if (trimmed.StartsWith("fatal:", StringComparison.Ordinal) || trimmed.StartsWith("error:", StringComparison.Ordinal))
+            {
+                return trimmed;
+            }
+        }
+
+        return lastNonEmpty ?? string.Empty;
     }
 
     // ---------- validation ----------
@@ -430,6 +560,15 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         File.Move(tmp, path, overwrite: true);
     }
 
+    private static async Task<RunWorkspace?> ReadSidecarAsync(string path, CancellationToken ct)
+    {
+        var stream = File.OpenRead(path);
+        await using (stream.ConfigureAwait(false))
+        {
+            return await JsonSerializer.DeserializeAsync(stream, GitWorkspaceJsonContext.Default.RunWorkspace, ct).ConfigureAwait(false);
+        }
+    }
+
     private void DeleteSidecar(Guid runId)
     {
         var path = SidecarPath(runId);
@@ -461,4 +600,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
     [LoggerMessage(EventId = 1001, Level = LogLevel.Warning, Message = "Could not {What}: {Error}")]
     private static partial void LogCleanupFailed(ILogger logger, string what, string error);
+
+    [LoggerMessage(EventId = 1002, Level = LogLevel.Warning, Message = "Sidecar '{Path}' could not be read and was skipped: {Error}")]
+    private static partial void LogUnreadableSidecar(ILogger logger, string path, string error);
 }

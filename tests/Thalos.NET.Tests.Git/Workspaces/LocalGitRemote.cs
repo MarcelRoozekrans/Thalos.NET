@@ -21,6 +21,13 @@ public sealed class LocalGitRemote : IDisposable
     /// Creates a bare repository seeded with <c>README.md</c> and <c>AGENT.md</c> on <c>main</c>. Each entry in
     /// <paramref name="files"/> overrides the default content of a name already seeded, or adds a new file.
     /// </summary>
+    /// <remarks>
+    /// A second branch, <c>other</c>, is always seeded with one commit newer than <c>main</c>'s tip, and the bare
+    /// repository's own <c>HEAD</c> is pointed at <c>other</c>, not <c>main</c> — so a provider that cuts a
+    /// worktree from the mirror's <c>HEAD</c> instead of the requested <c>origin/&lt;DefaultBranch&gt;</c> checks
+    /// out different, wrong content, and a test asserting against <c>main</c>'s own tip catches it directly,
+    /// without any extra setup at the call site.
+    /// </remarks>
     public static LocalGitRemote Create(params (string Name, string Content)[] files)
     {
         var seeds = new Dictionary<string, string>(StringComparer.Ordinal)
@@ -50,6 +57,13 @@ public sealed class LocalGitRemote : IDisposable
             RunGit(seed, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-m", "seed");
             RunGit(seed, "remote", "add", "origin", bare);
             RunGit(seed, "push", "origin", "main");
+
+            RunGit(seed, "checkout", "-b", "other");
+            File.WriteAllText(Path.Combine(seed, "OTHER-ONLY.md"), "# other\n");
+            RunGit(seed, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "add", "-A");
+            RunGit(seed, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-m", "other");
+            RunGit(seed, "push", "origin", "other");
+            RunGit(bare, "symbolic-ref", "HEAD", "refs/heads/other");
         }
         finally
         {
