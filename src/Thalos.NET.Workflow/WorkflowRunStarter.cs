@@ -29,15 +29,10 @@ public sealed class WorkflowRunStarter(IProcessDefinitionStore definitions, IRun
     {
         ArgumentNullException.ThrowIfNull(options);
         // Every start names its starter (ruling R26): refused before the store is ever called, so a caller sees
-        // this fail loudly rather than the store's own guard throwing with a different parameter name — and, if
-        // this guard were removed, rather than the fake store's own ArgumentNullException being caught by this
-        // method's own catch (ArgumentException) block below and silently turned into a Result.Failure instead
-        // of propagating at all. The explicit paramName names the property path, not a bare method parameter,
-        // which is what MA0015 flags below — deliberate here, so the exception names exactly which field was
-        // missing.
-#pragma warning disable MA0015
-        ArgumentNullException.ThrowIfNull(options.StartedBy, "options.StartedBy");
-#pragma warning restore MA0015
+        // this fail loudly rather than the store's own guard throwing with a different parameter name. No
+        // explicit paramName: CallerArgumentExpression supplies "options.StartedBy" itself, which is exactly
+        // what WorkflowRunStarterTests.A_start_with_no_starter_is_refused_before_the_store_is_called asserts on.
+        ArgumentNullException.ThrowIfNull(options.StartedBy);
 
         var process = options.Process;
         var correlationKey = options.CorrelationKey;
@@ -60,30 +55,23 @@ public sealed class WorkflowRunStarter(IProcessDefinitionStore definitions, IRun
             return Result<Guid>.Failure(manifest.Error);
         }
 
-        try
-        {
-            var runId = await _store.StartAsync(
-                new WorkflowStartRequest
-                {
-                    Process = process,
-                    Version = version.Value,
-                    CorrelationKey = correlationKey,
-                    StartNode = definition.Value.StartNode,
-                    InitialVariables = options.Variables,
-                    Manifest = manifest.Value,
-                    StartedBy = options.StartedBy,
-                    RunId = options.RunId,
-                },
-                ct).ConfigureAwait(false);
-
-            return Result<Guid>.Success(runId);
-        }
-        catch (ArgumentException ex)
-        {
-            // An over-cap InitialVariables bag (or a blank process/correlationKey/startNode) is a caller input
-            // problem, not an infrastructure fault — the store's own guards throw for it, and this is the one
-            // place that turns that throw back into the Result channel every other failure here already uses.
-            return Result<Guid>.Failure(ex.Message);
-        }
+        // The store itself now returns a Result: an over-cap InitialVariables bag or a colliding caller-supplied
+        // RunId are the caller-input problems the store's own Result.Failure already names, on the same channel
+        // every other failure here uses — nothing here needs to catch anything to translate one. A structurally
+        // broken request (a blank process/correlationKey/startNode, a missing StartedBy) is a programming error,
+        // not a condition this method exists to recover from, and is left to propagate as a thrown exception.
+        return await _store.StartAsync(
+            new WorkflowStartRequest
+            {
+                Process = process,
+                Version = version.Value,
+                CorrelationKey = correlationKey,
+                StartNode = definition.Value.StartNode,
+                InitialVariables = options.Variables,
+                Manifest = manifest.Value,
+                StartedBy = options.StartedBy,
+                RunId = options.RunId,
+            },
+            ct).ConfigureAwait(false);
     }
 }

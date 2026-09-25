@@ -44,7 +44,7 @@ public sealed class RunManifestTests(PostgresFixture pg) : IAsyncLifetime
             Documents = new Dictionary<string, string>(StringComparer.Ordinal) { ["standing_instructions"] = longDoc },
         };
 
-        var id = await _store.StartAsync(new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = $"k:{Guid.NewGuid()}", StartNode = "implement", Manifest = manifest, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var id = (await _store.StartAsync(new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = $"k:{Guid.NewGuid()}", StartNode = "implement", Manifest = manifest, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         var run = await _store.FindAsync(id, CancellationToken.None);
 
@@ -68,7 +68,7 @@ public sealed class RunManifestTests(PostgresFixture pg) : IAsyncLifetime
             Nodes = new Dictionary<string, NodePin>(StringComparer.Ordinal) { ["a"] = new NodePin("x", AgentId.New(), "r", "s", "h") },
         };
 
-        var id = await _store.StartAsync(new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = $"k:{Guid.NewGuid()}", StartNode = "a", Manifest = manifest, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var id = (await _store.StartAsync(new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = $"k:{Guid.NewGuid()}", StartNode = "a", Manifest = manifest, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         var run = await _store.FindAsync(id, CancellationToken.None);
         await _store.CompleteNodeAsync(
@@ -87,7 +87,7 @@ public sealed class RunManifestTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task A_request_with_no_manifest_starts_a_run_with_no_manifest()
     {
-        var id = await _store.StartAsync(new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = $"k:{Guid.NewGuid()}", StartNode = "implement", StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var id = (await _store.StartAsync(new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = $"k:{Guid.NewGuid()}", StartNode = "implement", StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         (await _store.FindAsync(id, CancellationToken.None))!.Manifest.Should().BeNull();
     }
@@ -111,8 +111,8 @@ public sealed class RunManifestTests(PostgresFixture pg) : IAsyncLifetime
             Nodes = new Dictionary<string, NodePin>(StringComparer.Ordinal) { ["a"] = new NodePin("second", AgentId.New(), "r2", "s2", "h2") },
         };
 
-        var first = await _store.StartAsync(new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = key, StartNode = "a", Manifest = firstManifest, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
-        var second = await _store.StartAsync(new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = key, StartNode = "a", Manifest = secondManifest, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var first = (await _store.StartAsync(new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = key, StartNode = "a", Manifest = firstManifest, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
+        var second = (await _store.StartAsync(new WorkflowStartRequest { Process = "p", Version = 1, CorrelationKey = key, StartNode = "a", Manifest = secondManifest, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         second.Should().Be(first);
         (await _store.FindAsync(first, CancellationToken.None))!.Manifest.Should().BeEquivalentTo(firstManifest);

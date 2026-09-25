@@ -33,12 +33,12 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         """;
 
     /// <summary>
-    /// <see cref="RunManifest"/>'s JSON shape on the wire and in the <c>manifest</c> column: web defaults
-    /// (camelCase property names), matching <c>Thalos.Mcp.McpConfigFile</c>'s convention for the same
-    /// <see cref="JsonSerializerDefaults.Web"/> preset elsewhere in this repository. <see cref="AgentId"/>
-    /// carries its own generated <see cref="System.Text.Json.Serialization.JsonConverterAttribute"/>, so it
-    /// round-trips through its 26-character ULID form without this options instance needing to say anything
-    /// about it.
+    /// <see cref="RunManifest"/>'s JSON shape on the wire and in the <c>manifest</c> column, and
+    /// <see cref="RunPrincipal"/>'s in the <c>started_by</c> column: web defaults (camelCase property names),
+    /// matching <c>Thalos.Mcp.McpConfigFile</c>'s convention for the same <see cref="JsonSerializerDefaults.Web"/>
+    /// preset elsewhere in this repository. <see cref="AgentId"/> carries its own generated
+    /// <see cref="System.Text.Json.Serialization.JsonConverterAttribute"/>, so it round-trips through its
+    /// 26-character ULID form without this options instance needing to say anything about it.
     /// </summary>
     private static readonly JsonSerializerOptions ManifestJsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -89,17 +89,20 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     private readonly IProcessDefinitionStore _definitions = definitions ?? throw new ArgumentNullException(nameof(definitions));
 
     /// <inheritdoc/>
-    public async ValueTask<Guid> StartAsync(WorkflowStartRequest request, CancellationToken ct)
+    public async ValueTask<Result<Guid>> StartAsync(WorkflowStartRequest request, CancellationToken ct)
     {
         ValidateStartRequest(request);
 
-        var process = request.Process;
-        var version = request.Version;
         var correlationKey = request.CorrelationKey;
         var startNode = request.StartNode;
         var initialVariables = request.InitialVariables;
-        var manifest = request.Manifest;
-        var startedBy = request.StartedBy;
+
+        // An over-cap InitialVariables bag is a caller mistake a well-behaved host can legitimately make at
+        // runtime — reported here, before any connection is opened, so nothing is written for it.
+        if (WorkflowVariableBlock.OverKeyLimitError(initialVariables) is { } overCapError)
+        {
+            return Result<Guid>.Failure(overCapError);
+        }
 
         await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
         await using var tx = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
@@ -111,21 +114,23 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         // Null and an empty bag are the same thing to the column: both store '{}', never SQL NULL, so a run's
         // variables read back as an empty dictionary rather than something a consumer has to null-check.
         var seeded = initialVariables ?? EmptyVariables;
-        var inserted = await InsertRunAsync(connection, tx, id, process, version, correlationKey, startNode, seeded, manifest, startedBy, ct).ConfigureAwait(false);
 
+        var insertResult = await TryInsertRunAsync(connection, tx, id, request.Process, request.Version, correlationKey, startNode, seeded, request.Manifest, request.StartedBy, ct).ConfigureAwait(false);
+        if (insertResult.IsFailure)
+        {
+            return Result<Guid>.Failure(insertResult.Error);
+        }
+
+        var inserted = insertResult.Value;
         if (inserted == 0)
         {
             // Idempotent lookup: a run for this correlation key already exists. Return its id rather than
             // create a duplicate — no event is appended, because no new run was entered, and no dispatch is
             // enqueued either: the run this returns is at whatever seq its own progress has reached, so a
             // message minted here would be a second delivery for a node something else already scheduled.
-            await using var select = connection.CreateCommand();
-            select.Transaction = tx;
-            select.CommandText = "SELECT id FROM workflow_run WHERE correlation_key = @correlationKey";
-            select.Parameters.AddWithValue("correlationKey", correlationKey);
-            var existing = (Guid)(await select.ExecuteScalarAsync(ct).ConfigureAwait(false))!;
+            var existing = await LookupExistingRunIdAsync(connection, tx, correlationKey, ct).ConfigureAwait(false);
             await tx.CommitAsync(ct).ConfigureAwait(false);
-            return existing;
+            return Result<Guid>.Success(existing);
         }
 
         await InsertEventAsync(
@@ -144,12 +149,32 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         await EnqueueDispatchAsync(connection, tx, id, InitialCurrentSeq, startNode, ct).ConfigureAwait(false);
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
-        return id;
+        return Result<Guid>.Success(id);
+    }
+
+    /// <summary>
+    /// <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/>'s idempotent-path lookup, split out only
+    /// to keep that method inside the analyzer's length limit. <paramref name="correlationKey"/> is already
+    /// known to belong to an existing run — <c>InsertRunAsync</c>'s <c>ON CONFLICT DO NOTHING</c> reported zero
+    /// rows inserted — so this is a plain, non-failing read, not a second guess at whether the run exists.
+    /// </summary>
+    private static async Task<Guid> LookupExistingRunIdAsync(NpgsqlConnection connection, NpgsqlTransaction tx, string correlationKey, CancellationToken ct)
+    {
+        await using var select = connection.CreateCommand();
+        select.Transaction = tx;
+        select.CommandText = "SELECT id FROM workflow_run WHERE correlation_key = @correlationKey";
+        select.Parameters.AddWithValue("correlationKey", correlationKey);
+        return (Guid)(await select.ExecuteScalarAsync(ct).ConfigureAwait(false))!;
     }
 
     /// <summary>
     /// <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/>'s argument guards, split out only to keep
-    /// that method inside the analyzer's length limit.
+    /// that method inside the analyzer's length limit. Every guard here throws: each one names a request that is
+    /// structurally broken — a null request, a missing starter, a blank process/correlation key/start node — a
+    /// programming error, not a condition a well-behaved caller can trigger at runtime. Expected, caller-
+    /// triggerable failures (an over-cap variables bag, a colliding <see cref="WorkflowStartRequest.RunId"/>) are
+    /// handled separately, inside <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/> itself, and
+    /// return a <see cref="Result{T}"/> failure instead.
     /// </summary>
     private static void ValidateStartRequest(WorkflowStartRequest request)
     {
@@ -158,13 +183,35 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         ArgumentException.ThrowIfNullOrWhiteSpace(request.CorrelationKey, nameof(request));
         ArgumentException.ThrowIfNullOrWhiteSpace(request.StartNode, nameof(request));
         // Every start names its starter (ruling R26): required does not stop StartedBy = null! at the language
-        // boundary, so this guard is the runtime half of the rule — checked before anything is written. Same
-        // nameof(request) convention as the three guards above: MA0015 wants paramName to match an actual
-        // parameter of this method, not the property path.
-        ArgumentNullException.ThrowIfNull(request.StartedBy, nameof(request));
-        // Literal, not nameof(request.InitialVariables): OrmWorkflowStoreTests.StartAsync_refuses_a_seed_over_the_key_cap_and_writes_nothing
-        // asserts on this exact lowercase name, kept stable since before the request/positional split.
-        WorkflowVariableBlock.ThrowIfOverKeyLimit(request.InitialVariables, "initialVariables");
+        // boundary, so this guard is the runtime half of the rule — checked before anything is written. No
+        // explicit paramName: CallerArgumentExpression supplies "request.StartedBy" itself.
+        ArgumentNullException.ThrowIfNull(request.StartedBy);
+    }
+
+    /// <summary>
+    /// <see cref="InsertRunAsync"/>, mapping a caller-supplied <see cref="WorkflowStartRequest.RunId"/> that
+    /// collides with a different, existing run's id to a named <see cref="Result{T}"/> failure instead of the
+    /// raw <see cref="PostgresException"/> that constraint violation would otherwise surface as — split out
+    /// only to keep <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/> inside the analyzer's
+    /// length limit. This is distinct from the <c>correlation_key</c> collision <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/>
+    /// handles itself as the idempotent path: a duplicate id is an expected condition a caller can legitimately
+    /// trigger — a reused id, a retried request with a stale one — not an infrastructure fault, and the
+    /// transaction rolling back on disposal leaves the existing run under that id completely untouched.
+    /// </summary>
+    private static async Task<Result<int>> TryInsertRunAsync(
+        NpgsqlConnection connection, NpgsqlTransaction tx, Guid id,
+        string process, int version, string correlationKey, string startNode,
+        IReadOnlyDictionary<string, object?> initialVariables, RunManifest? manifest, RunPrincipal startedBy, CancellationToken ct)
+    {
+        try
+        {
+            var inserted = await InsertRunAsync(connection, tx, id, process, version, correlationKey, startNode, initialVariables, manifest, startedBy, ct).ConfigureAwait(false);
+            return Result<int>.Success(inserted);
+        }
+        catch (PostgresException ex) when (string.Equals(ex.SqlState, PostgresErrorCodes.UniqueViolation, StringComparison.Ordinal) && string.Equals(ex.ConstraintName, "workflow_run_pkey", StringComparison.Ordinal))
+        {
+            return Result<int>.Failure($"a run with id '{id}' already exists");
+        }
     }
 
     /// <summary>

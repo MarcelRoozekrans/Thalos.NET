@@ -194,7 +194,7 @@ public sealed class RunPinningDispatchTests
 
         // Manifest carries nodes, but not "implement" — the node this run actually starts at.
         var manifest = new RunManifest { Nodes = new Dictionary<string, NodePin>(StringComparer.Ordinal) };
-        var runId = await store.StartAsync(new WorkflowStartRequest { Process = "pinned", Version = 1, CorrelationKey = "c-manifest-gap", StartNode = "implement", Manifest = manifest, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "pinned", Version = 1, CorrelationKey = "c-manifest-gap", StartNode = "implement", Manifest = manifest, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
         var message = store.TakeNext(runId)!;
 
         await dispatcher.DispatchAsync(message, CancellationToken.None);
@@ -228,7 +228,7 @@ public sealed class RunPinningDispatchTests
         var dispatcher = new WorkflowNodeDispatcher(store, runner, resolver, definitions, skills, _ => new FakeSecurityContext("workflow-engine"));
 
         var manifest = new RunManifest { Nodes = new Dictionary<string, NodePin>(StringComparer.Ordinal) { ["implement"] = pin } };
-        var runId = await store.StartAsync(new WorkflowStartRequest { Process = "pinned", Version = 1, CorrelationKey = "c-pinned", StartNode = "implement", InitialVariables = initialVariables, Manifest = manifest, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "pinned", Version = 1, CorrelationKey = "c-pinned", StartNode = "implement", InitialVariables = initialVariables, Manifest = manifest, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         return (dispatcher, runner, store.TakeNext(runId)!, store);
     }
@@ -252,7 +252,7 @@ public sealed class RunPinningDispatchTests
         var skills = new InMemorySkillStore(Clock); // never touched by the unpinned path
         var dispatcher = new WorkflowNodeDispatcher(store, runner, resolver, definitions, skills, _ => new FakeSecurityContext("workflow-engine"));
 
-        var runId = await store.StartAsync(new WorkflowStartRequest { Process = "pinned", Version = 1, CorrelationKey = "c-unpinned", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "pinned", Version = 1, CorrelationKey = "c-unpinned", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
         return (dispatcher, runner, store.TakeNext(runId)!);
     }
 

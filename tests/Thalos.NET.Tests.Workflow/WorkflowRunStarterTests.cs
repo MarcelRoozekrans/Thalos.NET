@@ -1,6 +1,7 @@
 using Thalos;
 using Thalos.Skills;
 using Thalos.Workflow;
+using ZeroAlloc.Results;
 
 namespace Thalos.Tests.Workflow;
 
@@ -99,10 +100,10 @@ public sealed class WorkflowRunStarterTests
 
     /// <summary>
     /// A variables bag over <c>WorkflowVariableBlock</c>'s key cap makes <see cref="FakeWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/>
-    /// throw <see cref="ArgumentException"/> — the same guard <c>OrmWorkflowStore</c> carries. That is a caller
-    /// input problem, not an infrastructure fault, so <see cref="WorkflowRunStarter.StartAsync"/> must catch it
-    /// and hand it back through the <see cref="ZeroAlloc.Results.Result{T}"/> channel every other failure here
-    /// already uses, rather than letting it escape as a throw.
+    /// return a <see cref="ZeroAlloc.Results.Result{T}"/> failure — the same check <c>OrmWorkflowStore</c>
+    /// carries — which <see cref="WorkflowRunStarter.StartAsync"/> now simply passes through: it is a caller
+    /// input problem the store's own <c>Result</c> channel already names, not an infrastructure fault, and not
+    /// something this method needs to catch and translate.
     /// </summary>
     [Fact]
     public async Task An_over_cap_variables_bag_is_returned_as_a_failure_not_thrown()
@@ -122,6 +123,30 @@ public sealed class WorkflowRunStarterTests
             CancellationToken.None);
 
         started.IsFailure.Should().BeTrue("an over-cap bag is a caller input problem the store's own guard already names — it must come back as a Result, not a thrown exception");
+    }
+
+    /// <summary>
+    /// Proves <see cref="WorkflowRunStarter.StartAsync"/> carries no blanket <c>catch (ArgumentException)</c>
+    /// around its call to the store: an exception the store throws — here, standing in for "a missing
+    /// <c>StartedBy</c> somehow reaching the store" — propagates out of this method uncaught, rather than being
+    /// silently turned into a <see cref="ZeroAlloc.Results.Result{T}"/> failure. <see cref="AlwaysThrowsOnStart"/>
+    /// throws regardless of what it is given, so this is a general regression test against the blanket catch
+    /// coming back — not a claim that <see cref="WorkflowRunStarter"/> itself can construct a request with a
+    /// null <c>StartedBy</c>, which its own guard above already rules out.
+    /// </summary>
+    [Fact]
+    public async Task An_exception_the_store_throws_propagates_and_is_not_converted_into_a_failure()
+    {
+        var (_, starter) = await StarterWith(
+            agents: [Def("implementer"), Def("reviewer")],
+            skills: [Skill("manufacture-implement", "h-imp"), Skill("manufacture-review", "h-rev")],
+            wrapStore: store => new AlwaysThrowsOnStart(store));
+
+        var act = async () => await starter.StartAsync(
+            new WorkflowRunStartOptions { Process = "manufacture", CorrelationKey = "k1", StartedBy = TestPrincipals.Starter },
+            CancellationToken.None);
+
+        await act.Should().ThrowAsync<ArgumentNullException>("its red is re-adding the blanket catch (ArgumentException), which would turn this into a Result.Failure instead");
     }
 
     /// <summary>
@@ -166,7 +191,16 @@ public sealed class WorkflowRunStarterTests
         store.StartedRuns.Should().BeEmpty();
     }
 
-    private static async Task<(FakeWorkflowStore Store, WorkflowRunStarter Starter)> StarterWith(IReadOnlyList<AgentDefinition> agents, IReadOnlyList<SkillDocument> skills)
+    /// <summary>
+    /// Wires a resolvable two-node <c>manufacture</c> process — every agent named in <see cref="TwoNodeProcessYaml"/>
+    /// resolves against <paramref name="agents"/>, and every skill it names is upserted from <paramref name="skills"/>
+    /// — behind a <see cref="WorkflowRunStarter"/>. <paramref name="wrapStore"/> lets a test substitute the
+    /// store the starter itself talks to (see <see cref="AlwaysThrowsOnStart"/>) while the returned
+    /// <see cref="FakeWorkflowStore"/> stays the plain one, so assertions such as <c>store.StartedRuns</c> keep
+    /// working unwrapped.
+    /// </summary>
+    private static async Task<(FakeWorkflowStore Store, WorkflowRunStarter Starter)> StarterWith(
+        IReadOnlyList<AgentDefinition> agents, IReadOnlyList<SkillDocument> skills, Func<FakeWorkflowStore, IWorkflowStore>? wrapStore = null)
     {
         var definitions = new InMemoryProcessDefinitionStore().Seed(TwoNodeProcessYaml);
         var store = new FakeWorkflowStore(definitions);
@@ -186,7 +220,7 @@ public sealed class WorkflowRunStarterTests
         }
 
         var resolver = new CatalogRunManifestResolver(references, catalog, skillStore);
-        var starter = new WorkflowRunStarter(definitions, resolver, store);
+        var starter = new WorkflowRunStarter(definitions, resolver, wrapStore is null ? store : wrapStore(store));
         return (store, starter);
     }
 
@@ -202,4 +236,36 @@ public sealed class WorkflowRunStarterTests
         ContentHash = hash,
         UpdatedAt = Clock.GetUtcNow(),
     };
+
+    /// <summary>
+    /// Delegates every call to <paramref name="inner"/> except <see cref="StartAsync"/>, which always throws —
+    /// standing in for a store rejecting a request for a reason of its own, so
+    /// <see cref="An_exception_the_store_throws_propagates_and_is_not_converted_into_a_failure"/> can prove
+    /// <see cref="WorkflowRunStarter.StartAsync"/> carries no blanket catch around the call to the store.
+    /// </summary>
+    private sealed class AlwaysThrowsOnStart(IWorkflowStore inner) : IWorkflowStore
+    {
+        public ValueTask<Result<Guid>> StartAsync(WorkflowStartRequest request, CancellationToken ct) =>
+            throw new ArgumentNullException(nameof(request), "simulating a missing StartedBy reaching the store");
+
+        public ValueTask<WorkflowRun?> FindAsync(Guid runId, CancellationToken ct) => inner.FindAsync(runId, ct);
+
+        public ValueTask CompleteNodeAsync(Guid runId, long seq, WorkflowTransition transition, NodeResult result, CancellationToken ct) =>
+            inner.CompleteNodeAsync(runId, seq, transition, result, ct);
+
+        public ValueTask<Result> ResumeAsync(Guid runId, string signal, string? payload, CancellationToken ct) =>
+            inner.ResumeAsync(runId, signal, payload, ct);
+
+        public ValueTask FailAsync(Guid runId, string errorMessage, CancellationToken ct) =>
+            inner.FailAsync(runId, errorMessage, ct);
+
+        public ValueTask<bool> FailStrandedAsync(Guid runId, long expectedSeq, string errorMessage, CancellationToken ct) =>
+            inner.FailStrandedAsync(runId, expectedSeq, errorMessage, ct);
+
+        public ValueTask CancelAsync(Guid runId, string reason, CancellationToken ct) =>
+            inner.CancelAsync(runId, reason, ct);
+
+        public ValueTask<IReadOnlyList<WorkflowRun>> FindStrandedAsync(TimeSpan olderThan, CancellationToken ct) =>
+            inner.FindStrandedAsync(olderThan, ct);
+    }
 }

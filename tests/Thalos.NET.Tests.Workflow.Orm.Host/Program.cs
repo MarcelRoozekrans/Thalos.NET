@@ -72,7 +72,7 @@ static async Task<int> WriteAsync(string connectionString, CancellationToken ct)
 
     var store = NewStore(connectionString);
 
-    var runId = await store.StartAsync(
+    var runId = (await store.StartAsync(
         new WorkflowStartRequest
         {
             Process = "manufacture",
@@ -83,7 +83,7 @@ static async Task<int> WriteAsync(string connectionString, CancellationToken ct)
             // own system principal rather than any of the human identities a real workflow start would carry.
             StartedBy = new RunPrincipal("system:orm-test-host", []),
         },
-        ct).ConfigureAwait(false);
+        ct).ConfigureAwait(false)).Value;
 
     await store.CompleteNodeAsync(
         runId,

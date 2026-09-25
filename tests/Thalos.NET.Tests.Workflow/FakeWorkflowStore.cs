@@ -57,13 +57,15 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
         return null;
     }
 
-    public ValueTask<Guid> StartAsync(WorkflowStartRequest request, CancellationToken ct)
+    public ValueTask<Result<Guid>> StartAsync(WorkflowStartRequest request, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(request);
         // Every start names its starter (ruling R26): mirrors OrmWorkflowStore.StartAsync's own guard, checked
-        // before this call records anything. nameof(request), not the property path, is what MA0015 wants —
-        // same convention OrmWorkflowStore.StartAsync uses.
-        ArgumentNullException.ThrowIfNull(request.StartedBy, nameof(request));
+        // before this call records anything. No explicit paramName: CallerArgumentExpression supplies
+        // "request.StartedBy" itself. A missing starter is a programming error and stays a throw, mirroring
+        // OrmWorkflowStore.ValidateStartRequest — not the caller-triggerable failures below, which return a
+        // Result instead.
+        ArgumentNullException.ThrowIfNull(request.StartedBy);
         _startedRuns.Add(request);
 
         var process = request.Process;
@@ -71,12 +73,25 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
         var startNode = request.StartNode;
         var initialVariables = request.InitialVariables;
 
-        // Mirrors OrmWorkflowStore.StartAsync, which calls the same one guard.
-        WorkflowVariableBlock.ThrowIfOverKeyLimit(initialVariables, nameof(initialVariables));
+        // Mirrors OrmWorkflowStore.StartAsync, which calls the same one check, now on the Result channel
+        // instead of throwing.
+        var overCapError = WorkflowVariableBlock.OverKeyLimitError(initialVariables);
+        if (overCapError is not null)
+        {
+            return ValueTask.FromResult(Result<Guid>.Failure(overCapError));
+        }
 
         // The host's own id when it supplied one, mirroring OrmWorkflowStore.StartAsync — otherwise this mints
         // one, exactly as it always has.
         var id = request.RunId ?? Guid.NewGuid();
+        if (_runs.ContainsKey(id))
+        {
+            // Mirrors OrmWorkflowStore.StartAsync's workflow_run_pkey mapping: a caller-supplied RunId
+            // colliding with a different, existing run is reported by name, and the existing run under that id
+            // is left untouched — nothing above this point mutated _runs.
+            return ValueTask.FromResult(Result<Guid>.Failure($"a run with id '{id}' already exists"));
+        }
+
         _runs[id] = new WorkflowRun
         {
             Id = id,
@@ -101,7 +116,7 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
         // The start node's own dispatch, exactly as OrmWorkflowStore.StartAsync enqueues it. A fake that skipped
         // this would put these tests back to supplying a message production never produced.
         _outbox.Add(new WorkflowDispatchMessage(id, 1, startNode));
-        return ValueTask.FromResult(id);
+        return ValueTask.FromResult(Result<Guid>.Success(id));
     }
 
     public ValueTask<WorkflowRun?> FindAsync(Guid runId, CancellationToken ct) =>

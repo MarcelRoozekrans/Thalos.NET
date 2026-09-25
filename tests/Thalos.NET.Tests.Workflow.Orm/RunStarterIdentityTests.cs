@@ -1,6 +1,7 @@
 using Npgsql;
 using Thalos.Workflow;
 using Thalos.Workflow.Orm;
+using ZeroAlloc.Results;
 
 namespace Thalos.Tests.Workflow.Orm;
 
@@ -35,7 +36,7 @@ public sealed class RunStarterIdentityTests(PostgresFixture pg) : IAsyncLifetime
     public async Task The_starter_and_the_caller_supplied_id_round_trip()
     {
         var runId = Guid.NewGuid();
-        var id = await _store.StartAsync(new WorkflowStartRequest
+        var id = (await _store.StartAsync(new WorkflowStartRequest
         {
             Process = "p",
             Version = 1,
@@ -43,7 +44,7 @@ public sealed class RunStarterIdentityTests(PostgresFixture pg) : IAsyncLifetime
             StartNode = "a",
             RunId = runId,
             StartedBy = new RunPrincipal("user-1", ["admin", "analyst"]) { DisplayName = "admin" },
-        }, CancellationToken.None);
+        }, CancellationToken.None)).Value;
 
         id.Should().Be(runId, "the host creates the workspace under this id before the run row exists");
         var run = await _store.FindAsync(id, CancellationToken.None);
@@ -59,14 +60,14 @@ public sealed class RunStarterIdentityTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task A_node_reporting_a_started_by_variable_never_changes_the_recorded_starter()
     {
-        var id = await _store.StartAsync(new WorkflowStartRequest
+        var id = (await _store.StartAsync(new WorkflowStartRequest
         {
             Process = "p",
             Version = 1,
             CorrelationKey = $"k:{Guid.NewGuid()}",
             StartNode = "a",
             StartedBy = new RunPrincipal("user-1", ["developer"]),
-        }, CancellationToken.None);
+        }, CancellationToken.None)).Value;
         var run = await _store.FindAsync(id, CancellationToken.None);
 
         await _store.CompleteNodeAsync(
@@ -87,14 +88,14 @@ public sealed class RunStarterIdentityTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task Without_a_run_id_the_store_generates_one_and_still_records_the_starter()
     {
-        var id = await _store.StartAsync(new WorkflowStartRequest
+        var id = (await _store.StartAsync(new WorkflowStartRequest
         {
             Process = "p",
             Version = 1,
             CorrelationKey = $"k:{Guid.NewGuid()}",
             StartNode = "a",
             StartedBy = TestPrincipals.Starter,
-        }, CancellationToken.None);
+        }, CancellationToken.None)).Value;
 
         id.Should().NotBe(Guid.Empty);
         (await _store.FindAsync(id, CancellationToken.None))!.StartedBy!.Id.Should().Be("test-starter");
@@ -110,17 +111,56 @@ public sealed class RunStarterIdentityTests(PostgresFixture pg) : IAsyncLifetime
     public async Task A_start_with_no_starter_is_refused_and_writes_no_row()
     {
         var key = $"k:{Guid.NewGuid()}";
-        var act = async () => await _store.StartAsync(new WorkflowStartRequest
+        var act = async () => (await _store.StartAsync(new WorkflowStartRequest
         {
             Process = "p",
             Version = 1,
             CorrelationKey = key,
             StartNode = "a",
             StartedBy = null!,
-        }, CancellationToken.None);
+        }, CancellationToken.None)).Value;
 
         await act.Should().ThrowAsync<ArgumentNullException>();
         (await CountRunsWithCorrelationKeyAsync(key)).Should().Be(0);
+    }
+
+    /// <summary>
+    /// Red if the <c>PostgresException</c> to <see cref="Result{T}.Failure"/> mapping in <c>StartAsync</c> is
+    /// removed — deliberately removed and reverted to watch this assertion fail; see the task report. A
+    /// caller-supplied <see cref="WorkflowStartRequest.RunId"/> is a primary key, not covered by the
+    /// idempotent <see cref="WorkflowStartRequest.CorrelationKey"/> lookup, so a second, genuinely different
+    /// start that happens to reuse an id is an expected condition — not an infrastructure fault that should
+    /// surface as a raw, unmapped exception — and must leave the run already at that id completely untouched.
+    /// </summary>
+    [Fact]
+    public async Task A_duplicate_caller_supplied_run_id_is_refused_and_leaves_the_first_run_unchanged()
+    {
+        var runId = Guid.NewGuid();
+        var first = await _store.StartAsync(new WorkflowStartRequest
+        {
+            Process = "p",
+            Version = 1,
+            CorrelationKey = $"k:{Guid.NewGuid()}",
+            StartNode = "a",
+            RunId = runId,
+            StartedBy = new RunPrincipal("user-1", ["admin"]),
+        }, CancellationToken.None);
+        first.IsSuccess.Should().BeTrue(first.IsFailure ? first.Error : "");
+        var firstRun = await _store.FindAsync(runId, CancellationToken.None);
+
+        var second = await _store.StartAsync(new WorkflowStartRequest
+        {
+            Process = "p",
+            Version = 1,
+            CorrelationKey = $"k:{Guid.NewGuid()}",
+            StartNode = "a",
+            RunId = runId,
+            StartedBy = new RunPrincipal("user-2", ["admin"]),
+        }, CancellationToken.None);
+
+        second.IsFailure.Should().BeTrue("a different correlation key means this is a genuinely new start attempt, not the idempotent path");
+        second.Error.Should().Contain(runId.ToString(), "the failure must name the id that collided");
+        (await _store.FindAsync(runId, CancellationToken.None)).Should().BeEquivalentTo(firstRun, "the run already at this id must be completely untouched by the rejected second start");
     }
 
     private OrmWorkflowStore NewStore() =>

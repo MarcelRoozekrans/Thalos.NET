@@ -30,7 +30,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task CompleteNode_commits_event_run_update_and_enqueue_atomically()
     {
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c1", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c1", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         await _store.CompleteNodeAsync(
             runId, seq: 1,
@@ -46,7 +46,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task CompleteNode_rolls_back_all_four_writes_when_the_enqueue_throws()
     {
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c2", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c2", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
         var store = StoreWithFailingOutbox();
         var toReview = new WorkflowTransition("review", WorkflowStatus.Running, null, WorkflowEventKind.Completed);
 
@@ -66,7 +66,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task CompleteNodeAsync_exactly_one_of_several_concurrent_completions_wins()
     {
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-race", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-race", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
         var transition = new WorkflowTransition("review", WorkflowStatus.Running, null, WorkflowEventKind.Completed);
 
         const int attempts = 8;
@@ -103,7 +103,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task StartAsync_seeds_visits_with_the_start_node_already_counted_as_one_entry()
     {
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c3", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c3", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         var run = await _store.FindAsync(runId, CancellationToken.None);
 
@@ -117,7 +117,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task CompleteNodeAsync_merges_a_new_nodes_variables_without_dropping_earlier_ones()
     {
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-vars-merge", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-vars-merge", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         await _store.CompleteNodeAsync(
             runId, seq: 1,
@@ -142,7 +142,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task CompleteNodeAsync_leaves_the_variable_bag_intact_when_a_node_returns_no_variables()
     {
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-vars-empty", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-vars-empty", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         await _store.CompleteNodeAsync(
             runId, seq: 1,
@@ -165,7 +165,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task StartAsync_seeds_an_empty_variable_bag()
     {
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-vars-start", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-vars-start", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         var run = await _store.FindAsync(runId, CancellationToken.None);
 
@@ -188,7 +188,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
             ["files"] = new List<object?> { "a.cs", "b.cs" },
         };
 
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-vars-seeded", StartNode = "implement", InitialVariables = seed, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-vars-seeded", StartNode = "implement", InitialVariables = seed, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         var run = await _store.FindAsync(runId, CancellationToken.None);
         run!.Variables["issue"].Should().Be("gh-42");
@@ -198,7 +198,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
 
     /// <summary>
     /// The real store enforces the same key cap the in-memory one does, and rejects before it opens a connection
-    /// or writes anything. Red if <c>ThrowIfOverKeyLimit</c> is dropped from <c>OrmWorkflowStore.StartAsync</c>:
+    /// or writes anything. Red if <c>OverKeyLimitError</c> is dropped from <c>OrmWorkflowStore.StartAsync</c>:
     /// runs started through the shipped store would hold bags the omitted-key list cannot name in full, which is
     /// the guarantee the cap exists to make structural.
     /// </summary>
@@ -211,9 +211,10 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
             oversized[$"k{i:D2}"] = "v";
         }
 
-        var start = async () => await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-vars-oversized", StartNode = "implement", InitialVariables = oversized, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var result = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-vars-oversized", StartNode = "implement", InitialVariables = oversized, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
 
-        (await start.Should().ThrowAsync<ArgumentException>()).And.ParamName.Should().Be("initialVariables");
+        result.IsFailure.Should().BeTrue();
+        result.Error.Should().Contain("at most", "an expected, caller-triggerable failure now returns a Result naming the cap, rather than throwing");
         (await CountAsync("SELECT count(*) FROM workflow_run", null)).Should().Be(0, "a rejected start must not have written a row");
         (await CountAsync("SELECT count(*) FROM outboxmessages", null)).Should().Be(0, "nor enqueued a dispatch");
     }
@@ -228,7 +229,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     {
         var seed = new Dictionary<string, object?>(StringComparer.Ordinal) { ["issue"] = "gh-42" };
 
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-vars-seeded-event", StartNode = "implement", InitialVariables = seed, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-vars-seeded-event", StartNode = "implement", InitialVariables = seed, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         var recorded = await ScalarAsync<string>(
             "SELECT variables::text FROM workflow_run_event WHERE run_id = @id AND kind = 'Entered'", runId);
@@ -243,7 +244,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task StartAsync_on_an_existing_correlation_key_leaves_that_runs_variables_alone()
     {
-        var first = await _store.StartAsync(
+        var first = (await _store.StartAsync(
             new WorkflowStartRequest
             {
                 Process = "manufacture",
@@ -253,9 +254,9 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
                 InitialVariables = new Dictionary<string, object?>(StringComparer.Ordinal) { ["issue"] = "gh-42" },
                 StartedBy = TestPrincipals.Starter,
             },
-            CancellationToken.None);
+            CancellationToken.None)).Value;
 
-        var second = await _store.StartAsync(
+        var second = (await _store.StartAsync(
             new WorkflowStartRequest
             {
                 Process = "manufacture",
@@ -265,7 +266,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
                 InitialVariables = new Dictionary<string, object?>(StringComparer.Ordinal) { ["issue"] = "gh-99" },
                 StartedBy = TestPrincipals.Starter,
             },
-            CancellationToken.None);
+            CancellationToken.None)).Value;
 
         second.Should().Be(first);
         var run = await _store.FindAsync(first, CancellationToken.None);
@@ -284,7 +285,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task StartAsync_enqueues_the_first_dispatch_so_a_started_run_can_advance()
     {
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-start-dispatch", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-start-dispatch", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         (await CountAsync("SELECT count(*) FROM outboxmessages", null)).Should().Be(1, "a started run must have its start node's dispatch already enqueued");
         (await ScalarAsync<string>("SELECT TypeName FROM outboxmessages LIMIT 1", null)).Should().Be(WorkflowDispatch.TypeName);
@@ -297,8 +298,8 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task StartAsync_is_idempotent_for_the_same_correlation_key()
     {
-        var first = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-dup", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
-        var second = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-dup", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var first = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-dup", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
+        var second = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-dup", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         second.Should().Be(first);
         (await CountAsync("SELECT count(*) FROM workflow_run WHERE correlation_key = @id", "c-dup")).Should().Be(1);
@@ -310,7 +311,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task CompleteNodeAsync_does_not_increment_visits_when_the_transition_parks_on_the_same_node()
     {
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "gated", Version = 1, CorrelationKey = "c-gate", StartNode = "gate", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "gated", Version = 1, CorrelationKey = "c-gate", StartNode = "gate", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         // A gate parking on itself: WorkflowTransition.NextNode == the run's current node.
         await _store.CompleteNodeAsync(
@@ -332,7 +333,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     {
         var store = await ActivateApprovalProcessAsync();
 
-        var runId = await store.StartAsync(new WorkflowStartRequest { Process = "approval", Version = 1, CorrelationKey = "c-resume", StartNode = "start", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "approval", Version = 1, CorrelationKey = "c-resume", StartNode = "start", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
         await store.CompleteNodeAsync(
             runId, seq: 1,
             new WorkflowTransition("gate", WorkflowStatus.Awaiting, "ok", WorkflowEventKind.Awaiting),
@@ -354,7 +355,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     {
         var store = await ActivateApprovalProcessAsync();
 
-        var runId = await store.StartAsync(new WorkflowStartRequest { Process = "approval", Version = 1, CorrelationKey = "c-resume-2", StartNode = "start", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "approval", Version = 1, CorrelationKey = "c-resume-2", StartNode = "start", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
         await store.CompleteNodeAsync(
             runId, seq: 1,
             new WorkflowTransition("gate", WorkflowStatus.Awaiting, "ok", WorkflowEventKind.Awaiting),
@@ -370,7 +371,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task FailAsync_marks_the_run_failed_and_records_the_error()
     {
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-fail", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-fail", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         await _store.FailAsync(runId, "boom", CancellationToken.None);
 
@@ -383,7 +384,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task CompleteNodeAsync_does_not_resurrect_a_run_that_was_failed_out_of_band()
     {
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-no-resurrect", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-no-resurrect", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         // FailAsync flips status but never touches current_seq — an in-flight completion for the seq the run
         // was on when it failed would otherwise still pass CompleteNodeAsync's seq check.
@@ -402,7 +403,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task FailAsync_is_idempotent_when_called_twice()
     {
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-fail-twice", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-fail-twice", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         await _store.FailAsync(runId, "boom", CancellationToken.None);
         // A naive retry would insert a second event at the same (run_id, seq) — the terminal-state guard is
@@ -418,7 +419,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task CancelAsync_is_idempotent_on_an_already_failed_run()
     {
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-cancel-after-fail", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-cancel-after-fail", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         await _store.FailAsync(runId, "boom", CancellationToken.None);
         await _store.CancelAsync(runId, "operator abort", CancellationToken.None);
@@ -432,7 +433,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task FailAsync_is_idempotent_on_a_succeeded_run()
     {
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-fail-after-succeed", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-fail-after-succeed", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
         var toDone = new WorkflowTransition("done", WorkflowStatus.Succeeded, null, WorkflowEventKind.Completed);
         await _store.CompleteNodeAsync(runId, 1, toDone, new NodeResult("ok", Empty), CancellationToken.None);
 
@@ -450,7 +451,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task CancelAsync_marks_the_run_cancelled_and_records_the_reason()
     {
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-cancel", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-cancel", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         await _store.CancelAsync(runId, "operator abort", CancellationToken.None);
 
@@ -464,7 +465,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task FailStrandedAsync_fails_the_run_when_the_seq_still_matches()
     {
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-stranded-fail", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-stranded-fail", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         var failed = await _store.FailStrandedAsync(runId, expectedSeq: 1, "stranded", CancellationToken.None);
 
@@ -481,7 +482,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         // that a concurrent dispatcher completes into Awaiting before the sweep's own FailAsync-equivalent
         // write lands. CompleteNodeAsync bumps current_seq to 2 on that transition — the sweep's stale
         // expectedSeq: 1 must therefore no-op, not fail the gate it never should have touched.
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "approval", Version = 1, CorrelationKey = "c-stranded-race", StartNode = "start", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "approval", Version = 1, CorrelationKey = "c-stranded-race", StartNode = "start", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
         var toGate = new WorkflowTransition("gate", WorkflowStatus.Awaiting, "ok", WorkflowEventKind.Awaiting);
         await _store.CompleteNodeAsync(runId, seq: 1, toGate, new NodeResult(null, Empty), CancellationToken.None);
 
@@ -497,7 +498,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task FailStrandedAsync_no_ops_on_an_already_terminal_run()
     {
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-stranded-terminal", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-stranded-terminal", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
         await _store.FailAsync(runId, "boom", CancellationToken.None);
 
         // FailAsync never advances current_seq (see its own remarks), so the stranded sweep's snapshot would
@@ -514,8 +515,8 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task FindStrandedAsync_returns_only_runs_older_than_the_threshold()
     {
-        var staleId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-stale", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
-        var freshId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-fresh", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var staleId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-stale", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
+        var freshId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-fresh", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         await ExecuteAsync("UPDATE workflow_run SET updated_at = now() - interval '1 hour' WHERE id = @id", staleId);
 
@@ -531,7 +532,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         // A run parked Awaiting has nothing in flight by design and may legitimately sit there for days — it
         // must never be reported stranded no matter how stale, or a consumer sweeping this list would destroy
         // exactly the human-in-the-loop work the gate exists to protect. See WorkflowRunReconciler's remarks.
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "approval", Version = 1, CorrelationKey = "c-stale-awaiting", StartNode = "start", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "approval", Version = 1, CorrelationKey = "c-stale-awaiting", StartNode = "start", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
         var toGate = new WorkflowTransition("gate", WorkflowStatus.Awaiting, "ok", WorkflowEventKind.Awaiting);
         await _store.CompleteNodeAsync(runId, seq: 1, toGate, new NodeResult(null, Empty), CancellationToken.None);
         await ExecuteAsync("UPDATE workflow_run SET updated_at = now() - interval '10 days' WHERE id = @id", runId);
@@ -550,9 +551,9 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         // still be wrong — that is the regression this test is falsifiable against. Dropping ORDER BY entirely
         // is not: these three rows are inserted, and later updated, oldest-to-newest, so an unordered scan of
         // this table happens to come back in the same sequence and would still pass.
-        var oldestId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-order-oldest", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
-        var middleId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-order-middle", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
-        var newestId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-order-newest", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None);
+        var oldestId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-order-oldest", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
+        var middleId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-order-middle", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
+        var newestId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-order-newest", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         await ExecuteAsync("UPDATE workflow_run SET updated_at = now() - interval '3 hours' WHERE id = @id", oldestId);
         await ExecuteAsync("UPDATE workflow_run SET updated_at = now() - interval '2 hours' WHERE id = @id", middleId);

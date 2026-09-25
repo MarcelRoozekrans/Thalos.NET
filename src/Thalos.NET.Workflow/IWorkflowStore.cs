@@ -53,10 +53,22 @@ public interface IWorkflowStore
     /// <b>Every start names its starter.</b> <see cref="WorkflowStartRequest.StartedBy"/> is required and
     /// non-null; an implementation guards it with <see cref="ArgumentNullException.ThrowIfNull(object?,string?)"/>
     /// next to its existing <see cref="ArgumentException"/> guards, since <c>required</c> alone does not stop a
-    /// caller passing <see langword="null"/> at the language boundary.
+    /// caller passing <see langword="null"/> at the language boundary. A missing starter is a programming error,
+    /// not a caller-input mistake a well-behaved host can make at runtime, so it throws rather than returning a
+    /// <see cref="Result{T}"/> failure.
+    /// </para>
+    /// <para>
+    /// <b>Two failures a caller can legitimately trigger surface as <see cref="Result{T}.Failure"/>, not a
+    /// throw.</b> An <see cref="WorkflowStartRequest.InitialVariables"/> bag over
+    /// <c>WorkflowVariableBlock.MaxVariableKeys</c> fails before any write. A caller-supplied
+    /// <see cref="WorkflowStartRequest.RunId"/> that collides with an existing, different run's id — as opposed
+    /// to a <see cref="WorkflowStartRequest.CorrelationKey"/> collision, which is the idempotent path above —
+    /// also fails, naming the id, and leaves the existing run under that id untouched. Both are expected,
+    /// caller-triggerable conditions, so neither is a thrown exception a caller must also catch alongside this
+    /// method's <see cref="Result{T}"/> return.
     /// </para>
     /// </remarks>
-    ValueTask<Guid> StartAsync(WorkflowStartRequest request, CancellationToken ct);
+    ValueTask<Result<Guid>> StartAsync(WorkflowStartRequest request, CancellationToken ct);
 
     /// <summary>Finds a run by id, or <see langword="null"/> if none exists.</summary>
     ValueTask<WorkflowRun?> FindAsync(Guid runId, CancellationToken ct);

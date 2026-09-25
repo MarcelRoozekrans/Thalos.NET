@@ -88,7 +88,7 @@ public sealed class ProcessDefinitionStoreTests(PostgresFixture pg) : IAsyncLife
         var ct = CancellationToken.None;
         await WriteProcessFile(ValidV1);
         await _sync.SyncAsync(ct);
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c1", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, ct);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c1", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, ct)).Value;
 
         await WriteProcessFile(ValidV2); // a valid, different shape
         await _sync.SyncAsync(ct);
@@ -103,7 +103,7 @@ public sealed class ProcessDefinitionStoreTests(PostgresFixture pg) : IAsyncLife
     public async Task A_version_cannot_be_removed_while_a_run_still_pins_it()
     {
         var ct = CancellationToken.None;
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c1", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, ct);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c1", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, ct)).Value;
         await WriteProcessFile(ValidV2);
         await _sync.SyncAsync(ct);
 
@@ -122,8 +122,8 @@ public sealed class ProcessDefinitionStoreTests(PostgresFixture pg) : IAsyncLife
     public async Task Removing_one_version_is_unaffected_by_a_different_version_still_being_pinned()
     {
         var ct = CancellationToken.None;
-        var v1RunId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-v1", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, ct);
-        await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 2, CorrelationKey = "c-v2", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, ct); // stays Running for the whole test
+        var v1RunId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-v1", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, ct)).Value;
+        _ = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 2, CorrelationKey = "c-v2", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, ct)).Value; // stays Running for the whole test
 
         await _store.CancelAsync(v1RunId, "test", ct);
 
@@ -186,7 +186,7 @@ public sealed class ProcessDefinitionStoreTests(PostgresFixture pg) : IAsyncLife
         var ct = CancellationToken.None;
         await WriteProcessFile(ValidV1);
         (await _sync.SyncAsync(ct)).IsSuccess.Should().BeTrue();
-        var runId = await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-immutable", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, ct);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-immutable", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, ct)).Value;
 
         // Still version 1, still perfectly valid, but a different graph: 'review' rejecting now loops to
         // 'adjudicate' instead of back to 'implement'. Exactly the edit that must not land underneath the run
