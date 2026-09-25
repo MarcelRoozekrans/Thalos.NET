@@ -61,7 +61,15 @@ public static partial class WorkspacePath
     /// kernel's reason is dropped rather than logged. The message is not the only channel: a link whose target
     /// passes through a host directory on its way back into the workspace, such as
     /// <c>/host/dir/../../workspace/src</c>, resolves only if <c>/host/dir</c> exists, so success against refusal
-    /// still reveals that much to whoever placed the link.
+    /// still reveals that much — not to whoever placed the link, but to whoever calls <see cref="Resolve"/>, which
+    /// is the model working inside the workspace. A worktree created by <c>Thalos.NET.Git</c>'s
+    /// <c>GitWorktreeWorkspaceProvider</c> closes this off at the source: it checks out every worktree with
+    /// <c>core.symlinks=false</c>, so a symlink committed to the repository arrives as a plain text file, never a
+    /// real link, and no path this method resolves inside such a workspace can carry that channel. The risk
+    /// remains for a workspace populated some other way — by a tool that writes files into
+    /// <paramref name="workspaceRoot"/> directly, or a provider that does not disable symlinks on checkout — where
+    /// a real link can still exist, and this method's over-refusal on a link it cannot rule out is what limits the
+    /// exposure for that case.
     /// </para>
     /// </remarks>
     /// <param name="workspaceRoot">The workspace's root directory.</param>
