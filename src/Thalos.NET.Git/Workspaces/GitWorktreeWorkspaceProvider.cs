@@ -584,9 +584,17 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
     private async Task<UnitResult<AgentError>> CloneMirrorAsync(string mirror, string remote, IReadOnlyList<(string Key, string Value)>? secretConfig, string? secret, CancellationToken ct)
     {
+        var repository = Path.GetFileName(mirror);
         var mirrorsDir = Path.Combine(_dataRoot, "mirrors");
         Directory.CreateDirectory(mirrorsDir);
-        var temp = Path.Combine(mirrorsDir, ".tmp-" + Guid.NewGuid().ToString("N"));
+
+        // This call holds the repository's mirror lock (see CreateClaimedAsync), so no other clone of the same
+        // repository can be in progress right now — any .tmp-* directory already here for this repository was left
+        // by a clone that was killed mid-way, never cleaned up on its own path, and is safe to delete. A directory
+        // left by a concurrent clone of a *different* repository, under its own lock, is untouched: the name
+        // carries the repository so the sweep never reaches across repositories.
+        SweepStaleCloneTempDirectories(mirrorsDir, repository);
+        var temp = Path.Combine(mirrorsDir, TempCloneDirectoryName(repository));
         try
         {
             var cloned = await _git.RunAsync(mirrorsDir, ["clone", "--bare", "-q", "--", remote, temp], null, secretConfig, ct).ConfigureAwait(false);
@@ -1214,6 +1222,57 @@ public sealed partial class GitWorktreeWorkspaceProvider(
             LogCleanupFailed(logger, what, ex.Message);
         }
     }
+
+    /// <summary>
+    /// The length of the fixed part of <see cref="TempCloneDirectoryName"/> before the repository name: the
+    /// <c>.tmp-</c> prefix plus a <see cref="Guid.ToString(string?)"/> <c>"N"</c> value, which is always exactly 32
+    /// hex digits, plus the separator before the repository name.
+    /// </summary>
+    private const int TempCloneDirectoryRepositoryOffset = 5 + 32 + 1;
+
+    /// <summary>
+    /// A unique temporary clone directory name for <paramref name="repository"/>, carrying the repository so a
+    /// later sweep can tell which repository's stale directories are whose without reaching across repositories
+    /// sharing the same <c>mirrors</c> directory. The GUID comes first, in fixed-width hex, so
+    /// <see cref="IsTempCloneDirectoryFor"/> can find where it ends and the repository name begins without
+    /// guessing at a separator a repository name — which may itself contain <c>-</c> — could also produce.
+    /// </summary>
+    private static string TempCloneDirectoryName(string repository) => $".tmp-{Guid.NewGuid():N}-{repository}";
+
+    /// <summary>
+    /// Deletes <c>.tmp-*</c> directories under <paramref name="mirrorsDir"/> left behind by a clone of
+    /// <paramref name="repository"/> that was killed before it moved its temporary directory into place — see
+    /// <see cref="CloneMirrorAsync"/>, which calls this holding that repository's mirror lock, the reason it is
+    /// safe: no other clone of the same repository can be running right now, so every matching directory found here
+    /// belongs to one that is not. A failed delete is logged, not fatal — an operator can remove it by hand.
+    /// </summary>
+    private void SweepStaleCloneTempDirectories(string mirrorsDir, string repository)
+    {
+        if (!Directory.Exists(mirrorsDir))
+        {
+            return;
+        }
+
+        foreach (var directory in Directory.EnumerateDirectories(mirrorsDir, ".tmp-*"))
+        {
+            if (IsTempCloneDirectoryFor(Path.GetFileName(directory), repository))
+            {
+                TryDeleteDirectory(directory, $"sweep the stale temporary clone directory '{directory}'");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="directoryName"/> is a <see cref="TempCloneDirectoryName"/> for exactly
+    /// <paramref name="repository"/>. The GUID segment has a fixed length, so the repository name is read from a
+    /// fixed offset and compared whole — never a prefix match — so repository <c>foo</c> cannot match a directory
+    /// that in fact belongs to repository <c>foo-bar</c>.
+    /// </summary>
+    private static bool IsTempCloneDirectoryFor(string directoryName, string repository) =>
+        directoryName.Length == TempCloneDirectoryRepositoryOffset + repository.Length
+        && directoryName.StartsWith(".tmp-", StringComparison.Ordinal)
+        && directoryName[TempCloneDirectoryRepositoryOffset - 1] == '-'
+        && string.CompareOrdinal(directoryName, TempCloneDirectoryRepositoryOffset, repository, 0, repository.Length) == 0;
 
     /// <summary>Deletes <paramref name="path"/> recursively if present, logging a failure; reports whether it is gone.</summary>
     private bool TryDeleteDirectory(string path, string what)
