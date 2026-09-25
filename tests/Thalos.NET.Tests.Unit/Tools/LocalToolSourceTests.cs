@@ -230,9 +230,9 @@ public sealed class LocalToolSourceTests
         var fn = await SingleToolAsync(typeof(StaticCallerEchoTools));
         using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), new TestSecurityContext("user-9"));
 
-        var result = await fn.InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal) { ["suffix"] = "y" }, CancellationToken.None);
+        var result = await fn.InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal) { ["suffix"] = "y", ["caller"] = new TestSecurityContext("forged") }, CancellationToken.None);
 
-        result!.ToString().Should().Contain("user-9:y");
+        result!.ToString().Should().Contain("user-9:y").And.NotContain("forged");
     }
 
     [Fact]
@@ -243,7 +243,7 @@ public sealed class LocalToolSourceTests
         var act = () => new LocalToolSource("local", sp, [typeof(ForgedPrincipalTools)]);
 
         act.Should().Throw<ArgumentException>()
-            .WithMessage("*ForgeConcrete*caller*")
+            .WithMessage("*ForgeConcrete*parameter 'caller'*")
             .And.ParamName.Should().Be("toolTypes");
     }
 
@@ -255,7 +255,198 @@ public sealed class LocalToolSourceTests
         var act = () => new LocalToolSource("local", sp, [typeof(DerivedInterfaceTools)]);
 
         act.Should().Throw<ArgumentException>()
-            .WithMessage("*ForgeInterface*caller*")
+            .WithMessage("*ForgeInterface*parameter 'caller'*")
             .And.ParamName.Should().Be("toolTypes");
+    }
+
+    /// <summary>A struct implementation, so <see cref="Nullable{T}"/> wrapping is reachable at the type level.</summary>
+    public readonly struct PrincipalStruct : ISecurityContext
+    {
+        public string Id { get; init; }
+        public IReadOnlySet<string> Roles => new HashSet<string>(StringComparer.Ordinal);
+        public IReadOnlyDictionary<string, string> Claims => new Dictionary<string, string>(StringComparer.Ordinal);
+    }
+
+    [ThalosToolType]
+    public sealed class NullableStructPrincipalTools(Counter counter)
+    {
+        [ThalosTool("nullable-struct")]
+        public string Nullable(PrincipalStruct? caller, string suffix) { counter.Value++; return $"{caller?.Id}:{suffix}"; }
+    }
+
+    /// <summary>A second concrete <see cref="ISecurityContext"/>, used only nested inside a collection or a DTO
+    /// property below — never as a parameter's own top-level type.</summary>
+    public sealed class Principal : ISecurityContext
+    {
+        public string Id { get; set; } = string.Empty;
+        public IReadOnlySet<string> Roles { get; } = new HashSet<string>(StringComparer.Ordinal);
+        public IReadOnlyDictionary<string, string> Claims { get; } = new Dictionary<string, string>(StringComparer.Ordinal);
+    }
+
+    [ThalosToolType]
+    public sealed class PrincipalListTools(Counter counter)
+    {
+        [ThalosTool("principal-list")]
+        public string List(List<Principal> caller, string suffix) { counter.Value++; return $"{caller.Count}:{suffix}"; }
+    }
+
+    [ThalosToolType]
+    public sealed class PrincipalArrayTools(Counter counter)
+    {
+        [ThalosTool("principal-array")]
+        public string Array(ISecurityContext[] caller, string suffix) { counter.Value++; return $"{caller.Length}:{suffix}"; }
+    }
+
+    public sealed class DtoWithPrincipalProperty
+    {
+        public Principal Who { get; set; } = new();
+    }
+
+    [ThalosToolType]
+    public sealed class DtoWithPrincipalPropertyTools(Counter counter)
+    {
+        [ThalosTool("dto-principal-property")]
+        public string DtoPrincipal(DtoWithPrincipalProperty caller, string suffix) { counter.Value++; return $"{caller.Who.Id}:{suffix}"; }
+    }
+
+    public sealed class DtoWithSecurityContextProperty
+    {
+        public ISecurityContext Who { get; set; } = AnonymousSecurityContext.Instance;
+    }
+
+    [ThalosToolType]
+    public sealed class DtoWithSecurityContextPropertyTools(Counter counter)
+    {
+        [ThalosTool("dto-isecuritycontext-property")]
+        public string DtoContext(DtoWithSecurityContextProperty caller, string suffix) { counter.Value++; return $"{caller.Who.Id}:{suffix}"; }
+    }
+
+    public sealed class NestedMiddleDto
+    {
+        public Principal Deep { get; set; } = new();
+    }
+
+    public sealed class NestedOuterDto
+    {
+        public NestedMiddleDto Middle { get; set; } = new();
+    }
+
+    [ThalosToolType]
+    public sealed class NestedDtoTools(Counter counter)
+    {
+        [ThalosTool("nested-dto")]
+        public string Nested(NestedOuterDto caller, string suffix) { counter.Value++; return $"{caller.Middle.Deep.Id}:{suffix}"; }
+    }
+
+    [ThalosToolType]
+    public sealed class ByRefPrincipalTools(Counter counter)
+    {
+        [ThalosTool("byref-principal")]
+        public string ByRef(in ISecurityContext caller, string suffix) { counter.Value++; return $"{caller.Id}:{suffix}"; }
+    }
+
+    public sealed class OrdinaryDto
+    {
+        public string Name { get; set; } = string.Empty;
+        public int Age { get; set; }
+    }
+
+    [ThalosToolType]
+    public sealed class OrdinaryDtoTools(Counter counter)
+    {
+        [ThalosTool("ordinary-dto")]
+        public string Ordinary(OrdinaryDto request, string suffix) { counter.Value++; return $"{request.Name}:{suffix}"; }
+    }
+
+    [Fact]
+    public void Rejects_a_nullable_struct_security_context_parameter_eagerly()
+    {
+        var sp = new ServiceCollection().BuildServiceProvider();
+
+        var act = () => new LocalToolSource("local", sp, [typeof(NullableStructPrincipalTools)]);
+
+        act.Should().Throw<ArgumentException>()
+            .WithMessage("*Nullable*parameter 'caller'*")
+            .And.ParamName.Should().Be("toolTypes");
+    }
+
+    [Fact]
+    public void Rejects_a_list_of_security_contexts_parameter_eagerly()
+    {
+        var sp = new ServiceCollection().BuildServiceProvider();
+
+        var act = () => new LocalToolSource("local", sp, [typeof(PrincipalListTools)]);
+
+        act.Should().Throw<ArgumentException>()
+            .WithMessage("*List*parameter 'caller'*")
+            .And.ParamName.Should().Be("toolTypes");
+    }
+
+    [Fact]
+    public void Rejects_an_array_of_security_contexts_parameter_eagerly()
+    {
+        var sp = new ServiceCollection().BuildServiceProvider();
+
+        var act = () => new LocalToolSource("local", sp, [typeof(PrincipalArrayTools)]);
+
+        act.Should().Throw<ArgumentException>()
+            .WithMessage("*Array*parameter 'caller'*")
+            .And.ParamName.Should().Be("toolTypes");
+    }
+
+    [Fact]
+    public void Rejects_a_dto_with_a_principal_property_eagerly()
+    {
+        var sp = new ServiceCollection().BuildServiceProvider();
+
+        var act = () => new LocalToolSource("local", sp, [typeof(DtoWithPrincipalPropertyTools)]);
+
+        act.Should().Throw<ArgumentException>()
+            .WithMessage("*DtoPrincipal*parameter 'caller'*'caller.Who'*")
+            .And.ParamName.Should().Be("toolTypes");
+    }
+
+    [Fact]
+    public void Rejects_a_dto_with_an_ISecurityContext_property_eagerly()
+    {
+        var sp = new ServiceCollection().BuildServiceProvider();
+
+        var act = () => new LocalToolSource("local", sp, [typeof(DtoWithSecurityContextPropertyTools)]);
+
+        act.Should().Throw<ArgumentException>()
+            .WithMessage("*DtoContext*parameter 'caller'*'caller.Who'*")
+            .And.ParamName.Should().Be("toolTypes");
+    }
+
+    [Fact]
+    public void Rejects_a_principal_nested_two_levels_deep_in_a_dto_eagerly()
+    {
+        var sp = new ServiceCollection().BuildServiceProvider();
+
+        var act = () => new LocalToolSource("local", sp, [typeof(NestedDtoTools)]);
+
+        act.Should().Throw<ArgumentException>()
+            .WithMessage("*Nested*parameter 'caller'*'caller.Middle.Deep'*")
+            .And.ParamName.Should().Be("toolTypes");
+    }
+
+    [Fact]
+    public void Rejects_a_by_ref_security_context_parameter_eagerly()
+    {
+        var sp = new ServiceCollection().BuildServiceProvider();
+
+        var act = () => new LocalToolSource("local", sp, [typeof(ByRefPrincipalTools)]);
+
+        act.Should().Throw<ArgumentException>()
+            .WithMessage("*ByRef*parameter 'caller'*")
+            .And.ParamName.Should().Be("toolTypes");
+    }
+
+    [Fact]
+    public async Task An_ordinary_dto_with_no_principal_anywhere_still_registers()
+    {
+        var fn = await SingleToolAsync(typeof(OrdinaryDtoTools));
+
+        fn.JsonSchema.GetRawText().Should().Contain("request").And.Contain("suffix");
     }
 }

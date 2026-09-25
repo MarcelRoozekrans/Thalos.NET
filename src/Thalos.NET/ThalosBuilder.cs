@@ -98,6 +98,13 @@ public sealed class ThalosBuilder
 
     /// <summary>In-process tools from <see cref="ThalosToolTypeAttribute"/> classes, exposed as <c>{sourceName}__{tool}</c>.</summary>
     /// <exception cref="ArgumentException">A type in <paramref name="toolTypes"/> is not marked <see cref="ThalosToolTypeAttribute"/>.</exception>
+    /// <remarks>
+    /// <see cref="LocalToolSource"/>'s own construction-time guard — which rejects a <see cref="ThalosToolAttribute"/>
+    /// parameter whose shape carries a type assignable to <see cref="ISecurityContext"/> anywhere other than an
+    /// exact, top-level, by-value match — does not run here. <see cref="LocalToolSource"/> is built lazily by the
+    /// factory registered below, so that <see cref="ArgumentException"/> surfaces on the first resolution of
+    /// <see cref="IToolSource"/>, not from this call.
+    /// </remarks>
     [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
     [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     public ThalosBuilder AddLocalTools(string sourceName, params Type[] toolTypes)
