@@ -79,6 +79,24 @@ internal readonly record struct GitCliResult(int ExitCode, string StdOut, string
 /// both.
 /// </para>
 /// <para>
+/// <b><c>HOME</c> and <c>XDG_CONFIG_HOME</c> are also isolated.</b> <c>GIT_CONFIG_NOSYSTEM</c>/<c>GIT_CONFIG_GLOBAL</c>
+/// close every gitconfig-based read, but <c>~/.netrc</c> is a separate mechanism: git's own HTTP transport reads it
+/// directly for credentials, keyed off <c>HOME</c>, with no gitconfig involved at all — so closing the config paths
+/// alone leaves it open. Every call sets both <c>HOME</c> and <c>XDG_CONFIG_HOME</c> to the same empty,
+/// provider-owned directory (recreated empty in the constructor — see below), so <c>~/.netrc</c> and any other
+/// home-keyed read (SSH's own config, credential caches, ...) find nothing. <c>HTTPS_PROXY</c>, <c>SSL_CERT_FILE</c>
+/// and <c>CURL_CA_BUNDLE</c> are deliberately <em>not</em> stripped or overridden — a host that needs a proxy or a
+/// custom CA bundle for its git traffic configures it through the process environment as normal, and this type does
+/// not get in the way of that, only of configuration sources tied to a human identity on this host.
+/// </para>
+/// <para>
+/// <b>The isolation files start empty on every construction, never merely "if missing".</b> The hooks directory,
+/// the home/XDG directory and the global config file are deleted and recreated by the constructor every time, so a
+/// file some earlier process (or an operator, or a compromised prior run) left behind at one of these exact,
+/// deterministic, <see cref="GitWorkspaceOptions.DataRoot"/>-relative paths is wiped before this instance issues a
+/// single git command — construction never assumes a path it is about to rely on for isolation is already safe.
+/// </para>
+/// <para>
 /// <b>Timeout.</b> <see cref="GitWorkspaceOptions.CommandTimeout"/> bounds a single invocation; on expiry the whole
 /// process tree is killed and <see cref="RunAsync"/> returns a result with <see cref="GitCliResult.TimedOut"/> set,
 /// never a thrown exception — a caller that let a <see cref="TimeoutException"/> escape mid-<c>CreateAsync</c>
@@ -94,8 +112,9 @@ internal sealed partial class GitCli
 
     private readonly GitWorkspaceOptions _options;
     private readonly string _hooksDirectory;
+    private readonly string _homeDirectory;
     private readonly string _globalConfigPath;
-    private readonly Lazy<Task<string?>> _versionProblem;
+    private volatile bool _versionConfirmed;
 
     public GitCli(GitWorkspaceOptions options)
     {
@@ -103,15 +122,24 @@ internal sealed partial class GitCli
 
         var isolationDirectory = Path.Combine(options.DataRoot, ".git-isolation");
         _hooksDirectory = Path.Combine(isolationDirectory, "hooks");
+        _homeDirectory = Path.Combine(isolationDirectory, "home");
         _globalConfigPath = Path.Combine(isolationDirectory, "global.config");
 
-        Directory.CreateDirectory(_hooksDirectory);
-        if (!File.Exists(_globalConfigPath))
+        // Recreated empty every time, never assumed already-empty — see the class remarks.
+        RecreateEmptyDirectory(_hooksDirectory);
+        RecreateEmptyDirectory(_homeDirectory);
+        Directory.CreateDirectory(isolationDirectory);
+        File.WriteAllText(_globalConfigPath, string.Empty);
+    }
+
+    private static void RecreateEmptyDirectory(string path)
+    {
+        if (Directory.Exists(path))
         {
-            File.Create(_globalConfigPath).Dispose();
+            Directory.Delete(path, recursive: true);
         }
 
-        _versionProblem = new Lazy<Task<string?>>(CheckVersionAsync, LazyThreadSafetyMode.ExecutionAndPublication);
+        Directory.CreateDirectory(path);
     }
 
     /// <summary>Runs <c>git [-c &lt;extraConfig&gt;]* &lt;args&gt;</c> in <paramref name="workingDirectory"/>.</summary>
@@ -137,7 +165,7 @@ internal sealed partial class GitCli
         ArgumentException.ThrowIfNullOrWhiteSpace(workingDirectory);
         ArgumentNullException.ThrowIfNull(args);
 
-        var versionProblem = await _versionProblem.Value.ConfigureAwait(false);
+        var versionProblem = await EnsureVersionAsync(ct).ConfigureAwait(false);
         if (versionProblem is not null)
         {
             return new GitCliResult(1, string.Empty, versionProblem);
@@ -147,13 +175,34 @@ internal sealed partial class GitCli
     }
 
     /// <summary>
-    /// Runs <c>git --version</c> once (memoized in <see cref="_versionProblem"/>) and reports why it is unusable,
-    /// or <see langword="null"/> when it is at least 2.32 — the version <c>GIT_CONFIG_GLOBAL</c> needs, which is
-    /// this type's whole host-isolation mechanism (see the class remarks).
+    /// Runs <c>git --version</c> and reports why it is unusable, or <see langword="null"/> when it is at least
+    /// 2.32 — the version <c>GIT_CONFIG_GLOBAL</c> needs, which is this type's whole host-isolation mechanism (see
+    /// the class remarks). Only a successful check is memoized (in <see cref="_versionConfirmed"/>): a failure —
+    /// including a transient one, such as a timeout — is not cached, so a later call retries rather than staying
+    /// permanently stuck on one bad reading for the lifetime of this instance. No lock coalesces concurrent
+    /// callers before the first success: each runs its own <c>--version</c>, and the first to succeed sets the
+    /// flag — a few redundant checks while unconfirmed cost little, and <see cref="_versionConfirmed"/> only ever
+    /// moves from <see langword="false"/> to <see langword="true"/>, so the race is benign.
     /// </summary>
-    private async Task<string?> CheckVersionAsync()
+    private async Task<string?> EnsureVersionAsync(CancellationToken ct)
     {
-        var result = await ExecuteAsync(Directory.GetCurrentDirectory(), ["--version"], null, null, CancellationToken.None).ConfigureAwait(false);
+        if (_versionConfirmed)
+        {
+            return null;
+        }
+
+        var problem = await CheckVersionAsync(ct).ConfigureAwait(false);
+        if (problem is null)
+        {
+            _versionConfirmed = true;
+        }
+
+        return problem;
+    }
+
+    private async Task<string?> CheckVersionAsync(CancellationToken ct)
+    {
+        var result = await ExecuteAsync(Directory.GetCurrentDirectory(), ["--version"], null, null, ct).ConfigureAwait(false);
         if (!result.Succeeded)
         {
             return $"Could not determine the git version: 'git --version' {(result.TimedOut ? "timed out" : $"exited {result.ExitCode}: {result.StdErr.Trim()}")}.";
@@ -304,6 +353,8 @@ internal sealed partial class GitCli
         environment["LANGUAGE"] = "C";
         environment["GIT_CONFIG_NOSYSTEM"] = "1";
         environment["GIT_CONFIG_GLOBAL"] = _globalConfigPath;
+        environment["HOME"] = _homeDirectory;
+        environment["XDG_CONFIG_HOME"] = _homeDirectory;
 
         if (secretConfig is not { Count: > 0 })
         {

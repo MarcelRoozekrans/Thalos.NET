@@ -40,15 +40,25 @@ namespace Thalos.Git.Workspaces;
 /// <b>A first clone is atomic.</b> The mirror is cloned into a temporary directory beside its final location and
 /// moved into place only once the clone and its follow-up config calls all succeed; a failure at any point leaves
 /// nothing at the mirror's real path. An existing mirror is validated — bare, with <c>remote.origin.fetch</c> set —
-/// before it is trusted; an invalid one is deleted and re-cloned rather than used as-is.
+/// before it is trusted, and only ever deleted on a <em>positive</em> invalid answer from that validation: a
+/// timeout, an ownership refusal, or any other inconclusive result fails the create instead, and never a mirror
+/// whose <c>worktrees/</c> directory still has an entry in it, however the validation came out — a mirror with a
+/// live worktree is never deleted by this provider, full stop. See <see cref="MirrorValidation"/>.
 /// </para>
 /// <para>
-/// <b>A run's root and sidecar are checked before anything is created.</b> <see cref="CreateAsync"/> refuses, with
-/// a failure <see cref="Result{T,E}"/>, a request whose run already has a worktree directory or a sidecar record —
-/// a second create for a run that already has a live workspace never touches it. A provisional sidecar (the same
-/// <see cref="RunWorkspace"/>, with <see cref="RunWorkspace.SolutionPath"/> not yet resolved) is written before
-/// <c>git worktree add</c> runs, so a crash between the worktree's creation and the create's own completion still
-/// leaves a sidecar a sweeper can find and act on, rather than an orphan directory with no record at all.
+/// <b>A run's root and sidecar are checked before anything is created, under the same lock as the creation
+/// itself.</b> <see cref="CreateAsync"/> refuses, with a failure <see cref="Result{T,E}"/>, a request whose run
+/// already has a worktree directory or a sidecar record — a second create for a run that already has a live
+/// workspace never touches it, including a second create that starts concurrently with the first: the check and
+/// every step of the creation run inside the same per-repository lock described below, so a second caller for the
+/// same run either observes the first call's finished, live workspace and refuses, or waits for a failed first
+/// call to finish cleaning up after itself before it ever sees an empty run directory to race into. A provisional
+/// sidecar (the same <see cref="RunWorkspace"/>, with <see cref="RunWorkspace.SolutionPath"/> not yet resolved) is
+/// written before <c>git worktree add</c> runs, so a crash between the worktree's creation and the create's own
+/// completion still leaves a sidecar a sweeper can find and act on, rather than an orphan directory with no record
+/// at all; because the existence check and every later step share one lock, whatever exists at the run's root or
+/// sidecar path when a later step fails was created by this same call, and cleanup on failure only ever removes
+/// what this call itself put there.
 /// </para>
 /// <para>
 /// <b>The per-repository lock.</b> A <see cref="SemaphoreSlim"/>, one per <see cref="RunWorkspaceRequest.Repository"/>,
@@ -61,6 +71,15 @@ namespace Thalos.Git.Workspaces;
 /// (<c>index.lock</c>, the per-worktree administrative locks under <c>.git/worktrees/&lt;name&gt;</c>, and so on)
 /// are what prevent corruption across processes — this provider relies on them for that, rather than reimplementing
 /// cross-process locking itself.
+/// </para>
+/// <para>
+/// <b><see cref="RemoveAsync"/> converges even when the worktree's own admin directory is already gone.</b> If
+/// something outside this provider deleted <c>&lt;mirror&gt;/worktrees/&lt;id&gt;</c> directly, <c>git worktree
+/// remove</c> fails with <c>fatal: '&lt;path&gt;' is not a working tree</c> forever — no amount of retrying
+/// changes that outcome. On exactly that error, <see cref="RemoveAsync"/> prunes, force-deletes whatever is left
+/// of the run's root directory, deletes the branch, and reports the workspace removed regardless of whether the
+/// branch delete itself succeeded — the alternative is a run whose sidecar and root can never be cleaned up by
+/// this provider again.
 /// </para>
 /// </remarks>
 /// <param name="options">Where mirrors, worktrees and sidecar records live, and how the git child process is run.</param>
@@ -93,56 +112,74 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
         var mirror = MirrorPath(request.Repository);
         var root = WorktreeRoot(request.RunId);
-
-        if (Directory.Exists(root) || File.Exists(SidecarPath(request.RunId)))
-        {
-            return Result<RunWorkspace, AgentError>.Failure(
-                AgentError.Validation($"A workspace for run '{request.RunId}' already exists."));
-        }
-
         var (secretConfig, secret) = CredentialConfig(request.Remote);
 
         var gate = LockFor(request.Repository);
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var prepared = await PrepareMirrorAsync(mirror, request.Remote, secretConfig, secret, ct).ConfigureAwait(false);
-            if (prepared.IsFailure)
-            {
-                return Result<RunWorkspace, AgentError>.Failure(prepared.Error);
-            }
-
-            var createdAt = clock.GetUtcNow();
-            var provisional = new RunWorkspace(request.RunId, request.Repository, request.Remote, request.DefaultBranch, request.Branch, root, SolutionPath: null)
-            {
-                CreatedAt = createdAt,
-            };
-            await WriteSidecarAsync(provisional, ct).ConfigureAwait(false);
-
-            var added = await AddWorktreeAsync(mirror, root, request, ct).ConfigureAwait(false);
-            if (added.IsFailure)
-            {
-                DeleteSidecar(request.RunId);
-                return Result<RunWorkspace, AgentError>.Failure(added.Error);
-            }
-
-            var solution = ResolveSolution(root, request.Solution);
-            if (solution.IsFailure)
-            {
-                await CleanupCreatedWorktreeAsync(mirror, root, request.Branch, ct).ConfigureAwait(false);
-                DeleteSidecar(request.RunId);
-                return Result<RunWorkspace, AgentError>.Failure(solution.Error);
-            }
-
-            var workspace = provisional with { SolutionPath = solution.Value };
-            await WriteSidecarAsync(workspace, ct).ConfigureAwait(false);
-            await NotifyObserversAsync(workspace, removing: false, ct).ConfigureAwait(false);
-            return Result<RunWorkspace, AgentError>.Success(workspace);
+            return await CreateLockedAsync(request, mirror, root, secretConfig, secret, ct).ConfigureAwait(false);
         }
         finally
         {
             gate.Release();
         }
+    }
+
+    /// <summary>
+    /// The body of <see cref="CreateAsync"/> that must run under the caller's per-repository lock: the existence
+    /// check and every step of the creation share that one lock, so once this call observes the run's root and
+    /// sidecar both absent, nothing else touches them until it returns — a concurrent duplicate create for the
+    /// same run waits for the lock instead of racing a sibling call's own failure cleanup. Because of that shared
+    /// lock, whatever exists at the run's root or sidecar path when a later step here fails was created by this
+    /// same call, and the cleanup on that path only ever removes what this call itself put there.
+    /// </summary>
+    private async Task<Result<RunWorkspace, AgentError>> CreateLockedAsync(
+        RunWorkspaceRequest request,
+        string mirror,
+        string root,
+        IReadOnlyList<(string Key, string Value)>? secretConfig,
+        string? secret,
+        CancellationToken ct)
+    {
+        if (Directory.Exists(root) || File.Exists(SidecarPath(request.RunId)))
+        {
+            return Result<RunWorkspace, AgentError>.Failure(
+                AgentError.Validation($"A workspace for run '{request.RunId}' already exists."));
+        }
+
+        var prepared = await PrepareMirrorAsync(mirror, request.Remote, secretConfig, secret, ct).ConfigureAwait(false);
+        if (prepared.IsFailure)
+        {
+            return Result<RunWorkspace, AgentError>.Failure(prepared.Error);
+        }
+
+        var createdAt = clock.GetUtcNow();
+        var provisional = new RunWorkspace(request.RunId, request.Repository, request.Remote, request.DefaultBranch, request.Branch, root, SolutionPath: null)
+        {
+            CreatedAt = createdAt,
+        };
+        await WriteSidecarAsync(provisional, ct).ConfigureAwait(false);
+
+        var added = await AddWorktreeAsync(mirror, root, request, ct).ConfigureAwait(false);
+        if (added.IsFailure)
+        {
+            DeleteSidecar(request.RunId);
+            return Result<RunWorkspace, AgentError>.Failure(added.Error);
+        }
+
+        var solution = ResolveSolution(root, request.Solution);
+        if (solution.IsFailure)
+        {
+            await CleanupCreatedWorktreeAsync(mirror, root, request.Branch, ct).ConfigureAwait(false);
+            DeleteSidecar(request.RunId);
+            return Result<RunWorkspace, AgentError>.Failure(solution.Error);
+        }
+
+        var workspace = provisional with { SolutionPath = solution.Value };
+        await WriteSidecarAsync(workspace, ct).ConfigureAwait(false);
+        await NotifyObserversAsync(workspace, removing: false, ct).ConfigureAwait(false);
+        return Result<RunWorkspace, AgentError>.Success(workspace);
     }
 
     /// <inheritdoc />
@@ -176,7 +213,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
             {
                 workspace = await ReadSidecarAsync(file, ct).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is IOException or JsonException)
+            catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
             {
                 // A sidecar the sweeper cannot read is not a reason to abandon the sweep for every other run —
                 // skip it and log, rather than letting one bad file abort ListAsync for everything else.
@@ -212,28 +249,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         try
         {
             var (removed, pruned, branchDeleted) = await RemoveWorktreeAndBranchAsync(mirror, workspace.Root, workspace.Branch, ct).ConfigureAwait(false);
-            if (!removed.Succeeded)
-            {
-                if (pruned is { Succeeded: false } p)
-                {
-                    LogCleanupFailed(logger, "prune the stale worktree registration", ExtractErrorDetail(p.StdErr));
-                }
-
-                if (!branchDeleted.Succeeded)
-                {
-                    LogCleanupFailed(logger, "delete the run branch", ExtractErrorDetail(branchDeleted.StdErr));
-                }
-
-                result = UnitResult<AgentError>.Failure(GitFailure("git worktree remove failed.", removed, secret: null));
-            }
-            else if (!branchDeleted.Succeeded)
-            {
-                result = UnitResult<AgentError>.Failure(GitFailure("git branch -D failed.", branchDeleted, secret: null));
-            }
-            else
-            {
-                result = UnitResult<AgentError>.Success();
-            }
+            result = InterpretRemoval(workspace.Root, removed, pruned, branchDeleted);
         }
         finally
         {
@@ -252,9 +268,30 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
     private async Task<UnitResult<AgentError>> PrepareMirrorAsync(string mirror, string remote, IReadOnlyList<(string Key, string Value)>? secretConfig, string? secret, CancellationToken ct)
     {
-        if (Directory.Exists(mirror) && !await ValidateMirrorAsync(mirror, ct).ConfigureAwait(false))
+        if (Directory.Exists(mirror))
         {
-            TryDeleteDirectory(mirror, "remove the invalid mirror before re-cloning");
+            var state = await ValidateMirrorAsync(mirror, ct).ConfigureAwait(false);
+            switch (state)
+            {
+                case MirrorValidation.Valid:
+                    break;
+
+                case MirrorValidation.Invalid when HasLiveWorktrees(mirror):
+                    return UnitResult<AgentError>.Failure(AgentError.Validation(
+                        $"The mirror at '{mirror}' looks invalid but still has live worktrees; refusing to delete it. An operator must resolve this."));
+
+                case MirrorValidation.Invalid:
+                    TryDeleteDirectory(mirror, "remove the invalid mirror before re-cloning");
+                    break;
+
+                // Indeterminate: a timeout, a validation command that failed for a reason other than a definitive
+                // "not bare" or "no fetch refspec" answer, or dubious ownership. None of these is a positive
+                // signal the mirror is invalid, so it is never deleted on this path — only a positive answer is
+                // grounds for deletion (see the class remarks); the create simply fails and an operator decides.
+                default:
+                    return UnitResult<AgentError>.Failure(AgentError.GitOperationFailed(
+                        $"Could not validate the mirror at '{mirror}'; leaving it untouched."));
+            }
         }
 
         if (!Directory.Exists(mirror))
@@ -321,16 +358,67 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         }
     }
 
-    private async Task<bool> ValidateMirrorAsync(string mirror, CancellationToken ct)
+    /// <summary>
+    /// Whether an existing mirror is usable as-is (<see cref="Valid"/>), positively confirmed unusable and eligible
+    /// for deletion (<see cref="Invalid"/>), or neither confirmed (<see cref="Indeterminate"/>) — a validation
+    /// command that failed to give either a clear "yes, bare, with a fetch refspec" or a clear "no" answer, such as
+    /// a timeout or a "dubious ownership" refusal. Only <see cref="Invalid"/> ever leads to deleting the mirror;
+    /// <see cref="Indeterminate"/> fails the create and leaves the mirror exactly as found.
+    /// </summary>
+    private enum MirrorValidation
+    {
+        Valid,
+        Invalid,
+        Indeterminate,
+    }
+
+    /// <summary>
+    /// Validates an existing mirror without ever guessing: <see cref="MirrorValidation.Invalid"/> only for a
+    /// positive invalid answer — <c>rev-parse --is-bare-repository</c> succeeding and printing exactly
+    /// <c>"false"</c>, or <c>config --get remote.origin.fetch</c> exiting exactly 1 (git's own convention for "key
+    /// not found") after a positive <c>"true"</c>. Every other outcome — a timeout, a nonzero exit that is not
+    /// exactly that convention, an unrecognised <c>rev-parse</c> answer — is <see cref="MirrorValidation.Indeterminate"/>,
+    /// never treated as invalid.
+    /// </summary>
+    private async Task<MirrorValidation> ValidateMirrorAsync(string mirror, CancellationToken ct)
     {
         var isBare = await _git.RunAsync(mirror, ["rev-parse", "--is-bare-repository"], null, null, ct).ConfigureAwait(false);
-        if (!isBare.Succeeded || !string.Equals(isBare.StdOut.Trim(), "true", StringComparison.Ordinal))
+        if (!isBare.Succeeded)
         {
-            return false;
+            return MirrorValidation.Indeterminate;
+        }
+
+        var isBareAnswer = isBare.StdOut.Trim();
+        if (string.Equals(isBareAnswer, "false", StringComparison.Ordinal))
+        {
+            return MirrorValidation.Invalid;
+        }
+
+        if (!string.Equals(isBareAnswer, "true", StringComparison.Ordinal))
+        {
+            return MirrorValidation.Indeterminate;
         }
 
         var fetchSpec = await _git.RunAsync(mirror, ["config", "--get", "remote.origin.fetch"], null, null, ct).ConfigureAwait(false);
-        return fetchSpec.Succeeded && !string.IsNullOrWhiteSpace(fetchSpec.StdOut);
+        if (fetchSpec.Succeeded && !string.IsNullOrWhiteSpace(fetchSpec.StdOut))
+        {
+            return MirrorValidation.Valid;
+        }
+
+        return !fetchSpec.TimedOut && fetchSpec.ExitCode == 1
+            ? MirrorValidation.Invalid
+            : MirrorValidation.Indeterminate;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="mirror"/>'s <c>worktrees/</c> administrative directory has any entries — a positive
+    /// answer means at least one worktree, live or merely registered, still points at this mirror, so it must never
+    /// be deleted regardless of what <see cref="ValidateMirrorAsync"/> says.
+    /// </summary>
+    private static bool HasLiveWorktrees(string mirror)
+    {
+        var worktreesDir = Path.Combine(mirror, "worktrees");
+        return Directory.Exists(worktreesDir) && Directory.EnumerateFileSystemEntries(worktreesDir).Any();
     }
 
     private async Task<UnitResult<AgentError>> AddWorktreeAsync(string mirror, string root, RunWorkspaceRequest request, CancellationToken ct)
@@ -399,6 +487,53 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         return (removed, pruned, branchDeleted);
     }
 
+    /// <summary>
+    /// Turns the three <see cref="RemoveWorktreeAndBranchAsync"/> results into the overall outcome of a remove.
+    /// A <c>worktree remove</c> failure whose message is <see cref="IsNotAWorkingTree"/> converges instead of
+    /// failing forever: the worktree's own administrative directory is already gone, so no retry of the same
+    /// command will ever succeed — <paramref name="pruned"/>'s and <paramref name="branchDeleted"/>'s own failures
+    /// are logged rather than surfaced, <paramref name="root"/> is force-deleted directly, and the workspace is
+    /// reported removed, since that is now true regardless of git's exit code.
+    /// </summary>
+    private UnitResult<AgentError> InterpretRemoval(string root, GitCliResult removed, GitCliResult? pruned, GitCliResult branchDeleted)
+    {
+        if (!removed.Succeeded && IsNotAWorkingTree(removed.StdErr))
+        {
+            if (pruned is { Succeeded: false } prunedAfterMissingAdmin)
+            {
+                LogCleanupFailed(logger, "prune the stale worktree registration", ExtractErrorDetail(prunedAfterMissingAdmin.StdErr));
+            }
+
+            TryDeleteDirectory(root, "remove the worktree directory directly, since git no longer considers it a working tree");
+
+            if (!branchDeleted.Succeeded)
+            {
+                LogCleanupFailed(logger, "delete the run branch", ExtractErrorDetail(branchDeleted.StdErr));
+            }
+
+            return UnitResult<AgentError>.Success();
+        }
+
+        if (!removed.Succeeded)
+        {
+            if (pruned is { Succeeded: false } p)
+            {
+                LogCleanupFailed(logger, "prune the stale worktree registration", ExtractErrorDetail(p.StdErr));
+            }
+
+            if (!branchDeleted.Succeeded)
+            {
+                LogCleanupFailed(logger, "delete the run branch", ExtractErrorDetail(branchDeleted.StdErr));
+            }
+
+            return UnitResult<AgentError>.Failure(GitFailure("git worktree remove failed.", removed, secret: null));
+        }
+
+        return branchDeleted.Succeeded
+            ? UnitResult<AgentError>.Success()
+            : UnitResult<AgentError>.Failure(GitFailure("git branch -D failed.", branchDeleted, secret: null));
+    }
+
     private static Result<string?, AgentError> ResolveSolution(string root, string? solution)
     {
         if (solution is null)
@@ -463,11 +598,20 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         secret is null ? text : text.Replace(secret, "***", StringComparison.Ordinal);
 
     /// <summary>
+    /// <see langword="true"/> when <paramref name="stdErr"/> is git's own <c>fatal: '&lt;path&gt;' is not a
+    /// working tree</c> — the error <c>git worktree remove</c> gives when the worktree's administrative directory
+    /// under the mirror is already gone, which no retry of the same command will ever turn into a success.
+    /// </summary>
+    private static bool IsNotAWorkingTree(string stdErr) =>
+        stdErr.Contains("is not a working tree", StringComparison.Ordinal);
+
+    /// <summary>
     /// The first line starting with <c>fatal:</c> or <c>error:</c> — git's own convention for the line that names
     /// what went wrong, buried among progress and hint lines <c>-q</c> does not suppress — or, when no line
-    /// matches, the last non-empty line, which is usually the most specific one available.
+    /// matches, the last non-empty line, which is usually the most specific one available. Internal (not private)
+    /// so it can be unit-tested directly.
     /// </summary>
-    private static string ExtractErrorDetail(string stdErr)
+    internal static string ExtractErrorDetail(string stdErr)
     {
         string? lastNonEmpty = null;
         using var reader = new StringReader(stdErr);
