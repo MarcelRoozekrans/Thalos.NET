@@ -3,6 +3,8 @@ using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
+using Thalos.Runtime;
+using ZeroAlloc.Authorization;
 using ZeroAlloc.Results;
 
 namespace Thalos.Tools;
@@ -68,13 +70,32 @@ public sealed class LocalToolSource : IToolSource
 
                 var toolName = attr.Name ?? method.Name;
                 var description = method.GetCustomAttribute<DescriptionAttribute>()?.Description;
-                var probeFunction = AIFunctionFactory.Create(method, method.IsStatic ? null : probe, new AIFunctionFactoryOptions { Name = toolName, Description = description });
+                var probeFunction = AIFunctionFactory.Create(method, method.IsStatic ? null : probe, Options(toolName, description));
                 tools.Add(method.IsStatic ? probeFunction : new ScopedTool(_services, type, method, probeFunction));
             }
         }
 
         return tools;
     }
+
+    /// <summary>
+    /// Options shared by the probe and bound <see cref="AIFunctionFactory.Create(MethodInfo, object?, AIFunctionFactoryOptions?)"/>
+    /// calls for a tool method. A parameter of type <see cref="ISecurityContext"/> is bound to the calling turn's
+    /// <see cref="TurnScope.Caller"/>, falling back to <see cref="AnonymousSecurityContext.Instance"/> outside a turn,
+    /// and is excluded from the JSON schema so the model can never see or forge it.
+    /// </summary>
+    private static AIFunctionFactoryOptions Options(string name, string? description) => new()
+    {
+        Name = name,
+        Description = description,
+        ConfigureParameterBinding = static p => p.ParameterType == typeof(ISecurityContext)
+            ? new AIFunctionFactoryOptions.ParameterBindingOptions
+            {
+                ExcludeFromSchema = true,
+                BindParameter = static (_, _) => TurnScope.Current?.Caller ?? AnonymousSecurityContext.Instance,
+            }
+            : default,
+    };
 
     /// <summary>Metadata from the probe function; a fresh scope + instance per invocation, disposed after the call.</summary>
     private sealed class ScopedTool(IServiceProvider root, [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] Type toolType, MethodInfo method, AIFunction probe)
@@ -87,7 +108,7 @@ public sealed class LocalToolSource : IToolSource
             var instance = ActivatorUtilities.CreateInstance(scope.ServiceProvider, toolType);
             try
             {
-                var bound = AIFunctionFactory.Create(method, instance, new AIFunctionFactoryOptions { Name = Name, Description = Description });
+                var bound = AIFunctionFactory.Create(method, instance, Options(Name, Description));
                 var scopedArguments = new AIFunctionArguments(arguments, StringComparer.Ordinal) { Services = scope.ServiceProvider, Context = arguments.Context };
                 return await bound.InvokeAsync(scopedArguments, cancellationToken).ConfigureAwait(false);
             }

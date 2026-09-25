@@ -1,7 +1,10 @@
 using System.ComponentModel;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
+using Thalos.Runtime;
+using Thalos.Tests.Unit.Runtime;
 using Thalos.Tools;
+using ZeroAlloc.Authorization;
 
 namespace Thalos.Tests.Unit.Tools;
 
@@ -44,10 +47,26 @@ public sealed class LocalToolSourceTests
         public void Dispose() => Disposed++;
     }
 
+    [ThalosToolType]
+    public sealed class CallerEchoTools
+    {
+        private readonly object _sentinel = new();
+
+        [ThalosTool("whoami")]
+        public string WhoAmI(ISecurityContext caller, string suffix) => $"{caller.Id}:{suffix}" + (_sentinel is null ? "!" : ""); // touch instance state (CA1822)
+    }
+
     private static async Task<AIFunction> ToolAsync(IServiceProvider sp, string name, params Type[] types)
     {
         var source = new LocalToolSource("local", sp, types);
         return (AIFunction)(await source.GetToolsAsync(default)).Value.Single(t => string.Equals(t.Name, name, StringComparison.Ordinal));
+    }
+
+    private static async Task<AIFunction> SingleToolAsync(Type toolType)
+    {
+        var sp = new ServiceCollection().BuildServiceProvider();
+        var source = new LocalToolSource("local", sp, [toolType]);
+        return (AIFunction)(await source.GetToolsAsync(default)).Value.Single();
     }
 
     [Fact]
@@ -140,5 +159,33 @@ public sealed class LocalToolSourceTests
         withNullName.Should().Throw<ArgumentException>();
         withNullServices.Should().Throw<ArgumentNullException>();
         withNullTypes.Should().Throw<ArgumentNullException>();
+    }
+
+    [Fact]
+    public async Task A_security_context_parameter_is_not_in_the_schema()
+    {
+        var fn = await SingleToolAsync(typeof(CallerEchoTools));
+
+        fn.JsonSchema.GetRawText().Should().NotContain("caller").And.Contain("suffix");
+    }
+
+    [Fact]
+    public async Task The_turn_caller_is_bound_not_a_model_argument()
+    {
+        var fn = await SingleToolAsync(typeof(CallerEchoTools));
+        using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), new TestSecurityContext("user-7"));
+
+        var result = await fn.InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal) { ["suffix"] = "x", ["caller"] = "forged" }, CancellationToken.None);
+
+        result!.ToString().Should().Contain("user-7:x").And.NotContain("forged");
+    }
+
+    [Fact]
+    public async Task Outside_a_turn_the_caller_is_anonymous()
+    {
+        var fn = await SingleToolAsync(typeof(CallerEchoTools));
+
+        (await fn.InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal) { ["suffix"] = "x" }, CancellationToken.None))!.ToString()
+            .Should().Contain(AnonymousSecurityContext.AnonymousId);
     }
 }
