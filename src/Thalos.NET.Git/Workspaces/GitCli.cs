@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
@@ -23,7 +24,7 @@ internal readonly record struct GitCliResult(int ExitCode, string StdOut, string
 /// Runs the git executable as a real child <see cref="Process"/>, awaited with
 /// <see cref="Process.WaitForExitAsync(CancellationToken)"/> — never LibGit2Sharp, and never <see cref="Task.Run{TResult}(Func{TResult})"/>
 /// to fake async over a synchronous API (ruling R23). Every call is independent; nothing is cached or kept open
-/// between calls, except the one-time git version check and the isolation files created in the constructor.
+/// between calls, except the one-time git version check and the isolation directory the constructor empties.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -90,21 +91,23 @@ internal readonly record struct GitCliResult(int ExitCode, string StdOut, string
 /// not get in the way of that, only of configuration sources tied to a human identity on this host.
 /// </para>
 /// <para>
-/// <b>The isolation files start empty on every construction, never merely "if missing".</b> The hooks directory,
-/// the home/XDG directory and the global config file are cleared by the constructor every time, so a file some
-/// earlier process (or an operator, or a compromised prior run) left behind at one of these exact, deterministic,
-/// <see cref="GitWorkspaceOptions.DataRoot"/>-relative paths is wiped before this instance issues a single git
-/// command — construction never assumes a path it is about to rely on for isolation is already safe. Clearing is
-/// idempotent rather than delete-then-recreate: <see cref="Directory.CreateDirectory(string)"/> on a directory that
-/// already exists is a no-op, and each file inside it is removed one by one, tolerating one already gone. This
-/// provider is registered as a DI singleton, so nothing prevents two of its <see cref="GitCli"/> instances — in the
-/// same process, or in two processes sharing this <see cref="GitWorkspaceOptions.DataRoot"/> — from constructing at
-/// the same moment; delete-then-recreate raced under exactly that concurrent construction (one instance's
-/// <c>Directory.Delete</c> firing between another's own delete and its <c>Directory.CreateDirectory</c> left the
-/// second instance with a <see cref="DirectoryNotFoundException"/> trying to enumerate or write into a directory
-/// that briefly did not exist), and a losing instance failing at startup is exactly the outcome a singleton must
-/// not risk. Clearing files in an always-present directory has no such window: the directory is never deleted, so
-/// there is nothing for a concurrent constructor to observe half-gone.
+/// <b>The isolation directories are emptied on every construction, and verified empty.</b> Git reads more than
+/// gitconfig from <c>HOME</c> and <c>XDG_CONFIG_HOME</c>: <c>~/.netrc</c> for credentials, and
+/// <c>$XDG_CONFIG_HOME/git/attributes</c> and <c>git/ignore</c>, which <c>GIT_CONFIG_GLOBAL</c> does not cover. So
+/// the constructor empties the whole <c>.git-isolation</c> directory under <see cref="GitWorkspaceOptions.DataRoot"/>
+/// recursively, whatever is nested in it and whether or not it is read-only: everything except the hooks directory,
+/// the home directory and the global config file is deleted, the two directories are emptied, and the global config
+/// is truncated. A link is deleted as a link, never followed, so a planted link cannot make the constructor delete
+/// anything outside <c>.git-isolation</c>. Only "already gone" is tolerated while deleting; any other failure
+/// propagates. The constructor then verifies that the hooks and home directories are empty, the global config is an
+/// empty file, and nothing else is there, and throws <see cref="InvalidOperationException"/> if anything remains:
+/// git never runs over a planted file this type could not remove. Constructors sharing a
+/// <see cref="GitWorkspaceOptions.DataRoot"/> — this provider is a DI singleton, and an API host and a CLI host may
+/// share one — take turns, through a <see cref="CrossProcessFileLock"/> on <c>&lt;DataRoot&gt;/.git-isolation.lock</c>
+/// held for the whole empty-and-verify, bounded by <see cref="GitWorkspaceOptions.CommandTimeout"/>. Without it, two
+/// constructors deleting the same entries at once fail on Windows, where a file another thread is deleting reports
+/// access denied rather than not found. Nothing but a constructor writes into these directories, so a git call
+/// running in another instance while one is being emptied is unaffected.
 /// </para>
 /// <para>
 /// <b>Timeout.</b> <see cref="GitWorkspaceOptions.CommandTimeout"/> bounds a single invocation; on expiry the whole
@@ -135,15 +138,165 @@ internal sealed partial class GitCli
         _homeDirectory = Path.Combine(isolationDirectory, "home");
         _globalConfigPath = Path.Combine(isolationDirectory, "global.config");
 
-        // Cleared empty every time, never assumed already-empty — see the class remarks. Idempotent, unlike
-        // delete-then-recreate, so two instances constructing at once on a shared DataRoot never observe a
-        // directory that briefly does not exist.
-        Directory.CreateDirectory(isolationDirectory);
-        Directory.CreateDirectory(_hooksDirectory);
-        Directory.CreateDirectory(_homeDirectory);
-        ClearFiles(_hooksDirectory);
-        ClearFiles(_homeDirectory);
-        ClearGlobalConfig(_globalConfigPath);
+        // Emptied every time, never assumed already empty, then verified — see the class remarks. One constructor at a
+        // time per DataRoot, across processes, so no two ever delete the same entries at once.
+        Directory.CreateDirectory(options.DataRoot);
+        using (CrossProcessFileLock.Acquire(Path.Combine(options.DataRoot, ".git-isolation.lock"), options.CommandTimeout))
+        {
+            EnsureRealDirectory(isolationDirectory);
+            EmptyIsolationDirectory(isolationDirectory, _hooksDirectory, _homeDirectory, _globalConfigPath);
+            EnsureRealDirectory(_hooksDirectory);
+            EnsureRealDirectory(_homeDirectory);
+            ClearGlobalConfig(_globalConfigPath);
+            VerifyIsolation(isolationDirectory, _hooksDirectory, _homeDirectory, _globalConfigPath);
+        }
+    }
+
+    /// <summary>
+    /// Creates <paramref name="path"/> as a real directory. A link planted in its place is removed first, as a link,
+    /// so emptying the directory can never reach through it into somewhere else.
+    /// </summary>
+    private static void EnsureRealDirectory(string path)
+    {
+        var info = new DirectoryInfo(path);
+        if (info.Exists && info.LinkTarget is not null)
+        {
+            DeleteEntry(info);
+        }
+
+        Directory.CreateDirectory(path);
+    }
+
+    /// <summary>
+    /// Deletes everything in <paramref name="isolationDirectory"/> except the hooks directory, the home directory and
+    /// the global config, and empties those two directories recursively.
+    /// </summary>
+    private static void EmptyIsolationDirectory(string isolationDirectory, string hooksDirectory, string homeDirectory, string globalConfigPath)
+    {
+        foreach (var entry in EnumerateEntries(isolationDirectory))
+        {
+            var isLink = entry.LinkTarget is not null;
+            if (!isLink && entry is DirectoryInfo && (IsPath(entry, hooksDirectory) || IsPath(entry, homeDirectory)))
+            {
+                EmptyDirectory(entry.FullName);
+            }
+            else if (!isLink && entry is FileInfo && IsPath(entry, globalConfigPath))
+            {
+                ClearReadOnly(entry);
+            }
+            else
+            {
+                DeleteEntry(entry);
+            }
+        }
+    }
+
+    private static bool IsPath(FileSystemInfo entry, string path) =>
+        string.Equals(Path.TrimEndingDirectorySeparator(entry.FullName), Path.TrimEndingDirectorySeparator(path), StringComparison.Ordinal);
+
+    /// <summary>Deletes every entry inside <paramref name="directory"/>, recursively, leaving the directory itself.</summary>
+    private static void EmptyDirectory(string directory)
+    {
+        foreach (var entry in EnumerateEntries(directory))
+        {
+            DeleteEntry(entry);
+        }
+    }
+
+    /// <summary>
+    /// Deletes one entry: a link as a link, never following it; a directory after emptying it; a file after clearing
+    /// its read-only attribute. Tolerates only the entry, or its parent, being gone already.
+    /// </summary>
+    private static void DeleteEntry(FileSystemInfo entry)
+    {
+        try
+        {
+            if (entry.LinkTarget is not null)
+            {
+                if (entry is DirectoryInfo)
+                {
+                    Directory.Delete(entry.FullName);
+                }
+                else
+                {
+                    File.Delete(entry.FullName);
+                }
+
+                return;
+            }
+
+            ClearReadOnly(entry);
+            if (entry is DirectoryInfo)
+            {
+                EmptyDirectory(entry.FullName);
+                Directory.Delete(entry.FullName);
+            }
+            else
+            {
+                File.Delete(entry.FullName);
+            }
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            // A concurrent constructor emptying the same directory deleted it first.
+        }
+    }
+
+    /// <summary>Clears the read-only attribute of a non-link entry, so it, or for a directory its contents, can be deleted.</summary>
+    private static void ClearReadOnly(FileSystemInfo entry)
+    {
+        var attributes = entry.Attributes;
+        if (attributes.HasFlag(FileAttributes.ReadOnly))
+        {
+            entry.Attributes = attributes & ~FileAttributes.ReadOnly;
+        }
+    }
+
+    /// <summary>
+    /// The entries of <paramref name="directory"/>, or none when a concurrent constructor removed it first. Listed
+    /// eagerly, so deleting entries does not disturb the enumeration.
+    /// </summary>
+    private static FileSystemInfo[] EnumerateEntries(string directory)
+    {
+        try
+        {
+            return new DirectoryInfo(directory).GetFileSystemInfos();
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// Throws unless the isolation directory holds exactly an empty hooks directory, an empty home directory and an
+    /// empty global config file — so git never runs over anything the emptying could not remove.
+    /// </summary>
+    private static void VerifyIsolation(string isolationDirectory, string hooksDirectory, string homeDirectory, string globalConfigPath)
+    {
+        foreach (var entry in new DirectoryInfo(isolationDirectory).GetFileSystemInfos())
+        {
+            if (!IsExpectedIsolationEntry(entry, hooksDirectory, homeDirectory, globalConfigPath))
+            {
+                throw new InvalidOperationException(
+                    $"The git isolation directory '{isolationDirectory}' could not be emptied: '{entry.FullName}' remains. Git will not run over it.");
+            }
+        }
+    }
+
+    private static bool IsExpectedIsolationEntry(FileSystemInfo entry, string hooksDirectory, string homeDirectory, string globalConfigPath)
+    {
+        if (entry.LinkTarget is not null)
+        {
+            return false;
+        }
+
+        return entry switch
+        {
+            DirectoryInfo directory => (IsPath(directory, hooksDirectory) || IsPath(directory, homeDirectory)) && directory.GetFileSystemInfos().Length == 0,
+            FileInfo file => IsPath(file, globalConfigPath) && file.Length == 0,
+            _ => false,
+        };
     }
 
     /// <summary>
@@ -158,27 +311,6 @@ internal sealed partial class GitCli
     private static void ClearGlobalConfig(string path)
     {
         using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
-    }
-
-    /// <summary>
-    /// Deletes every file directly inside <paramref name="directory"/>, tolerating one a concurrent constructor —
-    /// see the class remarks — already removed. <paramref name="directory"/> itself is never deleted, only cleared,
-    /// so there is no window where it does not exist for another thread or process to observe.
-    /// </summary>
-    private static void ClearFiles(string directory)
-    {
-        foreach (var file in Directory.EnumerateFiles(directory))
-        {
-            try
-            {
-                File.Delete(file);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                // Another instance clearing the same shared directory concurrently already removed this file,
-                // or is holding it briefly — either way, gone (or going) is the state this call wants.
-            }
-        }
     }
 
     /// <summary>Runs <c>git [-c &lt;extraConfig&gt;]* &lt;args&gt;</c> in <paramref name="workingDirectory"/>.</summary>
@@ -277,7 +409,17 @@ internal sealed partial class GitCli
         process.OutputDataReceived += (_, e) => { if (e.Data is not null) stdOut.Append(e.Data).Append('\n'); };
         process.ErrorDataReceived += (_, e) => { if (e.Data is not null) stdErr.Append(e.Data).Append('\n'); };
 
-        process.Start();
+        try
+        {
+            process.Start();
+        }
+        catch (Win32Exception ex)
+        {
+            // git could not be started at all: it is not installed, or the working directory does not exist. A
+            // result, not an exception, like every other way a git call can fail.
+            return new GitCliResult(-1, string.Empty, $"fatal: could not start '{_options.GitExecutable}' in '{workingDirectory}': {ex.Message}");
+        }
+
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 

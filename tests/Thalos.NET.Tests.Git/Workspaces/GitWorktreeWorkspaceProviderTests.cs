@@ -8,7 +8,7 @@ using ZeroAlloc.Results;
 
 namespace Thalos.Tests.Git.Workspaces;
 
-public sealed class GitWorktreeWorkspaceProviderTests : IDisposable
+public sealed partial class GitWorktreeWorkspaceProviderTests : IDisposable
 {
     private readonly string _temp = Directory.CreateTempSubdirectory("thalos-git-workspaces-").FullName;
     private readonly string _dataRoot;
@@ -390,7 +390,8 @@ public sealed class GitWorktreeWorkspaceProviderTests : IDisposable
 
         var (successCount, winner) = CountSuccesses(results);
         successCount.Should().Be(1, "exactly one of many provider instances racing the same run must win the claim");
-        Git(winner!.Root, "status").Should().NotBeNull("the survivor must still be a working git checkout, not just a directory that happens to exist");
+        // Git throws when git status exits nonzero, so the call itself checks the survivor is a working checkout.
+        _ = Git(winner!.Root, "status");
         File.ReadAllText(Path.Combine(winner.Root, "AGENT.md")).Should().Be("original", "the survivor's own files must be untouched by any loser");
         (await providers[0].FindAsync(runId, CancellationToken.None)).Should().NotBeNull();
     }
@@ -402,6 +403,10 @@ public sealed class GitWorktreeWorkspaceProviderTests : IDisposable
     /// writing <c>workspace.json.tmp</c>, because the sidecar path is keyed on the run id alone — calls for
     /// different repositories still collide on one sidecar file. The atomic <see cref="FileMode.CreateNew"/> claim
     /// must resolve this the same way as P1y: one winner, nothing thrown, every loser's repository untouched.
+    /// This test cannot turn red for a broken claim: with the claim made non-atomic, every extra winner still
+    /// collides on <c>git worktree add</c> against the one root the run id implies, and git's own refusal converges
+    /// to one success. <see cref="ClaimAsync_lets_exactly_one_racing_call_win_across_repositories"/> carries the
+    /// claim's red; this test is positive end-to-end confirmation only.
     /// </summary>
     [Fact]
     public async Task P1x_the_same_run_id_against_two_repositories_leaves_exactly_one_live_workspace()
@@ -429,7 +434,8 @@ public sealed class GitWorktreeWorkspaceProviderTests : IDisposable
 
         var (successCount, winner) = CountSuccesses(results);
         successCount.Should().Be(1, "exactly one repository must win the claim for a shared run id");
-        Git(winner!.Root, "status").Should().NotBeNull("the survivor must still be a working git checkout, not just a directory that happens to exist");
+        // Git throws when git status exits nonzero, so the call itself checks the survivor is a working checkout.
+        _ = Git(winner!.Root, "status");
         (await providers[0].FindAsync(runId, CancellationToken.None)).Should().NotBeNull();
     }
 
@@ -491,12 +497,17 @@ public sealed class GitWorktreeWorkspaceProviderTests : IDisposable
     public async Task Constructing_many_providers_on_one_shared_data_root_concurrently_never_throws()
     {
         var exceptions = new ConcurrentBag<Exception>();
-        var barrier = new Barrier(40);
-        var tasks = Enumerable.Range(0, 40).Select(_ => Task.Run(() =>
-        {
-            barrier.SignalAndWait();
-            ConstructProviderCatching(exceptions);
-        }));
+        var barrier = new Barrier(150);
+        // A dedicated thread per constructor: 150 threads blocked on one Barrier would starve the thread pool.
+        var tasks = Enumerable.Range(0, 150).Select(_ => Task.Factory.StartNew(
+            () =>
+            {
+                barrier.SignalAndWait();
+                ConstructProviderCatching(exceptions);
+            },
+            CancellationToken.None,
+            TaskCreationOptions.LongRunning,
+            TaskScheduler.Default));
 
         await Task.WhenAll(tasks);
 
@@ -539,8 +550,8 @@ public sealed class GitWorktreeWorkspaceProviderTests : IDisposable
         Directory.Exists(ws1.Root).Should().BeTrue("the earlier live worktree must survive an indeterminate mirror validation");
         File.ReadAllText(Path.Combine(ws1.Root, "AGENT.md")).Should().Be("original");
         // Directory.Exists alone would not prove ws1 still works as a git checkout, only that a directory with
-        // that name is present.
-        Git(ws1.Root, "status").Should().NotBeNull("ws1 must still be a working git checkout after the indeterminate validation, not just a surviving directory");
+        // that name is present. Git throws when git status exits nonzero, so the call itself is the check.
+        _ = Git(ws1.Root, "status");
     }
 
     /// <summary>
@@ -602,7 +613,8 @@ public sealed class GitWorktreeWorkspaceProviderTests : IDisposable
         IsIntactBareRepository(MirrorOf("sandbox")).Should().BeTrue("a mirror with a live worktree must never be deleted, even when validation finds it positively invalid");
         Directory.Exists(ws1.Root).Should().BeTrue();
         File.ReadAllText(Path.Combine(ws1.Root, "AGENT.md")).Should().Be("original");
-        Git(ws1.Root, "status").Should().NotBeNull("ws1 must still be a working git checkout, not just a surviving directory");
+        // Git throws when git status exits nonzero, so the call itself checks ws1 is still a working checkout.
+        _ = Git(ws1.Root, "status");
     }
 
     /// <summary>
@@ -1024,6 +1036,12 @@ public sealed class GitWorktreeWorkspaceProviderTests : IDisposable
         {
             // Clears the read-only attribute git sets on files under a mirror's .git/objects — otherwise a plain
             // recursive delete throws UnauthorizedAccessException on Windows.
+            // Directories too: a test may plant a read-only directory, which blocks deleting its children on Linux.
+            foreach (var directory in Directory.EnumerateDirectories(_temp, "*", SearchOption.AllDirectories))
+            {
+                File.SetAttributes(directory, FileAttributes.Directory);
+            }
+
             foreach (var file in Directory.EnumerateFiles(_temp, "*", SearchOption.AllDirectories))
             {
                 File.SetAttributes(file, FileAttributes.Normal);
@@ -1031,7 +1049,7 @@ public sealed class GitWorktreeWorkspaceProviderTests : IDisposable
 
             Directory.Delete(_temp, recursive: true);
         }
-        catch (IOException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             // Best effort: a worktree's index/objects can still be briefly locked right after a test's own
             // git process exits on Windows. Leaving a stray temp directory behind is not worth failing the test.

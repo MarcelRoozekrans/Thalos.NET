@@ -37,57 +37,75 @@ namespace Thalos.Git.Workspaces;
 /// names — never a stale one left over from the mirror's first clone.
 /// </para>
 /// <para>
-/// <b>A first clone is atomic.</b> The mirror is cloned into a temporary directory beside its final location and
-/// moved into place only once the clone and its follow-up config calls all succeed; a failure at any point leaves
-/// nothing at the mirror's real path. An existing mirror is validated — bare, with <c>remote.origin.fetch</c> set —
-/// before it is trusted, and only ever deleted on a <em>positive</em> invalid answer from that validation: a
-/// timeout, an ownership refusal, or any other inconclusive result fails the create instead, and never a mirror
-/// whose <c>worktrees/</c> directory still has an entry in it, however the validation came out — a mirror with a
-/// live worktree is never deleted by this provider, full stop. See <see cref="MirrorValidation"/>.
+/// <b>A first clone is atomic, and losing a first-clone race is not a failure.</b> The mirror is cloned into a
+/// temporary directory beside its final location and moved into place only once the clone and its follow-up config
+/// calls all succeed; a failure at any point leaves nothing at the mirror's real path. A first clone runs under the
+/// repository's cross-process lock (see below), so two hosts sharing a <see cref="GitWorkspaceOptions.DataRoot"/>
+/// normally clone one after the other, the second finding the first's mirror in place. Should both still clone at
+/// once — on a host where .NET's file locking is disabled, say — the second to reach the final move finds the
+/// destination taken, treats that as the other claimant having won, deletes its own temporary clone, validates the
+/// winner's mirror and continues with it. An existing mirror is validated — bare, with
+/// <c>remote.origin.fetch</c> set — before it is trusted, and only ever deleted on a <em>positive</em> invalid answer
+/// from that validation: a timeout, an ownership refusal, or any other inconclusive result fails the create instead,
+/// and never a mirror whose <c>worktrees/</c> directory still has an entry in it, however the validation came out —
+/// a mirror with a live worktree is never deleted by this provider, full stop. See <see cref="MirrorValidation"/>.
 /// </para>
 /// <para>
-/// <b>Ownership of a run is claimed atomically, across processes.</b> <see cref="CreateAsync"/> does not check
-/// whether the run's root or sidecar already exist and then act on what it saw — a check followed by an action is
-/// exactly the race two providers sharing one <see cref="GitWorkspaceOptions.DataRoot"/> (an API host and a CLI
-/// host, say) can both pass at once. Instead it creates the run's sidecar file with
-/// <see cref="FileMode.CreateNew"/>, the one filesystem operation the OS itself makes atomic even across
-/// processes: exactly one caller's <see cref="FileMode.CreateNew"/> can ever succeed for a given run id, no matter
-/// how many processes, repositories, or in-process callers race for it at the same moment. The call that loses —
-/// including every other call for the same run id against a <em>different</em> repository, since the sidecar path
-/// is keyed on the run id alone — returns a failure <see cref="Result{T,E}"/> immediately and touches nothing: no
-/// mirror, no worktree, no delete. The call that wins is this run's sole owner for the rest of the create, and
-/// every failure path from there deletes exactly what it, and only it, created: the sidecar directly, since it
-/// alone claimed it, and the worktree root through <see cref="AddWorktreeAsync"/> and
-/// <see cref="CleanupCreatedWorktreeAsync"/>, which track and remove only what those specific calls made. A
-/// provisional <see cref="RunWorkspace"/> — the same one, with <see cref="RunWorkspace.SolutionPath"/> not yet
-/// resolved — is what the claim itself writes, before <c>git worktree add</c> ever runs, so a crash between the
-/// worktree's creation and the create's own completion still leaves a sidecar a sweeper can find and act on rather
-/// than an orphan directory with no record at all.
+/// <b>Ownership of a run is claimed atomically, across processes, by publishing a whole record.</b>
+/// <see cref="CreateAsync"/> does not check whether the run's record exists and then act on what it saw — a check
+/// followed by an action is exactly the race two providers sharing one <see cref="GitWorkspaceOptions.DataRoot"/>
+/// (an API host and a CLI host, say) can both pass at once. Instead <see cref="ClaimAsync"/> serialises a
+/// <see cref="WorkspaceSidecarState.Provisional"/> record to a uniquely named temp file and publishes it onto the
+/// run's sidecar path with <see cref="AtomicPublish.TryPublishNew"/>, which the kernel refuses atomically when the
+/// path already exists — a no-replace move on Windows, <c>link(2)</c> on Unix, where .NET's own no-overwrite
+/// <see cref="File.Move(string, string, bool)"/> is a check followed by a replacing rename and is not atomic. Exactly
+/// one caller's publish can succeed for a given run id, however many processes, repositories or in-process callers
+/// race for it. Because the record only ever appears complete, a
+/// reader racing the claim sees either no record or the whole one — never a sharing violation and never a
+/// half-written file — and a claimant that crashes mid-claim leaves only its own temp file, which
+/// <see cref="ListAsync"/> sweeps once it is older than <see cref="ProvisionalGracePeriod"/>. The call that loses
+/// the publish — including every call for the same run id against a <em>different</em> repository, since the sidecar
+/// path is keyed on the run id alone — deletes its own temp file and returns a failure
+/// <see cref="Result{T,E}"/>, touching nothing else.
 /// </para>
 /// <para>
-/// <b>The per-repository lock serialises this process's own git calls; it has nothing to do with ownership.</b> A
-/// <see cref="SemaphoreSlim"/>, one per <see cref="RunWorkspaceRequest.Repository"/>, is held across every git call
-/// this provider makes against that repository's mirror — clone, fetch, worktree add, worktree remove, and branch
-/// delete — because two runs sharing a repository, within this one process, must not clone or fetch the one mirror
-/// directory at the same time. It is acquired only after ownership is already settled by the atomic claim above,
-/// and it does nothing for two separate host processes racing the same mirror — an in-process lock cannot arbitrate
-/// between an API host and a CLI host that happen to share a <see cref="GitWorkspaceOptions.DataRoot"/>, which is
-/// exactly why ownership is claimed the way it is rather than guarded by this lock. No test exercises the
-/// same-process git-serialisation race directly (a red for it would depend on git losing a timing race that cannot
-/// be forced, so none could be verified — ruling R16), but the lock stays: the hazard it prevents is real even
-/// though it cannot be demonstrated with a deterministic test. Git's own lock files (<c>index.lock</c>, the
-/// per-worktree administrative locks under <c>.git/worktrees/&lt;name&gt;</c>, and so on) are what prevent
-/// corruption across processes at the git level — this provider relies on them for that, rather than reimplementing
-/// cross-process locking itself.
+/// <b>The claimant undoes its own work on every path that does not complete.</b> Everything after the claim runs
+/// inside one <c>try</c>/<c>finally</c>: a failure <see cref="Result{T,E}"/>, an exception, or a cancellation all
+/// run the same undo, which removes the worktree and branch if this call got as far as adding them, and then the
+/// sidecar the claim published. Cancellation still propagates as <see cref="OperationCanceledException"/>; the undo
+/// itself runs uncancelled, bounded by <see cref="GitWorkspaceOptions.CommandTimeout"/> per git call. The worktree
+/// root and the run branch count as this call's own only because the create refuses up front when either already
+/// exists, so the undo never deletes something it found.
 /// </para>
 /// <para>
-/// <b><see cref="RemoveAsync"/> converges even when the worktree's own admin directory is already gone.</b> If
+/// <b>A record is provisional until its create completes.</b> The claim is replaced, again by a whole-file move,
+/// with a <see cref="WorkspaceSidecarState.Ready"/> record just before observers are told the workspace is ready.
+/// <see cref="FindAsync"/> reports only ready workspaces. <see cref="ListAsync"/> reports both, so a sweeper sees a
+/// crashed claimant's record. <see cref="RemoveAsync"/> refuses a provisional record younger than
+/// <see cref="ProvisionalGracePeriod"/>, because its create may still be running, possibly in another process, and
+/// removing its worktree mid-create is exactly the race it must not lose; an older one belongs to a dead claimant and
+/// is removed.
+/// </para>
+/// <para>
+/// <b>Git on a mirror is serialised across processes; that lock has nothing to do with ownership.</b> Every git call
+/// this provider makes against a repository's mirror — clone, fetch, worktree add, worktree remove, and branch
+/// delete — runs under that repository's lock, which is two locks taken in order: a <see cref="SemaphoreSlim"/> for
+/// this process's own callers, and a <see cref="CrossProcessFileLock"/> on <c>mirrors/.&lt;repository&gt;.lock</c>
+/// for every other process sharing the <see cref="GitWorkspaceOptions.DataRoot"/>. Git's own lock files
+/// (<c>config.lock</c>, ref locks, <c>index.lock</c>) prevent corruption, but they make a concurrent second git call
+/// fail — "could not lock config file" — rather than wait, so two hosts creating workspaces for one repository at
+/// once would fail each other's creates without it. The lock is taken only after ownership is settled by the claim
+/// above, and it plays no part in who owns a run.
+/// </para>
+/// <para>
+/// <b><see cref="RemoveAsync"/> converges when git has nothing left to act on.</b> A record whose mirror is gone has
+/// nothing to remove on the git side: the run's root directory and record are deleted and the remove succeeds. If
 /// something outside this provider deleted <c>&lt;mirror&gt;/worktrees/&lt;id&gt;</c> directly, <c>git worktree
 /// remove</c> fails with <c>fatal: '&lt;path&gt;' is not a working tree</c> forever — no amount of retrying
 /// changes that outcome. On exactly that error, <see cref="RemoveAsync"/> prunes, force-deletes whatever is left
 /// of the run's root directory, deletes the branch, and reports the workspace removed regardless of whether the
 /// branch delete itself succeeded — the alternative is a run whose sidecar and root can never be cleaned up by
-/// this provider again.
+/// this provider again. The root it deletes is always the one the run id implies, never a path read from the record.
 /// </para>
 /// </remarks>
 /// <param name="options">Where mirrors, worktrees and sidecar records live, and how the git child process is run.</param>
@@ -105,6 +123,16 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     TimeProvider clock,
     IGitCredentialSource? credentials = null) : IRunWorkspaceProvider
 {
+    /// <summary>
+    /// Ruling R9's orphan grace period. A provisional record younger than this may belong to a create still in
+    /// flight, so <see cref="RemoveAsync"/> refuses it; a claim temp file older than this belongs to a crashed
+    /// claimant, so <see cref="ListAsync"/> sweeps it.
+    /// </summary>
+    internal static readonly TimeSpan ProvisionalGracePeriod = TimeSpan.FromMinutes(10);
+
+    private const string SidecarSuffix = ".workspace.json";
+    private const string PendingSidecarSuffix = ".sidecar.tmp";
+
     private readonly GitCli _git = new(options);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _repositoryLocks = new(StringComparer.Ordinal);
 
@@ -128,67 +156,85 @@ public sealed partial class GitWorktreeWorkspaceProvider(
             return Result<RunWorkspace, AgentError>.Failure(claim.Error);
         }
 
-        var gate = LockFor(request.Repository);
-        await gate.WaitAsync(ct).ConfigureAwait(false);
+        // From here this call owns the run. Every way out that is not a completed create — a failure Result, an
+        // exception, a cancellation — runs the same undo, so no claimed record outlives its create.
+        var progress = new CreateProgress();
+        var completed = false;
         try
         {
-            return await CreateClaimedAsync(request, mirror, root, claim.Value, secretConfig, secret, ct).ConfigureAwait(false);
+            var created = await CreateClaimedAsync(request, mirror, root, claim.Value, secretConfig, secret, progress, ct).ConfigureAwait(false);
+            completed = created.IsSuccess;
+            return created;
         }
         finally
         {
-            gate.Release();
+            if (!completed)
+            {
+                await UndoCreateAsync(request, mirror, root, progress).ConfigureAwait(false);
+            }
         }
     }
 
     /// <summary>
-    /// Claims exclusive, cross-process ownership of <paramref name="request"/>'s run by creating its sidecar with
-    /// <see cref="FileMode.CreateNew"/> — see the class remarks for why this, rather than a check followed by an
-    /// action, is what makes the claim atomic across every provider instance sharing this
-    /// <see cref="GitWorkspaceOptions.DataRoot"/>. A losing caller returns a failure here and touches nothing else.
-    /// Internal, not private, so its own atomicity can be tested directly and quickly — hundreds of racing trials
-    /// with no real git work in any of them — rather than only indirectly through <see cref="CreateAsync"/>, where
-    /// a full create's own later git-level collisions (a shared worktree root refusing a second <c>git worktree
-    /// add</c>) can coincidentally still converge to one winner even if this claim were not atomic at all, masking
-    /// a broken claim rather than exposing it.
+    /// Claims exclusive, cross-process ownership of <paramref name="request"/>'s run by publishing a whole
+    /// provisional record onto its sidecar path — see the class remarks for why an atomic no-replace publish, rather
+    /// than a check followed by an action or a write in place, is what makes the claim atomic across every
+    /// provider instance sharing this <see cref="GitWorkspaceOptions.DataRoot"/>. A losing caller deletes its own temp
+    /// file, returns a failure and touches nothing else. Internal, not private, so its own atomicity can be tested
+    /// directly and quickly — hundreds of racing trials with no real git work in any of them — rather than only
+    /// indirectly through <see cref="CreateAsync"/>, where a full create's own later git-level collisions (a shared
+    /// worktree root refusing a second <c>git worktree add</c>) can coincidentally still converge to one winner even
+    /// if this claim were not atomic at all, masking a broken claim rather than exposing it.
     /// </summary>
     internal async Task<Result<RunWorkspace, AgentError>> ClaimAsync(RunWorkspaceRequest request, string root, CancellationToken ct)
     {
-        var runsDir = Path.Combine(options.DataRoot, "runs");
-        Directory.CreateDirectory(runsDir);
+        if (EnsureRunsDirectory() is { } unusable)
+        {
+            return Result<RunWorkspace, AgentError>.Failure(unusable);
+        }
 
         var provisional = new RunWorkspace(request.RunId, request.Repository, request.Remote, request.DefaultBranch, request.Branch, root, SolutionPath: null)
         {
             CreatedAt = clock.GetUtcNow(),
         };
 
-        FileStream claimStream;
+        var sidecar = SidecarPath(request.RunId);
+        var temp = PendingSidecarPath(request.RunId);
         try
         {
-            claimStream = new FileStream(SidecarPath(request.RunId), FileMode.CreateNew, FileAccess.Write, FileShare.None);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // Another call — in this process or a different one sharing the same DataRoot, possibly for a
-            // different repository, since the sidecar path is keyed on the run id alone — already claimed this
-            // run, or the path is not writable right now. Either way this call owns nothing and deletes nothing.
-            return Result<RunWorkspace, AgentError>.Failure(
-                AgentError.Validation($"A workspace for run '{request.RunId}' already exists or is being created."));
-        }
+            if (await WritePendingSidecarAsync(temp, new WorkspaceSidecar(WorkspaceSidecarState.Provisional, provisional), ct).ConfigureAwait(false) is { } writeFailed)
+            {
+                return Result<RunWorkspace, AgentError>.Failure(writeFailed);
+            }
 
-        await using (claimStream.ConfigureAwait(false))
-        {
-            await JsonSerializer.SerializeAsync(claimStream, provisional, GitWorkspaceJsonContext.Default.RunWorkspace, ct).ConfigureAwait(false);
-        }
+            bool published;
+            try
+            {
+                published = AtomicPublish.TryPublishNew(temp, sidecar);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                return Result<RunWorkspace, AgentError>.Failure(
+                    AgentError.StoreError($"Could not publish the claim for run '{request.RunId}' at '{sidecar}'.", ex.Message));
+            }
 
-        return Result<RunWorkspace, AgentError>.Success(provisional);
+            // Only an existing record means another claimant owns this run: in this process or another sharing the
+            // DataRoot, possibly for a different repository, since the sidecar path is keyed on the run id alone.
+            return published
+                ? Result<RunWorkspace, AgentError>.Success(provisional)
+                : Result<RunWorkspace, AgentError>.Failure(AgentError.Validation($"A workspace for run '{request.RunId}' already exists or is being created."));
+        }
+        finally
+        {
+            // A no-op after a successful move; otherwise this call's own temp file, and nobody else's.
+            DeleteFileIfPresent(temp, "remove the claim's temp file");
+        }
     }
 
     /// <summary>
-    /// The rest of <see cref="CreateAsync"/> once <paramref name="provisional"/>'s claim is secure and the
-    /// per-repository lock (which only serialises this process's own git calls, and plays no role in ownership) is
-    /// held. This call is the sidecar's sole owner, so every failure path below deletes it directly;
-    /// <paramref name="root"/>'s own cleanup is the separate responsibility of <see cref="AddWorktreeAsync"/> and
-    /// <see cref="CleanupCreatedWorktreeAsync"/>, which track and remove only what those specific calls created.
+    /// The rest of <see cref="CreateAsync"/> once <paramref name="provisional"/>'s claim is secure. Records in
+    /// <paramref name="progress"/> how far it got, so <see cref="UndoCreateAsync"/> removes exactly what this call
+    /// created and nothing it found.
     /// </summary>
     private async Task<Result<RunWorkspace, AgentError>> CreateClaimedAsync(
         RunWorkspaceRequest request,
@@ -197,78 +243,144 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         RunWorkspace provisional,
         IReadOnlyList<(string Key, string Value)>? secretConfig,
         string? secret,
+        CreateProgress progress,
         CancellationToken ct)
     {
-        var prepared = await PrepareMirrorAsync(mirror, request.Remote, secretConfig, secret, ct).ConfigureAwait(false);
-        if (prepared.IsFailure)
+        if (Directory.Exists(root) || File.Exists(root))
         {
-            DeleteSidecar(request.RunId);
-            return Result<RunWorkspace, AgentError>.Failure(prepared.Error);
+            // Nothing but this run's owner may create its root, and this call owns the run but did not create it:
+            // it is left over from something else, and an operator decides what it is.
+            return Result<RunWorkspace, AgentError>.Failure(AgentError.Validation(
+                $"'{root}' already exists but no workspace record owns it; refusing to use or delete it."));
         }
 
-        var added = await AddWorktreeAsync(mirror, root, request, ct).ConfigureAwait(false);
-        if (added.IsFailure)
+        using (await LockRepositoryAsync(request.Repository, ct).ConfigureAwait(false))
         {
-            DeleteSidecar(request.RunId);
-            return Result<RunWorkspace, AgentError>.Failure(added.Error);
+            var prepared = await PrepareMirrorAsync(mirror, request.Remote, secretConfig, secret, ct).ConfigureAwait(false);
+            if (prepared.IsFailure)
+            {
+                return Result<RunWorkspace, AgentError>.Failure(prepared.Error);
+            }
+
+            var branchExists = await BranchExistsAsync(mirror, request.Branch, ct).ConfigureAwait(false);
+            if (branchExists.IsFailure)
+            {
+                return Result<RunWorkspace, AgentError>.Failure(branchExists.Error);
+            }
+
+            if (branchExists.Value)
+            {
+                return Result<RunWorkspace, AgentError>.Failure(AgentError.GitBranchAlreadyExists(request.Branch));
+            }
+
+            // Set before the call: a cancellation mid-checkout can leave a partial root, registration and branch, and
+            // all three are this call's own, since neither the root nor the branch existed a moment ago.
+            progress.WorktreeAttempted = true;
+            var added = await AddWorktreeAsync(mirror, root, request, ct).ConfigureAwait(false);
+            if (added.IsFailure)
+            {
+                return Result<RunWorkspace, AgentError>.Failure(added.Error);
+            }
         }
 
         var solution = ResolveSolution(root, request.Solution);
         if (solution.IsFailure)
         {
-            await CleanupCreatedWorktreeAsync(mirror, root, request.Branch, ct).ConfigureAwait(false);
-            DeleteSidecar(request.RunId);
             return Result<RunWorkspace, AgentError>.Failure(solution.Error);
         }
 
         var workspace = provisional with { SolutionPath = solution.Value };
-        await WriteSidecarAsync(workspace, ct).ConfigureAwait(false);
+        var published = await PublishSidecarAsync(new WorkspaceSidecar(WorkspaceSidecarState.Ready, workspace), ct).ConfigureAwait(false);
+        if (published.IsFailure)
+        {
+            return Result<RunWorkspace, AgentError>.Failure(published.Error);
+        }
+
+        progress.Ready = workspace;
         await NotifyObserversAsync(workspace, removing: false, ct).ConfigureAwait(false);
         return Result<RunWorkspace, AgentError>.Success(workspace);
     }
 
-    /// <inheritdoc />
-    public async ValueTask<RunWorkspace?> FindAsync(Guid runId, CancellationToken ct)
+    /// <summary>
+    /// Undoes an incomplete create: tells observers the workspace is going if they were told it was ready, removes
+    /// the worktree, its registration and the run branch if this call attempted to add them, and deletes the claimed
+    /// sidecar last, so a crash part-way through the undo still leaves a record a sweeper can see. Runs uncancelled —
+    /// the caller's token may be the very reason this runs — and never throws: every step's failure is logged.
+    /// </summary>
+    private async Task UndoCreateAsync(RunWorkspaceRequest request, string mirror, string root, CreateProgress progress)
     {
-        var path = SidecarPath(runId);
-        if (!File.Exists(path))
+        if (progress.Ready is { } ready)
         {
-            return null;
+            await NotifyObserversAsync(ready, removing: true, CancellationToken.None).ConfigureAwait(false);
         }
 
-        return await ReadSidecarAsync(path, ct).ConfigureAwait(false);
+        if (progress.WorktreeAttempted)
+        {
+            using (await LockRepositoryAsync(request.Repository, CancellationToken.None).ConfigureAwait(false))
+            {
+                await RemoveCreatedWorktreeAsync(mirror, root, request.Branch).ConfigureAwait(false);
+            }
+        }
+
+        var deleted = DeleteSidecar(request.RunId);
+        if (deleted.IsFailure)
+        {
+            LogCleanupFailed(logger, "delete the claimed sidecar", deleted.Error.ToString());
+        }
     }
 
     /// <inheritdoc />
+    /// <remarks>
+    /// Reports only a <see cref="WorkspaceSidecarState.Ready"/> workspace: a record still being created is not a
+    /// workspace yet. An unreadable record is logged and reported as absent.
+    /// </remarks>
+    public async ValueTask<RunWorkspace?> FindAsync(Guid runId, CancellationToken ct)
+    {
+        var path = SidecarPath(runId);
+        var read = await ReadSidecarAsync(path, ct).ConfigureAwait(false);
+        if (read.Sidecar is { State: WorkspaceSidecarState.Ready } sidecar)
+        {
+            return sidecar.Workspace;
+        }
+
+        if (read.Error is { } error)
+        {
+            LogUnreadableSidecar(logger, path, error);
+        }
+
+        return null;
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Reports provisional records too, so a sweeper can see a crashed claimant's record and remove it once it is
+    /// older than <see cref="ProvisionalGracePeriod"/>. Also sweeps claim temp files older than that grace period.
+    /// </remarks>
     public async ValueTask<IReadOnlyList<RunWorkspace>> ListAsync(CancellationToken ct)
     {
-        var runsDir = Path.Combine(options.DataRoot, "runs");
+        var runsDir = RunsDirectory;
         if (!Directory.Exists(runsDir))
         {
             return [];
         }
 
+        SweepStalePendingSidecars(runsDir);
+
         var workspaces = new List<RunWorkspace>();
-        foreach (var file in Directory.EnumerateFiles(runsDir, "*.workspace.json"))
+        foreach (var file in Directory.EnumerateFiles(runsDir, "*" + SidecarSuffix))
         {
             ct.ThrowIfCancellationRequested();
 
-            RunWorkspace? workspace;
-            try
+            // A record the sweeper cannot read is not a reason to abandon the sweep for every other run — skip it
+            // and log, rather than letting one bad file abort ListAsync for everything else.
+            var read = await ReadSidecarAsync(file, ct).ConfigureAwait(false);
+            if (read.Sidecar is { } sidecar)
             {
-                workspace = await ReadSidecarAsync(file, ct).ConfigureAwait(false);
+                workspaces.Add(sidecar.Workspace);
             }
-            catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
+            else if (read.Error is { } error)
             {
-                // A sidecar the sweeper cannot read is not a reason to abandon the sweep for every other run —
-                // skip it and log, rather than letting one bad file abort ListAsync for everything else.
-                LogUnreadableSidecar(logger, file, ex.Message);
-                continue;
-            }
-
-            if (workspace is not null)
-            {
-                workspaces.Add(workspace);
+                LogUnreadableSidecar(logger, file, error);
             }
         }
 
@@ -278,35 +390,62 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     /// <inheritdoc />
     public async ValueTask<UnitResult<AgentError>> RemoveAsync(Guid runId, CancellationToken ct)
     {
-        var workspace = await FindAsync(runId, ct).ConfigureAwait(false);
-        if (workspace is null)
+        var read = await ReadSidecarAsync(SidecarPath(runId), ct).ConfigureAwait(false);
+        if (read.Error is { } error)
+        {
+            return UnitResult<AgentError>.Failure(AgentError.StoreError(
+                $"The workspace record for run '{runId}' could not be read; leaving it for an operator.", error));
+        }
+
+        if (read.Sidecar is not { } sidecar)
         {
             // Removing an already-removed (or never-created) workspace succeeds: there is nothing left to do.
             return UnitResult<AgentError>.Success();
         }
 
-        await NotifyObserversAsync(workspace, removing: true, ct).ConfigureAwait(false);
+        var workspace = sidecar.Workspace;
+        if (sidecar.State == WorkspaceSidecarState.Provisional && clock.GetUtcNow() - workspace.CreatedAt < ProvisionalGracePeriod)
+        {
+            return UnitResult<AgentError>.Failure(AgentError.Validation(
+                $"The workspace for run '{runId}' is still being created; it can be removed once its create finishes, or once its claim is older than {ProvisionalGracePeriod}."));
+        }
+
+        if (!IsValidRepositoryName(workspace.Repository))
+        {
+            return UnitResult<AgentError>.Failure(AgentError.Validation(
+                $"The workspace record for run '{runId}' names repository '{workspace.Repository}', which is not a valid mirror directory name; leaving it for an operator."));
+        }
+
+        // Observers were only ever told a ready workspace exists.
+        if (sidecar.State == WorkspaceSidecarState.Ready)
+        {
+            await NotifyObserversAsync(workspace, removing: true, ct).ConfigureAwait(false);
+        }
 
         var mirror = MirrorPath(workspace.Repository);
-        var gate = LockFor(workspace.Repository);
-        await gate.WaitAsync(ct).ConfigureAwait(false);
+        var root = WorktreeRoot(runId);
         UnitResult<AgentError> result;
-        try
+        using (await LockRepositoryAsync(workspace.Repository, ct).ConfigureAwait(false))
         {
-            var (removed, pruned, branchDeleted) = await RemoveWorktreeAndBranchAsync(mirror, workspace.Root, workspace.Branch, ct).ConfigureAwait(false);
-            result = InterpretRemoval(workspace.Root, removed, pruned, branchDeleted);
-        }
-        finally
-        {
-            gate.Release();
+            result = await RemoveFromGitAsync(mirror, root, workspace.Branch, ct).ConfigureAwait(false);
         }
 
-        if (result.IsSuccess)
+        return result.IsSuccess ? DeleteSidecar(runId) : result;
+    }
+
+    /// <summary>
+    /// Removes the run's worktree, registration and branch. A missing mirror means nothing is left to remove on the
+    /// git side — there is no repository to run git in — so only the root directory is deleted.
+    /// </summary>
+    private async Task<UnitResult<AgentError>> RemoveFromGitAsync(string mirror, string root, string branch, CancellationToken ct)
+    {
+        if (!Directory.Exists(mirror))
         {
-            DeleteSidecar(runId);
+            return DeleteRootDirectory(root, "remove the worktree directory of a workspace whose mirror is gone");
         }
 
-        return result;
+        var (removed, pruned, branchDeleted) = await RemoveWorktreeAndBranchAsync(mirror, root, branch, ct).ConfigureAwait(false);
+        return InterpretRemoval(root, removed, pruned, branchDeleted);
     }
 
     // ---------- mirror + worktree ----------
@@ -394,7 +533,19 @@ public sealed partial class GitWorktreeWorkspaceProvider(
                 return UnitResult<AgentError>.Failure(GitFailure("git config core.symlinks failed.", noSymlinks, secret: null));
             }
 
-            Directory.Move(temp, mirror);
+            try
+            {
+                Directory.Move(temp, mirror);
+            }
+            catch (IOException) when (Directory.Exists(mirror))
+            {
+                // Another claimant, most likely another host process sharing this DataRoot, finished its own first
+                // clone of this repository first. Its mirror is complete, because it too moved it into place only
+                // after clone and config succeeded; validate it and continue with it rather than failing a create
+                // that merely lost a race. This call's own clone is deleted by the finally below.
+                return await AdoptRacedMirrorAsync(mirror, ct).ConfigureAwait(false);
+            }
+
             return UnitResult<AgentError>.Success();
         }
         finally
@@ -403,6 +554,20 @@ public sealed partial class GitWorktreeWorkspaceProvider(
             // no-op) or failed at any step (nothing is left half-cloned at either the temp or the real path).
             TryDeleteDirectory(temp, "remove the temporary clone directory");
         }
+    }
+
+    /// <summary>
+    /// Continues with a mirror another claimant moved into place while this call was cloning, after checking it is a
+    /// valid one. A mirror that does not validate is left alone — this call did not create it — and fails the create.
+    /// </summary>
+    private async Task<UnitResult<AgentError>> AdoptRacedMirrorAsync(string mirror, CancellationToken ct)
+    {
+        LogFirstCloneRaceLost(logger, mirror);
+        var (state, detail) = await ValidateMirrorAsync(mirror, ct).ConfigureAwait(false);
+        return state == MirrorValidation.Valid
+            ? UnitResult<AgentError>.Success()
+            : UnitResult<AgentError>.Failure(AgentError.GitOperationFailed(
+                $"Another process cloned the mirror at '{mirror}' first, and it did not validate; leaving it untouched.", detail));
     }
 
     /// <summary>
@@ -472,6 +637,24 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         return Directory.Exists(worktreesDir) && Directory.EnumerateFileSystemEntries(worktreesDir).Any();
     }
 
+    /// <summary>
+    /// Whether <paramref name="branch"/> already exists in <paramref name="mirror"/>. Checked before
+    /// <c>git worktree add -b</c>, so that a branch present afterwards is known to be this create's own and its undo
+    /// may delete it; git would refuse the add for an existing branch anyway.
+    /// </summary>
+    private async Task<Result<bool, AgentError>> BranchExistsAsync(string mirror, string branch, CancellationToken ct)
+    {
+        var shown = await _git.RunAsync(mirror, ["show-ref", "--verify", "--quiet", "refs/heads/" + branch], null, null, ct).ConfigureAwait(false);
+        if (shown.Succeeded)
+        {
+            return Result<bool, AgentError>.Success(true);
+        }
+
+        return !shown.TimedOut && shown.ExitCode == 1
+            ? Result<bool, AgentError>.Success(false)
+            : Result<bool, AgentError>.Failure(GitFailure("git show-ref for the run branch failed.", shown, secret: null));
+    }
+
     private async Task<UnitResult<AgentError>> AddWorktreeAsync(string mirror, string root, RunWorkspaceRequest request, CancellationToken ct)
     {
         var added = await _git.RunAsync(
@@ -481,39 +664,32 @@ public sealed partial class GitWorktreeWorkspaceProvider(
             null,
             ct).ConfigureAwait(false);
 
-        if (added.Succeeded)
-        {
-            return UnitResult<AgentError>.Success();
-        }
-
-        TryDeleteDirectory(root, "remove the partially created worktree");
-
-        // git may have registered the worktree in the mirror's administrative files before the checkout itself
-        // failed; prune drops that stale registration so a later create for the same repository is not blocked by it.
-        var pruned = await _git.RunAsync(mirror, ["worktree", "prune"], null, null, ct).ConfigureAwait(false);
-        if (!pruned.Succeeded)
-        {
-            LogCleanupFailed(logger, "prune the stale worktree registration", ExtractErrorDetail(pruned.StdErr));
-        }
-
-        return UnitResult<AgentError>.Failure(GitFailure("git worktree add failed.", added, secret: null));
+        // A failed add is undone by UndoCreateAsync, together with every other way a create can end incomplete.
+        return added.Succeeded
+            ? UnitResult<AgentError>.Success()
+            : UnitResult<AgentError>.Failure(GitFailure("git worktree add failed.", added, secret: null));
     }
 
-    private async Task CleanupCreatedWorktreeAsync(string mirror, string root, string branch, CancellationToken ct)
+    /// <summary>
+    /// The git half of <see cref="UndoCreateAsync"/>: removes the worktree this create added, or whatever part of it
+    /// an interrupted add left — its directory and, through <c>worktree prune</c>, its registration — and the run
+    /// branch. Uncancelled; each failure is logged. A branch the add never got to create is not an error.
+    /// </summary>
+    private async Task RemoveCreatedWorktreeAsync(string mirror, string root, string branch)
     {
-        var (removed, pruned, branchDeleted) = await RemoveWorktreeAndBranchAsync(mirror, root, branch, ct).ConfigureAwait(false);
+        var removed = await _git.RunAsync(mirror, ["worktree", "remove", "--force", "--", root], null, null, CancellationToken.None).ConfigureAwait(false);
         if (!removed.Succeeded)
         {
-            LogCleanupFailed(logger, "remove the worktree", ExtractErrorDetail(removed.StdErr));
-            if (pruned is { Succeeded: false } p)
+            TryDeleteDirectory(root, "remove the worktree directory of an incomplete create");
+            var pruned = await _git.RunAsync(mirror, ["worktree", "prune"], null, null, CancellationToken.None).ConfigureAwait(false);
+            if (!pruned.Succeeded)
             {
-                LogCleanupFailed(logger, "prune the stale worktree registration", ExtractErrorDetail(p.StdErr));
+                LogCleanupFailed(logger, "prune the stale worktree registration", ExtractErrorDetail(pruned.StdErr));
             }
-
-            TryDeleteDirectory(root, "remove the worktree directory directly, after git worktree remove failed");
         }
 
-        if (!branchDeleted.Succeeded)
+        var branchDeleted = await _git.RunAsync(mirror, ["branch", "-D", "--", branch], null, null, CancellationToken.None).ConfigureAwait(false);
+        if (!branchDeleted.Succeeded && !branchDeleted.StdErr.Contains("not found", StringComparison.Ordinal))
         {
             LogCleanupFailed(logger, "delete the run branch", ExtractErrorDetail(branchDeleted.StdErr));
         }
@@ -544,7 +720,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     /// failing forever: the worktree's own administrative directory is already gone, so no retry of the same
     /// command will ever succeed — <paramref name="pruned"/>'s and <paramref name="branchDeleted"/>'s own failures
     /// are logged rather than surfaced, <paramref name="root"/> is force-deleted directly, and the workspace is
-    /// reported removed, since that is now true regardless of git's exit code.
+    /// reported removed once that directory is gone.
     /// </summary>
     private UnitResult<AgentError> InterpretRemoval(string root, GitCliResult removed, GitCliResult? pruned, GitCliResult branchDeleted)
     {
@@ -555,14 +731,12 @@ public sealed partial class GitWorktreeWorkspaceProvider(
                 LogCleanupFailed(logger, "prune the stale worktree registration", ExtractErrorDetail(prunedAfterMissingAdmin.StdErr));
             }
 
-            TryDeleteDirectory(root, "remove the worktree directory directly, since git no longer considers it a working tree");
-
             if (!branchDeleted.Succeeded)
             {
                 LogCleanupFailed(logger, "delete the run branch", ExtractErrorDetail(branchDeleted.StdErr));
             }
 
-            return UnitResult<AgentError>.Success();
+            return DeleteRootDirectory(root, "remove the worktree directory directly, since git no longer considers it a working tree");
         }
 
         if (!removed.Succeeded)
@@ -621,7 +795,6 @@ public sealed partial class GitWorktreeWorkspaceProvider(
             }
         }
     }
-
     // ---------- credentials ----------
 
     private (IReadOnlyList<(string Key, string Value)>? SecretConfig, string? Secret) CredentialConfig(string remoteUrl)
@@ -729,65 +902,253 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         && !repository.Contains('\0')
         && !repository.Contains(':');
 
+
     // ---------- paths ----------
+
+    private string RunsDirectory => Path.Combine(options.DataRoot, "runs");
 
     private string MirrorPath(string repository) => Path.Combine(options.DataRoot, "mirrors", repository);
 
-    private string WorktreeRoot(Guid runId) => Path.Combine(options.DataRoot, "runs", runId.ToString());
+    private string WorktreeRoot(Guid runId) => Path.Combine(RunsDirectory, runId.ToString());
 
-    private string SidecarPath(Guid runId) => Path.Combine(options.DataRoot, "runs", runId.ToString() + ".workspace.json");
+    private string SidecarPath(Guid runId) => Path.Combine(RunsDirectory, runId.ToString() + SidecarSuffix);
 
-    private SemaphoreSlim LockFor(string repository) => _repositoryLocks.GetOrAdd(repository, static _ => new SemaphoreSlim(1, 1));
+    /// <summary>
+    /// A temp path unique to one write, so two writers never share one, and named so it never matches
+    /// <see cref="SidecarSuffix"/>: nothing reads a temp file as a record.
+    /// </summary>
+    private string PendingSidecarPath(Guid runId) =>
+        Path.Combine(RunsDirectory, $".{runId:N}.{Guid.NewGuid():N}{PendingSidecarSuffix}");
 
-    private async Task WriteSidecarAsync(RunWorkspace workspace, CancellationToken ct)
+    /// <summary>
+    /// Serialises git on one repository's mirror: first within this process, through a <see cref="SemaphoreSlim"/>,
+    /// so this process's own callers queue without polling, then across processes, through a
+    /// <see cref="CrossProcessFileLock"/> on <c>mirrors/.&lt;repository&gt;.lock</c>. Dispose the lease to release both.
+    /// </summary>
+    private async Task<MirrorLease> LockRepositoryAsync(string repository, CancellationToken ct)
     {
-        var runsDir = Path.Combine(options.DataRoot, "runs");
-        Directory.CreateDirectory(runsDir);
-
-        var path = SidecarPath(workspace.RunId);
-        var tmp = path + ".tmp";
-        var stream = File.Create(tmp);
-        await using (stream.ConfigureAwait(false))
+        var gate = _repositoryLocks.GetOrAdd(repository, static _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct).ConfigureAwait(false);
+        var leased = false;
+        try
         {
-            await JsonSerializer.SerializeAsync(stream, workspace, GitWorkspaceJsonContext.Default.RunWorkspace, ct).ConfigureAwait(false);
+            var mirrorsDir = Path.Combine(options.DataRoot, "mirrors");
+            Directory.CreateDirectory(mirrorsDir);
+            var file = await CrossProcessFileLock.AcquireAsync(Path.Combine(mirrorsDir, $".{repository}.lock"), ct).ConfigureAwait(false);
+            leased = true;
+            return new MirrorLease(gate, file);
         }
-
-        File.Move(tmp, path, overwrite: true);
+        finally
+        {
+            if (!leased)
+            {
+                gate.Release();
+            }
+        }
     }
 
-    private static async Task<RunWorkspace?> ReadSidecarAsync(string path, CancellationToken ct)
+    // ---------- sidecar store ----------
+
+    /// <summary>Creates the runs directory, or says accurately why it cannot be used.</summary>
+    private AgentError? EnsureRunsDirectory()
     {
-        var stream = File.OpenRead(path);
-        await using (stream.ConfigureAwait(false))
+        var runsDir = RunsDirectory;
+        try
         {
-            return await JsonSerializer.DeserializeAsync(stream, GitWorkspaceJsonContext.Default.RunWorkspace, ct).ConfigureAwait(false);
+            Directory.CreateDirectory(runsDir);
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return File.Exists(runsDir)
+                ? AgentError.StoreError($"The runs path '{runsDir}' exists but is not a directory.")
+                : AgentError.StoreError($"Could not create the runs directory '{runsDir}'.", ex.Message);
         }
     }
 
-    private void DeleteSidecar(Guid runId)
+    /// <summary>
+    /// Writes <paramref name="sidecar"/> completely to <paramref name="temp"/>, a path no one else uses, and flushes
+    /// it to disk, so the move that publishes it can only ever publish a complete record.
+    /// </summary>
+    private static async Task<AgentError?> WritePendingSidecarAsync(string temp, WorkspaceSidecar sidecar, CancellationToken ct)
     {
-        var path = SidecarPath(runId);
-        if (File.Exists(path))
+        try
+        {
+            var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            await using (stream.ConfigureAwait(false))
+            {
+                await JsonSerializer.SerializeAsync(stream, sidecar, GitWorkspaceJsonContext.Default.WorkspaceSidecar, ct).ConfigureAwait(false);
+                stream.Flush(flushToDisk: true);
+            }
+
+            return null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return AgentError.StoreError($"Could not write the workspace record '{temp}'.", ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Replaces this run's record with <paramref name="sidecar"/> by moving a complete temp file over it, so a reader
+    /// sees the old record or the new one, never part of either.
+    /// </summary>
+    private async Task<UnitResult<AgentError>> PublishSidecarAsync(WorkspaceSidecar sidecar, CancellationToken ct)
+    {
+        var temp = PendingSidecarPath(sidecar.Workspace.RunId);
+        try
+        {
+            if (await WritePendingSidecarAsync(temp, sidecar, ct).ConfigureAwait(false) is { } writeFailed)
+            {
+                return UnitResult<AgentError>.Failure(writeFailed);
+            }
+
+            File.Move(temp, SidecarPath(sidecar.Workspace.RunId), overwrite: true);
+            return UnitResult<AgentError>.Success();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return UnitResult<AgentError>.Failure(AgentError.StoreError(
+                $"Could not publish the workspace record for run '{sidecar.Workspace.RunId}'.", ex.Message));
+        }
+        finally
+        {
+            DeleteFileIfPresent(temp, "remove the workspace record's temp file");
+        }
+    }
+
+    /// <summary>The outcome of reading one record: absent, read, or unreadable with the reason.</summary>
+    private readonly record struct SidecarRead(WorkspaceSidecar? Sidecar, string? Error);
+
+    /// <summary>
+    /// Reads a record without ever throwing for its absence or its content. The file is opened sharing read, write
+    /// and delete, so reading never blocks the whole-file move that publishes a newer record or the delete that
+    /// removes it; a reader holding the old file open simply finishes reading the old, complete, record.
+    /// </summary>
+    private static async Task<SidecarRead> ReadSidecarAsync(string path, CancellationToken ct)
+    {
+        try
+        {
+            var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+            await using (stream.ConfigureAwait(false))
+            {
+                var sidecar = await JsonSerializer.DeserializeAsync(stream, GitWorkspaceJsonContext.Default.WorkspaceSidecar, ct).ConfigureAwait(false);
+                return sidecar?.Workspace is null
+                    ? new SidecarRead(null, "The record holds no workspace.")
+                    : new SidecarRead(sidecar, null);
+            }
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return new SidecarRead(null, null);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException)
+        {
+            return new SidecarRead(null, ex.Message);
+        }
+    }
+
+    private UnitResult<AgentError> DeleteSidecar(Guid runId)
+    {
+        try
+        {
+            File.Delete(SidecarPath(runId));
+            return UnitResult<AgentError>.Success();
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return UnitResult<AgentError>.Success();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return UnitResult<AgentError>.Failure(AgentError.StoreError($"Could not delete the workspace record for run '{runId}'.", ex.Message));
+        }
+    }
+
+    /// <summary>
+    /// Deletes claim and publish temp files older than <see cref="ProvisionalGracePeriod"/>: a write takes
+    /// milliseconds, so one that old belongs to a writer that crashed before its move. A younger one may still be
+    /// about to be moved into place, and is left alone.
+    /// </summary>
+    private void SweepStalePendingSidecars(string runsDir)
+    {
+        var now = clock.GetUtcNow().UtcDateTime;
+        foreach (var file in Directory.EnumerateFiles(runsDir, "*" + PendingSidecarSuffix))
+        {
+            if (now - File.GetLastWriteTimeUtc(file) >= ProvisionalGracePeriod)
+            {
+                DeleteFileIfPresent(file, "sweep a stale workspace record temp file");
+            }
+        }
+    }
+
+    private void DeleteFileIfPresent(string path, string what)
+    {
+        try
         {
             File.Delete(path);
         }
-    }
-
-    private void TryDeleteDirectory(string path, string what)
-    {
-        if (!Directory.Exists(path))
+        catch (DirectoryNotFoundException)
         {
-            return;
-        }
-
-        try
-        {
-            Directory.Delete(path, recursive: true);
+            // Already gone with its directory.
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             LogCleanupFailed(logger, what, ex.Message);
         }
+    }
+
+    /// <summary>Deletes <paramref name="path"/> recursively if present, logging a failure; reports whether it is gone.</summary>
+    private bool TryDeleteDirectory(string path, string what)
+    {
+        if (!Directory.Exists(path))
+        {
+            return true;
+        }
+
+        try
+        {
+            Directory.Delete(path, recursive: true);
+            return true;
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            LogCleanupFailed(logger, what, ex.Message);
+            return false;
+        }
+    }
+
+    /// <summary>A remove reports success only once the run's root directory is actually gone.</summary>
+    private UnitResult<AgentError> DeleteRootDirectory(string root, string what) =>
+        TryDeleteDirectory(root, what)
+            ? UnitResult<AgentError>.Success()
+            : UnitResult<AgentError>.Failure(AgentError.StoreError($"Could not delete the worktree directory '{root}'."));
+
+    /// <summary>Holds one repository's in-process and cross-process locks until disposed.</summary>
+    private sealed class MirrorLease(SemaphoreSlim gate, FileStream file) : IDisposable
+    {
+        public void Dispose()
+        {
+            file.Dispose();
+            gate.Release();
+        }
+    }
+
+    /// <summary>How far one create got after its claim, so its undo removes exactly what it created.</summary>
+    private sealed class CreateProgress
+    {
+        /// <summary>
+        /// <c>git worktree add</c> was started. The root and branch did not exist beforehand, so whatever of them
+        /// exists now is this create's own.
+        /// </summary>
+        public bool WorktreeAttempted { get; set; }
+
+        /// <summary>The ready record was published and observers are being told; they must hear of the removal too.</summary>
+        public RunWorkspace? Ready { get; set; }
     }
 
     [LoggerMessage(EventId = 1000, Level = LogLevel.Warning, Message = "Workspace observer for run {RunId} failed during {Phase}: {Error}")]
@@ -798,4 +1159,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
     [LoggerMessage(EventId = 1002, Level = LogLevel.Warning, Message = "Sidecar '{Path}' could not be read and was skipped: {Error}")]
     private static partial void LogUnreadableSidecar(ILogger logger, string path, string error);
+
+    [LoggerMessage(EventId = 1003, Level = LogLevel.Information, Message = "Another process cloned the mirror at '{Mirror}' first; validating and using it.")]
+    private static partial void LogFirstCloneRaceLost(ILogger logger, string mirror);
 }
