@@ -6,10 +6,11 @@ namespace Thalos.Workspaces;
 /// </summary>
 /// <param name="RunId">The run the workspace belongs to.</param>
 /// <param name="Repository">The repository the run works against, as a local path or clone URL.</param>
-/// <param name="Remote">The git remote to fetch from and push to.</param>
+/// <param name="Remote">The URL of the git remote to fetch from and push to.</param>
 /// <param name="DefaultBranch">
-/// The repository's default branch, e.g. <c>"main"</c>. Combined with <see cref="Remote"/> to form
-/// <see cref="RunWorkspace.BaseRef"/>.
+/// The repository's default branch, e.g. <c>"main"</c>. <see cref="RunWorkspace.BaseRef"/> is the literal string
+/// <c>"origin/" + DefaultBranch</c> — it is not built from <see cref="Remote"/>, which may itself be a different
+/// remote name or URL.
 /// </param>
 /// <param name="Branch">The branch the workspace checks out and commits to.</param>
 /// <param name="Solution">

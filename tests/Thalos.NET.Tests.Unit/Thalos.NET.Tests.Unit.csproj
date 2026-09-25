@@ -5,5 +5,6 @@
     <ProjectReference Include="..\..\src\Thalos.NET.Testing\Thalos.NET.Testing.csproj" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
     <PackageReference Include="Microsoft.Extensions.Logging" />
+    <PackageReference Include="Xunit.SkippableFact" />
   </ItemGroup>
 </Project>
