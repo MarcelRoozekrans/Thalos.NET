@@ -1,6 +1,8 @@
 using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
+using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Thalos.Runtime;
@@ -27,7 +29,8 @@ public sealed class LocalToolSource : IToolSource
     /// <summary>Creates a source named <paramref name="name"/> over <paramref name="toolTypes"/>; method discovery is deferred to the first <see cref="GetToolsAsync"/>.</summary>
     /// <exception cref="ArgumentException">
     /// A type in <paramref name="toolTypes"/> is not marked <see cref="ThalosToolTypeAttribute"/>, or a
-    /// <see cref="ThalosToolAttribute"/> method declares a parameter whose model-deserializable shape contains a
+    /// <see cref="ThalosToolAttribute"/> method declares a parameter whose model-deserializable shape — as
+    /// System.Text.Json's own metadata for it describes that shape, never a hand-written guess at it — contains a
     /// type assignable to <see cref="ISecurityContext"/> anywhere other than the parameter's own top-level,
     /// by-value type. See <see cref="DescribeSecurityContextShapeViolation"/> for what "shape" covers.
     /// </exception>
@@ -37,6 +40,10 @@ public sealed class LocalToolSource : IToolSource
         ToolSourceName.ThrowIfInvalid(name, nameof(name));
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(toolTypes);
+
+        // One shape cache per construction call: a type shared by several parameters, or several tool methods, in
+        // this batch is walked once, not once per reference to it — see FindSecurityContextPath.
+        var shapeMemo = new Dictionary<Type, string?>();
         foreach (var type in toolTypes)
         {
             if (!type.IsDefined(typeof(ThalosToolTypeAttribute), inherit: false))
@@ -53,7 +60,7 @@ public sealed class LocalToolSource : IToolSource
 
                 foreach (var parameter in method.GetParameters())
                 {
-                    if (DescribeSecurityContextShapeViolation(type, method, parameter) is { } violation)
+                    if (DescribeSecurityContextShapeViolation(type, method, parameter, shapeMemo) is { } violation)
                     {
                         throw new ArgumentException(violation, nameof(toolTypes));
                     }
@@ -70,26 +77,31 @@ public sealed class LocalToolSource : IToolSource
     /// Describes why a <see cref="ThalosToolAttribute"/> parameter's model-deserializable shape contains a type
     /// assignable to <see cref="ISecurityContext"/> anywhere other than the parameter's own top-level, by-value
     /// type, or null when the parameter is clean. <see cref="Options"/> binds the caller only when a parameter's
-    /// own type is exactly <see cref="ISecurityContext"/> passed by value; every other shape — a concrete
-    /// principal, a derived interface, a nullable struct principal, a principal nested in an array or another
-    /// generic type argument or a DTO property at any depth, or a principal passed <c>ref</c>/<c>in</c>/<c>out</c>
-    /// — falls through to ordinary model-supplied binding instead. That exposes the principal, or the part of the
-    /// shape that carries it, in the JSON schema and accepts a model-forged value, or, when the reflection
-    /// marshaller cannot construct the shape (an array or DTO of interfaces), throws at call time. The caller
-    /// throws the returned message as an <see cref="ArgumentException"/> against its own <c>toolTypes</c>
-    /// parameter, so CA2208 sees a paramName that actually belongs to the throwing method.
+    /// own type is exactly <see cref="ISecurityContext"/> passed by value, so that is the one shape exempted here
+    /// before ever consulting <see cref="AIJsonUtilities.DefaultOptions"/>: every other shape falls through to
+    /// ordinary model-supplied binding instead, exposing the principal, or the part of the shape that carries it,
+    /// in the JSON schema and accepting a model-forged value. A <c>ref</c>/<c>in</c>/<c>out</c> parameter has no
+    /// JSON type info of its own — <see cref="Type.IsByRef"/> types cannot be passed to
+    /// <see cref="JsonSerializerOptions.GetTypeInfo(Type)"/> — so it is always validated (and, for a principal,
+    /// rejected) against its referenced element type instead, never exempted even when that element type is
+    /// exactly <see cref="ISecurityContext"/>: MAF's reflection-based function factory cannot bind a by-ref
+    /// parameter at all today, so it would otherwise only fail later and less clearly, inside
+    /// <see cref="AIFunctionFactory.Create(MethodInfo, object?, AIFunctionFactoryOptions?)"/>. The caller throws
+    /// the returned message as an <see cref="ArgumentException"/> against its own <c>toolTypes</c> parameter, so
+    /// CA2208 sees a paramName that actually belongs to the throwing method.
     /// </summary>
-    private static string? DescribeSecurityContextShapeViolation(Type toolType, MethodInfo method, ParameterInfo parameter)
+    private static string? DescribeSecurityContextShapeViolation(Type toolType, MethodInfo method, ParameterInfo parameter, Dictionary<Type, string?> shapeMemo)
     {
         var isByRef = parameter.ParameterType.IsByRef;
-        var effectiveType = isByRef ? parameter.ParameterType.GetElementType()! : parameter.ParameterType;
+        var declaredType = isByRef ? parameter.ParameterType.GetElementType()! : parameter.ParameterType;
+        var effectiveType = Nullable.GetUnderlyingType(declaredType) ?? declaredType;
 
         if (!isByRef && effectiveType == typeof(ISecurityContext))
         {
             return null; // the one bound shape: exactly ISecurityContext, passed by value
         }
 
-        var offendingPath = FindSecurityContextPath(effectiveType, []);
+        var offendingPath = FindSecurityContextPath(effectiveType, shapeMemo, []);
         if (offendingPath is null)
         {
             return null;
@@ -102,65 +114,57 @@ public sealed class LocalToolSource : IToolSource
     }
 
     /// <summary>
-    /// Walks <paramref name="type"/>'s model-deserializable shape depth-first for a type assignable to
-    /// <see cref="ISecurityContext"/>, unwrapping <see cref="Nullable{T}"/>, array element types and generic type
-    /// arguments, and otherwise descending into public instance properties (a DTO). Returns the path to the first
-    /// match found, relative to the caller's own path prefix, e.g. <c>".Who"</c> for a property or <c>"[]"</c> for a
-    /// collection element, or an empty string when <paramref name="type"/> itself matches; null when none exists.
-    /// <paramref name="visiting"/> is the set of types on the current path, guarding against a DTO cycle.
+    /// Finds the first type assignable to <see cref="ISecurityContext"/> reachable from <paramref name="type"/>
+    /// through <see cref="AIJsonUtilities.DefaultOptions"/>'s own <see cref="JsonTypeInfo"/> for it — the exact
+    /// <see cref="JsonSerializerOptions"/> <see cref="Options"/> leaves
+    /// <see cref="AIFunctionFactoryOptions.SerializerOptions"/> to default to, and so the same one a model's
+    /// arguments are actually deserialized through. Walking that metadata, rather than reflecting over
+    /// <paramref name="type"/> by hand, already reflects <c>[JsonInclude]</c> fields and non-public members,
+    /// inherited members, a closed generic DTO's own properties, a collection subclass's element type (through
+    /// <see cref="JsonTypeInfo.ElementType"/>, not its own declared properties, which is how a
+    /// <c>class PList : List&lt;P&gt;</c> is caught even though <c>PList</c> is not itself generic), a
+    /// dictionary's key and value types, and <c>[JsonDerivedType]</c> polymorphism, with no separate case needed
+    /// for any of them.
     /// </summary>
-    private static string? FindSecurityContextPath(Type type, HashSet<Type> visiting)
+    /// <returns>
+    /// The path to the first match, relative to the caller's own path prefix, built from
+    /// <see cref="JsonPropertyInfo.Name"/> — the JSON name a model-supplied value is actually keyed under, which
+    /// can differ from the CLR member name under a naming policy or <c>[JsonPropertyName]</c>, and is what a
+    /// developer reading this error would need to search the schema for — e.g. <c>".who"</c> for a property,
+    /// <c>"[]"</c> for a collection or dictionary element, <c>"{key}"</c> for a dictionary key, or
+    /// <c>":TypeName"</c> for a polymorphic derived type; an empty string when <paramref name="type"/> itself
+    /// matches; null when no match exists anywhere in the shape.
+    /// </returns>
+    /// <param name="type">The type to walk.</param>
+    /// <param name="shapeMemo">
+    /// Caches the final result per <see cref="Type"/> across one <see cref="LocalToolSource"/> construction, so a
+    /// type reachable from many parameters, or repeated at several depths of the same DTO graph, is walked once —
+    /// without this, the walk is exponential in a graph that shares types (a chain of thirteen levels of three
+    /// properties each reusing the previous level's type took multiple seconds unmemoised; with it, registration
+    /// of that same shape is sub-millisecond in isolation).
+    /// </param>
+    /// <param name="visiting">
+    /// The set of types currently on the recursion stack. Re-entering one of them — a cycle in the DTO graph —
+    /// counts as clean for that path and is not written to <paramref name="shapeMemo"/>, since "clean because it's
+    /// a cycle" is not that type's final, cacheable answer.
+    /// </param>
+    private static string? FindSecurityContextPath(Type type, Dictionary<Type, string?> shapeMemo, HashSet<Type> visiting)
     {
-        if (Nullable.GetUnderlyingType(type) is { } underlying)
+        if (shapeMemo.TryGetValue(type, out var cached))
         {
-            return FindSecurityContextPath(underlying, visiting);
+            return cached;
         }
 
-        if (typeof(ISecurityContext).IsAssignableFrom(type))
-        {
-            return string.Empty;
-        }
-
-        if (IsOpaqueLeaf(type) || !visiting.Add(type))
+        if (!visiting.Add(type))
         {
             return null;
         }
 
         try
         {
-            if (type.IsArray)
-            {
-                var elementPath = FindSecurityContextPath(type.GetElementType()!, visiting);
-                return elementPath is null ? null : "[]" + elementPath;
-            }
-
-            if (type.IsGenericType)
-            {
-                foreach (var argument in type.GetGenericArguments())
-                {
-                    if (FindSecurityContextPath(argument, visiting) is { } argumentPath)
-                    {
-                        return "[]" + argumentPath;
-                    }
-                }
-
-                return null;
-            }
-
-            foreach (var property in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
-            {
-                if (property.GetIndexParameters().Length > 0)
-                {
-                    continue;
-                }
-
-                if (FindSecurityContextPath(property.PropertyType, visiting) is { } propertyPath)
-                {
-                    return "." + property.Name + propertyPath;
-                }
-            }
-
-            return null;
+            var path = ComputeSecurityContextPath(type, shapeMemo, visiting);
+            shapeMemo[type] = path;
+            return path;
         }
         finally
         {
@@ -168,27 +172,46 @@ public sealed class LocalToolSource : IToolSource
         }
     }
 
-    /// <summary>
-    /// Types the shape walk in <see cref="FindSecurityContextPath"/> never descends into: primitives, common BCL
-    /// value types, enums, and the handful of reference types MAF or <see cref="LocalToolSource"/> already bind
-    /// specially (<see cref="object"/> itself, <see cref="CancellationToken"/>, <see cref="IServiceProvider"/>,
-    /// <see cref="AIFunctionArguments"/>) rather than deserializing from model arguments.
-    /// </summary>
-    private static bool IsOpaqueLeaf(Type type) =>
-        type.IsPrimitive
-        || type.IsEnum
-        || type == typeof(object)
-        || type == typeof(string)
-        || type == typeof(decimal)
-        || type == typeof(DateTime)
-        || type == typeof(DateTimeOffset)
-        || type == typeof(DateOnly)
-        || type == typeof(TimeOnly)
-        || type == typeof(TimeSpan)
-        || type == typeof(Guid)
-        || type == typeof(CancellationToken)
-        || type == typeof(IServiceProvider)
-        || type == typeof(AIFunctionArguments);
+    private static string? ComputeSecurityContextPath(Type type, Dictionary<Type, string?> shapeMemo, HashSet<Type> visiting)
+    {
+        if (typeof(ISecurityContext).IsAssignableFrom(type))
+        {
+            return string.Empty;
+        }
+
+        var info = AIJsonUtilities.DefaultOptions.GetTypeInfo(type);
+
+        foreach (var property in info.Properties)
+        {
+            if (FindSecurityContextPath(property.PropertyType, shapeMemo, visiting) is { } propertyPath)
+            {
+                return "." + property.Name + propertyPath;
+            }
+        }
+
+        if (info.ElementType is { } elementType && FindSecurityContextPath(elementType, shapeMemo, visiting) is { } elementPath)
+        {
+            return "[]" + elementPath;
+        }
+
+        if (info.KeyType is { } keyType && FindSecurityContextPath(keyType, shapeMemo, visiting) is { } keyPath)
+        {
+            return "{key}" + keyPath;
+        }
+
+        if (info.PolymorphismOptions is { } polymorphism)
+        {
+            foreach (var derived in polymorphism.DerivedTypes)
+            {
+                if (FindSecurityContextPath(derived.DerivedType, shapeMemo, visiting) is { } derivedPath)
+                {
+                    return ":" + derived.DerivedType.Name + derivedPath;
+                }
+            }
+        }
+
+        return null;
+    }
 
     /// <inheritdoc />
     public string Name { get; }
@@ -233,11 +256,13 @@ public sealed class LocalToolSource : IToolSource
     /// </summary>
     /// <remarks>
     /// The match is exact-type, not assignability: <see cref="DescribeSecurityContextShapeViolation"/> rejects, eagerly at
-    /// construction, any parameter whose shape carries an <see cref="ISecurityContext"/>-assignable type anywhere
-    /// other than this one exact, by-value spot, because the ambient caller cannot be guaranteed to be that other
-    /// concrete type. A parameter typed as the non-specific <see cref="object"/> is not, and cannot be, treated
-    /// specially here — nothing distinguishes it from a tool that legitimately wants free-form model input, so it is
-    /// bound and schema'd exactly like any other <see cref="object"/> parameter.
+    /// construction, any parameter whose System.Text.Json shape carries an <see cref="ISecurityContext"/>-assignable
+    /// type anywhere other than this one exact, by-value spot, because the ambient caller cannot be guaranteed to be
+    /// that other concrete type. Three parameter types are left alone deliberately, as a documented, free-form
+    /// limitation: <see cref="object"/>, <see cref="System.Text.Json.JsonElement"/> and
+    /// <see cref="System.Text.Json.Nodes.JsonNode"/> carry no static shape for the shape walk to inspect — each is a
+    /// container for arbitrary JSON, indistinguishable from a tool that legitimately wants free-form model input — so
+    /// they are bound and schema'd exactly like any other parameter of one of those three types.
     /// </remarks>
     private static AIFunctionFactoryOptions Options(string name, string? description) => new()
     {

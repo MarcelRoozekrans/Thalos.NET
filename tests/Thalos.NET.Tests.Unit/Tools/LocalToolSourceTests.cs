@@ -1,4 +1,6 @@
 using System.ComponentModel;
+using System.Diagnostics;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Thalos.Runtime;
@@ -366,7 +368,9 @@ public sealed class LocalToolSourceTests
         var act = () => new LocalToolSource("local", sp, [typeof(NullableStructPrincipalTools)]);
 
         act.Should().Throw<ArgumentException>()
-            .WithMessage("*Nullable*parameter 'caller'*")
+            // the top-level Nullable unwrap happens before the shape walk even starts, so the path is the bare
+            // parameter name, never a collection-style "[]" suffix
+            .WithMessage("*Nullable*parameter 'caller'*at 'caller'.*")
             .And.ParamName.Should().Be("toolTypes");
     }
 
@@ -378,7 +382,7 @@ public sealed class LocalToolSourceTests
         var act = () => new LocalToolSource("local", sp, [typeof(PrincipalListTools)]);
 
         act.Should().Throw<ArgumentException>()
-            .WithMessage("*List*parameter 'caller'*")
+            .WithMessage("*List*parameter 'caller'*at 'caller[]'.*")
             .And.ParamName.Should().Be("toolTypes");
     }
 
@@ -390,7 +394,7 @@ public sealed class LocalToolSourceTests
         var act = () => new LocalToolSource("local", sp, [typeof(PrincipalArrayTools)]);
 
         act.Should().Throw<ArgumentException>()
-            .WithMessage("*Array*parameter 'caller'*")
+            .WithMessage("*Array*parameter 'caller'*at 'caller[]'.*")
             .And.ParamName.Should().Be("toolTypes");
     }
 
@@ -402,7 +406,7 @@ public sealed class LocalToolSourceTests
         var act = () => new LocalToolSource("local", sp, [typeof(DtoWithPrincipalPropertyTools)]);
 
         act.Should().Throw<ArgumentException>()
-            .WithMessage("*DtoPrincipal*parameter 'caller'*'caller.Who'*")
+            .WithMessage("*DtoPrincipal*parameter 'caller'*'caller.who'*")
             .And.ParamName.Should().Be("toolTypes");
     }
 
@@ -414,7 +418,7 @@ public sealed class LocalToolSourceTests
         var act = () => new LocalToolSource("local", sp, [typeof(DtoWithSecurityContextPropertyTools)]);
 
         act.Should().Throw<ArgumentException>()
-            .WithMessage("*DtoContext*parameter 'caller'*'caller.Who'*")
+            .WithMessage("*DtoContext*parameter 'caller'*'caller.who'*")
             .And.ParamName.Should().Be("toolTypes");
     }
 
@@ -426,7 +430,7 @@ public sealed class LocalToolSourceTests
         var act = () => new LocalToolSource("local", sp, [typeof(NestedDtoTools)]);
 
         act.Should().Throw<ArgumentException>()
-            .WithMessage("*Nested*parameter 'caller'*'caller.Middle.Deep'*")
+            .WithMessage("*Nested*parameter 'caller'*'caller.middle.deep'*")
             .And.ParamName.Should().Be("toolTypes");
     }
 
@@ -438,7 +442,7 @@ public sealed class LocalToolSourceTests
         var act = () => new LocalToolSource("local", sp, [typeof(ByRefPrincipalTools)]);
 
         act.Should().Throw<ArgumentException>()
-            .WithMessage("*ByRef*parameter 'caller'*")
+            .WithMessage("*ByRef*parameter 'caller'*at 'caller'.*")
             .And.ParamName.Should().Be("toolTypes");
     }
 
@@ -448,5 +452,298 @@ public sealed class LocalToolSourceTests
         var fn = await SingleToolAsync(typeof(OrdinaryDtoTools));
 
         fn.JsonSchema.GetRawText().Should().Contain("request").And.Contain("suffix");
+    }
+
+    // --- Bypass shapes the hand-written reflection walk missed: System.Text.Json's own type info is walked
+    // instead, so these are caught the same way the model's deserializer would actually reach them. ---
+
+    /// <summary>A generic DTO. <c>JsonTypeInfo.Properties</c> for a closed generic type reports its own declared
+    /// properties directly — unlike the retired reflection walk, which only ever inspected a generic type's type
+    /// arguments and never its properties.</summary>
+    public sealed class GenericPrincipalDto<T>
+    {
+        public Principal Who { get; set; } = new();
+        public T Payload { get; set; } = default!;
+    }
+
+    [ThalosToolType]
+    public sealed class GenericDtoTools(Counter counter)
+    {
+        [ThalosTool("generic-dto")]
+        public string Generic(GenericPrincipalDto<int> caller, string suffix) { counter.Value++; return $"{caller.Who.Id}:{suffix}"; }
+    }
+
+    [Fact]
+    public void Rejects_a_generic_dto_with_a_principal_property_eagerly()
+    {
+        var sp = new ServiceCollection().BuildServiceProvider();
+
+        var act = () => new LocalToolSource("local", sp, [typeof(GenericDtoTools)]);
+
+        act.Should().Throw<ArgumentException>()
+            .WithMessage("*Generic*parameter 'caller'*'caller.who'*")
+            .And.ParamName.Should().Be("toolTypes");
+    }
+
+    /// <summary>A class that subclasses <see cref="List{T}"/> rather than being generic itself.
+    /// <c>JsonTypeInfo.ElementType</c> reports <see cref="Principal"/> for it because System.Text.Json recognizes
+    /// it as an <see cref="IEnumerable{T}"/> of <see cref="Principal"/> — the retired reflection walk's
+    /// <c>IsGenericType</c> branch never fired for this type (it is not itself generic) and fell through to
+    /// walking its own properties, which are just <c>Count</c>/<c>Capacity</c>.</summary>
+    public sealed class PrincipalListSubclass : List<Principal>;
+
+    [ThalosToolType]
+    public sealed class PrincipalListSubclassTools(Counter counter)
+    {
+        [ThalosTool("principal-list-subclass")]
+        public string ListSubclass(PrincipalListSubclass caller, string suffix) { counter.Value++; return $"{caller.Count}:{suffix}"; }
+    }
+
+    [Fact]
+    public void Rejects_a_class_that_subclasses_a_list_of_security_contexts_eagerly()
+    {
+        var sp = new ServiceCollection().BuildServiceProvider();
+
+        var act = () => new LocalToolSource("local", sp, [typeof(PrincipalListSubclassTools)]);
+
+        act.Should().Throw<ArgumentException>()
+            .WithMessage("*ListSubclass*parameter 'caller'*at 'caller[]'.*")
+            .And.ParamName.Should().Be("toolTypes");
+    }
+
+    public sealed class FieldPrincipalDto
+    {
+        [JsonInclude]
+        internal Principal Who = new();
+    }
+
+    [ThalosToolType]
+    public sealed class FieldPrincipalDtoTools(Counter counter)
+    {
+        [ThalosTool("field-principal-dto")]
+        public string FieldDto(FieldPrincipalDto caller, string suffix) { counter.Value++; return $"{caller.Who.Id}:{suffix}"; }
+    }
+
+    [Fact]
+    public void Rejects_a_json_include_field_that_is_a_principal_eagerly()
+    {
+        var sp = new ServiceCollection().BuildServiceProvider();
+
+        var act = () => new LocalToolSource("local", sp, [typeof(FieldPrincipalDtoTools)]);
+
+        act.Should().Throw<ArgumentException>()
+            .WithMessage("*FieldDto*parameter 'caller'*'caller.who'*")
+            .And.ParamName.Should().Be("toolTypes");
+    }
+
+    public sealed class InternalPropertyPrincipalDto
+    {
+        [JsonInclude]
+        internal Principal Who { get; set; } = new();
+    }
+
+    [ThalosToolType]
+    public sealed class InternalPropertyPrincipalDtoTools(Counter counter)
+    {
+        [ThalosTool("internal-property-principal-dto")]
+        public string InternalPropertyDto(InternalPropertyPrincipalDto caller, string suffix) { counter.Value++; return $"{caller.Who.Id}:{suffix}"; }
+    }
+
+    [Fact]
+    public void Rejects_a_json_include_internal_property_that_is_a_principal_eagerly()
+    {
+        var sp = new ServiceCollection().BuildServiceProvider();
+
+        var act = () => new LocalToolSource("local", sp, [typeof(InternalPropertyPrincipalDtoTools)]);
+
+        act.Should().Throw<ArgumentException>()
+            .WithMessage("*InternalPropertyDto*parameter 'caller'*'caller.who'*")
+            .And.ParamName.Should().Be("toolTypes");
+    }
+
+    [JsonPolymorphic]
+    [JsonDerivedType(typeof(PolymorphicPrincipal), "principal")]
+    public class PolymorphicBase;
+
+    public sealed class PolymorphicPrincipal : PolymorphicBase, ISecurityContext
+    {
+        public string Id { get; set; } = string.Empty;
+        public IReadOnlySet<string> Roles { get; } = new HashSet<string>(StringComparer.Ordinal);
+        public IReadOnlyDictionary<string, string> Claims { get; } = new Dictionary<string, string>(StringComparer.Ordinal);
+    }
+
+    [ThalosToolType]
+    public sealed class PolymorphicPrincipalTools(Counter counter)
+    {
+        [ThalosTool("polymorphic-principal")]
+        public string Polymorphic(PolymorphicBase caller, string suffix) { counter.Value++; return $"{caller.GetType().Name}:{suffix}"; }
+    }
+
+    [Fact]
+    public void Rejects_a_json_derived_type_that_is_a_principal_eagerly()
+    {
+        var sp = new ServiceCollection().BuildServiceProvider();
+
+        var act = () => new LocalToolSource("local", sp, [typeof(PolymorphicPrincipalTools)]);
+
+        act.Should().Throw<ArgumentException>()
+            .WithMessage("*Polymorphic*parameter 'caller'*'caller:PolymorphicPrincipal'*")
+            .And.ParamName.Should().Be("toolTypes");
+    }
+
+    // --- False positives the review checked for: none of these shapes carry a principal anywhere, so
+    // registration must succeed. ---
+
+    public interface IUnrelatedInterface
+    {
+        string Name { get; }
+    }
+
+    public sealed class FalsePositiveCheckDto
+    {
+        public Guid Id { get; set; }
+        public string Name { get; set; } = string.Empty;
+        public Uri? Website { get; set; }
+        public IReadOnlyList<string> Tags { get; set; } = [];
+        public Dictionary<string, object> Metadata { get; set; } = [];
+        public IUnrelatedInterface? Other { get; set; }
+    }
+
+    [ThalosToolType]
+    public sealed class FalsePositiveCheckTools(Counter counter)
+    {
+        [ThalosTool("false-positive-check")]
+        public string Check(FalsePositiveCheckDto request, string suffix) { counter.Value++; return $"{request.Name}:{suffix}"; }
+    }
+
+    [Fact]
+    public async Task A_dto_with_common_bcl_shapes_and_an_unrelated_interface_property_does_not_false_positive()
+    {
+        var fn = await SingleToolAsync(typeof(FalsePositiveCheckTools));
+
+        fn.JsonSchema.GetRawText().Should().Contain("request").And.Contain("suffix");
+    }
+
+    // --- Performance: the walk must be linear, memoised per Type, not exponential in a DTO graph that shares
+    // types. Thirteen levels of three properties each, all reusing the previous level's type. ---
+
+    public sealed class PerfLevel0
+    {
+        public string A { get; set; } = "";
+        public string B { get; set; } = "";
+        public string C { get; set; } = "";
+    }
+
+    public sealed class PerfLevel1
+    {
+        public PerfLevel0 A { get; set; } = new();
+        public PerfLevel0 B { get; set; } = new();
+        public PerfLevel0 C { get; set; } = new();
+    }
+
+    public sealed class PerfLevel2
+    {
+        public PerfLevel1 A { get; set; } = new();
+        public PerfLevel1 B { get; set; } = new();
+        public PerfLevel1 C { get; set; } = new();
+    }
+
+    public sealed class PerfLevel3
+    {
+        public PerfLevel2 A { get; set; } = new();
+        public PerfLevel2 B { get; set; } = new();
+        public PerfLevel2 C { get; set; } = new();
+    }
+
+    public sealed class PerfLevel4
+    {
+        public PerfLevel3 A { get; set; } = new();
+        public PerfLevel3 B { get; set; } = new();
+        public PerfLevel3 C { get; set; } = new();
+    }
+
+    public sealed class PerfLevel5
+    {
+        public PerfLevel4 A { get; set; } = new();
+        public PerfLevel4 B { get; set; } = new();
+        public PerfLevel4 C { get; set; } = new();
+    }
+
+    public sealed class PerfLevel6
+    {
+        public PerfLevel5 A { get; set; } = new();
+        public PerfLevel5 B { get; set; } = new();
+        public PerfLevel5 C { get; set; } = new();
+    }
+
+    public sealed class PerfLevel7
+    {
+        public PerfLevel6 A { get; set; } = new();
+        public PerfLevel6 B { get; set; } = new();
+        public PerfLevel6 C { get; set; } = new();
+    }
+
+    public sealed class PerfLevel8
+    {
+        public PerfLevel7 A { get; set; } = new();
+        public PerfLevel7 B { get; set; } = new();
+        public PerfLevel7 C { get; set; } = new();
+    }
+
+    public sealed class PerfLevel9
+    {
+        public PerfLevel8 A { get; set; } = new();
+        public PerfLevel8 B { get; set; } = new();
+        public PerfLevel8 C { get; set; } = new();
+    }
+
+    public sealed class PerfLevel10
+    {
+        public PerfLevel9 A { get; set; } = new();
+        public PerfLevel9 B { get; set; } = new();
+        public PerfLevel9 C { get; set; } = new();
+    }
+
+    public sealed class PerfLevel11
+    {
+        public PerfLevel10 A { get; set; } = new();
+        public PerfLevel10 B { get; set; } = new();
+        public PerfLevel10 C { get; set; } = new();
+    }
+
+    public sealed class PerfLevel12
+    {
+        public PerfLevel11 A { get; set; } = new();
+        public PerfLevel11 B { get; set; } = new();
+        public PerfLevel11 C { get; set; } = new();
+    }
+
+    public sealed class PerfLevel13
+    {
+        public PerfLevel12 A { get; set; } = new();
+        public PerfLevel12 B { get; set; } = new();
+        public PerfLevel12 C { get; set; } = new();
+    }
+
+    [ThalosToolType]
+    public sealed class PerfTools(Counter counter)
+    {
+        [ThalosTool("perf")]
+        public string Perf(PerfLevel13 request, string suffix) { counter.Value++; return $"{request is null}:{suffix}"; }
+    }
+
+    [Fact]
+    public void A_deep_shared_type_dto_registers_quickly_because_the_walk_is_memoised()
+    {
+        var sp = new ServiceCollection().BuildServiceProvider();
+        var stopwatch = Stopwatch.StartNew();
+
+        _ = new LocalToolSource("local", sp, [typeof(PerfTools)]);
+
+        // In isolation this is sub-millisecond; under the full solution's parallel test execution on this
+        // machine it was observed up to ~940 ms from scheduler contention alone. The unmemoised red (see the
+        // task report) took 2.6+ seconds even in isolation, so 2 s keeps an order-of-magnitude margin below that
+        // floor while comfortably absorbing parallel-run jitter above the memoised ceiling.
+        stopwatch.Elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(2000));
     }
 }
