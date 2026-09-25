@@ -42,4 +42,19 @@ public interface IPullRequestPublisher
     /// <param name="body">The pull request description.</param>
     /// <param name="ct">Cancellation token.</param>
     ValueTask<Result<PullRequestResult, AgentError>> OpenPullRequestAsync(string repositoryPath, string sourceBranch, string targetBranch, string title, string body, CancellationToken ct);
+
+    /// <summary>
+    /// The open pull request whose source branch is <paramref name="sourceBranch"/> on the repository hosted at
+    /// <paramref name="remoteUrl"/>, or <see langword="null"/> when none is open.
+    /// </summary>
+    /// <remarks>
+    /// Abstract, with no default body (ruling R28): a default that failed closed would only hide that an
+    /// implementer never supplied one. Takes <paramref name="remoteUrl"/>, not a working-tree path like
+    /// <see cref="OpenPullRequestAsync"/> does, so an implementation never has to open a repository on disk to find
+    /// out which hosted repository — platform, owner, name — to query (ruling R22).
+    /// </remarks>
+    /// <param name="remoteUrl">The git remote's URL, e.g. <see cref="Thalos.Workspaces.RunWorkspace.Remote"/>.</param>
+    /// <param name="sourceBranch">The branch to look for an open pull request from.</param>
+    /// <param name="ct">Cancellation token.</param>
+    ValueTask<Result<PullRequestResult?, AgentError>> FindOpenPullRequestAsync(string remoteUrl, string sourceBranch, CancellationToken ct);
 }

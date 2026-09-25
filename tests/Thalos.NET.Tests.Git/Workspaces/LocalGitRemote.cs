@@ -115,6 +115,9 @@ public sealed class LocalGitRemote : IDisposable
     /// <inheritdoc />
     public void Dispose() => DeleteReadOnly(_path);
 
+    /// <summary>Deletes the bare repository's directory, so a later operation against <see cref="Url"/> fails as an unreachable remote. Safe to call again, including from <see cref="Dispose"/>.</summary>
+    public void Delete() => DeleteReadOnly(_path);
+
     /// <summary>
     /// Deletes a directory git created, clearing the read-only attribute git sets on files under <c>.git/objects</c>
     /// first — otherwise a plain recursive delete throws <see cref="UnauthorizedAccessException"/> on Windows.
