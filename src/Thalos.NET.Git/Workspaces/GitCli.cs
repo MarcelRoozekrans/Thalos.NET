@@ -91,10 +91,20 @@ internal readonly record struct GitCliResult(int ExitCode, string StdOut, string
 /// </para>
 /// <para>
 /// <b>The isolation files start empty on every construction, never merely "if missing".</b> The hooks directory,
-/// the home/XDG directory and the global config file are deleted and recreated by the constructor every time, so a
-/// file some earlier process (or an operator, or a compromised prior run) left behind at one of these exact,
-/// deterministic, <see cref="GitWorkspaceOptions.DataRoot"/>-relative paths is wiped before this instance issues a
-/// single git command — construction never assumes a path it is about to rely on for isolation is already safe.
+/// the home/XDG directory and the global config file are cleared by the constructor every time, so a file some
+/// earlier process (or an operator, or a compromised prior run) left behind at one of these exact, deterministic,
+/// <see cref="GitWorkspaceOptions.DataRoot"/>-relative paths is wiped before this instance issues a single git
+/// command — construction never assumes a path it is about to rely on for isolation is already safe. Clearing is
+/// idempotent rather than delete-then-recreate: <see cref="Directory.CreateDirectory(string)"/> on a directory that
+/// already exists is a no-op, and each file inside it is removed one by one, tolerating one already gone. This
+/// provider is registered as a DI singleton, so nothing prevents two of its <see cref="GitCli"/> instances — in the
+/// same process, or in two processes sharing this <see cref="GitWorkspaceOptions.DataRoot"/> — from constructing at
+/// the same moment; delete-then-recreate raced under exactly that concurrent construction (one instance's
+/// <c>Directory.Delete</c> firing between another's own delete and its <c>Directory.CreateDirectory</c> left the
+/// second instance with a <see cref="DirectoryNotFoundException"/> trying to enumerate or write into a directory
+/// that briefly did not exist), and a losing instance failing at startup is exactly the outcome a singleton must
+/// not risk. Clearing files in an always-present directory has no such window: the directory is never deleted, so
+/// there is nothing for a concurrent constructor to observe half-gone.
 /// </para>
 /// <para>
 /// <b>Timeout.</b> <see cref="GitWorkspaceOptions.CommandTimeout"/> bounds a single invocation; on expiry the whole
@@ -125,21 +135,50 @@ internal sealed partial class GitCli
         _homeDirectory = Path.Combine(isolationDirectory, "home");
         _globalConfigPath = Path.Combine(isolationDirectory, "global.config");
 
-        // Recreated empty every time, never assumed already-empty — see the class remarks.
-        RecreateEmptyDirectory(_hooksDirectory);
-        RecreateEmptyDirectory(_homeDirectory);
+        // Cleared empty every time, never assumed already-empty — see the class remarks. Idempotent, unlike
+        // delete-then-recreate, so two instances constructing at once on a shared DataRoot never observe a
+        // directory that briefly does not exist.
         Directory.CreateDirectory(isolationDirectory);
-        File.WriteAllText(_globalConfigPath, string.Empty);
+        Directory.CreateDirectory(_hooksDirectory);
+        Directory.CreateDirectory(_homeDirectory);
+        ClearFiles(_hooksDirectory);
+        ClearFiles(_homeDirectory);
+        ClearGlobalConfig(_globalConfigPath);
     }
 
-    private static void RecreateEmptyDirectory(string path)
+    /// <summary>
+    /// Truncates <paramref name="path"/> to empty, creating it first if absent. Opened with
+    /// <see cref="FileShare.ReadWrite"/> rather than <see cref="File.WriteAllText(string, string)"/>'s exclusive
+    /// default: two instances constructing at once on a shared <see cref="GitWorkspaceOptions.DataRoot"/> both
+    /// truncate the same file, and since every writer truncates to the same empty content, a second writer opening
+    /// while the first is still mid-call is harmless as long as it is not refused outright — which an exclusive
+    /// open would do (observed under concurrent construction: <see cref="IOException"/>, "being used by another
+    /// process").
+    /// </summary>
+    private static void ClearGlobalConfig(string path)
     {
-        if (Directory.Exists(path))
-        {
-            Directory.Delete(path, recursive: true);
-        }
+        using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.ReadWrite);
+    }
 
-        Directory.CreateDirectory(path);
+    /// <summary>
+    /// Deletes every file directly inside <paramref name="directory"/>, tolerating one a concurrent constructor —
+    /// see the class remarks — already removed. <paramref name="directory"/> itself is never deleted, only cleared,
+    /// so there is no window where it does not exist for another thread or process to observe.
+    /// </summary>
+    private static void ClearFiles(string directory)
+    {
+        foreach (var file in Directory.EnumerateFiles(directory))
+        {
+            try
+            {
+                File.Delete(file);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // Another instance clearing the same shared directory concurrently already removed this file,
+                // or is holding it briefly — either way, gone (or going) is the state this call wants.
+            }
+        }
     }
 
     /// <summary>Runs <c>git [-c &lt;extraConfig&gt;]* &lt;args&gt;</c> in <paramref name="workingDirectory"/>.</summary>

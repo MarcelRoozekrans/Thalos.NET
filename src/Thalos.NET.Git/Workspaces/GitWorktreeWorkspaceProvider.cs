@@ -46,30 +46,38 @@ namespace Thalos.Git.Workspaces;
 /// live worktree is never deleted by this provider, full stop. See <see cref="MirrorValidation"/>.
 /// </para>
 /// <para>
-/// <b>A run's root and sidecar are checked before anything is created, under the same lock as the creation
-/// itself.</b> <see cref="CreateAsync"/> refuses, with a failure <see cref="Result{T,E}"/>, a request whose run
-/// already has a worktree directory or a sidecar record — a second create for a run that already has a live
-/// workspace never touches it, including a second create that starts concurrently with the first: the check and
-/// every step of the creation run inside the same per-repository lock described below, so a second caller for the
-/// same run either observes the first call's finished, live workspace and refuses, or waits for a failed first
-/// call to finish cleaning up after itself before it ever sees an empty run directory to race into. A provisional
-/// sidecar (the same <see cref="RunWorkspace"/>, with <see cref="RunWorkspace.SolutionPath"/> not yet resolved) is
-/// written before <c>git worktree add</c> runs, so a crash between the worktree's creation and the create's own
-/// completion still leaves a sidecar a sweeper can find and act on, rather than an orphan directory with no record
-/// at all; because the existence check and every later step share one lock, whatever exists at the run's root or
-/// sidecar path when a later step fails was created by this same call, and cleanup on failure only ever removes
-/// what this call itself put there.
+/// <b>Ownership of a run is claimed atomically, across processes.</b> <see cref="CreateAsync"/> does not check
+/// whether the run's root or sidecar already exist and then act on what it saw — a check followed by an action is
+/// exactly the race two providers sharing one <see cref="GitWorkspaceOptions.DataRoot"/> (an API host and a CLI
+/// host, say) can both pass at once. Instead it creates the run's sidecar file with
+/// <see cref="FileMode.CreateNew"/>, the one filesystem operation the OS itself makes atomic even across
+/// processes: exactly one caller's <see cref="FileMode.CreateNew"/> can ever succeed for a given run id, no matter
+/// how many processes, repositories, or in-process callers race for it at the same moment. The call that loses —
+/// including every other call for the same run id against a <em>different</em> repository, since the sidecar path
+/// is keyed on the run id alone — returns a failure <see cref="Result{T,E}"/> immediately and touches nothing: no
+/// mirror, no worktree, no delete. The call that wins is this run's sole owner for the rest of the create, and
+/// every failure path from there deletes exactly what it, and only it, created: the sidecar directly, since it
+/// alone claimed it, and the worktree root through <see cref="AddWorktreeAsync"/> and
+/// <see cref="CleanupCreatedWorktreeAsync"/>, which track and remove only what those specific calls made. A
+/// provisional <see cref="RunWorkspace"/> — the same one, with <see cref="RunWorkspace.SolutionPath"/> not yet
+/// resolved — is what the claim itself writes, before <c>git worktree add</c> ever runs, so a crash between the
+/// worktree's creation and the create's own completion still leaves a sidecar a sweeper can find and act on rather
+/// than an orphan directory with no record at all.
 /// </para>
 /// <para>
-/// <b>The per-repository lock.</b> A <see cref="SemaphoreSlim"/>, one per <see cref="RunWorkspaceRequest.Repository"/>,
-/// is held across every git call this provider makes against that repository's mirror — clone, fetch, worktree
-/// add, worktree remove, and branch delete — because two runs sharing a repository must not clone or fetch the one
-/// mirror directory at the same time. No test exercises the race directly (a red for it would depend on git losing
-/// a timing race that cannot be forced, so none could be verified — ruling R16), but the lock stays: the hazard it
-/// prevents is real even though it cannot be demonstrated with a deterministic test. The lock is scoped to this
-/// process only; it does nothing for two separate host processes racing the same mirror. Git's own lock files
-/// (<c>index.lock</c>, the per-worktree administrative locks under <c>.git/worktrees/&lt;name&gt;</c>, and so on)
-/// are what prevent corruption across processes — this provider relies on them for that, rather than reimplementing
+/// <b>The per-repository lock serialises this process's own git calls; it has nothing to do with ownership.</b> A
+/// <see cref="SemaphoreSlim"/>, one per <see cref="RunWorkspaceRequest.Repository"/>, is held across every git call
+/// this provider makes against that repository's mirror — clone, fetch, worktree add, worktree remove, and branch
+/// delete — because two runs sharing a repository, within this one process, must not clone or fetch the one mirror
+/// directory at the same time. It is acquired only after ownership is already settled by the atomic claim above,
+/// and it does nothing for two separate host processes racing the same mirror — an in-process lock cannot arbitrate
+/// between an API host and a CLI host that happen to share a <see cref="GitWorkspaceOptions.DataRoot"/>, which is
+/// exactly why ownership is claimed the way it is rather than guarded by this lock. No test exercises the
+/// same-process git-serialisation race directly (a red for it would depend on git losing a timing race that cannot
+/// be forced, so none could be verified — ruling R16), but the lock stays: the hazard it prevents is real even
+/// though it cannot be demonstrated with a deterministic test. Git's own lock files (<c>index.lock</c>, the
+/// per-worktree administrative locks under <c>.git/worktrees/&lt;name&gt;</c>, and so on) are what prevent
+/// corruption across processes at the git level — this provider relies on them for that, rather than reimplementing
 /// cross-process locking itself.
 /// </para>
 /// <para>
@@ -114,11 +122,17 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         var root = WorktreeRoot(request.RunId);
         var (secretConfig, secret) = CredentialConfig(request.Remote);
 
+        var claim = await ClaimAsync(request, root, ct).ConfigureAwait(false);
+        if (claim.IsFailure)
+        {
+            return Result<RunWorkspace, AgentError>.Failure(claim.Error);
+        }
+
         var gate = LockFor(request.Repository);
         await gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            return await CreateLockedAsync(request, mirror, root, secretConfig, secret, ct).ConfigureAwait(false);
+            return await CreateClaimedAsync(request, mirror, root, claim.Value, secretConfig, secret, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -127,39 +141,70 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     }
 
     /// <summary>
-    /// The body of <see cref="CreateAsync"/> that must run under the caller's per-repository lock: the existence
-    /// check and every step of the creation share that one lock, so once this call observes the run's root and
-    /// sidecar both absent, nothing else touches them until it returns — a concurrent duplicate create for the
-    /// same run waits for the lock instead of racing a sibling call's own failure cleanup. Because of that shared
-    /// lock, whatever exists at the run's root or sidecar path when a later step here fails was created by this
-    /// same call, and the cleanup on that path only ever removes what this call itself put there.
+    /// Claims exclusive, cross-process ownership of <paramref name="request"/>'s run by creating its sidecar with
+    /// <see cref="FileMode.CreateNew"/> — see the class remarks for why this, rather than a check followed by an
+    /// action, is what makes the claim atomic across every provider instance sharing this
+    /// <see cref="GitWorkspaceOptions.DataRoot"/>. A losing caller returns a failure here and touches nothing else.
+    /// Internal, not private, so its own atomicity can be tested directly and quickly — hundreds of racing trials
+    /// with no real git work in any of them — rather than only indirectly through <see cref="CreateAsync"/>, where
+    /// a full create's own later git-level collisions (a shared worktree root refusing a second <c>git worktree
+    /// add</c>) can coincidentally still converge to one winner even if this claim were not atomic at all, masking
+    /// a broken claim rather than exposing it.
     /// </summary>
-    private async Task<Result<RunWorkspace, AgentError>> CreateLockedAsync(
+    internal async Task<Result<RunWorkspace, AgentError>> ClaimAsync(RunWorkspaceRequest request, string root, CancellationToken ct)
+    {
+        var runsDir = Path.Combine(options.DataRoot, "runs");
+        Directory.CreateDirectory(runsDir);
+
+        var provisional = new RunWorkspace(request.RunId, request.Repository, request.Remote, request.DefaultBranch, request.Branch, root, SolutionPath: null)
+        {
+            CreatedAt = clock.GetUtcNow(),
+        };
+
+        FileStream claimStream;
+        try
+        {
+            claimStream = new FileStream(SidecarPath(request.RunId), FileMode.CreateNew, FileAccess.Write, FileShare.None);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // Another call — in this process or a different one sharing the same DataRoot, possibly for a
+            // different repository, since the sidecar path is keyed on the run id alone — already claimed this
+            // run, or the path is not writable right now. Either way this call owns nothing and deletes nothing.
+            return Result<RunWorkspace, AgentError>.Failure(
+                AgentError.Validation($"A workspace for run '{request.RunId}' already exists or is being created."));
+        }
+
+        await using (claimStream.ConfigureAwait(false))
+        {
+            await JsonSerializer.SerializeAsync(claimStream, provisional, GitWorkspaceJsonContext.Default.RunWorkspace, ct).ConfigureAwait(false);
+        }
+
+        return Result<RunWorkspace, AgentError>.Success(provisional);
+    }
+
+    /// <summary>
+    /// The rest of <see cref="CreateAsync"/> once <paramref name="provisional"/>'s claim is secure and the
+    /// per-repository lock (which only serialises this process's own git calls, and plays no role in ownership) is
+    /// held. This call is the sidecar's sole owner, so every failure path below deletes it directly;
+    /// <paramref name="root"/>'s own cleanup is the separate responsibility of <see cref="AddWorktreeAsync"/> and
+    /// <see cref="CleanupCreatedWorktreeAsync"/>, which track and remove only what those specific calls created.
+    /// </summary>
+    private async Task<Result<RunWorkspace, AgentError>> CreateClaimedAsync(
         RunWorkspaceRequest request,
         string mirror,
         string root,
+        RunWorkspace provisional,
         IReadOnlyList<(string Key, string Value)>? secretConfig,
         string? secret,
         CancellationToken ct)
     {
-        if (Directory.Exists(root) || File.Exists(SidecarPath(request.RunId)))
-        {
-            return Result<RunWorkspace, AgentError>.Failure(
-                AgentError.Validation($"A workspace for run '{request.RunId}' already exists."));
-        }
-
         var prepared = await PrepareMirrorAsync(mirror, request.Remote, secretConfig, secret, ct).ConfigureAwait(false);
         if (prepared.IsFailure)
         {
+            DeleteSidecar(request.RunId);
             return Result<RunWorkspace, AgentError>.Failure(prepared.Error);
         }
-
-        var createdAt = clock.GetUtcNow();
-        var provisional = new RunWorkspace(request.RunId, request.Repository, request.Remote, request.DefaultBranch, request.Branch, root, SolutionPath: null)
-        {
-            CreatedAt = createdAt,
-        };
-        await WriteSidecarAsync(provisional, ct).ConfigureAwait(false);
 
         var added = await AddWorktreeAsync(mirror, root, request, ct).ConfigureAwait(false);
         if (added.IsFailure)
@@ -270,7 +315,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     {
         if (Directory.Exists(mirror))
         {
-            var state = await ValidateMirrorAsync(mirror, ct).ConfigureAwait(false);
+            var (state, detail) = await ValidateMirrorAsync(mirror, ct).ConfigureAwait(false);
             switch (state)
             {
                 case MirrorValidation.Valid:
@@ -288,9 +333,11 @@ public sealed partial class GitWorktreeWorkspaceProvider(
                 // "not bare" or "no fetch refspec" answer, or dubious ownership. None of these is a positive
                 // signal the mirror is invalid, so it is never deleted on this path — only a positive answer is
                 // grounds for deletion (see the class remarks); the create simply fails and an operator decides.
+                // detail carries git's own extracted error line (e.g. "dubious ownership"), so an operator sees
+                // why validation could not reach a definitive answer, not just that it didn't.
                 default:
                     return UnitResult<AgentError>.Failure(AgentError.GitOperationFailed(
-                        $"Could not validate the mirror at '{mirror}'; leaving it untouched."));
+                        $"Could not validate the mirror at '{mirror}'; leaving it untouched.", detail));
             }
         }
 
@@ -378,37 +425,41 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     /// <c>"false"</c>, or <c>config --get remote.origin.fetch</c> exiting exactly 1 (git's own convention for "key
     /// not found") after a positive <c>"true"</c>. Every other outcome — a timeout, a nonzero exit that is not
     /// exactly that convention, an unrecognised <c>rev-parse</c> answer — is <see cref="MirrorValidation.Indeterminate"/>,
-    /// never treated as invalid.
+    /// never treated as invalid, and carries git's own extracted error detail (e.g. a "dubious ownership" refusal)
+    /// so a failed create says why, not just that validation could not reach a definitive answer.
     /// </summary>
-    private async Task<MirrorValidation> ValidateMirrorAsync(string mirror, CancellationToken ct)
+    private async Task<(MirrorValidation State, string? Detail)> ValidateMirrorAsync(string mirror, CancellationToken ct)
     {
         var isBare = await _git.RunAsync(mirror, ["rev-parse", "--is-bare-repository"], null, null, ct).ConfigureAwait(false);
         if (!isBare.Succeeded)
         {
-            return MirrorValidation.Indeterminate;
+            return (MirrorValidation.Indeterminate, IndeterminateDetail(isBare, "rev-parse --is-bare-repository"));
         }
 
         var isBareAnswer = isBare.StdOut.Trim();
         if (string.Equals(isBareAnswer, "false", StringComparison.Ordinal))
         {
-            return MirrorValidation.Invalid;
+            return (MirrorValidation.Invalid, null);
         }
 
         if (!string.Equals(isBareAnswer, "true", StringComparison.Ordinal))
         {
-            return MirrorValidation.Indeterminate;
+            return (MirrorValidation.Indeterminate, $"rev-parse --is-bare-repository printed an unrecognised answer: '{isBareAnswer}'.");
         }
 
         var fetchSpec = await _git.RunAsync(mirror, ["config", "--get", "remote.origin.fetch"], null, null, ct).ConfigureAwait(false);
         if (fetchSpec.Succeeded && !string.IsNullOrWhiteSpace(fetchSpec.StdOut))
         {
-            return MirrorValidation.Valid;
+            return (MirrorValidation.Valid, null);
         }
 
         return !fetchSpec.TimedOut && fetchSpec.ExitCode == 1
-            ? MirrorValidation.Invalid
-            : MirrorValidation.Indeterminate;
+            ? (MirrorValidation.Invalid, null)
+            : (MirrorValidation.Indeterminate, IndeterminateDetail(fetchSpec, "config --get remote.origin.fetch"));
     }
+
+    private static string IndeterminateDetail(GitCliResult result, string command) =>
+        result.TimedOut ? $"{command} timed out." : ExtractErrorDetail(result.StdErr);
 
     /// <summary>
     /// Whether <paramref name="mirror"/>'s <c>worktrees/</c> administrative directory has any entries — a positive

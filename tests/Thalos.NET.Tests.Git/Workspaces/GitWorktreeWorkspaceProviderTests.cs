@@ -1,8 +1,10 @@
+using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Time.Testing;
 using Thalos.Git;
 using Thalos.Git.Workspaces;
 using Thalos.Workspaces;
+using ZeroAlloc.Results;
 
 namespace Thalos.Tests.Git.Workspaces;
 
@@ -351,6 +353,157 @@ public sealed class GitWorktreeWorkspaceProviderTests : IDisposable
     }
 
     /// <summary>
+    /// How many provider instances race at once in <see cref="P1y_two_provider_instances_racing_the_same_run_leave_exactly_one_live_workspace"/>
+    /// and <see cref="P1x_the_same_run_id_against_two_repositories_leaves_exactly_one_live_workspace"/>. The claim's
+    /// vulnerable window under a broken claim — between one caller's <see cref="FileStream"/> closing and another's
+    /// opening — is narrow: a plain two-way race can land outside it even with the atomic claim removed, which
+    /// matches review's own description of this probe as non-deterministic ("both calls failed... or one reported
+    /// success"). Racing many callers at once, instead of just two, turns the narrow pairwise window into one of
+    /// <c>RacerCount</c> choose 2 chances to land inside it in a single attempt.
+    /// </summary>
+    private const int RacerCount = 12;
+
+    /// <summary>
+    /// Fix round 3, ruling 1 (review probe P1y): ownership of a run is claimed atomically across provider
+    /// instances — many providers sharing one <see cref="GitWorkspaceOptions.DataRoot"/>, as an API host and a CLI
+    /// host (and more of each) would, racing <see cref="GitWorktreeWorkspaceProvider.CreateAsync"/> for the very
+    /// same request. Before this fix, review found calls could fail and leave nothing, or one could report success
+    /// with its root already gone, because the existence check and the claim were two separate steps a second
+    /// process could interleave with. Exactly one of the <see cref="RacerCount"/> provider instances must win, and
+    /// the survivor must still work as a real git checkout — not merely have a directory present.
+    /// </summary>
+    [Fact]
+    public async Task P1y_two_provider_instances_racing_the_same_run_leave_exactly_one_live_workspace()
+    {
+        using var remote = LocalGitRemote.Create(("AGENT.md", "original"));
+        var providers = Enumerable.Range(0, RacerCount).Select(index => Provider(out _)).ToArray();
+        var runId = Guid.NewGuid();
+        var request = new RunWorkspaceRequest(runId, "sandbox", remote.Url, "main", $"manufacture/{runId}", null);
+
+        // A Barrier tightens the race window: every call reaches its claim attempt as close to simultaneously as
+        // possible, rather than one starting a few instructions ahead of another just from being awaited first. If
+        // any call let an exception escape instead of returning a failure Result, Task.WhenAll would rethrow it
+        // here, which is itself evidence of a broken claim.
+        var barrier = new Barrier(RacerCount);
+        var tasks = providers.Select(p => Task.Run(async () => { barrier.SignalAndWait(); return await p.CreateAsync(request, CancellationToken.None); })).ToArray();
+        var results = await Task.WhenAll(tasks);
+
+        var (successCount, winner) = CountSuccesses(results);
+        successCount.Should().Be(1, "exactly one of many provider instances racing the same run must win the claim");
+        Git(winner!.Root, "status").Should().NotBeNull("the survivor must still be a working git checkout, not just a directory that happens to exist");
+        File.ReadAllText(Path.Combine(winner.Root, "AGENT.md")).Should().Be("original", "the survivor's own files must be untouched by any loser");
+        (await providers[0].FindAsync(runId, CancellationToken.None)).Should().NotBeNull();
+    }
+
+    /// <summary>
+    /// Fix round 3, ruling 1 (review probe P1x): the same guarantee as <see cref="P1y_two_provider_instances_racing_the_same_run_leave_exactly_one_live_workspace"/>,
+    /// but the racing calls name the same run id against two <em>different</em> repositories, <see cref="RacerCount"/>
+    /// split evenly between them. Before this fix, review found this threw an uncaught <see cref="IOException"/>
+    /// writing <c>workspace.json.tmp</c>, because the sidecar path is keyed on the run id alone — calls for
+    /// different repositories still collide on one sidecar file. The atomic <see cref="FileMode.CreateNew"/> claim
+    /// must resolve this the same way as P1y: one winner, nothing thrown, every loser's repository untouched.
+    /// </summary>
+    [Fact]
+    public async Task P1x_the_same_run_id_against_two_repositories_leaves_exactly_one_live_workspace()
+    {
+        using var remote1 = LocalGitRemote.Create(("AGENT.md", "repo one"));
+        using var remote2 = LocalGitRemote.Create(("AGENT.md", "repo two"));
+        // One provider instance per racer, not one shared instance: a shared instance's per-repository lock (see
+        // the class remarks) would serialise every racer for the same repository through CreateClaimedAsync one at
+        // a time, masking the very race this test exists to expose — real cross-process racers, an API host and a
+        // CLI host, share no such in-process lock at all.
+        var providers = Enumerable.Range(0, RacerCount).Select(index => Provider(out _)).ToArray();
+        var runId = Guid.NewGuid();
+        var request1 = new RunWorkspaceRequest(runId, "repo-one", remote1.Url, "main", $"manufacture/{runId}", null);
+        var request2 = new RunWorkspaceRequest(runId, "repo-two", remote2.Url, "main", $"manufacture/{runId}", null);
+
+        var barrier = new Barrier(RacerCount);
+        var tasks = providers
+            .Select((p, index) => Task.Run(async () =>
+            {
+                barrier.SignalAndWait();
+                return await p.CreateAsync(index % 2 == 0 ? request1 : request2, CancellationToken.None);
+            }))
+            .ToArray();
+        var results = await Task.WhenAll(tasks);
+
+        var (successCount, winner) = CountSuccesses(results);
+        successCount.Should().Be(1, "exactly one repository must win the claim for a shared run id");
+        Git(winner!.Root, "status").Should().NotBeNull("the survivor must still be a working git checkout, not just a directory that happens to exist");
+        (await providers[0].FindAsync(runId, CancellationToken.None)).Should().NotBeNull();
+    }
+
+    /// <summary>
+    /// Fix round 3, ruling 1: <see cref="GitWorktreeWorkspaceProvider.ClaimAsync"/>'s own atomicity, tested directly
+    /// rather than only through the much noisier full <see cref="P1x_the_same_run_id_against_two_repositories_leaves_exactly_one_live_workspace"/>.
+    /// That end-to-end test's own downstream git work turned out to mask a broken claim for the cross-repository
+    /// case specifically: with the claim's <see cref="FileMode.CreateNew"/> reverted to a non-atomic
+    /// <see cref="FileMode.Create"/> during red verification, several racers can still win the claim step, but
+    /// every extra winner then collides with the others on <c>git worktree add</c> against the one shared
+    /// <see cref="RunWorkspace.Root"/> the run id implies — a second, independent, purely coincidental point of
+    /// convergence that has nothing to do with the ownership claim itself, and that reliably absorbed the broken
+    /// claim across every red trial attempted (12- and 20-way, repeated) without <see cref="P1x_the_same_run_id_against_two_repositories_leaves_exactly_one_live_workspace"/>
+    /// ever failing. Calling <see cref="GitWorktreeWorkspaceProvider.ClaimAsync"/> directly removes that
+    /// downstream noise entirely — no mirror, no worktree, just the sidecar file race — and, having no real git
+    /// work to wait on, can run many more trials in the same time, each with more racers, which is what actually
+    /// exposes the break reliably (see the report for the red observed this way).
+    /// </summary>
+    [Fact]
+    public async Task ClaimAsync_lets_exactly_one_racing_call_win_across_repositories()
+    {
+        const int trials = 30;
+        const int racersPerTrial = 10;
+        var provider = Provider(out _);
+
+        for (var trial = 0; trial < trials; trial++)
+        {
+            var runId = Guid.NewGuid();
+            var barrier = new Barrier(racersPerTrial);
+            var tasks = new Task<Result<RunWorkspace, AgentError>>[racersPerTrial];
+            for (var i = 0; i < racersPerTrial; i++)
+            {
+                var request = new RunWorkspaceRequest(runId, $"repo-{i}", "https://example.invalid/repo.git", "main", $"manufacture/{runId}", null);
+                var root = $"/irrelevant/root-{i}";
+                tasks[i] = Task.Run(async () =>
+                {
+                    barrier.SignalAndWait();
+                    return await provider.ClaimAsync(request, root, CancellationToken.None);
+                });
+            }
+
+            var results = await Task.WhenAll(tasks);
+            var (successCount, _) = CountSuccesses(results);
+            successCount.Should().Be(1, $"trial {trial}: exactly one of {racersPerTrial} concurrent claims for the same run id, across that many different repositories, must win");
+        }
+    }
+
+    /// <summary>
+    /// Fix round 3, ruling 3: the isolation files <see cref="GitCli"/>'s constructor clears must never race under
+    /// concurrent construction. Before this fix, review found 24 of 240 parallel constructions on a shared
+    /// <see cref="GitWorkspaceOptions.DataRoot"/> threw <see cref="DirectoryNotFoundException"/> — the old
+    /// delete-then-recreate pattern let one instance's delete land between another's own delete and its
+    /// <c>CreateDirectory</c>. This provider is registered as a DI singleton, so a losing instance failing here
+    /// fails an entire host at startup. <see cref="Task.Run{TResult}(Func{TResult})"/> is used here deliberately —
+    /// not to fake async over a synchronous API (the rule this codebase forbids it for), but to generate genuine
+    /// concurrent load from many real threads, the only way to reproduce a filesystem race at all.
+    /// </summary>
+    [Fact]
+    public async Task Constructing_many_providers_on_one_shared_data_root_concurrently_never_throws()
+    {
+        var exceptions = new ConcurrentBag<Exception>();
+        var barrier = new Barrier(40);
+        var tasks = Enumerable.Range(0, 40).Select(_ => Task.Run(() =>
+        {
+            barrier.SignalAndWait();
+            ConstructProviderCatching(exceptions);
+        }));
+
+        await Task.WhenAll(tasks);
+
+        exceptions.Should().BeEmpty("no provider construction on a shared DataRoot may throw, since this provider is a DI singleton and a losing instance would fail an entire host at startup");
+    }
+
+    /// <summary>
     /// Fix round 2, ruling 2 (IMPORTANT, review probe P11): a mirror validation call that cannot reach a
     /// definitive answer — here, <c>rev-parse --is-bare-repository</c> timing out — must never be treated as a
     /// positive "invalid" signal. The create fails, but the mirror and its live worktree from an earlier,
@@ -385,6 +538,40 @@ public sealed class GitWorktreeWorkspaceProviderTests : IDisposable
         IsIntactBareRepository(MirrorOf("sandbox")).Should().BeTrue("an indeterminate validation answer must never delete or otherwise disturb the mirror");
         Directory.Exists(ws1.Root).Should().BeTrue("the earlier live worktree must survive an indeterminate mirror validation");
         File.ReadAllText(Path.Combine(ws1.Root, "AGENT.md")).Should().Be("original");
+        // Directory.Exists alone would not prove ws1 still works as a git checkout, only that a directory with
+        // that name is present.
+        Git(ws1.Root, "status").Should().NotBeNull("ws1 must still be a working git checkout after the indeterminate validation, not just a surviving directory");
+    }
+
+    /// <summary>
+    /// Fix round 3, minor: an Indeterminate mirror validation must carry git's own extracted error detail, not just
+    /// "could not validate" — an operator reading <see cref="AgentError.ToString"/> needs to see e.g. "dubious
+    /// ownership" to know what actually happened, not just that validation was inconclusive.
+    /// </summary>
+    [Fact]
+    public async Task An_indeterminate_mirror_validation_reports_gits_own_error_detail()
+    {
+        using var remote = LocalGitRemote.Create();
+        var normalProvider = Provider(out _);
+        var runId1 = Guid.NewGuid();
+        await normalProvider.CreateAsync(
+            new RunWorkspaceRequest(runId1, "sandbox", remote.Url, "main", $"manufacture/{runId1}", null),
+            CancellationToken.None);
+
+        var dubiousOwnershipGit = WriteDubiousOwnershipGit(_temp);
+        var dubiousProvider = new GitWorktreeWorkspaceProvider(
+            new GitWorkspaceOptions { DataRoot = _dataRoot, GitExecutable = dubiousOwnershipGit },
+            [],
+            NullLogger<GitWorktreeWorkspaceProvider>.Instance,
+            TimeProvider.System);
+
+        var runId2 = Guid.NewGuid();
+        var result = await dubiousProvider.CreateAsync(
+            new RunWorkspaceRequest(runId2, "sandbox", remote.Url, "main", $"manufacture/{runId2}", null),
+            CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.ToString().Should().Contain("dubious ownership", "an operator must see git's own reason the validation was inconclusive");
     }
 
     /// <summary>
@@ -415,6 +602,7 @@ public sealed class GitWorktreeWorkspaceProviderTests : IDisposable
         IsIntactBareRepository(MirrorOf("sandbox")).Should().BeTrue("a mirror with a live worktree must never be deleted, even when validation finds it positively invalid");
         Directory.Exists(ws1.Root).Should().BeTrue();
         File.ReadAllText(Path.Combine(ws1.Root, "AGENT.md")).Should().Be("original");
+        Git(ws1.Root, "status").Should().NotBeNull("ws1 must still be a working git checkout, not just a surviving directory");
     }
 
     /// <summary>
@@ -454,23 +642,48 @@ public sealed class GitWorktreeWorkspaceProviderTests : IDisposable
         GitWorktreeWorkspaceProvider.ExtractErrorDetail("x\n\ny\n").Should().Be("y");
     }
 
-    /// <summary>Fix round 2, ruling 6: an unreadable or corrupt sidecar is skipped, not fatal to the whole sweep.</summary>
+    /// <summary>
+    /// Fix round 2, ruling 6; sharpened in fix round 3 after review found the original test not falsifiable:
+    /// changing the catch block's <c>continue</c> to <c>break</c> stayed green, because directory enumeration
+    /// order happened to put the one real sidecar first, so <c>break</c> on the garbage file right after it lost
+    /// nothing. A first attempt at fixing this used exactly two real workspaces plus one garbage sidecar named with
+    /// a low, all-zero-GUID prefix to bias it toward sorting first — that reliably caught the mutation on Windows,
+    /// but not on Linux, where <c>Directory.EnumerateFiles</c>' order is unrelated to filename content (ext4 does
+    /// not enumerate alphabetically) and the garbage file could just as easily land last, where a <c>break</c> there
+    /// loses nothing. Several real workspaces and several garbage sidecars fixes this without depending on
+    /// enumeration order at all: for <c>break</c> to lose no real workspace, every one of <see cref="GarbageSidecarCount"/>
+    /// garbage files would need to land after all <see cref="RealWorkspaceCount"/> real ones — implausible under any
+    /// real enumeration order, unlike the single-garbage-file case where it was merely uncommon.
+    /// </summary>
+    private const int RealWorkspaceCount = 5;
+
+    private const int GarbageSidecarCount = 5;
+
     [Fact]
-    public async Task ListAsync_skips_a_corrupt_sidecar_and_returns_exactly_the_real_workspace()
+    public async Task ListAsync_skips_corrupt_sidecars_and_returns_every_real_workspace()
     {
         using var remote = LocalGitRemote.Create();
         var provider = Provider(out _);
-        var runId = Guid.NewGuid();
-        var ws = (await provider.CreateAsync(
-            new RunWorkspaceRequest(runId, "sandbox", remote.Url, "main", $"manufacture/{runId}", null),
-            CancellationToken.None)).Value;
 
-        var garbagePath = Path.Combine(_dataRoot, "runs", Guid.NewGuid() + ".workspace.json");
-        File.WriteAllText(garbagePath, "{not json");
+        var expectedRunIds = new List<Guid>();
+        for (var i = 0; i < RealWorkspaceCount; i++)
+        {
+            var runId = Guid.NewGuid();
+            await provider.CreateAsync(
+                new RunWorkspaceRequest(runId, "sandbox", remote.Url, "main", $"manufacture/{runId}", null),
+                CancellationToken.None);
+            expectedRunIds.Add(runId);
+        }
+
+        for (var i = 0; i < GarbageSidecarCount; i++)
+        {
+            var garbagePath = Path.Combine(_dataRoot, "runs", $"{Guid.NewGuid()}.workspace.json");
+            File.WriteAllText(garbagePath, "{not json");
+        }
 
         var listed = await provider.ListAsync(CancellationToken.None);
 
-        listed.Should().ContainSingle().Which.RunId.Should().Be(ws.RunId);
+        listed.Select(w => w.RunId).Should().BeEquivalentTo(expectedRunIds, "every real workspace must survive skipping the unreadable sidecars, regardless of enumeration order");
     }
 
     /// <summary>
@@ -486,6 +699,50 @@ public sealed class GitWorktreeWorkspaceProviderTests : IDisposable
             [observer],
             NullLogger<GitWorktreeWorkspaceProvider>.Instance,
             clock ?? TimeProvider.System);
+    }
+
+    /// <summary>
+    /// Counts how many of two racing <see cref="GitWorktreeWorkspaceProvider.CreateAsync"/> results succeeded, and
+    /// returns the workspace of the last one that did — a plain loop instead of LINQ's <c>Count</c>/<c>Single</c>,
+    /// which this codebase's analyzer forbids inside the trial loop <see cref="P1y_two_provider_instances_racing_the_same_run_leave_exactly_one_live_workspace"/>
+    /// and <see cref="P1x_the_same_run_id_against_two_repositories_leaves_exactly_one_live_workspace"/> run (ZA0601:
+    /// an allocation on every iteration).
+    /// </summary>
+    private static (int SuccessCount, RunWorkspace? Winner) CountSuccesses(Result<RunWorkspace, AgentError>[] results)
+    {
+        var successCount = 0;
+        RunWorkspace? winner = null;
+        foreach (var result in results)
+        {
+            if (result.IsSuccess)
+            {
+                successCount++;
+                winner = result.Value;
+            }
+        }
+
+        return (successCount, winner);
+    }
+
+    /// <summary>
+    /// Constructs a <see cref="GitWorktreeWorkspaceProvider"/> over <see cref="_dataRoot"/>, recording any
+    /// exception into <paramref name="exceptions"/> instead of letting it end the calling thread — for the
+    /// concurrent-construction race test, where the assertion is about whether any construction throws at all.
+    /// </summary>
+    private void ConstructProviderCatching(ConcurrentBag<Exception> exceptions)
+    {
+        try
+        {
+            _ = new GitWorktreeWorkspaceProvider(
+                new GitWorkspaceOptions { DataRoot = _dataRoot },
+                [],
+                NullLogger<GitWorktreeWorkspaceProvider>.Instance,
+                TimeProvider.System);
+        }
+        catch (Exception ex)
+        {
+            exceptions.Add(ex);
+        }
     }
 
     private static RunWorkspaceRequest Request(LocalGitRemote remote, Guid runId) =>
@@ -573,7 +830,9 @@ public sealed class GitWorktreeWorkspaceProviderTests : IDisposable
             "    exit 0\n" +
             "    ;;\n" +
             "  *clone*)\n" +
-            "    eval last=\\$$#\n" +
+            // $$# is ambiguous past 9 positional parameters (POSIX expands $13 as ${1}3, not ${13}) — walk the
+            // parameters instead of indexing by count, which is correct for any argument count.
+            "    for last; do :; done\n" +
             "    mkdir -p \"$last\"\n" +
             "    sleep 9999\n" +
             "    ;;\n" +
@@ -623,6 +882,57 @@ public sealed class GitWorktreeWorkspaceProviderTests : IDisposable
             "    ;;\n" +
             "  *--is-bare-repository*)\n" +
             "    sleep 9999\n" +
+            "    ;;\n" +
+            "esac\n" +
+            "exec git \"$@\"\n");
+        File.SetUnixFileMode(scriptPath,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+            UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
+            UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+        return scriptPath;
+    }
+
+    /// <summary>
+    /// Writes a git wrapper that answers <c>--version</c> normally, fails <c>rev-parse --is-bare-repository</c>
+    /// immediately with a "dubious ownership" message on standard error (git's own real wording when a repository
+    /// is owned by a different user than the one running git), and proxies everything else to the real git — for
+    /// the Indeterminate-detail test: the failure must be immediate, not a timeout, so the resulting
+    /// <see cref="AgentError"/> is built from <see cref="GitWorktreeWorkspaceProvider.ExtractErrorDetail"/> rather
+    /// than a generic "timed out" message.
+    /// </summary>
+    private static string WriteDubiousOwnershipGit(string dir)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var path = Path.Combine(dir, "dubious-ownership-git-" + Guid.NewGuid().ToString("N") + ".cmd");
+            File.WriteAllText(path,
+                "@echo off\r\n" +
+                "echo %* | findstr /C:\"--version\" >nul\r\n" +
+                "if %errorlevel%==0 (\r\n" +
+                "    echo git version 2.43.0\r\n" +
+                "    exit /b 0\r\n" +
+                ")\r\n" +
+                "echo %* | findstr /C:\"--is-bare-repository\" >nul\r\n" +
+                "if %errorlevel%==0 (\r\n" +
+                "    echo fatal: detected dubious ownership in repository 1>&2\r\n" +
+                "    exit /b 128\r\n" +
+                ")\r\n" +
+                "git %*\r\n" +
+                "exit /b %errorlevel%\r\n");
+            return path;
+        }
+
+        var scriptPath = Path.Combine(dir, "dubious-ownership-git-" + Guid.NewGuid().ToString("N") + ".sh");
+        File.WriteAllText(scriptPath,
+            "#!/bin/sh\n" +
+            "case \"$*\" in\n" +
+            "  *--version*)\n" +
+            "    echo \"git version 2.43.0\"\n" +
+            "    exit 0\n" +
+            "    ;;\n" +
+            "  *--is-bare-repository*)\n" +
+            "    echo \"fatal: detected dubious ownership in repository\" >&2\n" +
+            "    exit 128\n" +
             "    ;;\n" +
             "esac\n" +
             "exec git \"$@\"\n");
