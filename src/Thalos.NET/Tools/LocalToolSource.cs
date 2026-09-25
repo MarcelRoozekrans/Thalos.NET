@@ -41,9 +41,9 @@ public sealed class LocalToolSource : IToolSource
         ArgumentNullException.ThrowIfNull(services);
         ArgumentNullException.ThrowIfNull(toolTypes);
 
-        // One shape cache per construction call: a type shared by several parameters, or several tool methods, in
+        // One shape walk per construction call: a type shared by several parameters, or several tool methods, in
         // this batch is walked once, not once per reference to it — see FindSecurityContextPath.
-        var shapeMemo = new Dictionary<Type, string?>();
+        var walk = new ShapeWalk();
         foreach (var type in toolTypes)
         {
             if (!type.IsDefined(typeof(ThalosToolTypeAttribute), inherit: false))
@@ -60,7 +60,7 @@ public sealed class LocalToolSource : IToolSource
 
                 foreach (var parameter in method.GetParameters())
                 {
-                    if (DescribeSecurityContextShapeViolation(type, method, parameter, shapeMemo) is { } violation)
+                    if (DescribeSecurityContextShapeViolation(type, method, parameter, walk) is { } violation)
                     {
                         throw new ArgumentException(violation, nameof(toolTypes));
                     }
@@ -71,7 +71,16 @@ public sealed class LocalToolSource : IToolSource
         Name = name;
         _services = services;
         _toolTypes = toolTypes;
+        ShapeTypeInfoLookups = walk.TypeInfoLookups;
     }
+
+    /// <summary>
+    /// How many times this construction's shape walk asked System.Text.Json for a <see cref="JsonTypeInfo"/>. With
+    /// the walk memoised per <see cref="Type"/>, that is at most the number of distinct types reachable from the
+    /// tool parameters; without the memo it grows with the number of paths through a DTO graph that shares types.
+    /// Exposed so a test can assert the walk's cost deterministically rather than by wall-clock time.
+    /// </summary>
+    internal int ShapeTypeInfoLookups { get; }
 
     /// <summary>
     /// Describes why a <see cref="ThalosToolAttribute"/> parameter's model-deserializable shape contains a type
@@ -90,7 +99,7 @@ public sealed class LocalToolSource : IToolSource
     /// the returned message as an <see cref="ArgumentException"/> against its own <c>toolTypes</c> parameter, so
     /// CA2208 sees a paramName that actually belongs to the throwing method.
     /// </summary>
-    private static string? DescribeSecurityContextShapeViolation(Type toolType, MethodInfo method, ParameterInfo parameter, Dictionary<Type, string?> shapeMemo)
+    private static string? DescribeSecurityContextShapeViolation(Type toolType, MethodInfo method, ParameterInfo parameter, ShapeWalk walk)
     {
         var isByRef = parameter.ParameterType.IsByRef;
         var declaredType = isByRef ? parameter.ParameterType.GetElementType()! : parameter.ParameterType;
@@ -101,7 +110,7 @@ public sealed class LocalToolSource : IToolSource
             return null; // the one bound shape: exactly ISecurityContext, passed by value
         }
 
-        var offendingPath = FindSecurityContextPath(effectiveType, shapeMemo, []);
+        var offendingPath = FindSecurityContextPath(effectiveType, walk);
         if (offendingPath is null)
         {
             return null;
@@ -136,65 +145,55 @@ public sealed class LocalToolSource : IToolSource
     /// matches; null when no match exists anywhere in the shape.
     /// </returns>
     /// <param name="type">The type to walk.</param>
-    /// <param name="shapeMemo">
-    /// Caches the final result per <see cref="Type"/> across one <see cref="LocalToolSource"/> construction, so a
-    /// type reachable from many parameters, or repeated at several depths of the same DTO graph, is walked once —
-    /// without this, the walk is exponential in a graph that shares types (a chain of thirteen levels of three
-    /// properties each reusing the previous level's type took multiple seconds unmemoised; with it, registration
-    /// of that same shape is sub-millisecond in isolation).
-    /// </param>
-    /// <param name="visiting">
-    /// The set of types currently on the recursion stack. Re-entering one of them — a cycle in the DTO graph —
-    /// counts as clean for that path and is not written to <paramref name="shapeMemo"/>, since "clean because it's
-    /// a cycle" is not that type's final, cacheable answer.
-    /// </param>
-    private static string? FindSecurityContextPath(Type type, Dictionary<Type, string?> shapeMemo, HashSet<Type> visiting)
+    /// <param name="walk">The memo, recursion stack and lookup count shared by one construction; see <see cref="ShapeWalk"/>.</param>
+    private static string? FindSecurityContextPath(Type type, ShapeWalk walk)
     {
-        if (shapeMemo.TryGetValue(type, out var cached))
+        if (walk.Memo.TryGetValue(type, out var cached))
         {
             return cached;
         }
 
-        if (!visiting.Add(type))
+        if (!walk.Visiting.Add(type))
         {
             return null;
         }
 
         try
         {
-            var path = ComputeSecurityContextPath(type, shapeMemo, visiting);
-            shapeMemo[type] = path;
+            var path = ComputeSecurityContextPath(type, walk);
+            walk.Memo[type] = path;
             return path;
         }
         finally
         {
-            visiting.Remove(type);
+            walk.Visiting.Remove(type);
         }
     }
 
-    private static string? ComputeSecurityContextPath(Type type, Dictionary<Type, string?> shapeMemo, HashSet<Type> visiting)
+    private static string? ComputeSecurityContextPath(Type type, ShapeWalk walk)
     {
         if (typeof(ISecurityContext).IsAssignableFrom(type))
         {
             return string.Empty;
         }
 
+        walk.TypeInfoLookups++;
         var info = AIJsonUtilities.DefaultOptions.GetTypeInfo(type);
 
         foreach (var property in info.Properties)
         {
-            if (FindSecurityContextPath(property.PropertyType, shapeMemo, visiting) is { } propertyPath)
+            if (FindSecurityContextPath(property.PropertyType, walk) is { } propertyPath)
             {
                 return "." + property.Name + propertyPath;
             }
         }
 
-        if (info.ElementType is { } elementType && FindSecurityContextPath(elementType, shapeMemo, visiting) is { } elementPath)
+        if (info.ElementType is { } elementType && FindSecurityContextPath(elementType, walk) is { } elementPath)
         {
             return "[]" + elementPath;
         }
 
-        if (info.KeyType is { } keyType && FindSecurityContextPath(keyType, shapeMemo, visiting) is { } keyPath)
+        if (info.KeyType is { } keyType && FindSecurityContextPath(keyType, walk) is { } keyPath)
         {
             return "{key}" + keyPath;
         }
@@ -203,7 +202,7 @@ public sealed class LocalToolSource : IToolSource
         {
             foreach (var derived in polymorphism.DerivedTypes)
             {
-                if (FindSecurityContextPath(derived.DerivedType, shapeMemo, visiting) is { } derivedPath)
+                if (FindSecurityContextPath(derived.DerivedType, walk) is { } derivedPath)
                 {
                     return ":" + derived.DerivedType.Name + derivedPath;
                 }
@@ -211,6 +210,27 @@ public sealed class LocalToolSource : IToolSource
         }
 
         return null;
+    }
+
+    /// <summary>State for one construction's shape walk; never shared across constructions, so never across threads.</summary>
+    private sealed class ShapeWalk
+    {
+        /// <summary>
+        /// The final result per <see cref="Type"/>, so a type reachable from many parameters, or repeated at several
+        /// depths of the same DTO graph, is walked once. Without it the walk is exponential in a graph that shares
+        /// types.
+        /// </summary>
+        public Dictionary<Type, string?> Memo { get; } = [];
+
+        /// <summary>
+        /// The types currently on the recursion stack. Re-entering one of them, a cycle in the DTO graph, counts as
+        /// clean for that path and is not written to <see cref="Memo"/>, since "clean because it's a cycle" is not
+        /// that type's final, cacheable answer.
+        /// </summary>
+        public HashSet<Type> Visiting { get; } = [];
+
+        /// <summary>How many <see cref="JsonTypeInfo"/> lookups the walk made; surfaced as <see cref="ShapeTypeInfoLookups"/>.</summary>
+        public int TypeInfoLookups { get; set; }
     }
 
     /// <inheritdoc />
@@ -258,11 +278,16 @@ public sealed class LocalToolSource : IToolSource
     /// The match is exact-type, not assignability: <see cref="DescribeSecurityContextShapeViolation"/> rejects, eagerly at
     /// construction, any parameter whose System.Text.Json shape carries an <see cref="ISecurityContext"/>-assignable
     /// type anywhere other than this one exact, by-value spot, because the ambient caller cannot be guaranteed to be
-    /// that other concrete type. Three parameter types are left alone deliberately, as a documented, free-form
-    /// limitation: <see cref="object"/>, <see cref="System.Text.Json.JsonElement"/> and
-    /// <see cref="System.Text.Json.Nodes.JsonNode"/> carry no static shape for the shape walk to inspect — each is a
-    /// container for arbitrary JSON, indistinguishable from a tool that legitimately wants free-form model input — so
-    /// they are bound and schema'd exactly like any other parameter of one of those three types.
+    /// that other concrete type. Some shapes are left alone deliberately, as a documented, free-form limitation:
+    /// <see cref="object"/>, <see cref="System.Text.Json.JsonElement"/> and
+    /// <see cref="System.Text.Json.Nodes.JsonNode"/>, and any type or member serialized through a custom
+    /// <see cref="System.Text.Json.Serialization.JsonConverter"/>. None of them carries a static shape in
+    /// System.Text.Json's metadata for the shape walk to inspect: the first three are containers for arbitrary JSON,
+    /// and a converter decides for itself what it builds from the JSON it reads, so a converter written to build a
+    /// principal passes the walk. Each is indistinguishable from a tool that legitimately wants free-form model input,
+    /// so they are bound and schema'd exactly like any other parameter. A tool author who declares one of them owns
+    /// what it deserializes to; the only principal the turn vouches for is a parameter typed exactly
+    /// <see cref="ISecurityContext"/>.
     /// </remarks>
     private static AIFunctionFactoryOptions Options(string name, string? description) => new()
     {

@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Diagnostics;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
@@ -733,17 +732,42 @@ public sealed class LocalToolSourceTests
     }
 
     [Fact]
-    public void A_deep_shared_type_dto_registers_quickly_because_the_walk_is_memoised()
+    public void A_deep_shared_type_dto_is_walked_once_per_distinct_type_because_the_walk_is_memoised()
     {
         var sp = new ServiceCollection().BuildServiceProvider();
-        var stopwatch = Stopwatch.StartNew();
+        var perf = typeof(PerfTools).GetMethod(nameof(PerfTools.Perf))!;
+        var reachable = ReachableTypes(perf);
+        var ownDtoCount = reachable.Count(t => t.Assembly == typeof(LocalToolSourceTests).Assembly);
 
-        _ = new LocalToolSource("local", sp, [typeof(PerfTools)]);
+        var source = new LocalToolSource("local", sp, [typeof(PerfTools)]);
 
-        // In isolation this is sub-millisecond; under the full solution's parallel test execution on this
-        // machine it was observed up to ~940 ms from scheduler contention alone. The unmemoised red (see the
-        // task report) took 2.6+ seconds even in isolation, so 2 s keeps an order-of-magnitude margin below that
-        // floor while comfortably absorbing parallel-run jitter above the memoised ceiling.
-        stopwatch.Elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(2000));
+        // Red when the memo is removed: the unmemoised walk looks up each path through the shared-type graph,
+        // millions of lookups rather than one per distinct type.
+        source.ShapeTypeInfoLookups.Should().BeLessThanOrEqualTo(reachable.Count);
+        // Red when the lookup counter is not incremented: every PerfLevel type has to be looked up at least once, so
+        // a dead counter cannot pass the bound above by reporting zero.
+        source.ShapeTypeInfoLookups.Should().BeGreaterThanOrEqualTo(ownDtoCount);
+    }
+
+    /// <summary>
+    /// The distinct types a tool method's parameters reach through public properties, descending only into this
+    /// test assembly's own DTOs and treating every other type, such as <see cref="string"/>, as a leaf.
+    /// </summary>
+    private static HashSet<Type> ReachableTypes(System.Reflection.MethodInfo method)
+    {
+        var seen = new HashSet<Type>();
+        var pending = new Stack<Type>(method.GetParameters().Select(p => p.ParameterType));
+        while (pending.TryPop(out var type))
+        {
+            if (seen.Add(type) && type.Assembly == typeof(LocalToolSourceTests).Assembly)
+            {
+                foreach (var property in type.GetProperties())
+                {
+                    pending.Push(property.PropertyType);
+                }
+            }
+        }
+
+        return seen;
     }
 }
