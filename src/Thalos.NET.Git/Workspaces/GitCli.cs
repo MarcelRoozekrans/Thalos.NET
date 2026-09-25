@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
@@ -47,12 +48,17 @@ internal readonly record struct GitCliResult(int ExitCode, string StdOut, string
 /// closed (a non-<see cref="GitCliResult.Succeeded"/> result, not an exception) until that check passes. On top of
 /// removing the global and system layers entirely, every call also passes <c>-c core.hooksPath=&lt;an empty
 /// provider-owned directory&gt;</c> (so even a hook a caller-supplied <c>extraConfig</c> or the repository's own
-/// tracked config might name cannot exist to run) and <c>-c protocol.allow=never -c protocol.https.allow=always
-/// -c protocol.file.allow=always</c> (so only the two transports this provider actually uses work; everything else,
-/// including <c>ext::</c>, is refused by git itself regardless of what any config layer says). Removing the global
-/// and system config layers is the root fix; the hooksPath and protocol flags are stated explicitly on the command
-/// line as well because they are cheap to state and give defense in depth against a future caller who reintroduces
-/// a config source this type does not control.
+/// tracked config might name cannot exist to run) and <c>-c protocol.allow=never</c> together with every individual
+/// <c>protocol.&lt;name&gt;.allow</c> git itself recognises, each pinned explicitly rather than left to the
+/// <c>protocol.allow</c> default: <c>https</c> and <c>file</c> set to <c>always</c> (the only two transports this
+/// provider actually uses), and <c>http</c>, <c>ext</c>, <c>git</c> and <c>ssh</c> each set to <c>never</c> (fix
+/// round 2 ruling — pinning only <c>protocol.allow=never</c> left a per-protocol override in a repository's own
+/// config, e.g. <c>protocol.http.allow=always</c>, able to widen it). Every call also passes
+/// <c>-c http.followRedirects=false</c> (fix round 2 ruling, pre-existing): an origin's HTTP redirect otherwise
+/// makes git resend a request — headers included — to whatever host the redirect names, which this provider never
+/// controls or intends to trust. Removing the global and system config layers is the root fix; the hooksPath,
+/// protocol and redirect flags are stated explicitly on the command line as well because they are cheap to state
+/// and give defense in depth against a future caller who reintroduces a config source this type does not control.
 /// </para>
 /// <para>
 /// <b>Secrets never reach argv or disk.</b> <c>secretConfig</c> entries — one <c>(key, value)</c> pair for a
@@ -463,14 +469,7 @@ internal sealed partial class GitCli
 
         // Isolation flags come first, so a caller-supplied extraConfig (or, for a same key, nothing here) can never
         // be shadowed by them, and so they apply identically to every invocation regardless of caller.
-        startInfo.ArgumentList.Add("-c");
-        startInfo.ArgumentList.Add($"core.hooksPath={_hooksDirectory}");
-        startInfo.ArgumentList.Add("-c");
-        startInfo.ArgumentList.Add("protocol.allow=never");
-        startInfo.ArgumentList.Add("-c");
-        startInfo.ArgumentList.Add("protocol.https.allow=always");
-        startInfo.ArgumentList.Add("-c");
-        startInfo.ArgumentList.Add("protocol.file.allow=always");
+        AddIsolationFlags(startInfo.ArgumentList);
 
         if (extraConfig is not null)
         {
@@ -487,6 +486,44 @@ internal sealed partial class GitCli
         }
 
         return startInfo;
+    }
+
+    /// <summary>
+    /// The isolation flags every call carries, regardless of caller: <c>core.hooksPath</c>, every
+    /// <c>protocol.&lt;name&gt;.allow</c> git recognises pinned explicitly rather than left to the
+    /// <c>protocol.allow</c> default, and <c>http.followRedirects=false</c>. See the class remarks for why each one
+    /// is here.
+    /// </summary>
+    private void AddIsolationFlags(Collection<string> argumentList)
+    {
+        argumentList.Add("-c");
+        argumentList.Add($"core.hooksPath={_hooksDirectory}");
+
+        // Every protocol pinned explicitly — never just protocol.allow=never plus the two allowed ones — so a
+        // per-protocol override sitting in a repository's own config (protocol.http.allow=always, say) can never
+        // widen what protocol.allow=never already closed (fix round 2, ruling: pin each protocol explicitly).
+        argumentList.Add("-c");
+        argumentList.Add("protocol.allow=never");
+        argumentList.Add("-c");
+        argumentList.Add("protocol.https.allow=always");
+        argumentList.Add("-c");
+        argumentList.Add("protocol.file.allow=always");
+        argumentList.Add("-c");
+        argumentList.Add("protocol.http.allow=never");
+        argumentList.Add("-c");
+        argumentList.Add("protocol.ext.allow=never");
+        argumentList.Add("-c");
+        argumentList.Add("protocol.git.allow=never");
+        argumentList.Add("-c");
+        argumentList.Add("protocol.ssh.allow=never");
+
+        // Fix round 2, ruling (pre-existing, predates any A7 code): an origin that answers a fetch or push with an
+        // HTTP redirect makes git re-target the request at the redirect's own host — and, for a POST such as
+        // git-receive-pack, resend whatever headers it was carrying, including the unscoped Authorization header
+        // secretConfig sets for the *original* URL. http.followRedirects=false refuses to follow any redirect at
+        // all: the call fails outright, and the redirect's target host never receives a request, header or not.
+        argumentList.Add("-c");
+        argumentList.Add("http.followRedirects=false");
     }
 
     private async Task<GitCliResult> WaitForExitAsync(Process process, StringBuilder stdOut, StringBuilder stdErr, CancellationToken ct)

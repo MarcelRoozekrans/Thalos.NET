@@ -30,8 +30,11 @@ public interface IRunWorkspaceGit
     ValueTask<Result<IReadOnlyList<GitFileChange>, AgentError>> DiffStatAsync(RunWorkspace workspace, CancellationToken ct);
 
     /// <summary>
-    /// Pushes <c>HEAD</c> to <c>refs/heads/&lt;workspace.Branch&gt;</c> on <c>origin</c>, the run's allow-listed
-    /// remote. Pushing what is already there succeeds and changes nothing.
+    /// Refuses outright when <see cref="RunWorkspace.Branch"/> equals <see cref="RunWorkspace.DefaultBranch"/>, and
+    /// otherwise verifies the worktree's checked-out branch really is <c>refs/heads/&lt;Branch&gt;</c> before
+    /// pushing anything. Pushes the explicit two-sided refspec <c>refs/heads/&lt;Branch&gt;:refs/heads/&lt;Branch&gt;</c>
+    /// straight to <see cref="RunWorkspace.Remote"/> — never through a named <c>origin</c> remote, and never any
+    /// other ref. Pushing what is already there succeeds and changes nothing.
     /// </summary>
     /// <param name="workspace">The run's worktree.</param>
     /// <param name="ct">Cancellation token.</param>

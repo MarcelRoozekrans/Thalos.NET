@@ -129,8 +129,6 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
     public async Task Pushing_a_branch_equal_to_the_default_branch_is_refused_and_the_remote_is_unchanged()
     {
         var ws = await WorktreeAsync();
-        File.WriteAllText(Path.Combine(ws.Root, "code.cs"), "x");
-        await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None);
         // The mirror's initial bare clone already holds a real local refs/heads/<DefaultBranch> (a bare clone
         // copies every branch directly, before CloneMirrorAsync reconfigures future fetches under refs/remotes/
         // origin/*), so checking it out here makes HEAD really point at refs/heads/<DefaultBranch> — isolating
@@ -138,6 +136,13 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
         // would trip on its own.
         Git(ws.Root, $"checkout {ws.DefaultBranch}");
         var mainBefore = _remote!.TryHeadOf(ws.DefaultBranch);
+
+        // Committed on main itself, after checkout, not on the run's own branch: a push that fast-forwarded main
+        // despite the refusal would move it past mainBefore, so this genuinely falsifies "the remote is unchanged"
+        // (fix round 2 minor — committing before the checkout left main identical to origin/main, so even a
+        // broken refusal's push would have changed nothing and this assertion could never go red).
+        File.WriteAllText(Path.Combine(ws.Root, "code.cs"), "x");
+        await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None);
 
         var pushed = await _git.PushAsync(ws with { Branch = ws.DefaultBranch }, CancellationToken.None);
 
@@ -163,8 +168,14 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
 
         var pushLine = File.ReadAllLines(captureFile).Single(l => l.Split(' ', StringSplitOptions.RemoveEmptyEntries).Contains("push", StringComparer.Ordinal));
         var refspec = $"refs/heads/{ws.Branch}:refs/heads/{ws.Branch}";
-        pushLine.Should().Contain(refspec).And.Contain(ws.Remote);
-        pushLine.Should().NotContain("--force").And.NotContain("--tags");
+        var tokens = pushLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        tokens.Should().Contain(refspec).And.Contain(ws.Remote);
+        // Token-based, not substring: a `+`-prefixed refspec forces the push on the wire the same as --force does,
+        // and -f is --force's short form (fix round 2 minor).
+        tokens.Should().NotContain("--force");
+        tokens.Should().NotContain("-f");
+        tokens.Should().NotContain("--tags");
+        tokens.Should().NotContain($"+{refspec}");
     }
 
     /// <summary>Push scope ruling: pushing straight to the workspace's URL writes nothing into the mirror's shared config.</summary>
@@ -353,6 +364,267 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
         captured.Should().NotContain(
             Convert.ToBase64String(Encoding.UTF8.GetBytes($"x-access-token:{token}")),
             "the encoded credential header must never reach argv either");
+    }
+
+    /// <summary>
+    /// Fix round 2, item 4 minor: item 3's create-time allow-list would refuse a mirror that configures
+    /// <c>core.fsmonitor</c> outright, so this plants it directly against an already-created mirror instead —
+    /// simulating tampering after a successful create, the same reasoning that motivates <see cref="PushAsync"/>'s
+    /// own config check — to exercise <c>-c core.fsmonitor=false</c> itself as defence in depth on the git call
+    /// path.
+    /// </summary>
+    [Fact]
+    public async Task No_fsmonitor_ever_fires_on_a_commit_even_when_the_mirror_configures_one()
+    {
+        var ws = await WorktreeAsync();
+        var marker = Path.Combine(_temp, "fsmonitor-ran.marker");
+        var fsmonitorScript = WriteFsmonitorScript(_temp, marker);
+        LocalGitRemote.RunGit(MirrorOf(), "config", "core.fsmonitor", fsmonitorScript.Replace('\\', '/'));
+
+        File.WriteAllText(Path.Combine(ws.Root, "code.cs"), "class C {}");
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None);
+
+        committed.Value.Created.Should().BeTrue();
+        File.Exists(marker).Should().BeFalse("-c core.fsmonitor=false on every call must override a repository-configured fsmonitor hook");
+    }
+
+    /// <summary>
+    /// Fix round 2, item 3: checked in <see cref="GitCliRunWorkspaceGit.PushAsync"/> itself, not only at create,
+    /// because the mirror's config could be tampered with in the interval between a successful create and a later
+    /// push. Uses a spy git to prove the refusal happens before <c>git push</c> is ever invoked — no network call.
+    /// </summary>
+    [Fact]
+    public async Task Push_refuses_when_the_mirrors_config_defines_a_push_redirect_before_any_network_call()
+    {
+        var ws = await WorktreeAsync();
+        File.WriteAllText(Path.Combine(ws.Root, "code.cs"), "x");
+        await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None);
+        LocalGitRemote.RunGit(MirrorOf(), "config", "url.https://evil.example/redirect.git.pushInsteadOf", ws.Remote);
+
+        var captureFile = Path.Combine(_temp, "pushinsteadof-argv.log");
+        File.WriteAllText(captureFile, string.Empty);
+        var spyGit = WriteSpyGit(_temp, captureFile);
+        var spyOptions = new GitWorkspaceOptions { DataRoot = _options.DataRoot, GitExecutable = spyGit, CommandTimeout = _options.CommandTimeout };
+        var git = new GitCliRunWorkspaceGit(spyOptions, NullLogger<GitCliRunWorkspaceGit>.Instance);
+
+        var pushed = await git.PushAsync(ws, CancellationToken.None);
+
+        pushed.IsFailure.Should().BeTrue();
+        File.ReadAllLines(captureFile).Should().NotContain(
+            l => l.Split(' ', StringSplitOptions.RemoveEmptyEntries).Contains("push", StringComparer.Ordinal),
+            "the mirror's disallowed config must refuse the push before any network-capable git call runs");
+    }
+
+    /// <summary>
+    /// Fix round 2, item 1 (CRITICAL, pre-existing): a review probe found that, without
+    /// <c>http.followRedirects=false</c>, an origin answering with an HTTP redirect makes git re-target the
+    /// request — and, for the push's own POST, resend the Authorization header — to whatever host the redirect
+    /// names. With the pin, git refuses to follow any redirect at all, so the redirect's target never receives a
+    /// request in the first place, header or not — a strictly stronger guarantee than "no header", and simpler to
+    /// prove without reimplementing git's smart-HTTP protocol in a fake server.
+    /// </summary>
+    /// <remarks>
+    /// Drives a raw <see cref="GitCli"/> call directly, with <c>protocol.http.allow=always</c> passed as this
+    /// call's own <c>extraConfig</c> (which overrides the isolation pin, added earlier on the same command line —
+    /// git's own last-one-wins rule for repeated <c>-c</c> keys), rather than going through
+    /// <see cref="GitCliRunWorkspaceGit.PushAsync"/> as every other push test does. Plain HTTP is otherwise refused
+    /// outright by the separate <c>protocol.http.allow=never</c> pin (covered on its own by
+    /// <see cref="GitCli_still_refuses_http_even_when_the_repository_config_allows_it"/>), which would make this
+    /// test fail for the wrong reason — never even attempting the origin at all — rather than exercising
+    /// <c>http.followRedirects</c> specifically.
+    /// </remarks>
+    [Fact]
+    public async Task A_redirecting_origin_never_gets_git_to_contact_the_redirect_target()
+    {
+        using var origin = new RedirectingHttpServer();
+        using var target = new RecordingHttpServer();
+        origin.RedirectTo(target.Prefix);
+
+        var ws = await WorktreeAsync();
+        File.WriteAllText(Path.Combine(ws.Root, "code.cs"), "x");
+        await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None);
+        var git = new GitCli(_options);
+
+        var pushed = await git.RunAsync(
+            ws.Root,
+            ["push", "--end-of-options", origin.Prefix + "r.git", $"refs/heads/{ws.Branch}:refs/heads/{ws.Branch}"],
+            ["protocol.http.allow=always"],
+            null,
+            CancellationToken.None);
+
+        pushed.Succeeded.Should().BeFalse();
+        target.RequestCount.Should().Be(0, "http.followRedirects=false must stop git from ever following the origin's redirect to another host");
+    }
+
+    /// <summary>
+    /// Fix round 2, item 2: verifies <see cref="GitCli"/>'s own command-line protocol pins directly, independent of
+    /// <see cref="GitWorktreeWorkspaceProvider"/>'s config allow-list (item 3), which would otherwise refuse this
+    /// scratch repository's mirror outright at create time and make this path unreachable through a normal create.
+    /// </summary>
+    [Fact]
+    public async Task GitCli_still_refuses_http_even_when_the_repository_config_allows_it()
+    {
+        var scratch = Path.Combine(_temp, "protocol-scratch");
+        LocalGitRemote.RunGit(_temp, "init", "-q", "--bare", scratch);
+        LocalGitRemote.RunGit(scratch, "config", "protocol.http.allow", "always");
+        var git = new GitCli(_options);
+
+        var result = await git.RunAsync(scratch, ["fetch", "http://127.0.0.1:1/definitely-not-a-real-remote.git"], null, null, CancellationToken.None);
+
+        result.Succeeded.Should().BeFalse();
+        result.StdErr.Should().Contain("not allowed", "the fetch must be refused for the protocol itself, not merely fail to connect");
+    }
+
+    /// <summary>Writes a script <c>core.fsmonitor</c> can point at, which touches <paramref name="markerPath"/> if git ever invokes it.</summary>
+    private static string WriteFsmonitorScript(string dir, string markerPath)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var path = Path.Combine(dir, "fsmonitor-" + Guid.NewGuid().ToString("N") + ".cmd");
+            File.WriteAllText(path, "@echo off\r\n" + $"echo. >> \"{markerPath}\"\r\n" + "exit /b 1\r\n");
+            return path;
+        }
+
+        var scriptPath = Path.Combine(dir, "fsmonitor-" + Guid.NewGuid().ToString("N") + ".sh");
+        File.WriteAllText(scriptPath, "#!/bin/sh\n" + $"touch \"{markerPath}\"\n" + "exit 1\n");
+        File.SetUnixFileMode(scriptPath,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+            UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
+            UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+        return scriptPath;
+    }
+
+    private static int GetFreePort()
+    {
+        var listener = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+        listener.Stop();
+        return port;
+    }
+
+    /// <summary>An HTTP server that answers every request with a 302 to a fixed prefix, for <see cref="A_redirecting_origin_never_gets_git_to_contact_the_redirect_target"/>.</summary>
+    private sealed class RedirectingHttpServer : IDisposable
+    {
+        private readonly System.Net.HttpListener _listener;
+        private string _redirectTo = "";
+
+        public string Prefix { get; }
+
+        public RedirectingHttpServer()
+        {
+            Prefix = $"http://127.0.0.1:{GetFreePort()}/";
+            _listener = new System.Net.HttpListener();
+            _listener.Prefixes.Add(Prefix);
+            _listener.Start();
+            _ = ServeAsync();
+        }
+
+        public void RedirectTo(string prefix) => _redirectTo = prefix;
+
+        private async Task ServeAsync()
+        {
+            while (_listener.IsListening)
+            {
+                System.Net.HttpListenerContext ctx;
+                try
+                {
+                    ctx = await _listener.GetContextAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is System.Net.HttpListenerException or ObjectDisposedException)
+                {
+                    // The listener was stopped, most likely by Dispose while this call was pending.
+                    return;
+                }
+
+                try
+                {
+                    ctx.Response.StatusCode = 302;
+                    ctx.Response.RedirectLocation = _redirectTo.TrimEnd('/') + ctx.Request.Url!.AbsolutePath;
+                    ctx.Response.Close();
+                }
+                catch (Exception ex) when (ex is System.Net.HttpListenerException or ObjectDisposedException or IOException)
+                {
+                    // Best effort per request — e.g. the client (git) already gave up on the connection; keep
+                    // serving for whatever request comes next.
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+            try
+            {
+                _listener.Stop();
+                _listener.Close();
+            }
+            catch (Exception ex) when (ex is System.Net.HttpListenerException or ObjectDisposedException)
+            {
+                // Best effort: already stopped is not a reason to fail test teardown.
+            }
+        }
+    }
+
+    /// <summary>An HTTP server that counts every request it receives, for <see cref="A_redirecting_origin_never_gets_git_to_contact_the_redirect_target"/>.</summary>
+    private sealed class RecordingHttpServer : IDisposable
+    {
+        private readonly System.Net.HttpListener _listener;
+        private int _requestCount;
+
+        public string Prefix { get; }
+
+        public int RequestCount => _requestCount;
+
+        public RecordingHttpServer()
+        {
+            Prefix = $"http://127.0.0.1:{GetFreePort()}/";
+            _listener = new System.Net.HttpListener();
+            _listener.Prefixes.Add(Prefix);
+            _listener.Start();
+            _ = ServeAsync();
+        }
+
+        private async Task ServeAsync()
+        {
+            while (_listener.IsListening)
+            {
+                System.Net.HttpListenerContext ctx;
+                try
+                {
+                    ctx = await _listener.GetContextAsync().ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is System.Net.HttpListenerException or ObjectDisposedException)
+                {
+                    // The listener was stopped, most likely by Dispose while this call was pending.
+                    return;
+                }
+
+                Interlocked.Increment(ref _requestCount);
+                try
+                {
+                    ctx.Response.StatusCode = 500;
+                    ctx.Response.Close();
+                }
+                catch (Exception ex) when (ex is System.Net.HttpListenerException or ObjectDisposedException or IOException)
+                {
+                    // Best effort — the request is already counted above regardless of whether the response write
+                    // succeeds.
+                }
+            }
+        }
+
+        public void Dispose()
+        {
+            try
+            {
+                _listener.Stop();
+                _listener.Close();
+            }
+            catch (Exception ex) when (ex is System.Net.HttpListenerException or ObjectDisposedException)
+            {
+                // Best effort: already stopped is not a reason to fail test teardown.
+            }
+        }
     }
 
     /// <summary>Creates a fresh remote and a worktree for a new run id, over this test's own <see cref="_options"/>.</summary>

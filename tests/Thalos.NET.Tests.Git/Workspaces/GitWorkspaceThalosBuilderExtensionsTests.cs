@@ -16,7 +16,12 @@ public sealed class GitWorkspaceThalosBuilderExtensionsTests
             services.AddThalos(t => t.UseGitWorktreeWorkspaces(o => o.DataRoot = dataRoot));
             using var sp = services.BuildServiceProvider();
 
-            sp.GetRequiredService<IRunWorkspaceProvider>().Should().BeOfType<GitWorktreeWorkspaceProvider>();
+            // Resolved twice: a same-type check alone stays green even if the registration's lifetime were
+            // changed from Singleton to Transient (fix round 2 minor) — only resolving twice and comparing
+            // instances actually falsifies "singleton".
+            var first = sp.GetRequiredService<IRunWorkspaceProvider>();
+            first.Should().BeOfType<GitWorktreeWorkspaceProvider>();
+            sp.GetRequiredService<IRunWorkspaceProvider>().Should().BeSameAs(first);
         }
         finally
         {
@@ -34,7 +39,9 @@ public sealed class GitWorkspaceThalosBuilderExtensionsTests
             services.AddThalos(t => t.UseGitWorktreeWorkspaces(o => o.DataRoot = dataRoot));
             using var sp = services.BuildServiceProvider();
 
-            sp.GetRequiredService<IRunWorkspaceGit>().Should().BeOfType<GitCliRunWorkspaceGit>();
+            var first = sp.GetRequiredService<IRunWorkspaceGit>();
+            first.Should().BeOfType<GitCliRunWorkspaceGit>();
+            sp.GetRequiredService<IRunWorkspaceGit>().Should().BeSameAs(first);
         }
         finally
         {

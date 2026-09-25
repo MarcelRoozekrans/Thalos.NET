@@ -256,6 +256,17 @@ public sealed partial class GitCliRunWorkspaceGit(
     {
         ArgumentNullException.ThrowIfNull(workspace);
 
+        // Checked here too, not only at create (GitWorktreeWorkspaceProvider's own mirror validation): the
+        // mirror's config could have been tampered with after a successful create but before this push — a
+        // url.<x>.pushInsteadOf planted in the interval would otherwise redirect this exact push, credentials
+        // included, before any network call happens (fix round 2 ruling).
+        var disallowedKey = await MirrorConfigSurface.FindDisallowedKeyAsync(_git, workspace.Root, ct).ConfigureAwait(false);
+        if (disallowedKey is not null)
+        {
+            return UnitResult<AgentError>.Failure(AgentError.Validation(
+                $"Refusing to push: the mirror's git config is outside the allowed surface. Detail: {disallowedKey}"));
+        }
+
         if (string.Equals(workspace.Branch, workspace.DefaultBranch, StringComparison.Ordinal))
         {
             return UnitResult<AgentError>.Failure(AgentError.Validation(

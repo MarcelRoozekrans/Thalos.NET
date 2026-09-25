@@ -544,6 +544,13 @@ public sealed partial class GitWorktreeWorkspaceProvider(
                     TryDeleteDirectory(mirror, "remove the invalid mirror before re-cloning");
                     break;
 
+                // A positive answer — the mirror's own config carries a key outside MirrorConfigSurface's
+                // allow-list — but never grounds for deletion, unlike Invalid: the mirror is left exactly as
+                // found, for an operator to inspect, not silently deleted and recloned (fix round 2 ruling).
+                case MirrorValidation.ConfigNotAllowed:
+                    return UnitResult<AgentError>.Failure(AgentError.Validation(
+                        $"The mirror at '{mirror}' has git config outside the allowed surface; refusing it. An operator must resolve this. Detail: {detail}"));
+
                 // Indeterminate: a timeout, a validation command that failed for a reason other than a definitive
                 // "not bare" or "no fetch refspec" answer, or dubious ownership. None of these is a positive
                 // signal the mirror is invalid, so it is never deleted on this path — only a positive answer is
@@ -656,16 +663,19 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
     /// <summary>
     /// Whether an existing mirror is usable as-is (<see cref="Valid"/>), positively confirmed unusable and eligible
-    /// for deletion (<see cref="Invalid"/>), or neither confirmed (<see cref="Indeterminate"/>) — a validation
-    /// command that failed to give either a clear "yes, bare, with a fetch refspec" or a clear "no" answer, such as
-    /// a timeout or a "dubious ownership" refusal. Only <see cref="Invalid"/> ever leads to deleting the mirror;
-    /// <see cref="Indeterminate"/> fails the create and leaves the mirror exactly as found.
+    /// for deletion (<see cref="Invalid"/>), positively confirmed to carry git config outside
+    /// <see cref="MirrorConfigSurface"/>'s allow-list (<see cref="ConfigNotAllowed"/>), or neither confirmed
+    /// (<see cref="Indeterminate"/>) — a validation command that failed to give either a clear "yes, bare, with a
+    /// fetch refspec" or a clear "no" answer, such as a timeout or a "dubious ownership" refusal. Only
+    /// <see cref="Invalid"/> ever leads to deleting the mirror; <see cref="ConfigNotAllowed"/> and
+    /// <see cref="Indeterminate"/> both fail the create and leave the mirror exactly as found.
     /// </summary>
     private enum MirrorValidation
     {
         Valid,
         Invalid,
         Indeterminate,
+        ConfigNotAllowed,
     }
 
     /// <summary>
@@ -675,7 +685,9 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     /// not found") after a positive <c>"true"</c>. Every other outcome — a timeout, a nonzero exit that is not
     /// exactly that convention, an unrecognised <c>rev-parse</c> answer — is <see cref="MirrorValidation.Indeterminate"/>,
     /// never treated as invalid, and carries git's own extracted error detail (e.g. a "dubious ownership" refusal)
-    /// so a failed create says why, not just that validation could not reach a definitive answer.
+    /// so a failed create says why, not just that validation could not reach a definitive answer. A mirror that is
+    /// otherwise bare with a fetch refspec is still checked against <see cref="MirrorConfigSurface"/>'s allow-list
+    /// before being reported <see cref="MirrorValidation.Valid"/> (fix round 2 ruling).
     /// </summary>
     private async Task<(MirrorValidation State, string? Detail)> ValidateMirrorAsync(string mirror, CancellationToken ct)
     {
@@ -697,14 +709,17 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         }
 
         var fetchSpec = await _git.RunAsync(mirror, ["config", "--get", "remote.origin.fetch"], null, null, ct).ConfigureAwait(false);
-        if (fetchSpec.Succeeded && !string.IsNullOrWhiteSpace(fetchSpec.StdOut))
+        if (!fetchSpec.Succeeded || string.IsNullOrWhiteSpace(fetchSpec.StdOut))
         {
-            return (MirrorValidation.Valid, null);
+            return !fetchSpec.TimedOut && fetchSpec.ExitCode == 1
+                ? (MirrorValidation.Invalid, null)
+                : (MirrorValidation.Indeterminate, IndeterminateDetail(fetchSpec, "config --get remote.origin.fetch"));
         }
 
-        return !fetchSpec.TimedOut && fetchSpec.ExitCode == 1
-            ? (MirrorValidation.Invalid, null)
-            : (MirrorValidation.Indeterminate, IndeterminateDetail(fetchSpec, "config --get remote.origin.fetch"));
+        var disallowedKey = await MirrorConfigSurface.FindDisallowedKeyAsync(_git, mirror, ct).ConfigureAwait(false);
+        return disallowedKey is null
+            ? (MirrorValidation.Valid, null)
+            : (MirrorValidation.ConfigNotAllowed, disallowedKey);
     }
 
     private static string IndeterminateDetail(GitCliResult result, string command) =>
@@ -741,9 +756,14 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
     private async Task<UnitResult<AgentError>> AddWorktreeAsync(string mirror, string root, RunWorkspaceRequest request, CancellationToken ct)
     {
+        // --no-track: without it, branch.autoSetupMerge's default writes branch.<Branch>.remote and
+        // branch.<Branch>.merge into the mirror's shared config, keyed by this run's own branch name — one more
+        // such pair for every run that has ever used this mirror, none of them predictable ahead of time. This
+        // provider needs no git-level upstream tracking for the branch it cuts, only the starting commit, so
+        // --no-track keeps the mirror's config within MirrorConfigSurface's fixed allow-list (fix round 2 ruling).
         var added = await _git.RunAsync(
             mirror,
-            ["worktree", "add", "-b", request.Branch, "--", root, $"origin/{request.DefaultBranch}"],
+            ["worktree", "add", "--no-track", "-b", request.Branch, "--", root, $"origin/{request.DefaultBranch}"],
             ["core.symlinks=false"],
             null,
             ct).ConfigureAwait(false);
