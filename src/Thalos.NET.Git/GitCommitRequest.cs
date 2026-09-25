@@ -8,13 +8,12 @@ public sealed record GitCommitRequest
 
     /// <summary>
     /// The commit's author and committer identity — the same identity is recorded as both, as
-    /// <see cref="GitAuthor"/> already documents. <see langword="null"/> uses a fixed fallback identity: a
-    /// supported configuration for a caller with no configured identity, such as a test (ruling R27). A production
-    /// caller is expected to always supply its own configured commit author, since <see cref="Workspaces.GitCli"/>'s
-    /// host-configuration isolation means no <c>user.name</c>/<c>user.email</c> can ever be picked up from git
-    /// config instead.
+    /// <see cref="GitAuthor"/> already documents. Required (ruling R27: optional only when absence is a supported
+    /// configuration, and it is not here): <see cref="Workspaces.GitCli"/>'s host-configuration isolation means no
+    /// <c>user.name</c>/<c>user.email</c> can ever be picked up from git config instead, so there is no fallback a
+    /// caller could rely on, and every caller — including a test — must supply its own.
     /// </summary>
-    public GitAuthor? Author { get; init; }
+    public required GitAuthor Author { get; init; }
 
     /// <summary>Repository-relative paths, confined to the workspace root, to stage. <see langword="null"/> stages every change in the worktree.</summary>
     public IReadOnlyList<string>? Paths { get; init; }

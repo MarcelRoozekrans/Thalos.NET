@@ -19,13 +19,6 @@ public sealed class GitActionToolsDependencySurfaceTests
     // allowed interface is caught by the same rule without this test needing to change.
     private static readonly string[] ReadVerbs = ["Get", "List", "Read", "Find", "Query", "Fetch", "Retrieve", "Search"];
 
-    // IPullRequestPublisher.FindOpenPullRequestAsync (Thalos task A7, ruling R28) is a deliberate, narrow exception:
-    // it reports only whether a pull request is already open — its URL and platform id, never a repository's,
-    // diff's or commit's contents — and R28 requires it directly on IPullRequestPublisher, one of GitActionTools's
-    // own two allowed dependencies. GitActionTools itself does not call it; nothing else this denylist would catch
-    // is exempted.
-    private static readonly string[] AllowedReadShapedMethods = [nameof(IPullRequestPublisher.FindOpenPullRequestAsync)];
-
     // Breaks if GitActionTools grows a third constructor dependency of any kind (read or write) — an addition here
     // silently widens what the class can reach, which is exactly what the doc comment says must not happen.
     [Fact]
@@ -47,8 +40,7 @@ public sealed class GitActionToolsDependencySurfaceTests
         {
             foreach (var method in parameterType.GetMethods())
             {
-                if (Array.Exists(ReadVerbs, verb => method.Name.StartsWith(verb, StringComparison.Ordinal))
-                    && !Array.Exists(AllowedReadShapedMethods, allowed => string.Equals(allowed, method.Name, StringComparison.Ordinal)))
+                if (Array.Exists(ReadVerbs, verb => method.Name.StartsWith(verb, StringComparison.Ordinal)))
                 {
                     offenders.Add($"{parameterType.Name}.{method.Name}");
                 }

@@ -14,33 +14,59 @@ namespace Thalos.Git.Workspaces;
 /// configuration — <c>GIT_CONFIG_NOSYSTEM</c>, an empty <c>GIT_CONFIG_GLOBAL</c>, an isolated <c>HOME</c>/
 /// <c>XDG_CONFIG_HOME</c>, and <c>-c core.hooksPath=&lt;an empty provider-owned directory&gt;</c> — so a host or
 /// repository hook (<c>pre-commit</c>, <c>commit-msg</c>, <c>post-commit</c>, ...) never runs on a commit this type
-/// makes; see <see cref="GitCli"/>'s own remarks for the full mechanism.
+/// makes; see <see cref="GitCli"/>'s own remarks for the full mechanism. Every call this type makes also passes
+/// <c>-c core.fsmonitor=false</c> — defence in depth on top of that isolation, since a repository's own tracked or
+/// local config can still name an fsmonitor hook that <c>core.hooksPath</c> alone does not cover.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Path-scoped commit.</b> <see cref="CommitAsync"/> stages <see cref="GitCommitRequest.Paths"/> with
-/// <c>git add -A -- &lt;Paths&gt;</c> (or <c>git add -A</c> when <see cref="GitCommitRequest.Paths"/> is
-/// <see langword="null"/>), then unstages <see cref="GitCommitRequest.ExcludePaths"/> with
-/// <c>git reset -q -- &lt;ExcludePaths&gt;</c>. The commit itself is then a plain <c>git commit -m &lt;Message&gt;</c>
-/// with no path list of its own: by the time it runs, the index already holds exactly the paths this call means to
-/// commit, so a second, redundant path restriction on <c>commit</c> (either <c>git commit -- &lt;paths&gt;</c> or
-/// <c>git commit --only -- &lt;paths&gt;</c>) would either duplicate what <c>add</c>/<c>reset</c> already did or, for
-/// <c>--only</c>, actively conflict with a prior <c>reset</c> of paths outside <see cref="GitCommitRequest.Paths"/>
-/// that this call never touched. Every path is validated with <see cref="WorkspacePath.Resolve"/> against the
-/// worktree root before any git command runs, and passed to git exactly as given — relative to
-/// <see cref="RunWorkspace.Root"/>, which is also <see cref="GitCli.RunAsync"/>'s working directory — through
-/// <see cref="System.Diagnostics.ProcessStartInfo.ArgumentList"/>, with <c>--</c> ahead of every path list, so
-/// nothing in a path is ever interpreted by a shell or mistaken for a git option.
+/// <b>Path-scoped commit, and no leftover from a failed attempt.</b> <see cref="CommitAsync"/> first resets the
+/// index to <c>HEAD</c> with a bare <c>git reset -q</c> — a failed commit attempt earlier in the same worktree (a
+/// blank message, say) can leave files staged from that attempt, and this call must always start from
+/// <c>HEAD</c>'s own state, never a previous call's leftovers. It then stages
+/// <see cref="GitCommitRequest.Paths"/> with <c>git add -A -- &lt;Paths&gt;</c> (or <c>git add -A</c> when
+/// <see cref="GitCommitRequest.Paths"/> is <see langword="null"/>), then unstages
+/// <see cref="GitCommitRequest.ExcludePaths"/> with <c>git reset -q -- &lt;ExcludePaths&gt;</c>. Every one of these
+/// three calls passes <c>--literal-pathspecs</c>, a global git flag stated as an argument (never an environment
+/// variable — <see cref="GitCli"/> strips every inherited <c>GIT_*</c> variable, including
+/// <c>GIT_LITERAL_PATHSPECS</c>, on every call), so a path such as <c>"*"</c> or <c>"AGENT.m?"</c> is matched
+/// literally by its exact name rather than as a glob — a caller-supplied path is data, never a pattern. The commit
+/// itself is then a plain <c>git commit -m &lt;Message&gt;</c> with no path list of its own: by the time it runs,
+/// the index already holds exactly the paths this call means to commit, so a second, redundant path restriction on
+/// <c>commit</c> (either <c>git commit -- &lt;paths&gt;</c> or <c>git commit --only -- &lt;paths&gt;</c>) would
+/// either duplicate what <c>add</c>/<c>reset</c> already did or, for <c>--only</c>, actively conflict with a prior
+/// <c>reset</c> of paths outside <see cref="GitCommitRequest.Paths"/> that this call never touched. Every path is
+/// validated with <see cref="WorkspacePath.Resolve"/> against the worktree root before any git command runs, and
+/// passed to git exactly as given — relative to <see cref="RunWorkspace.Root"/>, which is also
+/// <see cref="GitCli.RunAsync"/>'s working directory — through <see cref="System.Diagnostics.ProcessStartInfo.ArgumentList"/>,
+/// with <c>--</c> ahead of every path list, so nothing in a path is ever interpreted by a shell or mistaken for a
+/// git option.
 /// </para>
 /// <para>
-/// <b>Commit identity.</b> <see cref="GitCommitRequest.Author"/>, or a fixed fallback identity when
-/// <see langword="null"/> (see its own remarks), is passed as <c>-c user.name=</c>/<c>-c user.email=</c> — never
-/// read from git config, which <see cref="GitCli"/> isolates from the host entirely, and never left to a repository
-/// config that isolation does not reach (a mirror's own <c>.git/config</c>). <c>-c commit.gpgsign=false</c> is
-/// always passed too, forcing signing off explicitly rather than only relying on isolation hiding a host or
-/// repository <c>commit.gpgsign=true</c> — defense in depth, the same reasoning <see cref="GitCli"/> itself gives
-/// for stating its hooksPath and protocol flags explicitly on top of removing the config layers that would
-/// otherwise carry them.
+/// <b>Commit identity.</b> <see cref="GitCommitRequest.Author"/> — required (ruling R27) — is passed as
+/// <c>-c user.name=</c>/<c>-c user.email=</c> — never read from git config, which <see cref="GitCli"/> isolates
+/// from the host entirely, and never left to a repository config that isolation does not reach (a mirror's own
+/// <c>.git/config</c>). <c>-c commit.gpgsign=false</c> is always passed too, forcing signing off explicitly rather
+/// than only relying on isolation hiding a host or repository <c>commit.gpgsign=true</c> — defense in depth, the
+/// same reasoning <see cref="GitCli"/> itself gives for stating its hooksPath and protocol flags explicitly on top
+/// of removing the config layers that would otherwise carry them.
+/// </para>
+/// <para>
+/// <b>Push trusts nothing but the workspace record, writes no shared config, and needs no mirror lock.</b>
+/// <see cref="PushAsync"/> refuses outright when <see cref="RunWorkspace.Branch"/> equals
+/// <see cref="RunWorkspace.DefaultBranch"/> — a run's push must never be able to fast-forward the repository's own
+/// default branch — and otherwise verifies with <c>git symbolic-ref -q HEAD</c> that the worktree's checked-out
+/// branch really is <c>refs/heads/&lt;Branch&gt;</c> before pushing anything, so a workspace record that has been
+/// tampered with, or a caller that passes a workspace for the wrong worktree, is refused rather than trusted. The
+/// push itself names the explicit two-sided refspec <c>refs/heads/&lt;Branch&gt;:refs/heads/&lt;Branch&gt;</c> —
+/// never a bare <c>HEAD:...</c>, which would push whatever branch the worktree happens to be on regardless of what
+/// the refspec's destination says — and goes straight to <see cref="RunWorkspace.Remote"/> as the push's own
+/// repository argument (with <c>--end-of-options</c> ahead of it, so a remote or branch name that happens to start
+/// with <c>-</c> can never be parsed as a flag), rather than through a named <c>origin</c> remote whose URL this
+/// call would otherwise have to write into the mirror's shared, cross-run config first. Earlier revisions wrote
+/// <c>remote.origin.url</c> into that shared config before every push — a write with no mirror lock around it, racing
+/// every other run sharing the same mirror, and not atomic with the push that followed it. Pushing directly to the
+/// URL removes that shared, unlocked write entirely: nothing this call does is visible to any other run.
 /// </para>
 /// <para>
 /// <b>Credentials never reach argv or disk.</b> <see cref="PushAsync"/> asks <c>credentials</c> for
@@ -61,12 +87,6 @@ namespace Thalos.Git.Workspaces;
 public sealed partial class GitCliRunWorkspaceGit(
     GitWorkspaceOptions options, ILogger<GitCliRunWorkspaceGit> logger, IGitCredentialSource? credentials = null) : IRunWorkspaceGit
 {
-    /// <summary>
-    /// Used only when <see cref="GitCommitRequest.Author"/> is <see langword="null"/> — see its own remarks. Not a
-    /// real identity a commit should be attributed to in production; a production caller supplies its own.
-    /// </summary>
-    private static readonly GitAuthor DefaultAuthor = new("Thalos", "thalos@noreply.invalid");
-
     private readonly GitCli _git = new(options);
 
     /// <inheritdoc />
@@ -86,7 +106,7 @@ public sealed partial class GitCliRunWorkspaceGit(
             return Result<GitCommitResult, AgentError>.Failure(stageFailure);
         }
 
-        var cached = await _git.RunAsync(workspace.Root, ["diff", "--cached", "--quiet"], null, null, ct).ConfigureAwait(false);
+        var cached = await RunGitAsync(workspace.Root, ["diff", "--cached", "--quiet"], null, null, ct).ConfigureAwait(false);
         if (cached.TimedOut)
         {
             return Result<GitCommitResult, AgentError>.Failure(AgentError.GitOperationFailed("git diff --cached failed. The git command timed out."));
@@ -96,7 +116,7 @@ public sealed partial class GitCliRunWorkspaceGit(
         {
             // Nothing staged: git diff --cached --quiet's own convention for "no differences". No commit is made,
             // and Sha reports HEAD unchanged, per GitCommitResult's existing shape.
-            var unchanged = await _git.RunAsync(workspace.Root, ["rev-parse", "HEAD"], null, null, ct).ConfigureAwait(false);
+            var unchanged = await RunGitAsync(workspace.Root, ["rev-parse", "HEAD"], null, null, ct).ConfigureAwait(false);
             return unchanged.Succeeded
                 ? Result<GitCommitResult, AgentError>.Success(new GitCommitResult(unchanged.StdOut.Trim(), Created: false))
                 : Result<GitCommitResult, AgentError>.Failure(GitFailure("git rev-parse HEAD failed.", unchanged, secret: null));
@@ -107,35 +127,41 @@ public sealed partial class GitCliRunWorkspaceGit(
             return Result<GitCommitResult, AgentError>.Failure(GitFailure("git diff --cached failed.", cached, secret: null));
         }
 
-        var author = request.Author ?? DefaultAuthor;
-        var commitConfig = new[] { $"user.name={author.Name}", $"user.email={author.Email}", "commit.gpgsign=false" };
-        var committed = await _git.RunAsync(workspace.Root, ["commit", "-m", request.Message], commitConfig, null, ct).ConfigureAwait(false);
+        var commitConfig = new[] { $"user.name={request.Author.Name}", $"user.email={request.Author.Email}", "commit.gpgsign=false" };
+        var committed = await RunGitAsync(workspace.Root, ["commit", "-m", request.Message], commitConfig, null, ct).ConfigureAwait(false);
         if (!committed.Succeeded)
         {
             return Result<GitCommitResult, AgentError>.Failure(GitFailure("git commit failed.", committed, secret: null));
         }
 
-        var head = await _git.RunAsync(workspace.Root, ["rev-parse", "HEAD"], null, null, ct).ConfigureAwait(false);
+        var head = await RunGitAsync(workspace.Root, ["rev-parse", "HEAD"], null, null, ct).ConfigureAwait(false);
         return head.Succeeded
             ? Result<GitCommitResult, AgentError>.Success(new GitCommitResult(head.StdOut.Trim(), Created: true))
             : Result<GitCommitResult, AgentError>.Failure(GitFailure("git rev-parse HEAD failed.", head, secret: null));
     }
 
     /// <summary>
-    /// Stages <see cref="GitCommitRequest.Paths"/> (or everything) and then unstages
+    /// Resets the index to <c>HEAD</c> (clearing any leftover from a previous, failed commit attempt in this same
+    /// worktree), stages <see cref="GitCommitRequest.Paths"/> (or everything), and then unstages
     /// <see cref="GitCommitRequest.ExcludePaths"/> — in that order, so an excluded path staged by a broad
     /// <c>add -A</c> is always unstaged again afterwards. Returns the failure, or <see langword="null"/> on success.
     /// </summary>
     private async Task<AgentError?> StageAsync(string root, GitCommitRequest request, CancellationToken ct)
     {
-        var addArgs = new List<string> { "add", "-A" };
+        var resetToHead = await RunGitAsync(root, ["--literal-pathspecs", "reset", "-q"], null, null, ct).ConfigureAwait(false);
+        if (!resetToHead.Succeeded)
+        {
+            return GitFailure("git reset failed.", resetToHead, secret: null);
+        }
+
+        var addArgs = new List<string> { "--literal-pathspecs", "add", "-A" };
         if (request.Paths is { Count: > 0 } paths)
         {
             addArgs.Add("--");
             addArgs.AddRange(paths);
         }
 
-        var added = await _git.RunAsync(root, addArgs, null, null, ct).ConfigureAwait(false);
+        var added = await RunGitAsync(root, addArgs, null, null, ct).ConfigureAwait(false);
         if (!added.Succeeded)
         {
             return GitFailure("git add failed.", added, secret: null);
@@ -146,9 +172,9 @@ public sealed partial class GitCliRunWorkspaceGit(
             return null;
         }
 
-        var resetArgs = new List<string> { "reset", "-q", "--" };
+        var resetArgs = new List<string> { "--literal-pathspecs", "reset", "-q", "--" };
         resetArgs.AddRange(excludePaths);
-        var reset = await _git.RunAsync(root, resetArgs, null, null, ct).ConfigureAwait(false);
+        var reset = await RunGitAsync(root, resetArgs, null, null, ct).ConfigureAwait(false);
         return reset.Succeeded ? null : GitFailure("git reset failed.", reset, secret: null);
     }
 
@@ -183,34 +209,34 @@ public sealed partial class GitCliRunWorkspaceGit(
     {
         ArgumentNullException.ThrowIfNull(workspace);
 
-        var mergeBase = await _git.RunAsync(workspace.Root, ["merge-base", workspace.BaseRef, "HEAD"], null, null, ct).ConfigureAwait(false);
+        var mergeBase = await RunGitAsync(workspace.Root, ["merge-base", workspace.BaseRef, "HEAD"], null, null, ct).ConfigureAwait(false);
         if (!mergeBase.Succeeded)
         {
             return Result<IReadOnlyList<GitFileChange>, AgentError>.Failure(GitFailure("git merge-base failed.", mergeBase, secret: null));
         }
 
-        var diff = await _git.RunAsync(workspace.Root, ["diff", "--numstat", mergeBase.StdOut.Trim(), "HEAD"], null, null, ct).ConfigureAwait(false);
+        // --no-renames: a renamed file is reported as a delete of the old path and an add of the new one, so a
+        // caller never has to special-case a rename's own numstat shape. -z: NUL-terminated records with raw,
+        // unquoted paths, so a filename containing a newline, a tab, or non-ASCII bytes parses correctly instead of
+        // being C-style quoted (the default, newline-delimited format) or split apart by an embedded newline.
+        var diff = await RunGitAsync(workspace.Root, ["diff", "--no-renames", "-z", "--numstat", mergeBase.StdOut.Trim(), "HEAD"], null, null, ct).ConfigureAwait(false);
         return diff.Succeeded
             ? Result<IReadOnlyList<GitFileChange>, AgentError>.Success(ParseNumstat(diff.StdOut))
             : Result<IReadOnlyList<GitFileChange>, AgentError>.Failure(GitFailure("git diff --numstat failed.", diff, secret: null));
     }
 
     /// <summary>
-    /// Parses <c>git diff --numstat</c> output: one tab-separated <c>added\tdeleted\tpath</c> line per changed
-    /// file. A binary file's counts are the literal text <c>-</c>, read as <c>0</c>, per this method's own contract.
+    /// Parses <c>git diff --no-renames -z --numstat</c> output: one NUL-terminated <c>added\tdeleted\tpath</c>
+    /// record per changed file. A binary file's counts are the literal text <c>-</c>, read as <c>0</c>, per this
+    /// method's own contract. The path is everything after the second tab, taken as a whole even if it itself
+    /// contains a tab.
     /// </summary>
     private static List<GitFileChange> ParseNumstat(string stdOut)
     {
         var changes = new List<GitFileChange>();
-        using var reader = new StringReader(stdOut);
-        while (reader.ReadLine() is { } line)
+        foreach (var record in stdOut.Split('\0', StringSplitOptions.RemoveEmptyEntries))
         {
-            if (line.Length == 0)
-            {
-                continue;
-            }
-
-            var parts = line.Split('\t');
+            var parts = record.Split('\t', 3);
             if (parts.Length < 3)
             {
                 continue;
@@ -230,17 +256,28 @@ public sealed partial class GitCliRunWorkspaceGit(
     {
         ArgumentNullException.ThrowIfNull(workspace);
 
-        // Set explicitly before every push, the same discipline GitWorktreeWorkspaceProvider applies before every
-        // fetch: a mirror shared across runs for one repository could have had its origin URL last set by a
-        // different run's create, and credentials must only ever go to this workspace's own configured remote.
-        var setUrl = await _git.RunAsync(workspace.Root, ["config", "remote.origin.url", workspace.Remote], null, null, ct).ConfigureAwait(false);
-        if (!setUrl.Succeeded)
+        if (string.Equals(workspace.Branch, workspace.DefaultBranch, StringComparison.Ordinal))
         {
-            return UnitResult<AgentError>.Failure(GitFailure("git config remote.origin.url failed.", setUrl, secret: null));
+            return UnitResult<AgentError>.Failure(AgentError.Validation(
+                $"Refusing to push: the run's branch '{workspace.Branch}' is the repository's own default branch."));
+        }
+
+        var expectedRef = $"refs/heads/{workspace.Branch}";
+        var symbolicRef = await RunGitAsync(workspace.Root, ["symbolic-ref", "-q", "HEAD"], null, null, ct).ConfigureAwait(false);
+        if (!symbolicRef.Succeeded)
+        {
+            return UnitResult<AgentError>.Failure(GitFailure("git symbolic-ref HEAD failed.", symbolicRef, secret: null));
+        }
+
+        if (!string.Equals(symbolicRef.StdOut.Trim(), expectedRef, StringComparison.Ordinal))
+        {
+            return UnitResult<AgentError>.Failure(AgentError.Validation(
+                $"Refusing to push: the worktree's checked-out branch is not '{expectedRef}'."));
         }
 
         var (secretConfig, secret) = CredentialConfig(workspace.Remote);
-        var pushed = await _git.RunAsync(workspace.Root, ["push", "origin", $"HEAD:refs/heads/{workspace.Branch}"], null, secretConfig, ct).ConfigureAwait(false);
+        var refspec = $"{expectedRef}:{expectedRef}";
+        var pushed = await RunGitAsync(workspace.Root, ["push", "--end-of-options", workspace.Remote, refspec], null, secretConfig, ct).ConfigureAwait(false);
         return pushed.Succeeded
             ? UnitResult<AgentError>.Success()
             : UnitResult<AgentError>.Failure(GitFailure("git push failed.", pushed, secret));
@@ -261,6 +298,24 @@ public sealed partial class GitCliRunWorkspaceGit(
 
         var token = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{creds.Username}:{creds.Password}"));
         return ([("http.extraHeader", $"AUTHORIZATION: basic {token}")], token);
+    }
+
+    /// <summary>
+    /// Runs one git call through <see cref="GitCli"/> with <c>-c core.fsmonitor=false</c> merged ahead of
+    /// <paramref name="extraConfig"/> on every call this type makes — defence in depth against a repository's own
+    /// tracked or local config naming an fsmonitor hook, which <see cref="GitCli"/>'s <c>core.hooksPath</c>
+    /// isolation does not cover.
+    /// </summary>
+    private Task<GitCliResult> RunGitAsync(
+        string root, IReadOnlyList<string> args, IReadOnlyList<string>? extraConfig, IReadOnlyList<(string Key, string Value)>? secretConfig, CancellationToken ct)
+    {
+        var config = new List<string> { "core.fsmonitor=false" };
+        if (extraConfig is { Count: > 0 })
+        {
+            config.AddRange(extraConfig);
+        }
+
+        return _git.RunAsync(root, args, config, secretConfig, ct);
     }
 
     /// <summary>

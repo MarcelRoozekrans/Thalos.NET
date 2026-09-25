@@ -25,6 +25,24 @@ public sealed class GitWorkspaceThalosBuilderExtensionsTests
     }
 
     [Fact]
+    public void UseGitWorktreeWorkspaces_registers_IRunWorkspaceGit_as_a_singleton()
+    {
+        var dataRoot = Directory.CreateTempSubdirectory("thalos-git-di-").FullName;
+        try
+        {
+            var services = new ServiceCollection().AddLogging();
+            services.AddThalos(t => t.UseGitWorktreeWorkspaces(o => o.DataRoot = dataRoot));
+            using var sp = services.BuildServiceProvider();
+
+            sp.GetRequiredService<IRunWorkspaceGit>().Should().BeOfType<GitCliRunWorkspaceGit>();
+        }
+        finally
+        {
+            Directory.Delete(dataRoot, recursive: true);
+        }
+    }
+
+    [Fact]
     public void A_relative_DataRoot_is_refused()
     {
         var services = new ServiceCollection().AddLogging();

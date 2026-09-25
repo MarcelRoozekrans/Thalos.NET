@@ -77,6 +77,34 @@ public sealed class LocalGitRemote : IDisposable
     public string HeadOf(string branch) => RunGit(_path, "rev-parse", branch);
 
     /// <summary>
+    /// The commit sha at the tip of <paramref name="branch"/>, or <see langword="null"/> when that ref does not
+    /// exist — unlike <see cref="HeadOf"/>, which throws. For a test that wants a red assertion mismatch (a
+    /// <see langword="null"/>-vs-sha comparison) rather than an exception when a push did not create the ref it
+    /// expected.
+    /// </summary>
+    public string? TryHeadOf(string branch)
+    {
+        var startInfo = new ProcessStartInfo("git")
+        {
+            WorkingDirectory = _path,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        startInfo.ArgumentList.Add("rev-parse");
+        startInfo.ArgumentList.Add("--verify");
+        startInfo.ArgumentList.Add("-q");
+        startInfo.ArgumentList.Add(branch);
+
+        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start git.");
+        var stdOut = process.StandardOutput.ReadToEnd();
+        process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        return process.ExitCode == 0 ? stdOut.Trim() : null;
+    }
+
+    /// <summary>
     /// Creates a bare repository seeded with <c>README.md</c> plus one entry, <paramref name="linkName"/>, committed
     /// as a real git symlink (mode <c>120000</c>) pointing at <paramref name="linkTarget"/>. The symlink is written
     /// as a git object directly — <c>hash-object</c> plus <c>update-index --cacheinfo</c> — rather than created on
