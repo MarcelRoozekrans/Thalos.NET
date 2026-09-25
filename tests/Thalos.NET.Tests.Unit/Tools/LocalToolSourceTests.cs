@@ -48,12 +48,47 @@ public sealed class LocalToolSourceTests
     }
 
     [ThalosToolType]
-    public sealed class CallerEchoTools
+    public sealed class CallerEchoTools(Counter counter)
     {
-        private readonly object _sentinel = new();
-
         [ThalosTool("whoami")]
-        public string WhoAmI(ISecurityContext caller, string suffix) => $"{caller.Id}:{suffix}" + (_sentinel is null ? "!" : ""); // touch instance state (CA1822)
+        public string WhoAmI(ISecurityContext caller, string suffix) { counter.Value++; return $"{caller.Id}:{suffix}"; }
+    }
+
+    [ThalosToolType]
+    public sealed class StaticCallerEchoTools
+    {
+        [ThalosTool("whoami-static")]
+        public static string WhoAmIStatic(ISecurityContext caller, string suffix) => $"{caller.Id}:{suffix}";
+    }
+
+    /// <summary>A concrete <see cref="ISecurityContext"/> implementation with a settable <see cref="Id"/>, standing
+    /// in for Daedalus's real principal types (e.g. a detached principal or a claims-backed context) that a tool
+    /// author could mistakenly declare directly instead of the abstraction <see cref="LocalToolSource"/> binds.
+    /// Declared as a parameter type it would appear in the JSON schema and accept a model-supplied <c>id</c>.</summary>
+    public sealed class ForgedConcretePrincipal : ISecurityContext
+    {
+        public string Id { get; set; } = string.Empty;
+        public IReadOnlySet<string> Roles { get; } = new HashSet<string>(StringComparer.Ordinal);
+        public IReadOnlyDictionary<string, string> Claims { get; } = new Dictionary<string, string>(StringComparer.Ordinal);
+    }
+
+    [ThalosToolType]
+    public sealed class ForgedPrincipalTools(Counter counter)
+    {
+        [ThalosTool("forge-concrete")]
+        public string ForgeConcrete(ForgedConcretePrincipal caller, string suffix) { counter.Value++; return $"{caller.Id}:{suffix}"; }
+    }
+
+    public interface IExtendedSecurityContext : ISecurityContext
+    {
+        string ExtraClaim { get; }
+    }
+
+    [ThalosToolType]
+    public sealed class DerivedInterfaceTools(Counter counter)
+    {
+        [ThalosTool("forge-interface")]
+        public string ForgeInterface(IExtendedSecurityContext caller, string suffix) { counter.Value++; return $"{caller.Id}:{suffix}"; }
     }
 
     private static async Task<AIFunction> ToolAsync(IServiceProvider sp, string name, params Type[] types)
@@ -64,7 +99,7 @@ public sealed class LocalToolSourceTests
 
     private static async Task<AIFunction> SingleToolAsync(Type toolType)
     {
-        var sp = new ServiceCollection().BuildServiceProvider();
+        var sp = new ServiceCollection().AddScoped<Counter>().BuildServiceProvider();
         var source = new LocalToolSource("local", sp, [toolType]);
         return (AIFunction)(await source.GetToolsAsync(default)).Value.Single();
     }
@@ -175,7 +210,7 @@ public sealed class LocalToolSourceTests
         var fn = await SingleToolAsync(typeof(CallerEchoTools));
         using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), new TestSecurityContext("user-7"));
 
-        var result = await fn.InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal) { ["suffix"] = "x", ["caller"] = "forged" }, CancellationToken.None);
+        var result = await fn.InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal) { ["suffix"] = "x", ["caller"] = new TestSecurityContext("forged") }, CancellationToken.None);
 
         result!.ToString().Should().Contain("user-7:x").And.NotContain("forged");
     }
@@ -187,5 +222,40 @@ public sealed class LocalToolSourceTests
 
         (await fn.InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal) { ["suffix"] = "x" }, CancellationToken.None))!.ToString()
             .Should().Contain(AnonymousSecurityContext.AnonymousId);
+    }
+
+    [Fact]
+    public async Task A_static_tools_security_context_parameter_is_also_bound_from_the_turn()
+    {
+        var fn = await SingleToolAsync(typeof(StaticCallerEchoTools));
+        using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), new TestSecurityContext("user-9"));
+
+        var result = await fn.InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal) { ["suffix"] = "y" }, CancellationToken.None);
+
+        result!.ToString().Should().Contain("user-9:y");
+    }
+
+    [Fact]
+    public void Rejects_a_tool_parameter_typed_as_a_concrete_security_context_eagerly()
+    {
+        var sp = new ServiceCollection().BuildServiceProvider();
+
+        var act = () => new LocalToolSource("local", sp, [typeof(ForgedPrincipalTools)]);
+
+        act.Should().Throw<ArgumentException>()
+            .WithMessage("*ForgeConcrete*caller*")
+            .And.ParamName.Should().Be("toolTypes");
+    }
+
+    [Fact]
+    public void Rejects_a_tool_parameter_typed_as_a_derived_security_interface_eagerly()
+    {
+        var sp = new ServiceCollection().BuildServiceProvider();
+
+        var act = () => new LocalToolSource("local", sp, [typeof(DerivedInterfaceTools)]);
+
+        act.Should().Throw<ArgumentException>()
+            .WithMessage("*ForgeInterface*caller*")
+            .And.ParamName.Should().Be("toolTypes");
     }
 }
