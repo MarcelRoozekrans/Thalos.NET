@@ -19,26 +19,47 @@ public static partial class WorkspacePath
 
     /// <summary>
     /// Resolves <paramref name="relativePath"/> inside <paramref name="workspaceRoot"/>, or fails. Refuses: blank;
-    /// any path containing <c>':'</c> (a Windows drive qualifier or NTFS alternate data stream, refused on every OS
-    /// so a workspace path means the same thing everywhere); a <c>"."</c> or <c>".."</c> segment; a <c>".git"</c>
-    /// segment case-insensitively, or a segment matching git's own NTFS short-name alias pattern <c>^git~\d+$</c>
-    /// case-insensitively, checked against both the raw input and the fully resolved path; on Windows, a reserved
-    /// device name, or a segment ending in a trailing dot or space. A rooted or absolute <paramref name="relativePath"/>
-    /// is refused by the containment check below, not by a separate early check: <see cref="Path.Combine(string, string)"/>
-    /// discards <paramref name="workspaceRoot"/> entirely when the second argument is rooted, so the combined path
-    /// can never land inside the root.
+    /// a NUL character; any path containing <c>':'</c> (a Windows drive qualifier or NTFS alternate data stream,
+    /// refused on every OS); a <c>"."</c> or <c>".."</c> segment; a <c>".git"</c> segment case-insensitively, or a
+    /// segment matching git's own NTFS short-name alias pattern <c>^git~\d+$</c> case-insensitively, checked
+    /// against both the raw input and the fully resolved path; on Windows, a reserved device name, or a segment
+    /// ending in a trailing dot or space; a rooted or absolute <paramref name="relativePath"/>, refused outright as
+    /// a lexical step before any filesystem access — including one that happens to resolve inside the workspace,
+    /// which is refused too, since a caller using this contract correctly never has a reason to supply one; a
+    /// combined path that does not lexically fall under the canonical root; and a workspace root that does not
+    /// resolve to a directory.
     /// </summary>
     /// <remarks>
+    /// <para>
     /// Link resolution asks the operating system's own path canonicalisation for the deepest existing ancestor of
     /// the combined path — <c>realpath</c> on Linux and macOS, the handle's final path on Windows — rather than
     /// hand-walking symlinks and junctions segment by segment. A hand-written walk drifted from kernel semantics
-    /// twice: it failed to re-canonicalise a link discovered while resolving another link, and it normalised a
+    /// repeatedly: it failed to re-canonicalise a link discovered while resolving another link; it normalised a
     /// <c>".."</c> inside a link's recorded target as text, before the target itself had been followed, where the
-    /// kernel applies <c>".."</c> only after following the link. Letting the kernel canonicalise avoids both classes
-    /// of bug by construction. A dangling link, a link loop, or any other failure to resolve returns a failure
-    /// <see cref="Result{T, E}"/> — never an exception — and is refused even where it would, if it resolved, land
-    /// inside the workspace; that over-refusal is accepted. On a platform with no reachable kernel canonicalisation,
-    /// every path that needs one is refused.
+    /// kernel applies <c>".."</c> only after following the link; and its existence probe treated every filesystem
+    /// error alike, so a path segment beyond the platform's length limit was silently treated as "does not exist",
+    /// which stopped the probe early and left an unresolved, unverified tail that could itself contain a real
+    /// symlink. Letting the kernel canonicalise removes the first two classes of bug by construction. The third is
+    /// closed by a narrower rule for the probe itself: only <see cref="FileNotFoundException"/> and
+    /// <see cref="DirectoryNotFoundException"/> mean "does not exist" and stop the probe early; every other
+    /// failure — a path too long, a permission error, a symlink loop, or anything else — refuses the whole
+    /// resolution instead of guessing. Only given that rule does "the tail after the deepest existing ancestor
+    /// cannot contain a link" actually hold: nothing that exists yet, and nothing the probe could not conclusively
+    /// rule out, is ever appended unresolved.
+    /// </para>
+    /// <para>
+    /// A dangling link, a link loop, a filesystem error during the existence probe, or any other failure to
+    /// resolve returns a failure <see cref="Result{T, E}"/> — never an exception — and is refused even where it
+    /// would, if it resolved, land inside the workspace; that over-refusal is accepted. On a platform with no
+    /// reachable kernel canonicalisation, every path that needs one is refused.
+    /// </para>
+    /// <para>
+    /// A rooted/absolute input, an input outside the workspace either lexically or after full resolution, and a
+    /// filesystem error during the existence probe all fail with the exact same fixed message (see
+    /// <see cref="GenericRefusal"/>) — none of it derived from <paramref name="relativePath"/> or from the host
+    /// filesystem — so the failure channel cannot be used to learn whether a host path exists, is missing, or is
+    /// merely inaccessible.
+    /// </para>
     /// </remarks>
     /// <param name="workspaceRoot">The workspace's root directory.</param>
     /// <param name="relativePath">The path an agent supplied, taken as relative to <paramref name="workspaceRoot"/>.</param>
@@ -48,25 +69,44 @@ public static partial class WorkspacePath
         if (segmentFailure is { } failure)
             return failure;
 
+        // Lexical step, before any filesystem access: a rooted or absolute relativePath is refused outright,
+        // regardless of where it would resolve — including one that happens to land inside the workspace, which a
+        // caller using this contract correctly never has a reason to supply.
+        if (Path.IsPathRooted(relativePath))
+            return GenericRefusal();
+
         var rootCanonical = Canonicalize(Path.GetFullPath(workspaceRoot));
         if (rootCanonical.IsFailure)
-            return Failure(relativePath, $"the workspace root could not be resolved: {rootCanonical.Error.Message}");
+            return Failure(relativePath, $"the workspace root could not be resolved ({rootCanonical.Error.Message})");
         var root = rootCanonical.Value;
 
+        if (!Directory.Exists(root))
+            return Failure(relativePath, "the workspace root is not a directory");
+
         var full = Path.GetFullPath(Path.Combine(root, relativePath));
-        var ancestor = DeepestExistingAncestor(root, full);
 
-        var ancestorCanonical = Canonicalize(ancestor);
+        // Lexical step, still before any further filesystem access: refuse anything whose combined path is not
+        // textually under the canonical root. Given the checks above — no rooted input, no ".." or "." segment —
+        // this likely can never trigger for well-formed input, but it costs nothing and states the invariant
+        // explicitly rather than relying on it staying true as the checks above evolve.
+        if (!IsContained(full, root))
+            return GenericRefusal();
+
+        var ancestorResult = DeepestExistingAncestor(root, full);
+        if (ancestorResult.IsFailure)
+            return GenericRefusal();
+
+        var ancestorCanonical = Canonicalize(ancestorResult.Value);
         if (ancestorCanonical.IsFailure)
-            return Failure(relativePath, $"could not be resolved: {ancestorCanonical.Error.Message}");
+            return Failure(relativePath, $"could not be resolved ({ancestorCanonical.Error.Message})");
 
-        var tail = Path.GetRelativePath(ancestor, full);
+        var tail = Path.GetRelativePath(ancestorResult.Value, full);
         var resolved = string.Equals(tail, ".", StringComparison.Ordinal)
             ? ancestorCanonical.Value
             : Path.Combine(ancestorCanonical.Value, tail);
 
         if (!IsContained(resolved, root))
-            return Failure(relativePath, "escapes the workspace root");
+            return GenericRefusal();
 
         return GitSegmentFailure(relativePath, root, resolved) ?? Result<string, AgentError>.Success(resolved);
     }
@@ -75,6 +115,9 @@ public static partial class WorkspacePath
     {
         if (string.IsNullOrWhiteSpace(relativePath))
             return Failure(relativePath, "is blank");
+
+        if (relativePath.Contains('\0'))
+            return Failure(relativePath, "contains a NUL character");
 
         if (relativePath.Contains(':'))
             return Failure(relativePath, "contains a drive or alternate-data-stream qualifier");
@@ -173,11 +216,13 @@ public static partial class WorkspacePath
 
     /// <summary>
     /// Walks the segments between <paramref name="root"/> and <paramref name="full"/>, returning the deepest prefix
-    /// that exists — using an <c>lstat</c>-style check, so a symlink or junction counts as existing even when its
-    /// own target does not. Everything at or beyond the returned prefix does not exist yet, so it cannot contain a
-    /// link: <see cref="Resolve"/> appends it, unresolved, onto the kernel-canonicalised ancestor.
+    /// that exists — using an <c>lstat</c>-style existence probe (<see cref="LExists"/>), so a symlink or junction
+    /// counts as existing even when its own target does not. Everything at or beyond the returned prefix does not
+    /// exist yet, so it cannot contain a link and is appended, unresolved, onto the kernel-canonicalised ancestor —
+    /// but only because <see cref="LExists"/> fails the whole walk, rather than guessing "does not exist", for any
+    /// probe outcome other than a conclusive not-found.
     /// </summary>
-    private static string DeepestExistingAncestor(string root, string full)
+    private static Result<string, AgentError> DeepestExistingAncestor(string root, string full)
     {
         var relative = Path.GetRelativePath(root, full);
         var segments = string.Equals(relative, ".", StringComparison.Ordinal) ? [] : relative.Split(Path.DirectorySeparatorChar);
@@ -186,42 +231,46 @@ public static partial class WorkspacePath
         foreach (var segment in segments)
         {
             var candidate = Path.Combine(current, segment);
-            if (!LExists(candidate))
+            var exists = LExists(candidate);
+            if (exists.IsFailure)
+                return Result<string, AgentError>.Failure(exists.Error);
+
+            if (!exists.Value)
                 break;
 
             current = candidate;
         }
 
-        return current;
+        return Result<string, AgentError>.Success(current);
     }
 
     /// <summary>
     /// Reports whether <paramref name="path"/> has a filesystem entry, without following a final symlink or
-    /// junction — a dangling link still "exists" for this check, the same as POSIX <c>lstat</c>.
+    /// junction — a dangling link still "exists" for this check, the same as POSIX <c>lstat</c> — or fails.
     /// <see cref="File.GetAttributes(string)"/> queries the entry itself on both Windows (<c>GetFileAttributesW</c>
-    /// never follows reparse points) and Unix (an initial <c>lstat</c>), so this is already lstat-style on every
-    /// supported platform.
+    /// never follows reparse points) and Unix (an initial <c>lstat</c>), so a plain not-found result is already
+    /// lstat-style on every supported platform. Only <see cref="FileNotFoundException"/> and
+    /// <see cref="DirectoryNotFoundException"/> are treated as "does not exist". Every other outcome —
+    /// <see cref="PathTooLongException"/> or an <c>ENAMETOOLONG</c>-flavoured <see cref="IOException"/> for a
+    /// segment beyond the platform's length limit, <see cref="UnauthorizedAccessException"/> for a permission
+    /// error, an intermediate symlink loop, or anything else — fails closed instead: this is what makes
+    /// <see cref="DeepestExistingAncestor"/>'s "the tail cannot contain a link" invariant actually true, rather
+    /// than an unverified assumption a filesystem error could quietly violate.
     /// </summary>
-    private static bool LExists(string path)
+    private static Result<bool, AgentError> LExists(string path)
     {
         try
         {
             _ = File.GetAttributes(path);
-            return true;
+            return Result<bool, AgentError>.Success(true);
         }
         catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
         {
-            return false;
+            return Result<bool, AgentError>.Success(false);
         }
-        catch (IOException)
+        catch (Exception)
         {
-            // On Unix, GetAttributes still has to resolve every *intermediate* path component — lstat's
-            // no-follow rule applies only to the final component — so a symlink loop earlier in the path (not the
-            // segment being checked itself) surfaces here as ELOOP, not as a not-found error. Real lstat() would
-            // fail the same way for a path whose intermediate component loops, so this is treated the same as
-            // "does not exist yet": the walk stops before this segment, and Canonicalize's realpath call reports
-            // the loop as a proper failure Result once it is asked to resolve the ancestor that stopped there.
-            return false;
+            return Result<bool, AgentError>.Failure(AgentError.Validation("could not determine whether the path exists."));
         }
     }
 
@@ -240,7 +289,7 @@ public static partial class WorkspacePath
             return CanonicalizeOnUnix(path);
 
         return Result<string, AgentError>.Failure(
-            AgentError.Validation($"path '{path}' cannot be resolved: no kernel path canonicalisation is reachable on this platform."));
+            AgentError.Validation("no kernel path canonicalisation is reachable on this platform."));
     }
 
     [SupportedOSPlatform("linux")]
@@ -250,16 +299,16 @@ public static partial class WorkspacePath
         var resolved = Unix.RealPath(path);
         return resolved is not null
             ? Result<string, AgentError>.Success(resolved)
-            : Result<string, AgentError>.Failure(AgentError.Validation($"path '{path}' could not be resolved (errno {Marshal.GetLastPInvokeError()})."));
+            : Result<string, AgentError>.Failure(AgentError.Validation($"errno {Marshal.GetLastPInvokeError()}"));
     }
 
     [SupportedOSPlatform("windows")]
     private static Result<string, AgentError> CanonicalizeOnWindows(string path)
     {
-        var resolved = Windows.GetFinalPath(path);
+        var resolved = Windows.GetFinalPath(path, out var win32Error);
         return resolved is not null
             ? Result<string, AgentError>.Success(resolved)
-            : Result<string, AgentError>.Failure(AgentError.Validation($"path '{path}' could not be resolved."));
+            : Result<string, AgentError>.Failure(AgentError.Validation($"Win32 error {win32Error}"));
     }
 
     private static bool IsContained(string path, string root)
@@ -270,4 +319,15 @@ public static partial class WorkspacePath
 
     private static Result<string, AgentError> Failure(string relativePath, string reason) =>
         Result<string, AgentError>.Failure(AgentError.Validation($"path '{relativePath}' {reason}."));
+
+    /// <summary>
+    /// The single, fixed failure every "not permitted" case returns: a rooted or absolute input, an input outside
+    /// the workspace either lexically or after full resolution, and a filesystem error encountered while probing
+    /// for the deepest existing ancestor. Nothing here is derived from the caller's input or from the host
+    /// filesystem, and every case that reaches it returns the exact same message, so the failure channel cannot be
+    /// used to learn whether a host path exists, is missing, or is merely inaccessible — two calls refused this way
+    /// are indistinguishable from one another, regardless of what is actually on disk.
+    /// </summary>
+    private static Result<string, AgentError> GenericRefusal() =>
+        Result<string, AgentError>.Failure(AgentError.Validation("the path is not permitted."));
 }

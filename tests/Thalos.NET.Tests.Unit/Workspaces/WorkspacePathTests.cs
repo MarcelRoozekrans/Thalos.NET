@@ -1,3 +1,4 @@
+using System.Runtime.Versioning;
 using AwesomeAssertions;
 using Thalos.Workspaces;
 
@@ -263,6 +264,133 @@ public sealed class WorkspacePathTests : IDisposable
         var driveRoot = Path.GetPathRoot(_workspace)!;
 
         WorkspacePath.Resolve(driveRoot, "foo.txt").IsFailure.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Refuses_a_workspace_root_that_is_a_file()
+    {
+        var rootFile = Path.Combine(_root, "root-is-a-file.txt");
+        File.WriteAllText(rootFile, "not a directory");
+
+        WorkspacePath.Resolve(rootFile, "foo.txt").IsFailure.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Refuses_a_nul_character_without_throwing()
+    {
+        var act = () => WorkspacePath.Resolve(_workspace, "foo\0bar.txt");
+
+        act.Should().NotThrow();
+        act().IsFailure.Should().BeTrue();
+    }
+
+    [Fact]
+    public void Refuses_an_absolute_path_that_lies_inside_the_workspace()
+    {
+        // The rooted check's own red: remove it, and this succeeds wrongly, because Path.Combine discards the
+        // workspace root when the second argument is rooted, and the absolute input happens to equal the combined
+        // path anyway — so plain containment does not catch it. A caller using this contract correctly only ever
+        // supplies a relative path, so an absolute one is refused regardless of where it points.
+        var absoluteInsideWorkspace = Path.Combine(_workspace, "src", "Lib", "Class1.cs");
+
+        WorkspacePath.Resolve(_workspace, absoluteInsideWorkspace).IsFailure.Should().BeTrue();
+    }
+
+    [SkippableTheory]
+    [InlineData("/root/.bashrc")]
+    [InlineData("/root/nope/x")]
+    public void Refuses_absolute_host_paths_outside_the_workspace_without_throwing(string path)
+    {
+        Skip.IfNot(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS(), "these specific host paths are POSIX-only");
+
+        var act = () => WorkspacePath.Resolve(_workspace, path);
+
+        act.Should().NotThrow();
+        act().IsFailure.Should().BeTrue(path);
+    }
+
+    [SkippableFact]
+    public void Refuses_absolute_host_paths_with_the_same_message_whether_or_not_they_exist()
+    {
+        Skip.IfNot(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS(), "these specific host paths are POSIX-only");
+
+        // /root/.bashrc exists in the base image; /root/nope/x does not. Both are refused before either the
+        // existence of /root/.bashrc or the non-existence of /root/nope is ever probed, and with the exact same
+        // fixed message, so the caller cannot tell which host path was real.
+        var existing = WorkspacePath.Resolve(_workspace, "/root/.bashrc");
+        var missing = WorkspacePath.Resolve(_workspace, "/root/nope/x");
+
+        existing.IsFailure.Should().BeTrue();
+        missing.IsFailure.Should().BeTrue();
+        existing.Error.Message.Should().Be(missing.Error.Message);
+    }
+
+    [SkippableFact]
+    public void Refuses_an_unreadable_directory_inside_the_workspace_without_throwing()
+    {
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS())
+        {
+            Skip.If(true, "POSIX permission bits");
+            return;
+        }
+
+        RefusesAnUnreadableDirectoryWithoutThrowing();
+    }
+
+    [SupportedOSPlatform("linux")]
+    [SupportedOSPlatform("macos")]
+    private void RefusesAnUnreadableDirectoryWithoutThrowing()
+    {
+        var locked = Path.Combine(_workspace, "locked");
+        Directory.CreateDirectory(locked);
+        File.SetUnixFileMode(locked, UnixFileMode.None);
+
+        try
+        {
+            // chmod 000 has no effect on root; skip rather than silently pass if this process can bypass it.
+            Skip.If(CanListDespiteNoPermissions(locked), "running with a privilege that bypasses POSIX permission bits");
+
+            var act = () => WorkspacePath.Resolve(_workspace, "locked/x.txt");
+
+            act.Should().NotThrow();
+            act().IsFailure.Should().BeTrue();
+        }
+        finally
+        {
+            // restore access so the fixture's own teardown can remove it
+            File.SetUnixFileMode(locked, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+    }
+
+    [SkippableFact]
+    public void Refuses_a_path_beyond_the_platform_length_limit_with_a_symlink_in_the_would_be_tail()
+    {
+        Skip.IfNot(OperatingSystem.IsLinux() || OperatingSystem.IsMacOS(), "PATH_MAX/NAME_MAX are POSIX concepts");
+
+        // A real symlink that would escape if the existence probe ever reached it.
+        CreateRealSymlinkOrSkip(Path.Combine(_workspace, "escape"), _outside);
+
+        // A single path segment beyond NAME_MAX (255 bytes on ext4 and most Linux filesystems) makes the existence
+        // probe fail with ENAMETOOLONG partway through — before it would ever reach "escape" — so this exercises
+        // the "fail closed" rule directly: if the probe silently treated that failure as "does not exist" (the
+        // pre-fix behaviour), "escape/x.txt" would be appended unresolved onto the canonicalised root, textually
+        // inside the workspace, while a real write would land in _outside via the symlink.
+        var tooLong = new string('a', 300);
+
+        WorkspacePath.Resolve(_workspace, $"{tooLong}/escape/x.txt").IsFailure.Should().BeTrue();
+    }
+
+    private static bool CanListDespiteNoPermissions(string path)
+    {
+        try
+        {
+            _ = Directory.GetFileSystemEntries(path);
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return false;
+        }
     }
 
     [Fact]

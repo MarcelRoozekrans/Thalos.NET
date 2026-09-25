@@ -63,13 +63,17 @@ public static partial class WorkspacePath
         /// than only when the path's own final component is flagged as a reparse point, so an ancestor-level
         /// junction earlier in <paramref name="path"/> is resolved too — <c>CreateFileW</c> itself follows every
         /// reparse point it meets while opening. Returns <see langword="null"/> on any failure to open or query,
-        /// including a dangling link or a reparse-point loop.
+        /// including a dangling link or a reparse-point loop; <paramref name="win32Error"/> carries the Win32 error
+        /// code for the caller to report — never <paramref name="path"/> itself, which the caller must not echo.
         /// </summary>
-        public static string? GetFinalPath(string path)
+        public static string? GetFinalPath(string path, out int win32Error)
         {
             using var handle = CreateFileW(path, 0, FileShareRead | FileShareWrite | FileShareDelete, 0, OpenExisting, FileFlagBackupSemantics, 0);
             if (handle.IsInvalid)
+            {
+                win32Error = Marshal.GetLastPInvokeError();
                 return null;
+            }
 
             var buffer = new char[4096];
             while (true)
@@ -81,13 +85,22 @@ public static partial class WorkspacePath
                 }
 
                 if (length == 0)
+                {
+                    win32Error = Marshal.GetLastPInvokeError();
                     return null;
+                }
 
                 if (length < buffer.Length)
+                {
+                    win32Error = 0;
                     return StripExtendedLengthPrefix(new string(buffer, 0, (int)length));
+                }
 
                 if (buffer.Length >= 65536)
-                    return null; // pathologically long; refuse rather than grow the buffer forever
+                {
+                    win32Error = 0; // pathologically long; refuse rather than grow the buffer forever
+                    return null;
+                }
 
                 buffer = new char[buffer.Length * 2];
             }
