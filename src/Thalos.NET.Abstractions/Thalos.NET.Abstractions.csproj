@@ -4,6 +4,9 @@
     <PackageId>Thalos.NET.Abstractions</PackageId>
     <Description>Ports and models for Thalos.NET. Depends only on ZeroAlloc primitives and Microsoft.Extensions.AI.Abstractions.</Description>
     <PackageTags>agents;ai;llm;abstractions;zeroalloc</PackageTags>
+    <!-- WorkspacePath.Interop.cs P/Invokes the kernel's own path canonicalisation (realpath, GetFinalPathNameByHandle)
+         instead of hand-walking symlinks; the Windows buffer marshalling needs an unsafe char* pointer. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="ZeroAlloc.Results" />

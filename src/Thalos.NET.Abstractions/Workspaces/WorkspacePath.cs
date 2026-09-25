@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
 using ZeroAlloc.Results;
 
 namespace Thalos.Workspaces;
@@ -11,23 +13,33 @@ namespace Thalos.Workspaces;
 /// after this call returns but before the open — so a caller with a stronger requirement must additionally compare
 /// the opened handle's real path against the workspace root.
 /// </summary>
-public static class WorkspacePath
+public static partial class WorkspacePath
 {
     private static readonly char[] Separators = [Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar];
 
     /// <summary>
     /// Resolves <paramref name="relativePath"/> inside <paramref name="workspaceRoot"/>, or fails. Refuses: blank;
-    /// any path containing <c>':'</c> (a Windows drive qualifier or NTFS alternate data stream, and on every OS so a
-    /// workspace path means the same thing everywhere); a <c>"."</c> or <c>".."</c> segment; a <c>".git"</c>
-    /// segment case-insensitively, or a segment matching git's own NTFS short-name alias pattern
-    /// <c>^git~\d+$</c> case-insensitively, checked against both the raw input and the fully resolved path; on
-    /// Windows, a reserved device name, or a segment ending in a trailing dot or space; and any path whose existing
-    /// ancestor, or itself, is a symlink or junction whose final target — itself re-canonicalised the same way, so a
-    /// link that lands inside another link's target cannot escape — lies outside the root's own final target. A
-    /// rooted or absolute <paramref name="relativePath"/> is refused by the containment check below, not by a
-    /// separate early check: <see cref="Path.Combine(string, string)"/> discards <paramref name="workspaceRoot"/>
-    /// entirely when the second argument is rooted, so the combined path can never land inside the root.
+    /// any path containing <c>':'</c> (a Windows drive qualifier or NTFS alternate data stream, refused on every OS
+    /// so a workspace path means the same thing everywhere); a <c>"."</c> or <c>".."</c> segment; a <c>".git"</c>
+    /// segment case-insensitively, or a segment matching git's own NTFS short-name alias pattern <c>^git~\d+$</c>
+    /// case-insensitively, checked against both the raw input and the fully resolved path; on Windows, a reserved
+    /// device name, or a segment ending in a trailing dot or space. A rooted or absolute <paramref name="relativePath"/>
+    /// is refused by the containment check below, not by a separate early check: <see cref="Path.Combine(string, string)"/>
+    /// discards <paramref name="workspaceRoot"/> entirely when the second argument is rooted, so the combined path
+    /// can never land inside the root.
     /// </summary>
+    /// <remarks>
+    /// Link resolution asks the operating system's own path canonicalisation for the deepest existing ancestor of
+    /// the combined path — <c>realpath</c> on Linux and macOS, the handle's final path on Windows — rather than
+    /// hand-walking symlinks and junctions segment by segment. A hand-written walk drifted from kernel semantics
+    /// twice: it failed to re-canonicalise a link discovered while resolving another link, and it normalised a
+    /// <c>".."</c> inside a link's recorded target as text, before the target itself had been followed, where the
+    /// kernel applies <c>".."</c> only after following the link. Letting the kernel canonicalise avoids both classes
+    /// of bug by construction. A dangling link, a link loop, or any other failure to resolve returns a failure
+    /// <see cref="Result{T, E}"/> — never an exception — and is refused even where it would, if it resolved, land
+    /// inside the workspace; that over-refusal is accepted. On a platform with no reachable kernel canonicalisation,
+    /// every path that needs one is refused.
+    /// </remarks>
     /// <param name="workspaceRoot">The workspace's root directory.</param>
     /// <param name="relativePath">The path an agent supplied, taken as relative to <paramref name="workspaceRoot"/>.</param>
     public static Result<string, AgentError> Resolve(string workspaceRoot, string relativePath)
@@ -36,17 +48,27 @@ public static class WorkspacePath
         if (segmentFailure is { } failure)
             return failure;
 
-        var root = FinalPath(Path.GetFullPath(workspaceRoot));
-        var full = Path.GetFullPath(Path.Combine(root, relativePath));
+        var rootCanonical = Canonicalize(Path.GetFullPath(workspaceRoot));
+        if (rootCanonical.IsFailure)
+            return Failure(relativePath, $"the workspace root could not be resolved: {rootCanonical.Error.Message}");
+        var root = rootCanonical.Value;
 
-        if (!IsContained(full, root))
+        var full = Path.GetFullPath(Path.Combine(root, relativePath));
+        var ancestor = DeepestExistingAncestor(root, full);
+
+        var ancestorCanonical = Canonicalize(ancestor);
+        if (ancestorCanonical.IsFailure)
+            return Failure(relativePath, $"could not be resolved: {ancestorCanonical.Error.Message}");
+
+        var tail = Path.GetRelativePath(ancestor, full);
+        var resolved = string.Equals(tail, ".", StringComparison.Ordinal)
+            ? ancestorCanonical.Value
+            : Path.Combine(ancestorCanonical.Value, tail);
+
+        if (!IsContained(resolved, root))
             return Failure(relativePath, "escapes the workspace root");
 
-        var resolved = FollowLinks(root, full, relativePath);
-        if (resolved.IsFailure)
-            return resolved;
-
-        return GitSegmentFailure(relativePath, root, resolved.Value) ?? resolved;
+        return GitSegmentFailure(relativePath, root, resolved) ?? Result<string, AgentError>.Success(resolved);
     }
 
     private static Result<string, AgentError>? ValidateSegments(string relativePath)
@@ -104,8 +126,7 @@ public static class WorkspacePath
     }
 
     /// <summary>
-    /// Re-checks the fully resolved path — after link-following and after <see cref="Path.GetFullPath(string)"/>'s
-    /// own 8.3 short-name expansion — for a <see cref="IsGitSegment"/> match. The raw-input check in
+    /// Re-checks the fully resolved path for a <see cref="IsGitSegment"/> match. The raw-input check in
     /// <see cref="ValidateSegments"/> only sees what the caller typed; a junction or symlink to <c>.git</c>, or a
     /// short name that <see cref="Path.GetFullPath(string)"/> silently expands to <c>.git</c>, only shows up here.
     /// </summary>
@@ -151,13 +172,12 @@ public static class WorkspacePath
     }
 
     /// <summary>
-    /// Walks from <paramref name="root"/> down to <paramref name="full"/>, following any symlink or junction it
-    /// meets to its final target — itself re-canonicalised through <see cref="FinalPath"/> so a link that lands
-    /// inside another link's target is resolved too, since <see cref="FileSystemInfo.ResolveLinkTarget"/> only
-    /// follows the chain at the link's own final component and does not canonicalise the rest of that target's path
-    /// on Unix — and requires every resolved target to stay inside <paramref name="root"/>.
+    /// Walks the segments between <paramref name="root"/> and <paramref name="full"/>, returning the deepest prefix
+    /// that exists — using an <c>lstat</c>-style check, so a symlink or junction counts as existing even when its
+    /// own target does not. Everything at or beyond the returned prefix does not exist yet, so it cannot contain a
+    /// link: <see cref="Resolve"/> appends it, unresolved, onto the kernel-canonicalised ancestor.
     /// </summary>
-    private static Result<string, AgentError> FollowLinks(string root, string full, string relativePath)
+    private static string DeepestExistingAncestor(string root, string full)
     {
         var relative = Path.GetRelativePath(root, full);
         var segments = string.Equals(relative, ".", StringComparison.Ordinal) ? [] : relative.Split(Path.DirectorySeparatorChar);
@@ -165,59 +185,81 @@ public static class WorkspacePath
         var current = root;
         foreach (var segment in segments)
         {
-            current = Path.Combine(current, segment);
+            var candidate = Path.Combine(current, segment);
+            if (!LExists(candidate))
+                break;
 
-            var target = LinkTargetOf(current);
-            if (target is null)
-                continue;
-
-            target = FinalPath(target);
-
-            if (!IsContained(target, root))
-                return Failure(relativePath, "passes through a symlink or junction whose target lies outside the workspace");
-
-            current = target;
-        }
-
-        return Result<string, AgentError>.Success(current);
-    }
-
-    /// <summary>
-    /// Walks <paramref name="path"/> from its volume root down, resolving every ancestor that is itself a symlink or
-    /// junction to its final target, so a root reached through a link — a junction-backed workspace on Windows, or
-    /// <c>/var</c> → <c>/private/var</c> on macOS — is canonicalised before the containment check.
-    /// </summary>
-    private static string FinalPath(string path)
-    {
-        var anchor = Path.GetPathRoot(path) ?? string.Empty;
-        var relative = Path.GetRelativePath(anchor, path);
-        var segments = string.Equals(relative, ".", StringComparison.Ordinal) ? [] : relative.Split(Path.DirectorySeparatorChar);
-
-        var current = anchor;
-        foreach (var segment in segments)
-        {
-            current = Path.Combine(current, segment);
-            current = LinkTargetOf(current) ?? current;
+            current = candidate;
         }
 
         return current;
     }
 
-    private static string? LinkTargetOf(string path)
+    /// <summary>
+    /// Reports whether <paramref name="path"/> has a filesystem entry, without following a final symlink or
+    /// junction — a dangling link still "exists" for this check, the same as POSIX <c>lstat</c>.
+    /// <see cref="File.GetAttributes(string)"/> queries the entry itself on both Windows (<c>GetFileAttributesW</c>
+    /// never follows reparse points) and Unix (an initial <c>lstat</c>), so this is already lstat-style on every
+    /// supported platform.
+    /// </summary>
+    private static bool LExists(string path)
     {
-        if (Directory.Exists(path))
+        try
         {
-            var info = new DirectoryInfo(path);
-            return info.LinkTarget is null ? null : info.ResolveLinkTarget(returnFinalTarget: true)!.FullName;
+            _ = File.GetAttributes(path);
+            return true;
         }
-
-        if (File.Exists(path))
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
         {
-            var info = new FileInfo(path);
-            return info.LinkTarget is null ? null : info.ResolveLinkTarget(returnFinalTarget: true)!.FullName;
+            return false;
         }
+        catch (IOException)
+        {
+            // On Unix, GetAttributes still has to resolve every *intermediate* path component — lstat's
+            // no-follow rule applies only to the final component — so a symlink loop earlier in the path (not the
+            // segment being checked itself) surfaces here as ELOOP, not as a not-found error. Real lstat() would
+            // fail the same way for a path whose intermediate component loops, so this is treated the same as
+            // "does not exist yet": the walk stops before this segment, and Canonicalize's realpath call reports
+            // the loop as a proper failure Result once it is asked to resolve the ancestor that stopped there.
+            return false;
+        }
+    }
 
-        return null;
+    /// <summary>
+    /// Canonicalises <paramref name="path"/> using the operating system's own path resolution, so every symlink and
+    /// junction along it — including one nested inside another's target, and a <c>".."</c> inside a link's target,
+    /// applied only after the link is followed — is resolved exactly as the kernel would resolve it for a real
+    /// open. Fails, rather than throwing, for a dangling link, a link loop, or any other resolution failure.
+    /// </summary>
+    private static Result<string, AgentError> Canonicalize(string path)
+    {
+        if (OperatingSystem.IsWindows())
+            return CanonicalizeOnWindows(path);
+
+        if (OperatingSystem.IsLinux() || OperatingSystem.IsMacOS())
+            return CanonicalizeOnUnix(path);
+
+        return Result<string, AgentError>.Failure(
+            AgentError.Validation($"path '{path}' cannot be resolved: no kernel path canonicalisation is reachable on this platform."));
+    }
+
+    [SupportedOSPlatform("linux")]
+    [SupportedOSPlatform("macos")]
+    private static Result<string, AgentError> CanonicalizeOnUnix(string path)
+    {
+        var resolved = Unix.RealPath(path);
+        return resolved is not null
+            ? Result<string, AgentError>.Success(resolved)
+            : Result<string, AgentError>.Failure(AgentError.Validation($"path '{path}' could not be resolved (errno {Marshal.GetLastPInvokeError()})."));
+    }
+
+    [SupportedOSPlatform("windows")]
+    private static Result<string, AgentError> CanonicalizeOnWindows(string path)
+    {
+        var resolved = Windows.GetFinalPath(path);
+        return resolved is not null
+            ? Result<string, AgentError>.Success(resolved)
+            : Result<string, AgentError>.Failure(AgentError.Validation($"path '{path}' could not be resolved."));
     }
 
     private static bool IsContained(string path, string root)

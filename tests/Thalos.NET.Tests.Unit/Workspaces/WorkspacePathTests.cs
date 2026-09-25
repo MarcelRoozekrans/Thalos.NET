@@ -159,6 +159,102 @@ public sealed class WorkspacePathTests : IDisposable
         WorkspacePath.Resolve(_workspace, "viainner/x.txt").IsFailure.Should().BeTrue();
     }
 
+    [SkippableFact]
+    public void Refuses_a_three_level_link_chain_that_escapes()
+    {
+        // ws/a -> ws/b/c, ws/b -> ws/d/e, ws/d -> _outside. Each link's target must exist for mklink /J to accept
+        // it, so these are created in dependency order: _outside/e/c is real; d aliases _outside directly; b's
+        // target "ws/d/e" is only reachable by first following d; a's target "ws/b/c" is only reachable by
+        // following b then d. A two-level chain (Refuses_a_link_nested_inside_another_links_target, above) is not
+        // enough to prove re-canonicalisation is itself recursive — this needs a third hop.
+        Directory.CreateDirectory(Path.Combine(_outside, "e", "c"));
+
+        CreateDirectoryLinkOrSkip(Path.Combine(_workspace, "d"), _outside);
+        CreateDirectoryLinkOrSkip(Path.Combine(_workspace, "b"), Path.Combine(_workspace, "d", "e"));
+        CreateDirectoryLinkOrSkip(Path.Combine(_workspace, "a"), Path.Combine(_workspace, "b", "c"));
+
+        WorkspacePath.Resolve(_workspace, "a/n3.txt").IsFailure.Should().BeTrue();
+    }
+
+    [SkippableFact]
+    public void Refuses_a_three_level_link_chain_that_reaches_the_git_directory()
+    {
+        // Same chain shape as above, landing on .git instead of outside the workspace, proving the post-resolution
+        // git-segment check sees the fully re-canonicalised result of a multi-hop chain, not just a single hop.
+        var gitDir = Path.Combine(_workspace, ".git");
+        Directory.CreateDirectory(Path.Combine(gitDir, "e", "c"));
+
+        CreateDirectoryLinkOrSkip(Path.Combine(_workspace, "d"), gitDir);
+        CreateDirectoryLinkOrSkip(Path.Combine(_workspace, "b"), Path.Combine(_workspace, "d", "e"));
+        CreateDirectoryLinkOrSkip(Path.Combine(_workspace, "a"), Path.Combine(_workspace, "b", "c"));
+
+        WorkspacePath.Resolve(_workspace, "a/n3.txt").IsFailure.Should().BeTrue();
+    }
+
+    [SkippableFact]
+    public void Refuses_a_link_target_containing_dot_dot_in_relative_form()
+    {
+        // ws/sublink -> _outside/deep/leaf (absolute target); ws/reldd -> "sublink/.." (a *relative* target,
+        // relative to reldd's own directory, i.e. ws/). A hand-rolled resolver that normalises ".." as text before
+        // following "sublink" collapses this back to ws itself; the kernel applies ".." only after following
+        // "sublink", landing at _outside/deep — outside the workspace. Needs a real symlink: a junction cannot
+        // record a relative target.
+        Directory.CreateDirectory(Path.Combine(_outside, "deep", "leaf"));
+        CreateRealSymlinkOrSkip(Path.Combine(_workspace, "sublink"), Path.Combine(_outside, "deep", "leaf"));
+        CreateRealSymlinkOrSkip(Path.Combine(_workspace, "reldd"), Path.Combine("sublink", ".."));
+
+        WorkspacePath.Resolve(_workspace, "reldd/rd.txt").IsFailure.Should().BeTrue();
+    }
+
+    [SkippableFact]
+    public void Refuses_a_link_target_containing_dot_dot_in_absolute_form()
+    {
+        // Same escape, but the link's recorded target is itself an absolute path ending in "sublink/..", not a
+        // relative one — both forms must be resolved by the kernel, not normalised as text.
+        Directory.CreateDirectory(Path.Combine(_outside, "deep", "leaf"));
+        CreateRealSymlinkOrSkip(Path.Combine(_workspace, "sublink"), Path.Combine(_outside, "deep", "leaf"));
+        CreateRealSymlinkOrSkip(Path.Combine(_workspace, "absdd"), Path.Combine(_workspace, "sublink", ".."));
+
+        WorkspacePath.Resolve(_workspace, "absdd/rd.txt").IsFailure.Should().BeTrue();
+    }
+
+    [SkippableFact]
+    public void Refuses_a_self_referencing_link_without_throwing()
+    {
+        var selfLink = Path.Combine(_workspace, "self-loop");
+        CreateRealSymlinkOrSkip(selfLink, selfLink);
+
+        var act = () => WorkspacePath.Resolve(_workspace, "self-loop/x.txt");
+
+        act.Should().NotThrow();
+        act().IsFailure.Should().BeTrue();
+    }
+
+    [SkippableFact]
+    public void Refuses_a_two_link_loop_without_throwing()
+    {
+        var linkA = Path.Combine(_workspace, "loop-a");
+        var linkB = Path.Combine(_workspace, "loop-b");
+        CreateRealSymlinkOrSkip(linkA, linkB); // linkB does not exist yet; a symlink may dangle at creation
+        CreateRealSymlinkOrSkip(linkB, linkA); // now linkA -> linkB -> linkA is a genuine loop
+
+        var act = () => WorkspacePath.Resolve(_workspace, "loop-a/x.txt");
+
+        act.Should().NotThrow();
+        act().IsFailure.Should().BeTrue();
+    }
+
+    [SkippableFact]
+    public void Refuses_a_dangling_link()
+    {
+        // A junction/symlink whose target has been removed. Built without needing symlink privilege on Windows: a
+        // junction requires an existing target at creation time, so one is created, linked to, then deleted.
+        var dangling = Path.Combine(_workspace, "dangling");
+        CreateDanglingDirectoryLinkOrSkip(dangling);
+
+        WorkspacePath.Resolve(_workspace, "dangling/x.txt").IsFailure.Should().BeTrue();
+    }
+
     [Fact]
     public void Refuses_everything_under_a_drive_root_workspace()
     {
@@ -329,8 +425,7 @@ public sealed class WorkspacePathTests : IDisposable
     /// Developer Mode or elevation refuses <see cref="File.CreateSymbolicLink(string, string)"/> for an
     /// unprivileged process; under <c>CI</c> (the Windows runner is admin, and Linux needs no privilege at all),
     /// that failure fails the test instead of skipping it, so CI can never pass vacuously. This exercises a file
-    /// symlink specifically — the junction-based tests above only exercise the directory branch of
-    /// <c>WorkspacePath.LinkTargetOf</c>'s <see cref="File.Exists(string)"/> check.
+    /// symlink specifically — the junction-based tests above only exercise a directory target.
     /// </summary>
     private static void CreateFileSymlinkOrSkip(string linkPath, string targetPath)
     {
@@ -342,6 +437,38 @@ public sealed class WorkspacePathTests : IDisposable
         {
             FailOrSkip("create a file symlink", ex);
         }
+    }
+
+    /// <summary>
+    /// Creates a real directory symlink — never a junction, even on Windows — or reports the test as Skipped. A
+    /// relative target, a target containing <c>".."</c>, a loop, and a self-reference cannot be represented by a
+    /// junction at all: a junction requires an existing target at creation time and always records an absolute NT
+    /// path, never a relative or <c>".."</c>-bearing one. These tests accept the same privilege dependency as
+    /// <see cref="CreateFileSymlinkOrSkip"/> on an unprivileged Windows process.
+    /// </summary>
+    private static void CreateRealSymlinkOrSkip(string linkPath, string targetPath)
+    {
+        try
+        {
+            Directory.CreateSymbolicLink(linkPath, targetPath);
+        }
+        catch (IOException ex)
+        {
+            FailOrSkip("create a directory symlink", ex);
+        }
+    }
+
+    /// <summary>
+    /// Creates a junction (Windows) or symlink (elsewhere) at <paramref name="linkPath"/> whose target has since
+    /// been removed, without needing symlink privilege on Windows: a junction requires an existing target at
+    /// creation time, so a real one is created, linked to, and then deleted, leaving the link dangling.
+    /// </summary>
+    private static void CreateDanglingDirectoryLinkOrSkip(string linkPath)
+    {
+        var target = linkPath + "-target";
+        Directory.CreateDirectory(target);
+        CreateDirectoryLinkOrSkip(linkPath, target);
+        Directory.Delete(target);
     }
 
     private static void FailOrSkip(string action, Exception? ex)
