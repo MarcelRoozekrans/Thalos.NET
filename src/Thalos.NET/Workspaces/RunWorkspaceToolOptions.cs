@@ -24,17 +24,28 @@ public sealed class RunWorkspaceToolOptions
     public int MaxListEntries { get; set; } = 500;
 
     /// <summary>
-    /// How long <c>read_file</c>, <c>write_file</c> and <c>edit_file</c> wait for a file another holder is using,
-    /// measured from the start of the call, before returning the distinct "the file is busy" result (ruling (j)). The
-    /// wait covers two holders. First, this process's own concurrent calls on the same path: every call takes that
-    /// path's in-process lock before it opens the file. Second, a holder outside the process: when the leaf file's
-    /// open fails with a sharing violation or a lock violation on Windows, or <c>EBUSY</c> on Linux, the open is
-    /// retried with a backoff that starts at 10 ms and doubles up to 250 ms, until this much time has passed since the
-    /// call began (ruling (k)). Directory opens are not retried: they request read access and share read and write,
-    /// so they do not contend with this tool's own opens. Default 5 seconds. <see cref="TimeSpan.Zero"/> makes one
-    /// attempt with no wait; <see cref="Timeout.InfiniteTimeSpan"/> waits until the holder lets go or the call is
-    /// cancelled. Any other negative value, or one over <see cref="int.MaxValue"/> milliseconds, is refused by
-    /// <c>UseRunWorkspaceTools</c>.
+    /// How long <c>read_file</c>, <c>write_file</c>, <c>edit_file</c> and <c>list_files</c> wait for a file or
+    /// directory another holder is using, measured from the start of the call, before returning the distinct "the file
+    /// is busy" result (ruling (j)). The wait covers these holders:
+    /// <list type="bullet">
+    /// <item>This process's own concurrent calls on the same file: every call except <c>list_files</c> takes that
+    /// path's in-process lock before it opens the file.</item>
+    /// <item>A holder of the file outside the process: when the file's open fails with a sharing violation or a lock
+    /// violation on Windows, or <c>EBUSY</c> on Linux, the open is retried with a backoff that starts at 10 ms and
+    /// doubles up to 250 ms (ruling (k)).</item>
+    /// <item>A holder of a directory on the way to the file outside the process: when a directory's open fails with a
+    /// sharing violation, or, for <c>write_file</c>, the directory is gone again between its creation and its open,
+    /// every directory the call holds is released and the walk starts again from the workspace root, with the same
+    /// backoff (round-5 ruling (t)).</item>
+    /// </list>
+    /// Directory opens never contend with this process's own calls: they request read access and share read and
+    /// write; a call removes a directory it created only when no other call holds that directory, and leaves it in
+    /// place otherwise; and a call about to open a directory that is being removed waits for the removal to finish.
+    /// That wait lasts only as long as a few file-system calls and does not count against this timeout. Default 5
+    /// seconds.
+    /// <see cref="TimeSpan.Zero"/> makes one attempt with no wait; <see cref="Timeout.InfiniteTimeSpan"/> waits until
+    /// the holder lets go or the call is cancelled. Any other negative value, or one over <see cref="int.MaxValue"/>
+    /// milliseconds, is refused by <c>UseRunWorkspaceTools</c>.
     /// </summary>
     public TimeSpan ContentionTimeout { get; set; } = TimeSpan.FromSeconds(5);
 

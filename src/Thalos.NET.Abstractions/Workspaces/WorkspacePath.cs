@@ -72,10 +72,34 @@ public static partial class WorkspacePath
     /// a real link can still exist, and this method's over-refusal on a link it cannot rule out is what limits the
     /// exposure for that case.
     /// </para>
+    /// <para>
+    /// The existence probe and the canonicalisation are two steps, so a directory the probe found can be removed by
+    /// a concurrent caller before it is canonicalised, for instance a <c>workspace__write_file</c> call cleaning up
+    /// a directory it created. Canonicalising a directory that is gone fails, and on Windows a handle opened just
+    /// before the removal can report a final path outside the workspace. Either would refuse a path that is
+    /// perfectly valid. So when canonicalisation fails, or lands outside the workspace, and the ancestor no longer
+    /// exists, the probe runs again from the root, up to <see cref="MaxAncestorProbes"/> times. An ancestor that
+    /// still exists is refused exactly as before, and every result is checked the same way whichever probe found it.
+    /// </para>
     /// </remarks>
     /// <param name="workspaceRoot">The workspace's root directory.</param>
     /// <param name="relativePath">The path an agent supplied, taken as relative to <paramref name="workspaceRoot"/>.</param>
-    public static Result<string, AgentError> Resolve(string workspaceRoot, string relativePath)
+    public static Result<string, AgentError> Resolve(string workspaceRoot, string relativePath) =>
+        ResolveCore(workspaceRoot, relativePath, beforeCanonicalize: null);
+
+    /// <summary>
+    /// How many times <see cref="Resolve"/> probes for the deepest existing ancestor when the one it
+    /// found vanished before it could be canonicalised. Each extra probe needs a concurrent removal of its own, so a
+    /// few are enough for any caller that is not removing directories in a loop.
+    /// </summary>
+    private const int MaxAncestorProbes = 4;
+
+    /// <summary>
+    /// <see cref="Resolve"/>, with a test-only seam: <paramref name="beforeCanonicalize"/> is invoked
+    /// with the deepest existing ancestor each probe found, right before it is canonicalised, so a test can remove
+    /// that ancestor in the window a concurrent caller would. <see langword="null"/> in production.
+    /// </summary>
+    internal static Result<string, AgentError> ResolveCore(string workspaceRoot, string relativePath, Action<string>? beforeCanonicalize)
     {
         var segmentFailure = ValidateSegments(relativePath);
         if (segmentFailure is { } failure)
@@ -96,23 +120,41 @@ public static partial class WorkspacePath
 
         var full = Path.GetFullPath(Path.Combine(root, relativePath));
 
-        var ancestor = DeepestExistingAncestor(root, full);
-        if (ancestor is null)
-            return GenericRefusal();
+        for (var probe = 1; probe <= MaxAncestorProbes; probe++)
+        {
+            var ancestor = DeepestExistingAncestor(root, full);
+            if (ancestor is null)
+                return GenericRefusal();
 
+            beforeCanonicalize?.Invoke(ancestor);
+            var resolved = CanonicalizeWithTail(ancestor, full);
+            if (resolved is not null && IsContained(resolved, root))
+            {
+                return ReachesGitDirectory(root, resolved)
+                    ? GenericRefusal()
+                    : Result<string, AgentError>.Success(resolved);
+            }
+
+            // Refused as before unless the ancestor is now conclusively gone: only then did a concurrent removal,
+            // not the path itself, make the canonicalisation fail, and a fresh probe finds the new deepest ancestor.
+            if (LExists(ancestor) != false)
+                return GenericRefusal();
+        }
+
+        return GenericRefusal();
+    }
+
+    /// <summary>The kernel's canonical form of <paramref name="ancestor"/>, with the rest of <paramref name="full"/> below it appended unchanged, or <see langword="null"/> when <paramref name="ancestor"/> cannot be canonicalised.</summary>
+    private static string? CanonicalizeWithTail(string ancestor, string full)
+    {
         var ancestorCanonical = Canonicalize(ancestor);
         if (ancestorCanonical is null)
-            return GenericRefusal();
+            return null;
 
         var tail = Path.GetRelativePath(ancestor, full);
-        var resolved = string.Equals(tail, ".", StringComparison.Ordinal)
+        return string.Equals(tail, ".", StringComparison.Ordinal)
             ? ancestorCanonical
             : Path.Combine(ancestorCanonical, tail);
-
-        if (!IsContained(resolved, root) || ReachesGitDirectory(root, resolved))
-            return GenericRefusal();
-
-        return Result<string, AgentError>.Success(resolved);
     }
 
     private static Result<string, AgentError>? ValidateSegments(string relativePath)

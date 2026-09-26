@@ -87,6 +87,15 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
     internal LeafLockTable LeafLocks { get; set; } = LeafLockTable.Shared;
 
     /// <summary>
+    /// The per-level reference counts every pinned chain takes for each directory below the root, so a call cleaning
+    /// up a level it created never removes one another call still holds (round-5 ruling (t)); see
+    /// <see cref="DirectoryLevelTable"/> for the lock order it forms with <see cref="LeafLocks"/>.
+    /// <see cref="DirectoryLevelTable.Shared"/> in production, for the same reason as <see cref="LeafLocks"/>; internal
+    /// and settable only so a test can count an instance's entries in isolation.
+    /// </summary>
+    internal DirectoryLevelTable DirectoryLevels { get; set; } = DirectoryLevelTable.Shared;
+
+    /// <summary>
     /// Test-only seam: invoked with the candidate path or name a pinned open is about to try, immediately before it
     /// tries it, so a test can deterministically simulate the check-to-use race the
     /// type-level remarks describe — e.g. swapping a directory for a link between <see cref="WorkspacePath.Resolve"/>
@@ -136,7 +145,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         var canonicalRoot = target.CanonicalRoot!;
         var resolved = target.Resolved!;
         var deadline = new ContentionDeadline(options.ContentionTimeout);
-        var chainResult = PinExistingDirectoryChain(canonicalRoot, Path.GetDirectoryName(resolved) ?? canonicalRoot, path);
+        var chainResult = await PinChainAsync(canonicalRoot, Path.GetDirectoryName(resolved) ?? canonicalRoot, create: false, path, deadline, ct).ConfigureAwait(false);
         if (!chainResult.Ok)
         {
             return chainResult.Error!;
@@ -193,16 +202,29 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
                 return opened;
             }
 
-            var remaining = deadline.Remaining;
-            if (remaining == TimeSpan.Zero)
+            if (!await WaitBeforeRetryAsync(delay, deadline, ct).ConfigureAwait(false))
             {
                 return opened;
             }
 
-            await Task.Delay(remaining == Timeout.InfiniteTimeSpan || delay < remaining ? delay : remaining, ct).ConfigureAwait(false);
-            delay = delay * 2 < MaxContentionRetryDelay ? delay * 2 : MaxContentionRetryDelay;
+            delay = NextRetryDelay(delay);
         }
     }
+
+    /// <summary>Waits <paramref name="delay"/>, or whatever is left of <paramref name="deadline"/> if that is less, before another attempt. Returns <see langword="false"/> without waiting when no time is left.</summary>
+    private static async Task<bool> WaitBeforeRetryAsync(TimeSpan delay, ContentionDeadline deadline, CancellationToken ct)
+    {
+        var remaining = deadline.Remaining;
+        if (remaining == TimeSpan.Zero)
+        {
+            return false;
+        }
+
+        await Task.Delay(remaining == Timeout.InfiniteTimeSpan || delay < remaining ? delay : remaining, ct).ConfigureAwait(false);
+        return true;
+    }
+
+    private static TimeSpan NextRetryDelay(TimeSpan delay) => delay * 2 < MaxContentionRetryDelay ? delay * 2 : MaxContentionRetryDelay;
 
     /// <summary>The time left of <see cref="RunWorkspaceToolOptions.ContentionTimeout"/>, counted from when the call began: shared by the wait for the per-path lock and the retries of the leaf open, so together they never exceed it.</summary>
     [StructLayout(LayoutKind.Auto)]
@@ -235,14 +257,43 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
     };
 
     /// <summary>
-    /// Pins the directory chain down to <paramref name="targetDirectory"/> without creating anything missing — used
-    /// by <c>read_file</c> and <c>edit_file</c> (ruling (h)), which must not bring a missing parent directory into
-    /// existence as a side effect of a read. A missing or refused ancestor is reported the same way a missing leaf
-    /// file is, via <see cref="FormatLeafOpenFailure"/>.
+    /// Pins the directory chain from the canonical root down to <paramref name="targetDirectory"/>, creating any
+    /// missing level when <paramref name="create"/> is set (<c>write_file</c>) and never otherwise (<c>read_file</c>,
+    /// <c>edit_file</c> and <c>list_files</c>, ruling (h)). Round-5 ruling (t): when a level's open fails because a
+    /// holder outside this process has it, a sharing violation, the attempt releases everything it pinned, removes
+    /// what it created, and the chain is rebuilt from the root with the same backoff as a leaf open, within
+    /// <paramref name="deadline"/>. When <paramref name="create"/> is set, a level that is gone again between its
+    /// creation and its open is rebuilt the same way. Without it, a missing level is the answer, "does not exist",
+    /// not a race. Once the deadline is spent the result is the busy text.
     /// </summary>
-    private ChainResult PinExistingDirectoryChain(string canonicalRoot, string targetDirectory, string originalPath)
+    private async Task<ChainResult> PinChainAsync(string canonicalRoot, string targetDirectory, bool create, string originalPath, ContentionDeadline deadline, CancellationToken ct)
     {
-        var rootPin = PinnedDirectory.OpenRoot(canonicalRoot, ArchitectureOverrideForTesting);
+        var delay = FirstContentionRetryDelay;
+        while (true)
+        {
+            var attempt = TryPinChain(canonicalRoot, targetDirectory, create, originalPath);
+            if (!attempt.ShouldRetry)
+            {
+                return attempt;
+            }
+
+            if (!await WaitBeforeRetryAsync(delay, deadline, ct).ConfigureAwait(false))
+            {
+                return ChainResult.Failure(BusyText);
+            }
+
+            delay = NextRetryDelay(delay);
+        }
+    }
+
+    /// <summary>
+    /// One attempt of <see cref="PinChainAsync"/>. Holds every level open, root first, until the caller disposes the
+    /// chain via <see cref="DisposeChain"/>. Any failure releases what this attempt pinned and, per ruling (i),
+    /// removes every level it created, while every level is still pinned.
+    /// </summary>
+    private ChainResult TryPinChain(string canonicalRoot, string targetDirectory, bool create, string originalPath)
+    {
+        var rootPin = PinnedDirectory.OpenRoot(canonicalRoot, DirectoryLevels, ArchitectureOverrideForTesting);
         if (rootPin.IsFailure)
         {
             return ChainResult.Failure(rootPin.Error);
@@ -260,11 +311,13 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
             var current = rootPin.Value;
             foreach (var segment in relative.Split(Path.DirectorySeparatorChar))
             {
-                var child = current.OpenChild(segment, BeforeOpenForTesting);
+                var child = create ? current.CreateChild(segment, BeforeOpenForTesting) : current.OpenChild(segment, BeforeOpenForTesting);
                 if (child.IsFailure)
                 {
+                    RemoveCreatedDirectories(chain);
                     DisposeChain(chain);
-                    return ChainResult.Failure(FormatLeafOpenFailure(child.Error, originalPath));
+                    var retry = child.Error == PinnedOpenOutcome.Contended || (create && child.Error == PinnedOpenOutcome.Missing);
+                    return retry ? ChainResult.Retry() : ChainResult.Failure(create ? GenericRefusalText : FormatLeafOpenFailure(child.Error, originalPath));
                 }
 
                 chain.Add(child.Value);
@@ -275,6 +328,10 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         }
         catch
         {
+            // Never leak an already-pinned ancestor if creating or verifying a deeper level throws instead of
+            // returning a Result failure. Ruling (i) applies here too: a chain-build failure removes the levels
+            // it created whether it surfaces as a Result or, as here, an exception.
+            RemoveCreatedDirectories(chain);
             DisposeChain(chain);
             throw;
         }
@@ -301,17 +358,24 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
             return GenericRefusalText;
         }
 
-        var start = ResolveListStart(workspace.Root, canonicalRoot, directory);
-        if (start.Error is { } startError)
+        var start = await PinListStartAsync(workspace.Root, canonicalRoot, directory, ct).ConfigureAwait(false);
+        if (!start.Ok)
         {
-            return startError;
+            return start.Error!;
         }
 
-        using var startDirectory = start.Directory!;
+        var chain = start.Chain!;
         var entries = new List<string>();
-        if (!Walk(startDirectory, "", entries, options.MaxListEntries, ct))
+        try
         {
-            return GenericRefusalText;
+            if (!Walk(chain[^1], "", entries, options.MaxListEntries, ct))
+            {
+                return GenericRefusalText;
+            }
+        }
+        finally
+        {
+            DisposeChain(chain);
         }
 
         entries.Sort(StringComparer.Ordinal);
@@ -320,59 +384,35 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
     }
 
     /// <summary>
-    /// Pins the directory <c>list_files</c> should start walking from — the canonical root itself, or a
-    /// caller-supplied subdirectory, resolved and lexically validated via <see cref="WorkspacePath.Resolve"/> first,
-    /// then reached by opening one already-verified level at a time, exactly as a write's directory chain does — so
-    /// the starting point is pinned the same way, never re-resolved by a path string once found.
+    /// Pins the chain <c>list_files</c> walks from: the canonical root itself, or a caller-supplied subdirectory,
+    /// resolved and lexically validated via <see cref="WorkspacePath.Resolve"/> first and then reached through the
+    /// same <see cref="PinChainAsync"/> <c>read_file</c> uses, so every level is counted in the level table and a
+    /// holder outside the process is waited out the same way (round-5 ruling (t)). The whole chain stays pinned while
+    /// the walk runs. A missing or refused start keeps the one "is not a directory" text it always had; only an
+    /// exhausted wait reports busy.
     /// </summary>
-    private (PinnedDirectory? Directory, string? Error) ResolveListStart(string root, string canonicalRoot, string? directory)
+    private async Task<ChainResult> PinListStartAsync(string root, string canonicalRoot, string? directory, CancellationToken ct)
     {
-        if (string.IsNullOrEmpty(directory))
+        var target = canonicalRoot;
+        if (!string.IsNullOrEmpty(directory))
         {
-            return PinRoot(canonicalRoot);
-        }
-
-        var resolved = WorkspacePath.Resolve(root, directory);
-        if (resolved.IsFailure)
-        {
-            return (null, "error: " + resolved.Error.Message);
-        }
-
-        var relative = Path.GetRelativePath(canonicalRoot, resolved.Value);
-        if (string.Equals(relative, ".", StringComparison.Ordinal))
-        {
-            return PinRoot(canonicalRoot);
-        }
-
-        var rootPin = PinnedDirectory.OpenRoot(canonicalRoot, ArchitectureOverrideForTesting);
-        if (rootPin.IsFailure)
-        {
-            return (null, GenericRefusalText);
-        }
-
-        // OpenChild's classified PinnedOpenOutcome is not distinguished here: list_files reported the same
-        // "is not a directory" text for a missing or a mismatched target before ruling (h) introduced the
-        // Missing/Contended split for read_file and edit_file, and nothing asks list_files to change that.
-        var current = rootPin.Value;
-        foreach (var segment in relative.Split(Path.DirectorySeparatorChar))
-        {
-            var child = current.OpenChild(segment);
-            current.Dispose();
-            if (child.IsFailure)
+            var resolved = WorkspacePath.Resolve(root, directory);
+            if (resolved.IsFailure)
             {
-                return (null, $"error: '{directory}' is not a directory.");
+                return ChainResult.Failure("error: " + resolved.Error.Message);
             }
 
-            current = child.Value;
+            target = resolved.Value;
         }
 
-        return (current, null);
-    }
+        var deadline = new ContentionDeadline(options.ContentionTimeout);
+        var pinned = await PinChainAsync(canonicalRoot, target, create: false, directory ?? "", deadline, ct).ConfigureAwait(false);
+        if (pinned.Ok || string.Equals(target, canonicalRoot, StringComparison.Ordinal) || string.Equals(pinned.Error, BusyText, StringComparison.Ordinal))
+        {
+            return pinned;
+        }
 
-    private (PinnedDirectory? Directory, string? Error) PinRoot(string canonicalRoot)
-    {
-        var rootPin = PinnedDirectory.OpenRoot(canonicalRoot, ArchitectureOverrideForTesting);
-        return rootPin.IsSuccess ? (rootPin.Value, null) : (null, GenericRefusalText);
+        return ChainResult.Failure($"error: '{directory}' is not a directory.");
     }
 
     private static string FormatListing(List<string> entries, int limit)
@@ -417,7 +457,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
             return FormatGate(pre, path, preExtension);
         }
 
-        var chainResult = PinDirectoryChain(canonicalRoot, Path.GetDirectoryName(resolved) ?? canonicalRoot);
+        var chainResult = await PinChainAsync(canonicalRoot, Path.GetDirectoryName(resolved) ?? canonicalRoot, create: true, path, deadline, ct).ConfigureAwait(false);
         if (!chainResult.Ok)
         {
             BeforeCleanupForTesting?.Invoke();
@@ -428,16 +468,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         (string? RelativePath, string Result) written;
         try
         {
-            // Serializes every call on this exact leaf path, so the leaf open below never contends with another
-            // of this process's own calls: round-3 finding B1, round-4 finding N1. A bounded wait: exhausting it
-            // returns the distinct busy text (ruling (j)) rather than hanging or refusing outright.
-            using var lease = await LeafLocks.AcquireAsync(resolved, deadline.Remaining, ct).ConfigureAwait(false);
-            if (lease is null)
-            {
-                return BusyText;
-            }
-
-            written = await OpenAndWriteLeafAsync(caller, canonicalRoot, path, resolved, content, chain, deadline, ct).ConfigureAwait(false);
+            written = await LockAndWriteLeafAsync(caller, canonicalRoot, path, resolved, content, chain, deadline, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -452,6 +483,42 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         }
 
         return written.Result;
+    }
+
+    /// <summary>
+    /// Takes the per-path lock for <c>write_file</c> once its chain is pinned, then opens and writes the leaf. Every
+    /// way this ends without writing removes the levels this call created: a refusal, busy, or a cancellation while
+    /// waiting (round-5 ruling (u)). Split out from <see cref="WriteFile"/> only to keep it under the method-length
+    /// limit.
+    /// </summary>
+    private async Task<(string? RelativePath, string Result)> LockAndWriteLeafAsync(ISecurityContext caller, string canonicalRoot, string path, string resolved, string content, List<PinnedDirectory> chain, ContentionDeadline deadline, CancellationToken ct)
+    {
+        try
+        {
+            // Serializes every call on this exact leaf path, so the leaf open below never contends with another
+            // of this process's own calls: round-3 finding B1, round-4 finding N1. A bounded wait: exhausting it
+            // returns the distinct busy text (ruling (j)) rather than hanging or refusing outright.
+            using var lease = await LeafLocks.AcquireAsync(resolved, deadline.Remaining, ct).ConfigureAwait(false);
+            if (lease is null)
+            {
+                // Busy leaves nothing behind, the same as every other result that writes nothing. A level another
+                // call still holds is kept, per the level table.
+                BeforeCleanupForTesting?.Invoke();
+                RemoveCreatedDirectories(chain);
+                return (null, BusyText);
+            }
+
+            return await OpenAndWriteLeafAsync(caller, canonicalRoot, path, resolved, content, chain, deadline, ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // A call cancelled while it waited for the leaf lock or for an outside holder removes the levels it
+            // created before the cancellation propagates. Once the leaf file exists the levels are not empty, and the
+            // removal leaves them.
+            BeforeCleanupForTesting?.Invoke();
+            RemoveCreatedDirectories(chain);
+            throw;
+        }
     }
 
     /// <summary>The leaf open, post-check and write for <c>write_file</c>, once its directory chain is pinned and its per-path lock is held. Returns the changed path relative to the canonical root and the success text, or a null path and the refusal text. Split out from <see cref="WriteFile"/> only to keep it under the method-length limit.</summary>
@@ -514,60 +581,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         RemoveCreatedDirectories(chain);
     }
 
-    /// <summary>
-    /// Pins the whole chain of directories from the canonical root down to <paramref name="targetDirectory"/>,
-    /// creating any level that is missing — never a path-based <see cref="Directory.CreateDirectory(string)"/> —
-    /// and holds every level open, root first, so the type-level remarks' "hold the whole chain" applies from here
-    /// until the caller disposes it via <see cref="DisposeChain"/>.
-    /// </summary>
-    private ChainResult PinDirectoryChain(string canonicalRoot, string targetDirectory)
-    {
-        var rootPin = PinnedDirectory.OpenRoot(canonicalRoot, ArchitectureOverrideForTesting);
-        if (rootPin.IsFailure)
-        {
-            return ChainResult.Failure(rootPin.Error);
-        }
-
-        var chain = new List<PinnedDirectory> { rootPin.Value };
-        var relative = Path.GetRelativePath(canonicalRoot, targetDirectory);
-        if (string.Equals(relative, ".", StringComparison.Ordinal))
-        {
-            return ChainResult.Success(chain);
-        }
-
-        try
-        {
-            var current = rootPin.Value;
-            foreach (var segment in relative.Split(Path.DirectorySeparatorChar))
-            {
-                var child = current.CreateChild(segment, BeforeOpenForTesting);
-                if (child.IsFailure)
-                {
-                    // Ruling (i): a chain-build failure removes every level this call created, not only the one
-                    // that failed to verify — while every level is still pinned, before any handle is released.
-                    RemoveCreatedDirectories(chain);
-                    DisposeChain(chain);
-                    return ChainResult.Failure(child.Error);
-                }
-
-                chain.Add(child.Value);
-                current = child.Value;
-            }
-
-            return ChainResult.Success(chain);
-        }
-        catch
-        {
-            // Never leak an already-pinned ancestor if creating or verifying a deeper level throws instead of
-            // returning a Result failure. Ruling (i) applies here too: a chain-build failure removes the levels
-            // it created whether it surfaces as a Result or, as here, an exception.
-            RemoveCreatedDirectories(chain);
-            DisposeChain(chain);
-            throw;
-        }
-    }
-
-    /// <summary>Removes exactly the directories this call created, innermost first, stopping at the first one that was not created by this call or that removal itself refuses — e.g. because it is not empty. Never the root.</summary>
+    /// <summary>Removes exactly the directories this call created, innermost first, stopping at the first one that was not created by this call or that removal itself refuses — because it is not empty, or because another call in this process still holds it (round-5 ruling (t)). Never the root.</summary>
     private static void RemoveCreatedDirectories(List<PinnedDirectory> chain)
     {
         for (var i = chain.Count - 1; i >= 0; i--)
@@ -587,24 +601,30 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         }
     }
 
-    /// <summary>The outcome of <see cref="PinDirectoryChain"/>: either the whole open chain, root first, or ready-to-return error text.</summary>
+    /// <summary>The outcome of <see cref="TryPinChain"/> and <see cref="PinChainAsync"/>: the whole open chain, root first; ready-to-return error text; or, from one attempt only, a request to rebuild the chain from the root.</summary>
     private readonly struct ChainResult
     {
-        private ChainResult(List<PinnedDirectory>? chain, string? error)
+        private ChainResult(List<PinnedDirectory>? chain, string? error, bool shouldRetry)
         {
             Chain = chain;
             Error = error;
+            ShouldRetry = shouldRetry;
         }
 
         public List<PinnedDirectory>? Chain { get; }
 
         public string? Error { get; }
 
-        public bool Ok => Error is null;
+        /// <summary>A level's open met a holder outside the process, or a level vanished after this attempt created it: nothing is pinned, and the chain should be rebuilt from the root.</summary>
+        public bool ShouldRetry { get; }
 
-        public static ChainResult Success(List<PinnedDirectory> chain) => new(chain, null);
+        public bool Ok => Chain is not null;
 
-        public static ChainResult Failure(string error) => new(null, error);
+        public static ChainResult Success(List<PinnedDirectory> chain) => new(chain, null, shouldRetry: false);
+
+        public static ChainResult Failure(string error) => new(null, error, shouldRetry: false);
+
+        public static ChainResult Retry() => new(null, null, shouldRetry: true);
     }
 
     private static async Task<int> WriteAllBytesAsync(FileStream stream, string content, CancellationToken ct)
@@ -657,7 +677,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
     private async Task<(string? RelativePath, string Result)> OpenAndApplyEditAsync(ISecurityContext caller, string canonicalRoot, string path, string resolved, string oldText, string newText, CancellationToken ct)
     {
         var deadline = new ContentionDeadline(options.ContentionTimeout);
-        var chainResult = PinExistingDirectoryChain(canonicalRoot, Path.GetDirectoryName(resolved) ?? canonicalRoot, path);
+        var chainResult = await PinChainAsync(canonicalRoot, Path.GetDirectoryName(resolved) ?? canonicalRoot, create: false, path, deadline, ct).ConfigureAwait(false);
         if (!chainResult.Ok)
         {
             return (null, chainResult.Error!);

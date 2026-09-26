@@ -374,7 +374,7 @@ public sealed class WorkspaceToolsTests : IDisposable
     {
         Skip.IfNot(OperatingSystem.IsLinux(), "a pinned directory can be removed only on Linux");
         var dir = NewTempDir("thalos-workspace-tools-enumerate-");
-        var pinned = PinnedDirectory.OpenRoot(dir);
+        var pinned = PinnedDirectory.OpenRoot(dir, new DirectoryLevelTable());
         pinned.IsSuccess.Should().BeTrue();
 
         using var directory = pinned.Value;
@@ -1255,6 +1255,319 @@ public sealed class WorkspaceToolsTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// Round-5 finding 1, the reviewer's deterministic reproduction. Writer A creates <c>d</c>, is refused after the
+    /// open because its allow-list is narrowed once the pre-check passed, and parks at the cleanup seam. Writer B then
+    /// pins the existing <c>d</c> and parks right before it opens <c>d/y.cs</c>. A is released and cleans up; B is
+    /// released and writes. On Linux, <c>unlinkat</c> with <c>AT_REMOVEDIR</c> removed the empty <c>d</c> under B's
+    /// pin, so B's create failed and B got the generic refusal. Ruling (t): A's cleanup sees B's count on <c>d</c> in
+    /// the level table and leaves it, so B's write succeeds. On Windows B's pin already refused A's delete by share
+    /// mode, so this test was green there before the fix; it runs on both.
+    /// </summary>
+    [Fact]
+    public async Task A_cleanup_never_removes_a_directory_another_writer_still_holds()
+    {
+        var allowedA = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cs" };
+        var (writerA, _, root) = Build(allowedWriteExtensions: allowedA);
+        var writerB = ToolsOver(root);
+        using var aParked = new SemaphoreSlim(0);
+        using var releaseA = new SemaphoreSlim(0);
+        using var bParked = new SemaphoreSlim(0);
+        using var releaseB = new SemaphoreSlim(0);
+        writerA.BeforeOpenForTesting = candidate =>
+        {
+            if (candidate.EndsWith("x.cs", StringComparison.Ordinal))
+            {
+                allowedA.Clear(); // A's post-check, after this open, now refuses
+            }
+        };
+        writerA.BeforeCleanupForTesting = () =>
+        {
+            aParked.Release();
+            releaseA.Wait(TimeSpan.FromSeconds(30));
+        };
+        writerB.BeforeOpenForTesting = candidate =>
+        {
+            if (candidate.EndsWith("y.cs", StringComparison.Ordinal))
+            {
+                bParked.Release();
+                releaseB.Wait(TimeSpan.FromSeconds(30));
+            }
+        };
+
+        var a = Task.Run(() => writerA.WriteFile(Caller(RunId), "d/x.cs", "a"));
+        await SignalledOrThrowAsync(aParked, "A never reached its cleanup");
+        var b = Task.Run(() => writerB.WriteFile(Caller(RunId), "d/y.cs", "b"));
+        await SignalledOrThrowAsync(bParked, "B never pinned d and reached its leaf");
+        releaseA.Release();
+        var resultA = await a;
+        releaseB.Release();
+        var resultB = await b;
+
+        using var scope = new AssertionScope();
+        resultA.Should().Contain("extension '.cs'");
+        resultB.Should().Be("wrote 1 bytes to 'd/y.cs'.");
+        var written = Path.Combine(root, "d", "y.cs");
+        (File.Exists(written) ? File.ReadAllText(written) : "(missing)").Should().Be("b");
+    }
+
+    /// <summary>
+    /// Round-5 finding 1 by timing alone, the reviewer's hammer: in each of 1,000 pairs, writer A creates a new
+    /// directory and is refused after the open, so it removes that directory, while writer B writes a file into the
+    /// same directory at the same moment. Before ruling (t), 2 to 7 of B's writes in 1,000 were refused on Linux.
+    /// Every one of B's writes must succeed and land.
+    /// </summary>
+    [Fact]
+    public async Task A_thousand_cleanups_racing_writers_into_the_same_new_directory_refuse_none()
+    {
+        var (writerB, _, root) = Build();
+        var caller = Caller(RunId);
+        var refusedB = new List<string>();
+        var unrefusedA = new List<string>();
+
+        for (var i = 0; i < 1000; i++)
+        {
+            var allowedA = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cs" };
+            var writerA = ToolsOver(root, allowedA);
+            writerA.BeforeOpenForTesting = candidate =>
+            {
+                if (candidate.EndsWith("a.cs", StringComparison.Ordinal))
+                {
+                    allowedA.Clear();
+                }
+            };
+
+            var directory = $"d{i}";
+            var a = Task.Run(() => writerA.WriteFile(caller, $"{directory}/a.cs", "a"));
+            var b = Task.Run(() => writerB.WriteFile(caller, $"{directory}/b.cs", "b"));
+            var (resultA, resultB) = (await a, await b);
+            if (!resultA.Contains("extension", StringComparison.Ordinal))
+            {
+                unrefusedA.Add(resultA);
+            }
+
+            if (!resultB.StartsWith("wrote", StringComparison.Ordinal) || !File.Exists(Path.Combine(root, directory, "b.cs")))
+            {
+                refusedB.Add($"{directory}: {resultB}");
+            }
+        }
+
+        using var scope = new AssertionScope();
+        unrefusedA.Should().BeEmpty("every A is refused after its open, so every A runs its cleanup");
+        refusedB.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// Ruling (t)'s bookkeeping: every level a chain counts is released again, whatever the call did — wrote, read,
+    /// edited, listed, or was refused after the open and cleaned up. After 2,000 such calls on one instance with its
+    /// own table, the table is empty, and on Linux no descriptor under the workspace is left open.
+    /// </summary>
+    [Fact]
+    public async Task The_directory_level_table_is_empty_again_after_two_thousand_mixed_calls()
+    {
+        var (tools, _, root) = Build();
+        var levels = new DirectoryLevelTable();
+        tools.DirectoryLevels = levels;
+        var allowedR = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cs" };
+        var refuser = ToolsOver(root, allowedR);
+        refuser.DirectoryLevels = levels;
+        refuser.BeforeOpenForTesting = candidate =>
+        {
+            if (candidate.EndsWith("refused.cs", StringComparison.Ordinal))
+            {
+                allowedR.Clear();
+            }
+        };
+        var caller = Caller(RunId);
+        var baselineFds = OperatingSystem.IsLinux() ? CountOpenFileDescriptorsUnder(root) : -1;
+        var unexpected = new List<string>();
+
+        for (var i = 0; i < 400; i++)
+        {
+            var file = $"a{i % 7}/b{i % 3}/f{i}.cs";
+            allowedR.Add(".cs");
+            string[] results =
+            [
+                await tools.WriteFile(caller, file, "old"),
+                await tools.ReadFile(caller, file),
+                await tools.EditFile(caller, file, "old", "new"),
+                await tools.ListFiles(caller, $"a{i % 7}"),
+                await refuser.WriteFile(caller, $"r{i}/q/refused.cs", "x"),
+            ];
+            if (!results[0].StartsWith("wrote", StringComparison.Ordinal) || !string.Equals(results[1], "old", StringComparison.Ordinal)
+                || !results[2].StartsWith("edited", StringComparison.Ordinal) || results[3].StartsWith("error", StringComparison.Ordinal)
+                || !results[4].Contains("extension", StringComparison.Ordinal))
+            {
+                unexpected.Add(string.Join(" | ", results));
+            }
+        }
+
+        using var scope = new AssertionScope();
+        unexpected.Should().BeEmpty();
+        levels.Count.Should().Be(0);
+        if (OperatingSystem.IsLinux())
+        {
+            CountOpenFileDescriptorsUnder(root).Should().Be(baselineFds);
+        }
+    }
+
+    /// <summary>
+    /// Round-5 ruling (t), a holder outside the process: <c>d</c> is held open with <c>DELETE</c> access and a share
+    /// mode without <c>FILE_SHARE_DELETE</c>, as another process's removal of it would. Opening <c>d</c> then fails
+    /// with a sharing violation. The call must release its chain and walk again from the root, and the holder lets go
+    /// on the second attempt to open <c>d</c>, inside the wait by construction. Before the fix a write got the generic
+    /// refusal, a read or an edit got busy at once, and a listing got "is not a directory". Windows-only: Linux has no
+    /// mandatory sharing mode.
+    /// </summary>
+    [SkippableTheory]
+    [InlineData("write")]
+    [InlineData("read")]
+    [InlineData("edit")]
+    [InlineData("list")]
+    public async Task A_directory_an_outside_holder_is_deleting_is_waited_for_then_used(string operation)
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "sharing violations are a Windows-enforced concept");
+        var (tools, _, root) = Build(contentionTimeout: TimeSpan.FromSeconds(30));
+        var directory = Path.Combine(root, "d");
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "f.cs"), "original");
+        using var holder = HoldForDeletion(directory);
+        var directoryAttempts = 0;
+        tools.BeforeOpenForTesting = candidate =>
+        {
+            if (candidate.EndsWith(Path.DirectorySeparatorChar + "d", StringComparison.Ordinal) && ++directoryAttempts == 2)
+            {
+                holder.Dispose();
+            }
+        };
+
+        var result = operation switch
+        {
+            "write" => await tools.WriteFile(Caller(RunId), "d/f.cs", "written"),
+            "read" => await tools.ReadFile(Caller(RunId), "d/f.cs"),
+            "edit" => await tools.EditFile(Caller(RunId), "d/f.cs", "original", "edited"),
+            _ => await tools.ListFiles(Caller(RunId), "d"),
+        };
+
+        using var scope = new AssertionScope();
+        directoryAttempts.Should().BeGreaterThanOrEqualTo(2, "the holder lets go on the second attempt, inside the wait");
+        result.Should().Be(operation switch
+        {
+            "write" => "wrote 7 bytes to 'd/f.cs'.",
+            "read" => "original",
+            "edit" => "edited 'd/f.cs'.",
+            _ => "f.cs",
+        });
+    }
+
+    /// <summary>
+    /// The bound on the same wait: an outside holder of <c>d</c> that never lets go ends in the busy text once the
+    /// contention timeout is spent, not in a refusal, and not before the timeout. Windows-only, as above.
+    /// </summary>
+    [SkippableTheory]
+    [InlineData("write")]
+    [InlineData("read")]
+    public async Task An_outside_holder_that_never_lets_go_of_a_directory_ends_in_busy_after_the_timeout(string operation)
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "sharing violations are a Windows-enforced concept");
+        var timeout = TimeSpan.FromMilliseconds(500);
+        var (tools, _, root) = Build(contentionTimeout: timeout);
+        var directory = Path.Combine(root, "d");
+        Directory.CreateDirectory(directory);
+        File.WriteAllText(Path.Combine(directory, "f.cs"), "original");
+
+        string result;
+        var elapsed = Stopwatch.StartNew();
+        using (HoldForDeletion(directory))
+        {
+            result = string.Equals(operation, "write", StringComparison.Ordinal)
+                ? await tools.WriteFile(Caller(RunId), "d/f.cs", "written")
+                : await tools.ReadFile(Caller(RunId), "d/f.cs");
+            elapsed.Stop();
+        }
+
+        using var scope = new AssertionScope();
+        result.Should().Be("error: the file is busy; try again.");
+        elapsed.Elapsed.Should().BeGreaterThanOrEqualTo(timeout - TimeSpan.FromMilliseconds(50), "the busy result comes only after retrying for the whole contention timeout");
+    }
+
+    /// <summary>
+    /// Round-5 ruling (t), the Linux side of a holder outside the process: <c>d</c> is created and pinned by the call,
+    /// and then removed from outside before <c>d/e</c> is created in it. <c>mkdirat</c> and <c>openat</c> in the
+    /// removed <c>d</c> both fail with <c>ENOENT</c>. The call must walk again from the root, create both levels anew,
+    /// and write. Before the fix it returned the generic refusal. Linux-only: on Windows the pin on <c>d</c> refuses
+    /// the removal itself.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_new_directory_removed_from_outside_during_the_walk_is_created_again()
+    {
+        Skip.IfNot(OperatingSystem.IsLinux(), "on Windows the pin on d refuses the removal");
+        var (tools, _, root) = Build();
+        var attemptsAtE = 0;
+        tools.BeforeOpenForTesting = candidate =>
+        {
+            if (string.Equals(Path.GetFileName(candidate), "e", StringComparison.Ordinal) && ++attemptsAtE == 1)
+            {
+                Directory.Delete(Path.Combine(root, "d"));
+            }
+        };
+
+        var result = await tools.WriteFile(Caller(RunId), "d/e/f.cs", "x");
+
+        using var scope = new AssertionScope();
+        result.Should().Be("wrote 1 bytes to 'd/e/f.cs'.");
+        File.Exists(Path.Combine(root, "d", "e", "f.cs")).Should().BeTrue();
+        attemptsAtE.Should().Be(2);
+    }
+
+    /// <summary>
+    /// Round-5 finding 2 and ruling (u): a write that returns busy because the per-path lock stayed held must remove
+    /// the directories it created on the way, as every other result that writes nothing does. The test holds the lock
+    /// itself, through the instance's own table, so no other chain holds <c>d</c> or <c>d/e</c>.
+    /// </summary>
+    [Fact]
+    public async Task A_busy_write_leaves_no_directories_it_created()
+    {
+        var (tools, _, root) = Build(contentionTimeout: TimeSpan.FromMilliseconds(100));
+        var locks = new LeafLockTable();
+        tools.LeafLocks = locks;
+        using var held = await locks.AcquireAsync(WorkspacePath.Resolve(root, "d/e/f.cs").Value, TimeSpan.Zero, CancellationToken.None);
+
+        var result = await tools.WriteFile(Caller(RunId), "d/e/f.cs", "x");
+
+        using var scope = new AssertionScope();
+        result.Should().Be("error: the file is busy; try again.");
+        Directory.Exists(Path.Combine(root, "d", "e")).Should().BeFalse();
+        Directory.Exists(Path.Combine(root, "d")).Should().BeFalse();
+    }
+
+    /// <summary>
+    /// Ruling (u)'s other path: a write cancelled while it waits for the per-path lock must remove the directory it
+    /// created before the cancellation propagates. The token is cancelled from the seam as <c>f</c> is created, so
+    /// the cancellation lands in the wait by construction.
+    /// </summary>
+    [Fact]
+    public async Task A_write_cancelled_while_waiting_leaves_no_directories_it_created()
+    {
+        var (tools, _, root) = Build(contentionTimeout: TimeSpan.FromSeconds(30));
+        var locks = new LeafLockTable();
+        tools.LeafLocks = locks;
+        using var held = await locks.AcquireAsync(WorkspacePath.Resolve(root, "f/g.cs").Value, TimeSpan.Zero, CancellationToken.None);
+        using var cts = new CancellationTokenSource();
+        tools.BeforeOpenForTesting = candidate =>
+        {
+            if (string.Equals(Path.GetFileName(candidate), "f", StringComparison.Ordinal))
+            {
+                cts.Cancel();
+            }
+        };
+
+        var act = () => tools.WriteFile(Caller(RunId), "f/g.cs", "x", cts.Token);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        Directory.Exists(Path.Combine(root, "f")).Should().BeFalse();
+    }
+
     private (WorkspaceTools Tools, FakeChangeListener Listener, string Root) Build(
         IReadOnlySet<string>? allowedWriteExtensions = null,
         IEnumerable<string>? protectedPaths = null,
@@ -1305,6 +1618,39 @@ public sealed class WorkspaceToolsTests : IDisposable
     /// <summary>Asserts that <paramref name="swap"/> fails with a sharing violation: an <see cref="IOException"/> whose HResult's low word is 32, <c>ERROR_SHARING_VIOLATION</c> (ruling (m)).</summary>
     private static void SwapIsRefusedWithASharingViolation(Action swap) =>
         (swap.Should().Throw<IOException>().Which.HResult & 0xFFFF).Should().Be(32);
+
+    /// <summary>A second <see cref="WorkspaceTools"/> over an existing workspace root, with its own options and seams but the same process-wide lock and level tables, as the tool source's per-call instances have.</summary>
+    private static WorkspaceTools ToolsOver(string root, IReadOnlySet<string>? allowedWriteExtensions = null)
+    {
+        var workspace = new RunWorkspace(RunId, "repo", "https://example.invalid/repo.git", "main", $"run/{RunId}", root, null);
+        var options = new RunWorkspaceToolOptions
+        {
+            AllowedWriteExtensions = allowedWriteExtensions ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cs", ".md" },
+        };
+        return new WorkspaceTools(new FakeRunWorkspaceProvider(workspace), options, [new FakeChangeListener()], NullLogger<WorkspaceTools>.Instance);
+    }
+
+    /// <summary>Waits for a test's own sync point. Not an assertion: a sync point that is never reached is a broken test setup, reported as a <see cref="TimeoutException"/>.</summary>
+    private static async Task SignalledOrThrowAsync(SemaphoreSlim signal, string failure)
+    {
+        if (!await signal.WaitAsync(TimeSpan.FromSeconds(30)))
+        {
+            throw new TimeoutException(failure);
+        }
+    }
+
+    /// <summary>Opens <paramref name="directory"/> the way another process deleting it would: with <c>DELETE</c> access and a share mode without <c>FILE_SHARE_DELETE</c>, so every other open of it fails with a sharing violation while this handle stays open. Windows-only.</summary>
+    private static Microsoft.Win32.SafeHandles.SafeFileHandle HoldForDeletion(string directory)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException("A mandatory sharing mode exists only on Windows.");
+        }
+
+        var handle = PinnedIo.Windows.CreateFileW(directory, PinnedIo.Windows.Delete, PinnedIo.Windows.FileShareRead | PinnedIo.Windows.FileShareWrite, PinnedIo.Windows.OpenExisting);
+        handle.IsInvalid.Should().BeFalse("the test's own holder must open");
+        return handle;
+    }
 
     private string NewTempDir(string prefix)
     {

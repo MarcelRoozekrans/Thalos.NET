@@ -12,7 +12,8 @@ namespace Thalos.Workspaces;
 /// gate, together with the lookup and the removal: a caller that finds an entry has already counted itself before
 /// the gate is released, so the entry cannot be removed and replaced while it waits on the semaphore, and two
 /// callers for one key can never be handed different semaphores. Waiting on the semaphore itself happens outside
-/// the gate.
+/// the gate. A lease from this table is the outermost lock in the order <see cref="DirectoryLevelTable"/> documents:
+/// a holder may remove directory levels, but nothing waits for a leaf lease while holding a level's removal lock.
 /// </remarks>
 internal sealed class LeafLockTable
 {

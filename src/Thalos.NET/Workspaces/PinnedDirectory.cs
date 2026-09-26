@@ -66,6 +66,15 @@ internal enum PinnedOpenOutcome
 /// result is unaffected (ruling (b)).
 /// </para>
 /// <para>
+/// <b>Removal never races another call in this process (round-5 ruling (t)).</b> Because Linux unlinks an empty
+/// directory whatever descriptors are open on it, a pin alone cannot stop another call's cleanup there, and on
+/// Windows the cleanup's own <c>DELETE</c> handle makes a concurrent pin fail. So every level below the root is
+/// counted in a <see cref="DirectoryLevelTable"/> from before it is opened or created until it is disposed, and a
+/// removal runs only when this call's own count is the only one, with new pins of that level held back until it is
+/// done. A holder outside the process is not in the table: when opening a level fails because such a holder has
+/// it, or because it vanished, the caller rebuilds its chain from the root.
+/// </para>
+/// <para>
 /// <b>Where pinning cannot run</b> — any platform other than Windows or Linux, or a Linux process architecture
 /// <see cref="PinnedIo.FlagsFor"/> does not cover — <see cref="OpenRoot"/> fails closed.
 /// </para>
@@ -76,11 +85,15 @@ internal sealed class PinnedDirectory : IDisposable
     private readonly PinnedDirectory? _parent;
     private readonly string? _name;
     private readonly (int ODirectory, int ONoFollow) _linuxFlags;
+    private readonly DirectoryLevelTable _levels;
+    private readonly DirectoryLevelTable.Lease? _lease;
 
-    private PinnedDirectory(SafeFileHandle handle, string realPath, bool wasCreated, PinnedDirectory? parent, string? name, (int ODirectory, int ONoFollow) linuxFlags)
+    private PinnedDirectory(SafeFileHandle handle, string realPath, bool wasCreated, PinnedDirectory? parent, string? name, (int ODirectory, int ONoFollow) linuxFlags, DirectoryLevelTable levels, DirectoryLevelTable.Lease? lease)
     {
         _handle = handle;
         _linuxFlags = linuxFlags;
+        _levels = levels;
+        _lease = lease;
         RealPath = realPath;
         WasCreated = wasCreated;
         _parent = parent;
@@ -98,13 +111,14 @@ internal sealed class PinnedDirectory : IDisposable
 
     /// <summary>Opens the workspace's canonical root as the start of a chain, verified to equal <paramref name="canonicalRoot"/> exactly. Fails closed on a platform other than Windows or Linux, or on a Linux process architecture <see cref="PinnedIo.FlagsFor"/> does not cover.</summary>
     /// <param name="canonicalRoot">The workspace's canonical root.</param>
+    /// <param name="levels">The table every level below the root is counted in while pinned (ruling (t)). The root itself is never removed, so it is not counted.</param>
     /// <param name="architectureOverride">Test-only seam: the architecture the Linux flag table is read for, in place of this process's own. See <see cref="WorkspaceTools.ArchitectureOverrideForTesting"/>. <see langword="null"/> in production.</param>
-    public static Result<PinnedDirectory, string> OpenRoot(string canonicalRoot, Architecture? architectureOverride = null)
+    public static Result<PinnedDirectory, string> OpenRoot(string canonicalRoot, DirectoryLevelTable levels, Architecture? architectureOverride = null)
     {
         if (OperatingSystem.IsWindows())
         {
             var handle = PinnedIo.Windows.CreateFileW(canonicalRoot, PinnedIo.Windows.GenericRead, PinnedIo.Windows.FileShareRead | PinnedIo.Windows.FileShareWrite, PinnedIo.Windows.OpenExisting);
-            return Verify(handle, canonicalRoot, wasCreated: false, parent: null, name: null, linuxFlags: default);
+            return VerifyRoot(handle, canonicalRoot, linuxFlags: default, levels);
         }
 
         if (OperatingSystem.IsLinux())
@@ -118,7 +132,7 @@ internal sealed class PinnedDirectory : IDisposable
             }
 
             var handle = PinnedIo.Linux.Open(canonicalRoot, flags.ODirectory | flags.ONoFollow | PinnedIo.Linux.OCloExec);
-            return Verify(handle, canonicalRoot, wasCreated: false, parent: null, name: null, flags);
+            return VerifyRoot(handle, canonicalRoot, flags, levels);
         }
 
         return Result<PinnedDirectory, string>.Failure(WorkspaceTools.GenericRefusalText);
@@ -127,7 +141,20 @@ internal sealed class PinnedDirectory : IDisposable
     /// <summary>Opens an existing child directory relative to this pinned one. Classifies a missing level separately from any other refusal, so a caller building a read-only chain (<c>read_file</c>, <c>edit_file</c>) can report "does not exist" the same way a missing leaf file does.</summary>
     /// <param name="name">The child's name.</param>
     /// <param name="beforeOpen">Test-only seam: invoked with the candidate path (Windows) or <paramref name="name"/> (Linux) immediately before the open — see <see cref="WorkspaceTools.BeforeOpenForTesting"/>.</param>
+    /// <remarks>The level is counted in the chain's <see cref="DirectoryLevelTable"/> before it is opened, and stays counted until this child is disposed; see <see cref="TryRemoveSelf"/>.</remarks>
     public Result<PinnedDirectory, PinnedOpenOutcome> OpenChild(string name, Action<string>? beforeOpen = null)
+    {
+        var lease = _levels.Pin(Path.Combine(RealPath, name));
+        var opened = OpenChildPinned(name, lease, beforeOpen);
+        if (opened.IsFailure)
+        {
+            lease.Dispose();
+        }
+
+        return opened;
+    }
+
+    private Result<PinnedDirectory, PinnedOpenOutcome> OpenChildPinned(string name, DirectoryLevelTable.Lease lease, Action<string>? beforeOpen)
     {
         if (OperatingSystem.IsWindows())
         {
@@ -139,7 +166,7 @@ internal sealed class PinnedDirectory : IDisposable
                 return Result<PinnedDirectory, PinnedOpenOutcome>.Failure(ClassifyWindowsError(Marshal.GetLastPInvokeError()));
             }
 
-            return VerifyClassified(handle, candidate, parent: this, name: name);
+            return Verify(handle, candidate, wasCreated: false, name, lease);
         }
 
         if (OperatingSystem.IsLinux())
@@ -151,7 +178,7 @@ internal sealed class PinnedDirectory : IDisposable
                 return Result<PinnedDirectory, PinnedOpenOutcome>.Failure(ClassifyLinuxError(Marshal.GetLastPInvokeError()));
             }
 
-            return VerifyClassified(handle, Path.Combine(RealPath, name), parent: this, name: name);
+            return Verify(handle, Path.Combine(RealPath, name), wasCreated: false, name, lease);
         }
 
         return Result<PinnedDirectory, PinnedOpenOutcome>.Failure(PinnedOpenOutcome.Refused);
@@ -162,9 +189,25 @@ internal sealed class PinnedDirectory : IDisposable
     /// <see cref="OpenChild"/>. On Windows, <c>CreateFileW</c> cannot create a directory, so this is a genuine
     /// two-step — <c>CreateDirectoryW</c>, then open and verify — never one call that skips the verification; on
     /// Linux, <c>mkdirat</c> then <c>openat</c>. A concurrent caller creating the same level a moment earlier is not
-    /// a failure.
+    /// a failure. A failed open is classified the same way <see cref="OpenChild"/> classifies one:
+    /// <see cref="PinnedOpenOutcome.Missing"/> when the level is gone again by the time it is opened, and
+    /// <see cref="PinnedOpenOutcome.Contended"/> for a sharing violation, so the caller can rebuild its chain from the
+    /// root instead of refusing (ruling (t)). A failed verification is always <see cref="PinnedOpenOutcome.Refused"/>.
     /// </summary>
-    public Result<PinnedDirectory, string> CreateChild(string name, Action<string>? beforeOpen = null)
+    /// <remarks>The level is counted in the chain's <see cref="DirectoryLevelTable"/> before it is created or opened, so a removal of it by another call in this process either finishes first or does not happen; see <see cref="TryRemoveSelf"/>.</remarks>
+    public Result<PinnedDirectory, PinnedOpenOutcome> CreateChild(string name, Action<string>? beforeOpen = null)
+    {
+        var lease = _levels.Pin(Path.Combine(RealPath, name));
+        var created = CreateChildPinned(name, lease, beforeOpen);
+        if (created.IsFailure)
+        {
+            lease.Dispose();
+        }
+
+        return created;
+    }
+
+    private Result<PinnedDirectory, PinnedOpenOutcome> CreateChildPinned(string name, DirectoryLevelTable.Lease lease, Action<string>? beforeOpen)
     {
         if (OperatingSystem.IsWindows())
         {
@@ -172,7 +215,12 @@ internal sealed class PinnedDirectory : IDisposable
             beforeOpen?.Invoke(candidate);
             var created = PinnedIo.Windows.CreateDirectoryW(candidate); // a false return — already occupied, by a concurrent creator or otherwise — is resolved by the open-and-verify step below, but must not be recorded as this call's own creation
             var handle = PinnedIo.Windows.CreateFileW(candidate, PinnedIo.Windows.GenericRead, PinnedIo.Windows.FileShareRead | PinnedIo.Windows.FileShareWrite, PinnedIo.Windows.OpenExisting);
-            return Verify(handle, candidate, created, parent: this, name: name, _linuxFlags);
+            if (handle.IsInvalid)
+            {
+                return Result<PinnedDirectory, PinnedOpenOutcome>.Failure(ClassifyWindowsError(Marshal.GetLastPInvokeError()));
+            }
+
+            return Verify(handle, candidate, created, name, lease);
         }
 
         if (OperatingSystem.IsLinux())
@@ -180,7 +228,12 @@ internal sealed class PinnedDirectory : IDisposable
             beforeOpen?.Invoke(name);
             var created = PinnedIo.Linux.MkDirAt(_handle, name);
             var handle = PinnedIo.Linux.OpenAt(_handle, name, _linuxFlags.ODirectory | _linuxFlags.ONoFollow | PinnedIo.Linux.OCloExec);
-            var verified = Verify(handle, Path.Combine(RealPath, name), created, parent: this, name: name, _linuxFlags);
+            if (handle.IsInvalid)
+            {
+                return Result<PinnedDirectory, PinnedOpenOutcome>.Failure(ClassifyLinuxError(Marshal.GetLastPInvokeError()));
+            }
+
+            var verified = Verify(handle, Path.Combine(RealPath, name), created, name, lease);
             if (verified.IsFailure && created)
             {
                 // Ruling (n): mkdirat created the level relative to this directory's descriptor, which still refers
@@ -193,7 +246,7 @@ internal sealed class PinnedDirectory : IDisposable
             return verified;
         }
 
-        return Result<PinnedDirectory, string>.Failure(WorkspaceTools.GenericRefusalText);
+        return Result<PinnedDirectory, PinnedOpenOutcome>.Failure(PinnedOpenOutcome.Refused);
     }
 
     /// <summary>Opens <paramref name="name"/> relative to this pinned directory if it exists, otherwise creates it — <see cref="FileMode.Open"/> falling back to <see cref="FileMode.CreateNew"/>, exactly as before, but relative to an already-pinned parent rather than a path string built from an unpinned tree. Never opens a directory as if it were a plain file (ruling (f)). A failed open is classified: a genuine sharing conflict — this call's own now-exclusive open contending with something that already holds the name — is reported distinctly from an ordinary refusal (ruling (j)), since <em>this</em> method's own retry-or-refuse decision belongs to the caller, not here.</summary>
@@ -435,16 +488,38 @@ internal sealed class PinnedDirectory : IDisposable
     /// parent's descriptor, which needs no such dance, since Linux unlinks immediately regardless of other open
     /// descriptors.
     /// </summary>
+    /// <remarks>
+    /// Ruling (t): the removal runs only through <see cref="DirectoryLevelTable.TryRemove"/>, so it happens only when
+    /// no other chain in this process holds the level, and no new pin of the level opens or creates it until the
+    /// removal is finished. Another chain that holds the level makes this return <see langword="false"/> without
+    /// touching it, the same as a sharing violation from a holder outside the process: the level is left for that
+    /// holder, and this call's own result is unaffected. A successful removal drops this level's own count at once,
+    /// so a later call that creates the level anew can remove it again.
+    /// </remarks>
     public bool TryRemoveSelf()
     {
-        if (_parent is null || _name is null)
+        if (_parent is null || _name is null || _lease is null)
         {
             return false;
         }
 
+        var removed = _levels.TryRemove(_lease, RemoveSelfUnderTable);
+        if (removed)
+        {
+            _lease.Dispose();
+        }
+
+        return removed;
+    }
+
+    /// <summary>The removal itself, run by <see cref="DirectoryLevelTable.TryRemove"/> while it holds this level's removal lock. Only called for a level with a parent and a name.</summary>
+    private bool RemoveSelfUnderTable()
+    {
+        var parent = _parent!;
+        var name = _name!;
         if (OperatingSystem.IsWindows())
         {
-            var expected = Path.Combine(_parent.RealPath, _name);
+            var expected = Path.Combine(parent.RealPath, name);
             _handle.Dispose();
             var deleteHandle = PinnedIo.Windows.CreateFileW(expected, PinnedIo.Windows.Delete, PinnedIo.Windows.FileShareRead | PinnedIo.Windows.FileShareWrite, PinnedIo.Windows.OpenExisting);
             if (deleteHandle.IsInvalid)
@@ -467,7 +542,7 @@ internal sealed class PinnedDirectory : IDisposable
 
         if (OperatingSystem.IsLinux())
         {
-            var removed = PinnedIo.Linux.UnlinkAt(_parent._handle, _name, removeDirectory: true);
+            var removed = PinnedIo.Linux.UnlinkAt(parent._handle, name, removeDirectory: true);
             _handle.Dispose();
             return removed;
         }
@@ -475,9 +550,14 @@ internal sealed class PinnedDirectory : IDisposable
         return false;
     }
 
-    public void Dispose() => _handle.Dispose();
+    /// <summary>Closes the handle or descriptor and drops this level's count in the <see cref="DirectoryLevelTable"/>. Safe to call more than once.</summary>
+    public void Dispose()
+    {
+        _handle.Dispose();
+        _lease?.Dispose();
+    }
 
-    private static Result<PinnedDirectory, string> Verify(SafeFileHandle handle, string expectedRealPath, bool wasCreated, PinnedDirectory? parent, string? name, (int ODirectory, int ONoFollow) linuxFlags)
+    private static Result<PinnedDirectory, string> VerifyRoot(SafeFileHandle handle, string canonicalRoot, (int ODirectory, int ONoFollow) linuxFlags, DirectoryLevelTable levels)
     {
         if (handle.IsInvalid)
         {
@@ -486,16 +566,17 @@ internal sealed class PinnedDirectory : IDisposable
 
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         var real = WorkspacePath.FinalPathOfHandle(handle);
-        if (real is null || !string.Equals(real, expectedRealPath, comparison))
+        if (real is null || !string.Equals(real, canonicalRoot, comparison))
         {
             handle.Dispose();
             return Result<PinnedDirectory, string>.Failure(WorkspaceTools.GenericRefusalText);
         }
 
-        return Result<PinnedDirectory, string>.Success(new PinnedDirectory(handle, real, wasCreated, parent, name, linuxFlags));
+        return Result<PinnedDirectory, string>.Success(new PinnedDirectory(handle, real, wasCreated: false, parent: null, name: null, linuxFlags, levels, lease: null));
     }
 
-    private static Result<PinnedDirectory, PinnedOpenOutcome> VerifyClassified(SafeFileHandle handle, string expectedRealPath, PinnedDirectory parent, string name)
+    /// <summary>Verifies a child level's open handle against <paramref name="expectedRealPath"/>, exactly. The caller has already turned an invalid handle into a classified failure; a mismatch here is always <see cref="PinnedOpenOutcome.Refused"/>. On success the child carries <paramref name="lease"/>, which it releases when disposed.</summary>
+    private Result<PinnedDirectory, PinnedOpenOutcome> Verify(SafeFileHandle handle, string expectedRealPath, bool wasCreated, string name, DirectoryLevelTable.Lease lease)
     {
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         var real = WorkspacePath.FinalPathOfHandle(handle);
@@ -505,7 +586,7 @@ internal sealed class PinnedDirectory : IDisposable
             return Result<PinnedDirectory, PinnedOpenOutcome>.Failure(PinnedOpenOutcome.Refused);
         }
 
-        return Result<PinnedDirectory, PinnedOpenOutcome>.Success(new PinnedDirectory(handle, real, wasCreated: false, parent, name, parent._linuxFlags));
+        return Result<PinnedDirectory, PinnedOpenOutcome>.Success(new PinnedDirectory(handle, real, wasCreated, this, name, _linuxFlags, _levels, lease));
     }
 
     [SupportedOSPlatform("windows")]

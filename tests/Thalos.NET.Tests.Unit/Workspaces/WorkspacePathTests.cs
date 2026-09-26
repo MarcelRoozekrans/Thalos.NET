@@ -651,6 +651,50 @@ public sealed class WorkspacePathTests : IDisposable
         // NTFS alternate-data-stream syntax contains ':', which every OS now refuses unconditionally.
         WorkspacePath.Resolve(_workspace, "src/file.txt:hidden-stream").IsFailure.Should().BeTrue();
 
+    /// <summary>
+    /// Found by task A8's round-5 hammer: <c>workspace__write_file</c> resolves its path while another call is
+    /// removing a directory it created. The existence probe found <c>d</c>; <c>d</c> was gone before it could be
+    /// canonicalised, and the whole path was refused with the generic message, though nothing about it is wrong. The
+    /// seam removes <c>d</c> in exactly that window. The resolution must probe again, find the root as the deepest
+    /// existing ancestor, and succeed.
+    /// </summary>
+    [Fact]
+    public void An_ancestor_removed_before_it_is_canonicalised_is_probed_again()
+    {
+        Directory.CreateDirectory(Path.Combine(_workspace, "d"));
+        var probed = new List<string>();
+
+        var result = WorkspacePath.ResolveCore(_workspace, "d/x.cs", ancestor =>
+        {
+            probed.Add(ancestor);
+            if (probed.Count == 1)
+            {
+                Directory.Delete(ancestor);
+            }
+        });
+
+        probed.Should().HaveCount(2);
+        result.IsSuccess.Should().BeTrue();
+        result.Value.Should().Be(Path.Combine(WorkspacePath.CanonicalizeRoot(_workspace)!, "d", "x.cs"));
+    }
+
+    /// <summary>
+    /// The other side of the re-probe: an ancestor that still exists after it failed canonicalisation, or
+    /// canonicalised to somewhere outside, is refused on the first probe, exactly as before. Only a vanished
+    /// ancestor earns another probe.
+    /// </summary>
+    [SkippableFact]
+    public void An_ancestor_that_still_exists_is_refused_without_another_probe()
+    {
+        CreateDirectoryLinkOrSkip(Path.Combine(_workspace, "escape"), _outside);
+        var probes = 0;
+
+        var result = WorkspacePath.ResolveCore(_workspace, "escape/secret.txt", _ => probes++);
+
+        result.IsFailure.Should().BeTrue();
+        probes.Should().Be(1);
+    }
+
     private static void CreateDirectoryLink(string linkPath, string targetPath)
     {
         if (OperatingSystem.IsWindows())
