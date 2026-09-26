@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Text;
 using Microsoft.Extensions.Logging;
@@ -59,8 +60,31 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
     internal const string GenericRefusalText = "error: the path is not permitted.";
 
     /// <summary>
-    /// Test-only seam: invoked with the path <see cref="OpenExisting"/> is about to open, immediately before it
-    /// opens it, so a test can deterministically simulate the check-to-use race the
+    /// Returned instead of <see cref="GenericRefusalText"/> when a leaf open failed only because something else —
+    /// this run's own concurrent call to the same path, or an outside process — currently holds it, and the bounded
+    /// wait for it to let go ran out. Ruling (j): this reveals nothing a caller could not already see (they know they
+    /// just tried to write a contended file), unlike a policy refusal, so it gets its own distinct text rather than
+    /// folding into the one generic message.
+    /// </summary>
+    private const string BusyText = "error: the file is busy; try again.";
+
+    /// <summary>
+    /// Serializes writers to the very same leaf path within this process: round-3 finding B1 measured 300 truly
+    /// parallel writers to one file succeeding only 103 times, because each one's leaf open was fully exclusive
+    /// (<see cref="FileShare.None"/> on Windows) with no retry on contention. Keyed by the pre-open resolved path
+    /// (case-insensitive, matching Windows' own path comparison; a harmless over-approximation on Linux, where two
+    /// differently-cased names are genuinely different files) rather than the post-open real path, since the whole
+    /// point is to serialize before either writer has opened anything. Never evicted: a very long-running process
+    /// that writes an unbounded number of distinct paths will accumulate one <see cref="SemaphoreSlim"/> per path —
+    /// a known, accepted limit for this round, noted in the report rather than solved here.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> LeafLocks = new(StringComparer.OrdinalIgnoreCase);
+
+    private static SemaphoreSlim LeafLock(string resolvedPath) => LeafLocks.GetOrAdd(resolvedPath, static _ => new SemaphoreSlim(1, 1));
+
+    /// <summary>
+    /// Test-only seam: invoked with the candidate path or name a pinned open is about to try, immediately before it
+    /// tries it, so a test can deterministically simulate the check-to-use race the
     /// type-level remarks describe — e.g. swapping a directory for a link between <see cref="WorkspacePath.Resolve"/>
     /// and the open — instead of depending on real timing. Always <see langword="null"/> in production; instance-level
     /// and internal, so only a test in this assembly's <c>InternalsVisibleTo</c> grant, holding its own instance, can
@@ -87,20 +111,91 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
             return target.Error!;
         }
 
-        var opened = OpenExisting(path, target.Resolved!, FileAccess.Read, FileShare.ReadWrite);
-        if (!opened.Ok)
+        var canonicalRoot = target.CanonicalRoot!;
+        var resolved = target.Resolved!;
+        var chainResult = PinExistingDirectoryChain(canonicalRoot, Path.GetDirectoryName(resolved) ?? canonicalRoot, path);
+        if (!chainResult.Ok)
         {
-            return opened.Error!;
+            return chainResult.Error!;
         }
 
-        using var confined = opened.Value!;
-        if (!IsContained(confined.RealPath, target.CanonicalRoot!))
+        var chain = chainResult.Chain!;
+        try
         {
-            return GenericRefusalText;
+            var leafName = Path.GetFileName(resolved);
+            var opened = chain[^1].OpenExistingFile(leafName, readOnly: true, BeforeOpenForTesting);
+            if (opened.IsFailure)
+            {
+                return FormatLeafOpenFailure(opened.Error, path);
+            }
+
+            using var file = opened.Value;
+            if (!IsContained(file.RealPath, canonicalRoot))
+            {
+                return GenericRefusalText;
+            }
+
+            var read = await ReadBoundedAsync(file.Stream, path, ct).ConfigureAwait(false);
+            return read.Error ?? read.Text!;
+        }
+        finally
+        {
+            DisposeChain(chain);
+        }
+    }
+
+    /// <summary>Maps a failed leaf or ancestor open to the text a caller returns: "does not exist" for a missing target, the distinct busy text for contention, and the one generic refusal text for anything else (ruling (j)).</summary>
+    private static string FormatLeafOpenFailure(PinnedOpenOutcome outcome, string path) => outcome switch
+    {
+        PinnedOpenOutcome.Missing => $"error: '{path}' does not exist.",
+        PinnedOpenOutcome.Contended => BusyText,
+        _ => GenericRefusalText,
+    };
+
+    /// <summary>
+    /// Pins the directory chain down to <paramref name="targetDirectory"/> without creating anything missing — used
+    /// by <c>read_file</c> and <c>edit_file</c> (ruling (h)), which must not bring a missing parent directory into
+    /// existence as a side effect of a read. A missing or refused ancestor is reported the same way a missing leaf
+    /// file is, via <see cref="FormatLeafOpenFailure"/>.
+    /// </summary>
+    private ChainResult PinExistingDirectoryChain(string canonicalRoot, string targetDirectory, string originalPath)
+    {
+        var rootPin = PinnedDirectory.OpenRoot(canonicalRoot);
+        if (rootPin.IsFailure)
+        {
+            return ChainResult.Failure(rootPin.Error);
         }
 
-        var read = await ReadBoundedAsync(confined.Stream, path, ct).ConfigureAwait(false);
-        return read.Error ?? read.Text!;
+        var chain = new List<PinnedDirectory> { rootPin.Value };
+        var relative = Path.GetRelativePath(canonicalRoot, targetDirectory);
+        if (string.Equals(relative, ".", StringComparison.Ordinal))
+        {
+            return ChainResult.Success(chain);
+        }
+
+        try
+        {
+            var current = rootPin.Value;
+            foreach (var segment in relative.Split(Path.DirectorySeparatorChar))
+            {
+                var child = current.OpenChild(segment, BeforeOpenForTesting);
+                if (child.IsFailure)
+                {
+                    DisposeChain(chain);
+                    return ChainResult.Failure(FormatLeafOpenFailure(child.Error, originalPath));
+                }
+
+                chain.Add(child.Value);
+                current = child.Value;
+            }
+
+            return ChainResult.Success(chain);
+        }
+        catch
+        {
+            DisposeChain(chain);
+            throw;
+        }
     }
 
     /// <summary><c>workspace__list_files</c>: lists files and directories under the workspace root (or a subdirectory), skipping <c>.git</c> and not following links.</summary>
@@ -132,7 +227,11 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
 
         using var startDirectory = start.Directory!;
         var entries = new List<string>();
-        Walk(startDirectory, "", entries, options.MaxListEntries, ct);
+        if (!Walk(startDirectory, "", entries, options.MaxListEntries, ct))
+        {
+            return GenericRefusalText;
+        }
+
         entries.Sort(StringComparer.Ordinal);
 
         return entries.Count == 0 ? "(empty)" : FormatListing(entries, options.MaxListEntries);
@@ -169,6 +268,9 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
             return (null, GenericRefusalText);
         }
 
+        // OpenChild's classified PinnedOpenOutcome is not distinguished here: list_files reported the same
+        // "is not a directory" text for a missing or a mismatched target before ruling (h) introduced the
+        // Missing/Contended split for read_file and edit_file, and nothing asks list_files to change that.
         var current = rootPin.Value;
         foreach (var segment in relative.Split(Path.DirectorySeparatorChar))
         {
@@ -240,12 +342,24 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         }
 
         var chain = chainResult.Chain!;
+
+        // Serializes writers to this exact leaf path, so the leaf open below never contends with another one of
+        // this run's own concurrent WriteFile calls — round-3 finding B1. A bounded wait, not an unbounded one:
+        // exhausting it returns the distinct busy text (ruling (j)) rather than hanging or refusing outright.
+        var gate = LeafLock(resolved);
+        if (!await gate.WaitAsync(options.WriteContentionTimeout, ct).ConfigureAwait(false))
+        {
+            DisposeChain(chain);
+            return BusyText;
+        }
+
         try
         {
             return await OpenAndWriteLeafAsync(caller, workspace, canonicalRoot, path, resolved, content, chain, ct).ConfigureAwait(false);
         }
         finally
         {
+            gate.Release();
             DisposeChain(chain);
         }
     }
@@ -259,7 +373,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         {
             BeforeCleanupForTesting?.Invoke();
             RemoveCreatedDirectories(chain);
-            return opened.Error;
+            return opened.Error == PinnedOpenOutcome.Contended ? BusyText : GenericRefusalText;
         }
 
         var file = opened.Value;
@@ -272,6 +386,14 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
             {
                 CleanUpRefusedFile(file, chain);
                 return FormatGate(post, path, postExtension);
+            }
+
+            // Ruling (d): verified once at open time (file.RealPath); verified again, live, right before the
+            // content is actually committed — closing the gap between that first verification and this moment.
+            if (!file.StillAtVerifiedPath())
+            {
+                CleanUpRefusedFile(file, chain);
+                return GenericRefusalText;
             }
 
             byteCount = await WriteAllBytesAsync(file.Stream, content, ct).ConfigureAwait(false);
@@ -334,6 +456,9 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
                 var child = current.CreateChild(segment, BeforeOpenForTesting);
                 if (child.IsFailure)
                 {
+                    // Ruling (i): a chain-build failure removes every level this call created, not only the one
+                    // that failed to verify — while every level is still pinned, before any handle is released.
+                    RemoveCreatedDirectories(chain);
                     DisposeChain(chain);
                     return ChainResult.Failure(child.Error);
                 }
@@ -347,7 +472,9 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         catch
         {
             // Never leak an already-pinned ancestor if creating or verifying a deeper level throws instead of
-            // returning a Result failure — this rethrows unchanged; it only guarantees the handles are released.
+            // returning a Result failure. Ruling (i) applies here too: a chain-build failure removes the levels
+            // it created whether it surfaces as a Result or, as here, an exception.
+            RemoveCreatedDirectories(chain);
             DisposeChain(chain);
             throw;
         }
@@ -429,24 +556,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
             return FormatGate(pre, path, preExtension);
         }
 
-        var opened = OpenExisting(path, resolved, FileAccess.ReadWrite, FileShare.None);
-        if (!opened.Ok)
-        {
-            return opened.Error!;
-        }
-
-        var confined = opened.Value!;
-        string? relativePath;
-        string result;
-        try
-        {
-            (relativePath, result) = await ApplyEditAsync(caller, canonicalRoot, confined, path, oldText, newText, ct).ConfigureAwait(false);
-        }
-        finally
-        {
-            confined.Dispose();
-        }
-
+        var (relativePath, result) = await OpenAndApplyEditAsync(caller, canonicalRoot, path, resolved, oldText, newText, ct).ConfigureAwait(false);
         if (relativePath is null)
         {
             return result;
@@ -456,21 +566,70 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         return result;
     }
 
+    /// <summary>Pins the chain, opens the leaf and applies the edit for <see cref="EditFile"/>, once the pre-check has passed — split out only to keep <see cref="EditFile"/> under the method-length limit. Ruling (h): edit_file goes through the same pinned chain write_file does, opening only what already exists — never creating a missing parent directory as a side effect the way write_file's own chain would.</summary>
+    private async Task<(string? RelativePath, string Result)> OpenAndApplyEditAsync(ISecurityContext caller, string canonicalRoot, string path, string resolved, string oldText, string newText, CancellationToken ct)
+    {
+        var chainResult = PinExistingDirectoryChain(canonicalRoot, Path.GetDirectoryName(resolved) ?? canonicalRoot, path);
+        if (!chainResult.Ok)
+        {
+            return (null, chainResult.Error!);
+        }
+
+        var chain = chainResult.Chain!;
+        var gate = LeafLock(resolved);
+        if (!await gate.WaitAsync(options.WriteContentionTimeout, ct).ConfigureAwait(false))
+        {
+            DisposeChain(chain);
+            return (null, BusyText);
+        }
+
+        try
+        {
+            var leafName = Path.GetFileName(resolved);
+            var opened = chain[^1].OpenExistingFile(leafName, readOnly: false, BeforeOpenForTesting);
+            if (opened.IsFailure)
+            {
+                return (null, FormatLeafOpenFailure(opened.Error, path));
+            }
+
+            var file = opened.Value;
+            try
+            {
+                return await ApplyEditAsync(caller, canonicalRoot, file, path, oldText, newText, ct).ConfigureAwait(false);
+            }
+            finally
+            {
+                file.Dispose();
+            }
+        }
+        finally
+        {
+            gate.Release();
+            DisposeChain(chain);
+        }
+    }
+
     /// <summary>
     /// The post-check, bounded read, exactly-once replacement and write for <c>edit_file</c>. Returns the changed
     /// path relative to the canonical root and the success text on success, or a null path and the refusal or error
     /// text otherwise — the caller notifies listeners only when the path is non-null.
     /// </summary>
     private async Task<(string? RelativePath, string Result)> ApplyEditAsync(
-        ISecurityContext caller, string canonicalRoot, ConfinedHandle confined, string path, string oldText, string newText, CancellationToken ct)
+        ISecurityContext caller, string canonicalRoot, PinnedFile file, string path, string oldText, string newText, CancellationToken ct)
     {
-        var post = CheckWrite(caller, canonicalRoot, confined.RealPath, out var postExtension);
+        var post = CheckWrite(caller, canonicalRoot, file.RealPath, out var postExtension);
         if (post != WriteGate.Ok)
         {
             return (null, FormatGate(post, path, postExtension));
         }
 
-        var read = await ReadBoundedAsync(confined.Stream, path, ct).ConfigureAwait(false);
+        // Ruling (d): verified again, live, right before committing the edit — see PinnedFile.StillAtVerifiedPath.
+        if (!file.StillAtVerifiedPath())
+        {
+            return (null, GenericRefusalText);
+        }
+
+        var read = await ReadBoundedAsync(file.Stream, path, ct).ConfigureAwait(false);
         if (read.Error is { } sizeError)
         {
             return (null, sizeError);
@@ -485,12 +644,12 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         var updated = read.Text!.Replace(oldText, newText, StringComparison.Ordinal);
         var bytes = Encoding.UTF8.GetBytes(updated);
 
-        confined.Stream.Position = 0;
-        confined.Stream.SetLength(0);
-        await confined.Stream.WriteAsync(bytes, ct).ConfigureAwait(false);
-        await confined.Stream.FlushAsync(ct).ConfigureAwait(false);
+        file.Stream.Position = 0;
+        file.Stream.SetLength(0);
+        await file.Stream.WriteAsync(bytes, ct).ConfigureAwait(false);
+        await file.Stream.FlushAsync(ct).ConfigureAwait(false);
 
-        return (RelativeToRoot(canonicalRoot, confined.RealPath), $"edited '{path}'.");
+        return (RelativeToRoot(canonicalRoot, file.RealPath), $"edited '{path}'.");
     }
 
     /// <summary>Resolves the calling run's workspace, its canonicalised root, and confines <paramref name="path"/> to it.</summary>
@@ -562,35 +721,6 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         WriteGate.Extension => extensionMessage!,
         _ => throw new InvalidOperationException($"{nameof(CheckWrite)} returned {nameof(WriteGate.Ok)}; there is nothing to format."),
     };
-
-    /// <summary>Opens an existing file for <c>read_file</c> (read-only) or <c>edit_file</c> (read-write, exclusive). Never creates one.</summary>
-    private ConfinedHandleResult OpenExisting(string originalPath, string resolvedPath, FileAccess access, FileShare share)
-    {
-        BeforeOpenForTesting?.Invoke(resolvedPath);
-
-        FileStream stream;
-        try
-        {
-            stream = new FileStream(resolvedPath, FileMode.Open, access, share);
-        }
-        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
-        {
-            return ConfinedHandleResult.Failure($"error: '{originalPath}' does not exist.");
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return ConfinedHandleResult.Failure(GenericRefusalText);
-        }
-
-        var real = WorkspacePath.FinalPathOfHandle(stream.SafeFileHandle);
-        if (real is null)
-        {
-            stream.Dispose();
-            return ConfinedHandleResult.Failure(GenericRefusalText);
-        }
-
-        return ConfinedHandleResult.Success(new ConfinedHandle(stream, real, createdNew: false));
-    }
 
     /// <summary><see langword="null"/> when <paramref name="caller"/> may write a file whose real final path is <paramref name="realPath"/>; otherwise the error text.</summary>
     private string? RefuseExtension(ISecurityContext caller, string realPath)
@@ -715,32 +845,29 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
     /// skipping <c>.git</c> and any reparse point; a name found to be a subdirectory is descended into by opening it
     /// as a child of this same pinned directory, closing the gap between checking an entry's attributes and
     /// enumerating what a swap could have made it point to since. Stops once one more than <paramref name="limit"/>
-    /// entries have been collected.
+    /// entries have been collected. Returns <see langword="false"/> on a genuine enumeration error at this level or
+    /// any descendant, so <c>list_files</c> reports a failure rather than a silently truncated listing (ruling (e)).
     /// </summary>
-    private void Walk(PinnedDirectory directory, string relativePrefix, List<string> results, int limit, CancellationToken ct)
+    private bool Walk(PinnedDirectory directory, string relativePrefix, List<string> results, int limit, CancellationToken ct)
     {
         if (results.Count > limit)
         {
-            return;
+            return true;
         }
 
         ct.ThrowIfCancellationRequested();
 
-        List<PinnedDirEntry> children;
-        try
+        var enumerated = directory.EnumerateEntries();
+        if (enumerated.IsFailure)
         {
-            children = directory.EnumerateEntries();
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return;
+            return false;
         }
 
-        foreach (var entry in children)
+        foreach (var entry in enumerated.Value)
         {
             if (results.Count > limit)
             {
-                return;
+                return true;
             }
 
             if (entry.Name.Equals(".git", StringComparison.OrdinalIgnoreCase) || entry.IsReparsePoint)
@@ -764,13 +891,18 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
 
             try
             {
-                Walk(child.Value, relative, results, limit, ct);
+                if (!Walk(child.Value, relative, results, limit, ct))
+                {
+                    return false;
+                }
             }
             finally
             {
                 child.Value.Dispose();
             }
         }
+
+        return true;
     }
 
 
@@ -806,35 +938,4 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         public static PathResolution Failure(string error) => new(null, null, null, error);
     }
 
-    /// <summary>The outcome of opening a file: either an open, re-checked handle, or ready-to-return error text.</summary>
-    private readonly struct ConfinedHandleResult
-    {
-        private ConfinedHandleResult(ConfinedHandle? value, string? error)
-        {
-            Value = value;
-            Error = error;
-        }
-
-        public ConfinedHandle? Value { get; }
-
-        public string? Error { get; }
-
-        public bool Ok => Error is null;
-
-        public static ConfinedHandleResult Success(ConfinedHandle value) => new(value, null);
-
-        public static ConfinedHandleResult Failure(string error) => new(null, error);
-    }
-
-    /// <summary>An open file handle together with its real, symlink-resolved path, from <see cref="OpenExisting"/>; <c>CreatedNew</c> is always false here, since this path never creates a file — see <see cref="PinnedFile"/> for the one that does.</summary>
-    private sealed class ConfinedHandle(FileStream stream, string realPath, bool createdNew) : IDisposable
-    {
-        public FileStream Stream { get; } = stream;
-
-        public string RealPath { get; } = realPath;
-
-        public bool CreatedNew { get; } = createdNew;
-
-        public void Dispose() => Stream.Dispose();
-    }
 }

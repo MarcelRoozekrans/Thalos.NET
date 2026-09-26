@@ -22,4 +22,13 @@ public sealed class RunWorkspaceToolOptions
 
     /// <summary><c>list_files</c> lists at most this many entries per call. Default 500.</summary>
     public int MaxListEntries { get; set; } = 500;
+
+    /// <summary>
+    /// How long <c>write_file</c> and <c>edit_file</c> wait for another writer — this run's own concurrent call to
+    /// the very same path, or an outside holder — to release it before giving up with a distinct "busy" result
+    /// (ruling (j)) instead of an unbounded wait or an immediate refusal. Default 5 seconds. Tests that deliberately
+    /// hold a target file open for the whole call set this much shorter, so the wait's own bound does not slow the
+    /// suite down.
+    /// </summary>
+    public TimeSpan WriteContentionTimeout { get; set; } = TimeSpan.FromSeconds(5);
 }

@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using Microsoft.Extensions.Logging.Abstractions;
 using Thalos.Tests.Unit.Runtime;
 using Thalos.Workspaces;
@@ -24,6 +25,114 @@ public sealed class WorkspaceToolsTests : IDisposable
                 // best-effort cleanup
             }
         }
+    }
+
+    /// <summary>
+    /// Round-3 finding A, the Critical: <c>O_DIRECTORY</c> and <c>O_NOFOLLOW</c> are architecture-dependent on Linux
+    /// — x86_64 and the "generic" ABI most other architectures (arm64 included) use disagree on their values — and
+    /// <see cref="PinnedIo.FlagsFor"/> is the table ruling (a) asks for. A pure function of its argument, so
+    /// this pins it without needing to run under either architecture.
+    /// </summary>
+    [Fact]
+    public void The_linux_o_directory_and_o_no_follow_flags_are_pinned_per_architecture()
+    {
+        PinnedIo.FlagsFor(Architecture.X64).Should().Be((0x10000, 0x20000));
+        PinnedIo.FlagsFor(Architecture.Arm64).Should().Be((0x4000, 0x8000));
+        PinnedIo.FlagsFor(Architecture.Arm).Should().BeNull();
+    }
+
+    /// <summary>
+    /// Ruling (a)'s other half: an architecture the table above does not cover must refuse before ever calling into
+    /// libc, rather than opening with flag values that might mean something else entirely there. Linux-only, since
+    /// <see cref="PinnedDirectory.OpenRoot"/> only consults <see cref="PinnedIo.ArchitectureOverrideForTesting"/>
+    /// from its Linux branch.
+    /// </summary>
+    [SkippableFact]
+    public async Task An_unsupported_linux_architecture_refuses_every_call_before_any_open()
+    {
+        Skip.IfNot(OperatingSystem.IsLinux(), "PinnedIo.Linux's architecture gate only runs on Linux");
+        var (tools, _, root) = Build();
+        PinnedIo.ArchitectureOverrideForTesting = Architecture.Arm;
+
+        try
+        {
+            (await tools.WriteFile(Caller(RunId), "a.cs", "x")).Should().StartWith("error:");
+            File.Exists(Path.Combine(root, "a.cs")).Should().BeFalse();
+        }
+        finally
+        {
+            PinnedIo.ArchitectureOverrideForTesting = null;
+        }
+    }
+
+    /// <summary>
+    /// Round-3 finding B4: on Windows, opening a directory as though it were the plain file <c>write_file</c>
+    /// expects used to throw <see cref="ArgumentOutOfRangeException"/> from <see cref="FileStream.SetLength"/>,
+    /// because <c>CreateFileW</c>'s backup semantics happily open a directory. Ruling (f): refused cleanly instead,
+    /// on both OSes — on Linux, opening a directory without <c>O_DIRECTORY</c> already fails at the kernel level
+    /// with <c>EISDIR</c>, so this exercises the same contract there without needing a separate code path.
+    /// </summary>
+    [Fact]
+    public async Task Opening_a_directory_where_a_file_is_expected_is_refused_without_throwing()
+    {
+        var (tools, _, root) = Build();
+        Directory.CreateDirectory(Path.Combine(root, "dir.cs"));
+
+        var act = () => tools.WriteFile(Caller(RunId), "dir.cs", "content");
+
+        (await act.Should().NotThrowAsync()).Which.Should().StartWith("error:");
+    }
+
+    /// <summary>
+    /// Ruling (j): a leaf open refused only because something else currently holds it — here, an external,
+    /// non-participating <see cref="FileStream"/> opened with <see cref="FileShare.None"/> — gets the distinct busy
+    /// text once the bounded wait for it to let go runs out, never the one generic refusal text a policy check
+    /// returns. <see cref="RunWorkspaceToolOptions.WriteContentionTimeout"/> is set short so this test does not wait
+    /// the production default of 5 seconds. Windows-only: <see cref="FileShare.None"/> is a Windows, kernel-enforced
+    /// concept; a plain Linux <c>open()</c> has no equivalent mandatory sharing conflict, so a second writer's own
+    /// open there succeeds regardless of another handle's requested share mode — this is the same asymmetry finding
+    /// B1 turned up, not a gap in the fix.
+    /// </summary>
+    [SkippableFact]
+    public async Task Write_file_reports_a_distinct_busy_result_when_another_holder_never_lets_go()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "FileShare.None is a Windows-enforced concept");
+        var (tools, _, root) = Build(writeContentionTimeout: TimeSpan.FromMilliseconds(200));
+        var target = Path.Combine(root, "held.cs");
+        File.WriteAllText(target, "original");
+
+        string result;
+        using (new FileStream(target, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            result = await tools.WriteFile(Caller(RunId), "held.cs", "hijack");
+        }
+
+        result.Should().Be("error: the file is busy; try again.");
+        File.ReadAllText(target).Should().Be("original");
+    }
+
+    /// <summary>
+    /// Round-3 finding B2: on Windows, <c>list_files</c>' own directory opens requested <c>DELETE</c> access, so 36
+    /// of 50 truly parallel listings of the same directory silently came back missing its contents — a second,
+    /// concurrent pin's open collided with the first and <see cref="WorkspaceTools.ListFiles"/> caught the resulting
+    /// refusal the same way it treats a genuinely empty directory. Ruling (e): list_files opens read-only, so
+    /// concurrent pins of the same directory never collide with each other at all.
+    /// </summary>
+    [Fact]
+    public async Task Concurrent_listings_of_the_same_directory_never_lose_its_contents()
+    {
+        var (tools, _, root) = Build();
+        Directory.CreateDirectory(Path.Combine(root, "sub"));
+        for (var i = 0; i < 5; i++)
+        {
+            File.WriteAllText(Path.Combine(root, "sub", $"f{i}.cs"), "x");
+        }
+
+        var caller = Caller(RunId);
+        var tasks = Enumerable.Range(0, 50).Select(_ => Task.Run(() => tools.ListFiles(caller)));
+        var results = await Task.WhenAll(tasks);
+
+        results.Should().OnlyContain(listing => Enumerable.Range(0, 5).All(i => listing.Contains($"sub/f{i}.cs", StringComparison.Ordinal)));
     }
 
     [Fact]
@@ -183,15 +292,21 @@ public sealed class WorkspaceToolsTests : IDisposable
         };
         tools.BeforeCleanupForTesting = () =>
         {
-            try
+            var swap = () =>
             {
                 Directory.Delete(Path.Combine(root, "sub"), recursive: true);
                 CreateDirectoryLinkOrSkip(Path.Combine(root, "sub"), outside);
-            }
-            catch (IOException)
+            };
+
+            if (OperatingSystem.IsWindows())
             {
-                // Windows: sub is still pinned with FILE_SHARE_DELETE excluded at this point.
+                // Ruling (g): sub is still pinned with FILE_SHARE_DELETE excluded at this point — assert the swap
+                // itself is refused by the OS, rather than silently swallowing whatever it throws.
+                swap.Should().Throw<IOException>();
+                return;
             }
+
+            swap();
         };
 
         var result = await tools.WriteFile(Caller(RunId), "sub/new.cs", "hijack");
@@ -238,10 +353,10 @@ public sealed class WorkspaceToolsTests : IDisposable
     /// <c>Directory.Delete("root/d/e")</c> bug reached by following the swapped name a second time, deleting it. A
     /// fixed cleanup removes <c>d</c> and <c>e</c> through the handles this call already holds, never by
     /// re-resolving <c>"root/d/e"</c>, so it cannot reach <paramref name="outside"/> at all. On Windows, pinning
-    /// <c>d</c> with a share mode that excludes <c>FILE_SHARE_DELETE</c> means the swap this probe wants often
-    /// cannot even be performed — an <see cref="IOException"/> from the attempt is swallowed here, since failing to
-    /// construct the race is itself already the property under test; the race is reliably constructible on Linux,
-    /// where an open descriptor does not pin a directory's name this way.
+    /// <c>d</c> with a share mode that excludes <c>FILE_SHARE_DELETE</c> means the swap this probe wants cannot even
+    /// be performed; ruling (g): that is asserted directly, as the OS refusing the swap with an
+    /// <see cref="IOException"/>, rather than silently swallowed. The race itself is reliably constructible on
+    /// Linux, where an open descriptor does not pin a directory's name this way.
     /// </summary>
     [SkippableFact]
     public async Task A_swap_of_an_ancestor_right_before_cleanup_does_not_delete_outside()
@@ -257,16 +372,19 @@ public sealed class WorkspaceToolsTests : IDisposable
                 return; // only swap once d/e are genuinely created, right before the leaf itself opens
             }
 
-            try
+            var swap = () =>
             {
                 Directory.Delete(Path.Combine(root, "d"), recursive: true);
                 CreateDirectoryLinkOrSkip(Path.Combine(root, "d"), outside);
-            }
-            catch (IOException)
+            };
+
+            if (OperatingSystem.IsWindows())
             {
-                // Windows: d is already pinned with FILE_SHARE_DELETE excluded, so the swap cannot be performed —
-                // which is exactly the property under test, just proven a different way.
+                swap.Should().Throw<IOException>();
+                return;
             }
+
+            swap();
         };
 
         await tools.WriteFile(Caller(RunId), "d/e/new.cs", "hijack");
@@ -302,6 +420,67 @@ public sealed class WorkspaceToolsTests : IDisposable
         result.Should().StartWith("error:");
         File.ReadAllText(Path.Combine(outside, "e", "keep.txt")).Should().Be("outside-original");
         File.Exists(Path.Combine(outside, "e", "new.cs")).Should().BeFalse();
+    }
+
+    /// <summary>
+    /// Round-3 finding B3: on Linux, <c>PinnedFile.RealPath</c> was computed via <c>Path.Combine</c> instead of
+    /// read from the fd, so the post-open check was a no-op. The review's own probe: renaming the pinned
+    /// intermediate directory <c>a</c> to outside the workspace at the leaf seam still returned "wrote 6 bytes" and
+    /// created the file under the renamed location. Ruling (d): every level, and the leaf file, are verified by
+    /// reading <c>/proc/self/fd</c> back against the expected canonical path, so a rename is caught the same way a
+    /// swap is — closing the gap and correcting round 2's report and commit, which called Linux's fd-relative opens
+    /// "inherently immune to a later swap"; a rename of an already-pinned ancestor is exactly the swap they were
+    /// not immune to. Linux-only: renaming a directory an open handle still refers to is exactly what Windows' own
+    /// pinning (<c>FILE_SHARE_DELETE</c> excluded) already refuses outright, covered by the <c>IOException</c>
+    /// assertions above; this probe is only constructible on Linux, where an open fd does not pin a name this way.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_rename_of_an_intermediate_directory_is_caught_before_commit()
+    {
+        Skip.IfNot(OperatingSystem.IsLinux(), "an open fd only survives a rename-away on Linux");
+        var (tools, _, root) = Build();
+        var outside = NewTempDir("thalos-workspace-tools-outside-");
+        Directory.Delete(outside); // Directory.Move refuses an already-existing destination.
+        Directory.CreateDirectory(Path.Combine(root, "a", "b"));
+
+        tools.BeforeOpenForTesting = candidate =>
+        {
+            if (candidate.EndsWith("new.cs", StringComparison.Ordinal))
+            {
+                Directory.Move(Path.Combine(root, "a"), outside);
+            }
+        };
+
+        var result = await tools.WriteFile(Caller(RunId), "a/b/new.cs", "hijack");
+
+        result.Should().StartWith("error:");
+        File.Exists(Path.Combine(outside, "b", "new.cs")).Should().BeFalse();
+    }
+
+    /// <summary>
+    /// The root-level variant of the same finding: renaming the workspace root itself, once pinned, must be caught
+    /// the same way. Linux-only, for the same reason as above.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_rename_of_the_workspace_root_itself_is_caught_before_commit()
+    {
+        Skip.IfNot(OperatingSystem.IsLinux(), "an open fd only survives a rename-away on Linux");
+        var (tools, _, root) = Build();
+        var outside = NewTempDir("thalos-workspace-tools-outside-");
+        Directory.Delete(outside);
+
+        tools.BeforeOpenForTesting = candidate =>
+        {
+            if (candidate.EndsWith("x.cs", StringComparison.Ordinal))
+            {
+                Directory.Move(root, outside);
+            }
+        };
+
+        var result = await tools.WriteFile(Caller(RunId), "x.cs", "hijack");
+
+        result.Should().StartWith("error:");
+        File.Exists(Path.Combine(outside, "x.cs")).Should().BeFalse();
     }
 
     /// <summary>
@@ -349,8 +528,13 @@ public sealed class WorkspaceToolsTests : IDisposable
 
     /// <summary>
     /// Another of the review's minors: an exception partway through pinning the chain — rather than an ordinary
-    /// refusal — must still release every already-pinned ancestor. If <c>d</c>'s handle leaked, held with a share
-    /// mode that excludes deletion, an ordinary external delete of it right afterwards would fail.
+    /// refusal — must still release every already-pinned ancestor, and, per round-3 ruling (i), remove every level
+    /// this call created, exactly as an ordinary chain-build <em>Result</em> failure does. <c>d</c> is genuinely
+    /// created by this call before the seam throws for <c>d/e</c>, so a fixed <c>PinDirectoryChain</c> both releases
+    /// <c>d</c>'s handle and removes <c>d</c> itself; <see cref="Directory.Exists"/> returning <see langword="false"/>
+    /// proves both at once — if a handle had leaked instead, on Windows the removal attempt inside the same catch
+    /// block would itself fail (a sharing violation against its own leaked, non-delete-shared handle), leaving
+    /// <c>d</c> behind.
     /// </summary>
     [Fact]
     public async Task An_exception_mid_chain_still_releases_pinned_handles()
@@ -364,11 +548,29 @@ public sealed class WorkspaceToolsTests : IDisposable
             }
         };
 
+        // Ruling (g): "the mid-chain test on Linux asserts that the /proc/self/fd count returns to its baseline" —
+        // a leaked fd on Linux would not block the Directory.Exists check above, unlike a leaked Windows handle.
+        var baselineFds = OperatingSystem.IsLinux() ? CountOpenFileDescriptors() : -1;
+
         var act = () => tools.WriteFile(Caller(RunId), "d/e/f.cs", "x");
 
         await act.Should().ThrowAsync<InvalidOperationException>();
-        Directory.Delete(Path.Combine(root, "d"), recursive: true);
+        Directory.Exists(Path.Combine(root, "d")).Should().BeFalse();
+
+        if (OperatingSystem.IsLinux())
+        {
+            CountOpenFileDescriptors().Should().Be(baselineFds);
+        }
     }
+
+    private static int CountOpenFileDescriptors() => Directory.EnumerateFileSystemEntries("/proc/self/fd").Count();
+
+    // Ruling (i)'s "ordinary Result failure" branch in PinDirectoryChain calls the exact same
+    // RemoveCreatedDirectories(chain); DisposeChain(chain); pair as the catch block the test above exercises, on
+    // the same chain shape (chain = [root, d], failure reaching "e"). A dedicated scenario for that branch was not
+    // added: every construction tried left a foreign entry (the swapped-in link itself) sitting inside "d", which
+    // makes "d" genuinely, correctly non-empty — refusing to remove it there is the right behaviour, not a gap —
+    // so there was no way to reach this branch without producing exactly the debris ruling (i) is not about.
 
     [Fact]
     public async Task Edit_requires_exactly_one_match()
@@ -618,9 +820,12 @@ public sealed class WorkspaceToolsTests : IDisposable
     }
 
     /// <summary>
-    /// Regression for the ancestor-pinning rewrite: 300 concurrent writes to the very same file, each opening it
-    /// with a share mode that excludes <c>FILE_SHARE_DELETE</c>, must never throw — a losing writer gets a clean
-    /// refusal, never an unhandled sharing-violation exception — and the file itself must still exist afterwards.
+    /// Regression for the ancestor-pinning rewrite, tightened for round-3 finding B1: the review measured this
+    /// exact scenario with truly parallel <see cref="Task.Run(Action)"/> callers and got only 103 of 300 "wrote"
+    /// results, the rest sharing-violation refusals, because every pin requested <c>DELETE</c> access it did not
+    /// need. Ruling (c): same-file writers serialize instead — a bounded wait on contention, last writer wins — so
+    /// every one of these 300 truly parallel writers must get "wrote", never a refusal, and the file must exist
+    /// afterwards with content from one of them.
     /// </summary>
     [Fact]
     public async Task Concurrent_writes_to_the_same_file_never_throw_and_never_lose_the_file()
@@ -628,17 +833,20 @@ public sealed class WorkspaceToolsTests : IDisposable
         var (tools, _, root) = Build();
         var caller = Caller(RunId);
 
-        var tasks = Enumerable.Range(0, 300).Select(i => tools.WriteFile(caller, "shared.cs", $"content-{i}"));
+        var tasks = Enumerable.Range(0, 300).Select(i => Task.Run(() => tools.WriteFile(caller, "shared.cs", $"content-{i}")));
         var results = await Task.WhenAll(tasks);
 
-        results.Should().OnlyContain(r => r.StartsWith("wrote", StringComparison.Ordinal) || r.StartsWith("error:", StringComparison.Ordinal));
+        results.Should().OnlyContain(r => r.StartsWith("wrote", StringComparison.Ordinal));
         File.Exists(Path.Combine(root, "shared.cs")).Should().BeTrue();
+        Enumerable.Range(0, 300).Select(i => $"content-{i}").Should().Contain(File.ReadAllText(Path.Combine(root, "shared.cs")));
     }
 
     /// <summary>
-    /// A second concurrency regression specific to this round: many writers racing to create the very same new
-    /// ancestor directory — <see cref="PinnedDirectory.CreateChild"/>'s already-occupied fallback — must all
-    /// succeed cleanly, each still landing its own distinct file.
+    /// A second concurrency regression specific to this round, also tightened for finding B1 (measured as 4 of 50
+    /// "wrote" under truly parallel <see cref="Task.Run(Action)"/>): many writers racing to create the very same
+    /// new ancestor directory — <see cref="PinnedDirectory.CreateChild"/>'s already-occupied fallback — must all
+    /// succeed cleanly, each still landing its own distinct file. Ruling (c): "writers into the same directories all
+    /// succeed", no busy result, no refusal.
     /// </summary>
     [Fact]
     public async Task Concurrent_writes_creating_the_same_new_directory_never_throw()
@@ -646,7 +854,7 @@ public sealed class WorkspaceToolsTests : IDisposable
         var (tools, _, root) = Build();
         var caller = Caller(RunId);
 
-        var tasks = Enumerable.Range(0, 50).Select(i => tools.WriteFile(caller, $"newdir/f{i}.cs", $"content-{i}"));
+        var tasks = Enumerable.Range(0, 50).Select(i => Task.Run(() => tools.WriteFile(caller, $"newdir/f{i}.cs", $"content-{i}")));
         var results = await Task.WhenAll(tasks);
 
         results.Should().OnlyContain(r => r.StartsWith("wrote", StringComparison.Ordinal));
@@ -656,11 +864,35 @@ public sealed class WorkspaceToolsTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// The third scenario the review measured directly (7 of 50 "wrote" under truly parallel
+    /// <see cref="Task.Run(Action)"/>, against an already-existing directory rather than one being created): many
+    /// writers of distinct files into one pre-existing directory must all succeed, since none of their directory
+    /// pins request <c>DELETE</c> access and so none of them can collide with each other (ruling (b)).
+    /// </summary>
+    [Fact]
+    public async Task Concurrent_writes_of_distinct_files_in_an_existing_directory_never_throw()
+    {
+        var (tools, _, root) = Build();
+        Directory.CreateDirectory(Path.Combine(root, "existing"));
+        var caller = Caller(RunId);
+
+        var tasks = Enumerable.Range(0, 50).Select(i => Task.Run(() => tools.WriteFile(caller, $"existing/f{i}.cs", $"content-{i}")));
+        var results = await Task.WhenAll(tasks);
+
+        results.Should().OnlyContain(r => r.StartsWith("wrote", StringComparison.Ordinal));
+        for (var i = 0; i < 50; i++)
+        {
+            File.Exists(Path.Combine(root, "existing", $"f{i}.cs")).Should().BeTrue();
+        }
+    }
+
     private (WorkspaceTools Tools, FakeChangeListener Listener, string Root) Build(
         IReadOnlySet<string>? allowedWriteExtensions = null,
         IEnumerable<string>? protectedPaths = null,
         int? maxReadBytes = null,
         int? maxListEntries = null,
+        TimeSpan? writeContentionTimeout = null,
         Func<string, IRunWorkspaceChangeListener>? extraListener = null)
     {
         var root = NewTempDir("thalos-workspace-tools-");
@@ -680,6 +912,11 @@ public sealed class WorkspaceToolsTests : IDisposable
         if (maxListEntries is { } entries)
         {
             options.MaxListEntries = entries;
+        }
+
+        if (writeContentionTimeout is { } timeout)
+        {
+            options.WriteContentionTimeout = timeout;
         }
 
         if (protectedPaths is not null)
