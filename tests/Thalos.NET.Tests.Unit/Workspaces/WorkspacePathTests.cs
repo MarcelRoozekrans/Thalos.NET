@@ -112,7 +112,7 @@ public sealed class WorkspacePathTests : IDisposable
 
         var shortNamePath = Path.Combine(_workspace, "GIT~1");
         if (!Directory.Exists(shortNamePath))
-            FailOrSkip("resolve the .git directory's 8.3 short name GIT~1 — 8dot3name generation may be disabled on this volume", null);
+            LinkTestHelpers.FailOrSkip("resolve the .git directory's 8.3 short name GIT~1 — 8dot3name generation may be disabled on this volume", null);
 
         // "GIT~1" itself already matches the raw-input git~N alias check, so this is refused outright before any
         // resolution happens — this test's distinct value is confirming, against a real .git directory on a real
@@ -686,7 +686,7 @@ public sealed class WorkspacePathTests : IDisposable
         }
         catch (Exception ex) when (ex is IOException or InvalidOperationException or UnauthorizedAccessException)
         {
-            FailOrSkip("create a directory link (junction or symlink)", ex);
+            LinkTestHelpers.FailOrSkip("create a directory link (junction or symlink)", ex);
         }
     }
 
@@ -705,7 +705,7 @@ public sealed class WorkspacePathTests : IDisposable
         }
         catch (IOException ex)
         {
-            FailOrSkip("create a file symlink", ex);
+            LinkTestHelpers.FailOrSkip("create a file symlink", ex);
         }
     }
 
@@ -724,7 +724,7 @@ public sealed class WorkspacePathTests : IDisposable
         }
         catch (IOException ex)
         {
-            FailOrSkip("create a directory symlink", ex);
+            LinkTestHelpers.FailOrSkip("create a directory symlink", ex);
         }
     }
 
@@ -741,11 +741,4 @@ public sealed class WorkspacePathTests : IDisposable
         Directory.Delete(target);
     }
 
-    private static void FailOrSkip(string action, Exception? ex)
-    {
-        if (Environment.GetEnvironmentVariable("CI") is not null)
-            throw new InvalidOperationException($"Could not {action} under CI, where this platform is expected to support it.", ex);
-
-        Skip.If(true, $"Could not {action} on this machine{(ex is null ? "" : $": {ex.Message}")}.");
-    }
 }

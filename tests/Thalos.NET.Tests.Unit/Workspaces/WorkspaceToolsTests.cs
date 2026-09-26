@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging.Abstractions;
 using Thalos.Tests.Unit.Runtime;
 using Thalos.Workspaces;
 using ZeroAlloc.Authorization;
@@ -5,9 +6,25 @@ using ZeroAlloc.Results;
 
 namespace Thalos.Tests.Unit.Workspaces;
 
-public sealed class WorkspaceToolsTests
+public sealed class WorkspaceToolsTests : IDisposable
 {
     private static readonly Guid RunId = Guid.NewGuid();
+    private readonly List<string> _tempDirs = [];
+
+    public void Dispose()
+    {
+        foreach (var dir in _tempDirs)
+        {
+            try
+            {
+                Directory.Delete(dir, recursive: true);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // best-effort cleanup
+            }
+        }
+    }
 
     [Fact]
     public async Task Write_then_read_round_trips_inside_the_run_workspace_and_notifies_listeners()
@@ -24,17 +41,10 @@ public sealed class WorkspaceToolsTests
     public async Task A_caller_without_a_run_claim_touches_nothing() =>
         (await Build().Tools.WriteFile(new TestSecurityContext("chat-user"), "x.txt", "y")).Should().StartWith("error: this turn has no run workspace");
 
-    [Theory]
-    [InlineData("../escape.txt")]
-    [InlineData(".git/config")]
-    public async Task Escapes_are_refused_by_the_tool(string path) =>
-        (await Build().Tools.WriteFile(Caller(RunId), path, "x")).Should().StartWith("error:");
-
     /// <summary>
-    /// The same two escapes as <see cref="Escapes_are_refused_by_the_tool"/>, but against targets that already
-    /// exist with an allow-listed extension, so an unconfined write would actually succeed rather than merely fail
-    /// with "does not exist" — that distinction matters because the plain refusal above can't tell a genuine
-    /// confinement refusal from a target that simply isn't there.
+    /// Against targets that already exist with an allow-listed extension, so an unconfined write would actually
+    /// succeed rather than merely fail with "does not exist" — a plain refusal on a target that isn't there can't
+    /// tell a genuine confinement refusal from one that never had anything to reach.
     /// </summary>
     [Fact]
     public async Task Escapes_are_refused_even_when_the_outside_and_git_targets_already_exist()
@@ -79,6 +89,73 @@ public sealed class WorkspaceToolsTests
 
         (await tools.WriteFile(Caller(RunId), "alias.md", "hijack")).Should().Contain("protected");
         File.ReadAllText(Path.Combine(root, "AGENT.md")).Should().Be("pinned");
+    }
+
+    /// <summary>
+    /// The swap the review found: <c>sub</c> is a real directory containing no <c>AGENT.md</c> of its own, so
+    /// <c>WorkspacePath.Resolve("sub/AGENT.md")</c> resolves cleanly and the pre-check — comparing
+    /// <c>"sub/AGENT.md"</c> against the protected path <c>"AGENT.md"</c> — correctly sees no match. Between that
+    /// resolve and the tool's own open, <c>sub</c> is swapped for a junction pointing at the workspace root itself,
+    /// via the <see cref="WorkspaceTools.BeforeOpenForTesting"/> seam; the open then really reaches
+    /// <c>root/AGENT.md</c>. Only the post-check, run against the handle's real path, catches this.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_swap_through_a_subdirectory_does_not_bypass_agent_md_protection()
+    {
+        var (tools, _, root) = Build(protectedPaths: ["AGENT.md"]);
+        File.WriteAllText(Path.Combine(root, "AGENT.md"), "pinned");
+        Directory.CreateDirectory(Path.Combine(root, "sub"));
+
+        tools.BeforeOpenForTesting = _ =>
+        {
+            Directory.Delete(Path.Combine(root, "sub"));
+            CreateDirectoryLinkOrSkip(Path.Combine(root, "sub"), root);
+        };
+
+        (await tools.WriteFile(Caller(RunId), "sub/AGENT.md", "hijack")).Should().Contain("protected");
+        File.ReadAllText(Path.Combine(root, "AGENT.md")).Should().Be("pinned");
+    }
+
+    /// <summary>
+    /// The review's second finding: <c>sub</c> is a real, empty directory; between resolve and open it is swapped
+    /// for a link to a directory outside the workspace, so <c>write_file("sub/new.cs")</c>'s <c>FileMode.CreateNew</c>
+    /// fallback actually creates <c>outside/new.cs</c> before the post-check can run. The post-check must still
+    /// refuse the write, and — because this call created that file — must also remove it, by its real path, so
+    /// nothing is left outside once the write is refused.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_write_through_a_swap_to_outside_leaves_nothing_behind()
+    {
+        var (tools, _, root) = Build();
+        var outside = NewTempDir("thalos-workspace-tools-outside-");
+        Directory.CreateDirectory(Path.Combine(root, "sub"));
+
+        tools.BeforeOpenForTesting = _ =>
+        {
+            Directory.Delete(Path.Combine(root, "sub"));
+            CreateDirectoryLinkOrSkip(Path.Combine(root, "sub"), outside);
+        };
+
+        var result = await tools.WriteFile(Caller(RunId), "sub/new.cs", "hijack");
+
+        result.Should().Contain("not permitted");
+        File.Exists(Path.Combine(outside, "new.cs")).Should().BeFalse();
+    }
+
+    /// <summary>
+    /// The review's third finding: a disallowed-extension write must leave no trace, including the parent
+    /// directories it created to get there. <c>d</c> and <c>d/e</c> do not exist beforehand.
+    /// </summary>
+    [Fact]
+    public async Task A_disallowed_extension_write_leaves_no_directories_behind()
+    {
+        var (tools, _, root) = Build();
+
+        var result = await tools.WriteFile(Caller(RunId), "d/e/Makefile", "x");
+
+        result.Should().Contain("extension ''");
+        Directory.Exists(Path.Combine(root, "d", "e")).Should().BeFalse();
+        Directory.Exists(Path.Combine(root, "d")).Should().BeFalse();
     }
 
     [Fact]
@@ -133,12 +210,12 @@ public sealed class WorkspaceToolsTests
         File.ReadAllText(Path.Combine(root, "x.csproj")).Should().Be("<Project />");
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task A_link_named_like_an_allowed_file_cannot_smuggle_a_disallowed_one()
     {
         var (tools, _, root) = Build();
         File.WriteAllText(Path.Combine(root, "Directory.Build.props"), "<Project />");
-        File.CreateSymbolicLink(Path.Combine(root, "alias.cs"), Path.Combine(root, "Directory.Build.props"));
+        CreateFileSymlinkOrSkip(Path.Combine(root, "alias.cs"), Path.Combine(root, "Directory.Build.props"));
 
         (await tools.WriteFile(Caller(RunId), "alias.cs", "<Project><Target Name=\"X\" /></Project>")).Should().Contain("extension '.props'");
         File.ReadAllText(Path.Combine(root, "Directory.Build.props")).Should().Be("<Project />");
@@ -163,6 +240,17 @@ public sealed class WorkspaceToolsTests
         (await tools.WriteFile(caller, "notes.md", "x")).Should().StartWith("wrote");
     }
 
+    /// <summary>A claim that is present but blank is a grant of zero extensions, not "no grant" — only an absent claim falls back to the ceiling.</summary>
+    [Fact]
+    public async Task A_blank_grant_claim_refuses_every_write()
+    {
+        var (tools, _, root) = Build();
+        var caller = Caller(RunId, writeExtensions: " ");
+
+        (await tools.WriteFile(caller, "a.cs", "class A {}")).Should().StartWith("error: extension '.cs'");
+        File.Exists(Path.Combine(root, "a.cs")).Should().BeFalse();
+    }
+
     [Fact]
     public async Task Read_file_refuses_a_file_over_the_configured_size_limit()
     {
@@ -170,6 +258,16 @@ public sealed class WorkspaceToolsTests
         File.WriteAllText(Path.Combine(root, "big.md"), "more than four bytes");
 
         (await tools.ReadFile(Caller(RunId), "big.md")).Should().StartWith("error:");
+    }
+
+    /// <summary>Unlike the old, unbounded <c>ReadToEndAsync</c>, <c>edit_file</c> now caps its read the same way <c>read_file</c> does.</summary>
+    [Fact]
+    public async Task Edit_file_refuses_a_file_over_the_configured_size_limit()
+    {
+        var (tools, _, root) = Build(maxReadBytes: 4);
+        File.WriteAllText(Path.Combine(root, "big.md"), "more than four bytes");
+
+        (await tools.EditFile(Caller(RunId), "big.md", "more", "less")).Should().StartWith("error:");
     }
 
     [Fact]
@@ -190,44 +288,103 @@ public sealed class WorkspaceToolsTests
     /// Simulates the check-to-use race the type-level remarks on <see cref="WorkspaceTools"/> describe: between
     /// <see cref="WorkspacePath.Resolve"/> succeeding for "sub/escape.cs" (a plain, real, in-workspace file at that
     /// moment) and the tool's own open, "sub" itself is swapped for a link to a directory outside the workspace —
-    /// via the internal <see cref="WorkspaceTools.BeforeOpenForTesting"/> seam, so the race is deterministic rather
-    /// than timing-dependent. Unfixed, the open would follow the swapped link and edit the outside file in place.
+    /// via the instance-level <see cref="WorkspaceTools.BeforeOpenForTesting"/> seam, so the race is deterministic
+    /// rather than timing-dependent. Unfixed, the open would follow the swapped link and edit the outside file in
+    /// place.
     /// </summary>
     [SkippableFact]
     public async Task A_directory_swapped_for_a_link_between_resolve_and_open_is_refused_without_touching_the_outside_file()
     {
         var (tools, _, root) = Build();
-        var outside = Directory.CreateTempSubdirectory("thalos-workspace-tools-outside-").FullName;
-        try
+        var outside = NewTempDir("thalos-workspace-tools-outside-");
+        Directory.CreateDirectory(Path.Combine(root, "sub"));
+        File.WriteAllText(Path.Combine(root, "sub", "escape.cs"), "outside-original");
+        File.WriteAllText(Path.Combine(outside, "escape.cs"), "outside-original");
+
+        tools.BeforeOpenForTesting = _ =>
         {
-            Directory.CreateDirectory(Path.Combine(root, "sub"));
-            File.WriteAllText(Path.Combine(root, "sub", "escape.cs"), "outside-original");
-            File.WriteAllText(Path.Combine(outside, "escape.cs"), "outside-original");
+            Directory.Delete(Path.Combine(root, "sub"), recursive: true);
+            CreateDirectoryLinkOrSkip(Path.Combine(root, "sub"), outside);
+        };
 
-            WorkspaceTools.BeforeOpenForTesting = _ =>
-            {
-                Directory.Delete(Path.Combine(root, "sub"), recursive: true);
-                CreateDirectoryLinkOrSkip(Path.Combine(root, "sub"), outside);
-            };
+        var result = await tools.EditFile(Caller(RunId), "sub/escape.cs", "outside-original", "malicious");
 
-            var result = await tools.EditFile(Caller(RunId), "sub/escape.cs", "outside-original", "malicious");
-
-            result.Should().Contain("not permitted");
-            File.ReadAllText(Path.Combine(outside, "escape.cs")).Should().Be("outside-original");
-        }
-        finally
-        {
-            WorkspaceTools.BeforeOpenForTesting = null;
-        }
+        result.Should().Contain("not permitted");
+        File.ReadAllText(Path.Combine(outside, "escape.cs")).Should().Be("outside-original");
     }
 
-    private static (WorkspaceTools Tools, FakeChangeListener Listener, string Root) Build(
+    /// <summary>A listener that throws must never turn an otherwise-successful write into a failed tool call.</summary>
+    [Fact]
+    public async Task A_throwing_listener_still_leaves_the_write_successful()
+    {
+        var (tools, _, _) = Build(extraListener: static _ => new ThrowingChangeListener());
+
+        var act = () => tools.WriteFile(Caller(RunId), "a.cs", "class A {}");
+
+        (await act.Should().NotThrowAsync()).Which.Should().StartWith("wrote");
+    }
+
+    /// <summary>
+    /// Notify must run only after the write's own handle is disposed — a listener that reads the file back through
+    /// an ordinary, non-exclusive open must not collide with a still-open, <see cref="FileShare.None"/> handle.
+    /// </summary>
+    [Fact]
+    public async Task A_reading_listener_can_read_the_file_the_write_just_produced()
+    {
+        ReadingChangeListener? reading = null;
+        var (tools, _, _) = Build(extraListener: root =>
+        {
+            reading = new ReadingChangeListener(root);
+            return reading;
+        });
+
+        (await tools.WriteFile(Caller(RunId), "a.cs", "class A {}")).Should().StartWith("wrote");
+
+        reading!.ReadBack.Should().Be("class A {}");
+    }
+
+    /// <summary>Listeners receive the changed path relative to the canonical root, with forward-slash separators, regardless of the OS.</summary>
+    [Fact]
+    public async Task A_listener_receives_a_root_relative_forward_slash_path()
+    {
+        var (tools, listener, _) = Build();
+
+        (await tools.WriteFile(Caller(RunId), "sub/deep/File.cs", "x")).Should().StartWith("wrote");
+
+        listener.Changes.Should().ContainSingle().Which.Path.Should().Be("sub/deep/File.cs");
+    }
+
+    /// <summary>
+    /// A workspace root reached through a junction must work exactly like one reached directly: every comparison
+    /// against the root must canonicalise it first, with the same kernel canonicalisation <see cref="WorkspacePath.Resolve"/>
+    /// itself applies.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_root_reached_through_a_junction_works()
+    {
+        var real = NewTempDir("thalos-workspace-tools-real-");
+        var linkParent = NewTempDir("thalos-workspace-tools-link-parent-");
+        var throughLink = Path.Combine(linkParent, "root-link");
+        CreateDirectoryLinkOrSkip(throughLink, real);
+
+        var workspace = new RunWorkspace(RunId, "repo", "https://example.invalid/repo.git", "main", $"run/{RunId}", throughLink, null);
+        var provider = new FakeRunWorkspaceProvider(workspace);
+        var options = new RunWorkspaceToolOptions { AllowedWriteExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cs" } };
+        var tools = new WorkspaceTools(provider, options, [], NullLogger<WorkspaceTools>.Instance);
+
+        (await tools.WriteFile(Caller(RunId), "a.cs", "class A {}")).Should().StartWith("wrote");
+        (await tools.ReadFile(Caller(RunId), "a.cs")).Should().Be("class A {}");
+        File.ReadAllText(Path.Combine(real, "a.cs")).Should().Be("class A {}");
+    }
+
+    private (WorkspaceTools Tools, FakeChangeListener Listener, string Root) Build(
         IReadOnlySet<string>? allowedWriteExtensions = null,
         IEnumerable<string>? protectedPaths = null,
         int? maxReadBytes = null,
-        int? maxListEntries = null)
+        int? maxListEntries = null,
+        Func<string, IRunWorkspaceChangeListener>? extraListener = null)
     {
-        var root = Directory.CreateTempSubdirectory("thalos-workspace-tools-").FullName;
+        var root = NewTempDir("thalos-workspace-tools-");
         var workspace = new RunWorkspace(RunId, "repo", "https://example.invalid/repo.git", "main", $"run/{RunId}", root, null);
 
         var provider = new FakeRunWorkspaceProvider(workspace);
@@ -254,9 +411,18 @@ public sealed class WorkspaceToolsTests
             }
         }
 
-        var listener = new FakeChangeListener();
-        var tools = new WorkspaceTools(provider, options, [listener]);
-        return (tools, listener, root);
+        var fake = new FakeChangeListener();
+        var extra = extraListener?.Invoke(root);
+        IEnumerable<IRunWorkspaceChangeListener> registered = extra is null ? [fake] : [fake, extra];
+        var tools = new WorkspaceTools(provider, options, registered, NullLogger<WorkspaceTools>.Instance);
+        return (tools, fake, root);
+    }
+
+    private string NewTempDir(string prefix)
+    {
+        var dir = Directory.CreateTempSubdirectory(prefix).FullName;
+        _tempDirs.Add(dir);
+        return dir;
     }
 
     private static TestSecurityContext Caller(Guid runId, string? writeExtensions = null)
@@ -278,7 +444,7 @@ public sealed class WorkspaceToolsTests
         }
         catch (IOException ex)
         {
-            FailOrSkip("create a file symlink", ex);
+            LinkTestHelpers.FailOrSkip("create a file symlink", ex);
         }
     }
 
@@ -296,7 +462,7 @@ public sealed class WorkspaceToolsTests
             process.WaitForExit();
             if (process.ExitCode != 0)
             {
-                FailOrSkip("create a directory junction", new InvalidOperationException(process.StandardError.ReadToEnd()));
+                LinkTestHelpers.FailOrSkip("create a directory junction", new InvalidOperationException(process.StandardError.ReadToEnd()));
             }
 
             return;
@@ -308,18 +474,8 @@ public sealed class WorkspaceToolsTests
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            FailOrSkip("create a directory link", ex);
+            LinkTestHelpers.FailOrSkip("create a directory link", ex);
         }
-    }
-
-    private static void FailOrSkip(string action, Exception? ex)
-    {
-        if (Environment.GetEnvironmentVariable("CI") is not null)
-        {
-            throw new InvalidOperationException($"Could not {action} under CI, where this platform is expected to support it.", ex);
-        }
-
-        Skip.If(true, $"Could not {action} on this machine{(ex is null ? "" : $": {ex.Message}")}.");
     }
 
     /// <summary>Answers <see cref="FindAsync"/> for one known run with <paramref name="workspace"/>; every other member is unused by these tests.</summary>
@@ -349,5 +505,19 @@ public sealed class WorkspaceToolsTests
                 Changes.Add((runId, path));
             }
         }
+    }
+
+    private sealed class ThrowingChangeListener : IRunWorkspaceChangeListener
+    {
+        public void OnFilesChanged(Guid runId, IReadOnlyList<string> relativePaths) => throw new InvalidOperationException("listener boom");
+    }
+
+    /// <summary>Reads the changed file back through an ordinary, non-exclusive open, to prove the write's own handle is already closed by the time listeners run.</summary>
+    private sealed class ReadingChangeListener(string root) : IRunWorkspaceChangeListener
+    {
+        public string? ReadBack { get; private set; }
+
+        public void OnFilesChanged(Guid runId, IReadOnlyList<string> relativePaths) =>
+            ReadBack = File.ReadAllText(Path.Combine(root, relativePaths[0]));
     }
 }

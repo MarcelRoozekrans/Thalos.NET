@@ -23,15 +23,14 @@ public static class RunWorkspaceClaims
 
     /// <summary>
     /// The caller's <see cref="WriteExtensions"/> grant, split on <c>';'</c>, trimmed and compared
-    /// case-insensitively, or <see langword="null"/> when the claim is absent or blank — the caller carries no
-    /// grant-specific narrowing, and only the host-wide ceiling applies.
+    /// case-insensitively, or <see langword="null"/> only when the claim is <em>absent</em> — meaning the caller
+    /// carries no grant at all, so the host-wide ceiling alone applies. A <em>present</em> claim always parses to a
+    /// set, even an empty one: a blank value (<c>""</c> or whitespace) is a grant of zero extensions, not "no
+    /// grant", and narrows the ceiling down to nothing rather than leaving it unnarrowed.
     /// </summary>
     /// <param name="caller">The caller whose claims are read.</param>
-    public static IReadOnlySet<string>? WriteExtensionsOf(ISecurityContext caller)
-    {
-        if (!caller.Claims.TryGetValue(WriteExtensions, out var raw) || string.IsNullOrWhiteSpace(raw))
-            return null;
-
-        return raw.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.OrdinalIgnoreCase);
-    }
+    public static IReadOnlySet<string>? WriteExtensionsOf(ISecurityContext caller) =>
+        caller.Claims.TryGetValue(WriteExtensions, out var raw)
+            ? raw.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries).ToHashSet(StringComparer.OrdinalIgnoreCase)
+            : null;
 }

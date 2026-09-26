@@ -314,12 +314,13 @@ public static partial class WorkspacePath
     /// </summary>
     /// <remarks>
     /// On Windows this queries <paramref name="handle"/> directly via <c>GetFinalPathNameByHandleW</c>. On Linux it
-    /// resolves the handle's <c>/proc/self/fd/&lt;fd&gt;</c> entry through the same <c>realpath</c> binding
-    /// <see cref="Resolve"/> itself uses: that entry is a magic symlink whose target is already exactly this
-    /// handle's real path, so resolving it through the already-vetted <c>realpath</c> binding gets the same answer
-    /// as a raw <c>readlink</c> would, without a second, bespoke P/Invoke. Not supported on macOS, which has no
+    /// reads the handle's <c>/proc/self/fd/&lt;fd&gt;</c> entry directly via <c>readlink</c>: that entry is a magic
+    /// symlink whose target already is this handle's real path, so a single <c>readlink</c> is enough — unlike
+    /// <c>realpath</c>, it does not re-walk and re-canonicalise the rest of the path, which here would be pure
+    /// waste (the fd already names one specific, already-open inode). Not supported on macOS, which has no
     /// <c>/proc</c>, or on any other platform: returns <see langword="null"/>, and the caller must fail closed
-    /// rather than trust a path it could not independently verify.
+    /// rather than trust a path it could not independently verify. This means a caller that needs the handle check
+    /// on macOS today has no coverage there; nothing in this type or its callers currently ships on macOS.
     /// </remarks>
     /// <param name="handle">A handle the caller already has open to the file or directory to re-check.</param>
     internal static string? FinalPathOfHandle(SafeFileHandle handle)
@@ -330,10 +331,20 @@ public static partial class WorkspacePath
             return Windows.GetFinalPathOfHandle(handle);
 
         if (OperatingSystem.IsLinux())
-            return Unix.RealPath("/proc/self/fd/" + handle.DangerousGetHandle());
+            return Unix.ReadLink("/proc/self/fd/" + handle.DangerousGetHandle());
 
         return null;
     }
+
+    /// <summary>
+    /// Canonicalises <paramref name="root"/> itself, with the same kernel canonicalisation <see cref="Resolve"/>
+    /// applies to its own <c>workspaceRoot</c> parameter before comparing anything against it. A caller that keeps
+    /// its own copy of a workspace's root — to compare a handle's real path against it, for instance — must
+    /// canonicalise that copy the same way, or a root reached through a symlink or junction will never equal what
+    /// <see cref="Resolve"/> itself returns for a path inside it, and every comparison will wrongly fail.
+    /// </summary>
+    /// <param name="root">The workspace root to canonicalise.</param>
+    internal static string? CanonicalizeRoot(string root) => Canonicalize(Path.GetFullPath(root));
 
     private static Result<string, AgentError> Failure(string relativePath, string reason) =>
         Result<string, AgentError>.Failure(AgentError.Validation($"path '{relativePath}' {reason}."));

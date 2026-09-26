@@ -42,6 +42,32 @@ public static partial class WorkspacePath
 
         [LibraryImport("libc", EntryPoint = "free")]
         private static partial void FreeNative(nint ptr);
+
+        /// <summary>
+        /// Reads the target of the symlink at <paramref name="path"/> via <c>readlink</c>, verbatim — unlike
+        /// <see cref="RealPath"/>, this does not further canonicalise the result, walk any other path component, or
+        /// require the target to exist. Used only for the magic <c>/proc/self/fd/&lt;fd&gt;</c> entry, whose target
+        /// already is the open handle's real path, so no further resolution is wanted. Returns
+        /// <see langword="null"/> on any failure. <c>errno</c> is deliberately not surfaced, for the same reason
+        /// <see cref="RealPath"/> does not surface it.
+        /// </summary>
+        public static string? ReadLink(string path)
+        {
+            const int BufferSize = 4096;
+            var buffer = Marshal.AllocHGlobal(BufferSize);
+            try
+            {
+                var length = ReadLinkNative(path, buffer, BufferSize);
+                return length < 0 ? null : Marshal.PtrToStringUTF8(buffer, (int)length);
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        [LibraryImport("libc", EntryPoint = "readlink", StringMarshalling = StringMarshalling.Utf8)]
+        private static partial nint ReadLinkNative(string path, nint buf, nint bufsiz);
     }
 
     /// <summary>
