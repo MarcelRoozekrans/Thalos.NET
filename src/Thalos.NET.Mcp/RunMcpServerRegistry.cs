@@ -20,16 +20,22 @@ namespace Thalos.Mcp;
 /// <see cref="GetReadyClientAsync"/> observe, so nothing is fire-and-forget. <see cref="OnRemovingAsync"/> and
 /// <see cref="DisposeAsync"/> stop every affected server, including one still starting, and return only once its
 /// process has been shut down, so the workspace directory is no longer any process's working directory when the
-/// provider deletes it. A removed run is remembered for the registry's lifetime, so a
-/// <see cref="WaitAllReadyAsync"/> that looked the workspace up just before the removal cannot start a server for it
-/// again; only a new <see cref="OnReadyAsync"/> for that run clears the mark. That costs one run id per removed run.
+/// provider deletes it. <see cref="DisposeAsync"/> also waits for a removal's stop that is already under way.
+/// </para>
+/// <para>
+/// <b>A lookup that races a removal cannot start a server.</b> The provider calls <see cref="OnRemovingAsync"/> before
+/// it deletes the workspace record, so a <see cref="WaitAllReadyAsync"/> whose
+/// <see cref="IRunWorkspaceProvider.FindAsync"/> was in flight during the removal can still see the record. Every
+/// such lookup is marked when the run is removed and fails instead of starting a server. The mark lives only as long
+/// as that lookup, so nothing accumulates per removed run. A lookup that begins after the removal started is not
+/// marked, and can start a server if the record still exists; a host must not wait for the readiness of a run it
+/// is removing.
 /// </para>
 /// <para>
 /// <b>Not re-entrant into the provider.</b> <c>GitWorktreeWorkspaceProvider</c> calls <see cref="OnReadyAsync"/> and
-/// <see cref="OnRemovingAsync"/> while it holds its per-repository lock. Neither method calls the provider's
-/// <see cref="IRunWorkspaceProvider.CreateAsync"/> or <see cref="IRunWorkspaceProvider.RemoveAsync"/>, for any
-/// repository, and neither waits for a server to become ready: a change that did would deadlock the provider or hold
-/// its lock for as long as a server takes to load. Only <see cref="WaitAllReadyAsync"/> calls the provider, and only
+/// <see cref="OnRemovingAsync"/> while it holds its per-repository lock. Neither method calls any of the provider's
+/// methods, for any repository, and neither waits for a server to become ready: a change that did would deadlock
+/// the provider or hold its lock for as long as a server takes to load. Only <see cref="WaitAllReadyAsync"/> calls the provider, and only
 /// <see cref="IRunWorkspaceProvider.FindAsync"/>.
 /// </para>
 /// <para>
@@ -37,9 +43,18 @@ namespace Thalos.Mcp;
 /// does not care in which order notifications for one path arrive. The next <see cref="GetReadyClientAsync"/> for the
 /// run applies the reload under the server's lock before it hands the client out. It records the count it is
 /// applying before the reload runs, so a change reported while a reload is in flight is reloaded again on the call
-/// after. A <c>restart</c> reload disposes the previous client, so a call still running on it fails. Reloading
+/// after. Reloading
 /// re-evaluates the workspace's build files; see <see cref="RunScopedMcpDefinition.Reload"/> for why that is only
 /// safe while a run cannot write MSBuild files.
+/// </para>
+/// <para>
+/// <b>Leases.</b> <see cref="GetReadyClientAsync"/> hands out a <see cref="RunMcpClientLease"/>, not a bare client. A
+/// lease is shared: any number of calls may hold one at once. A reload is exclusive: it holds the server's lock, so no
+/// new lease is handed out, and waits until every outstanding lease is disposed before it calls the reload tool or
+/// restarts the server. A call is therefore never cut off by a restart and never overlaps a reload. A caller must
+/// dispose its lease as soon as its call returns, and must not ask for a second lease on the same server while it
+/// holds one, or a pending reload waits for it forever. Removal and dispose do not wait for leases: they cancel a
+/// waiting reload and stop the server, and a call still running on it then fails.
 /// </para>
 /// <para>
 /// <b>No provider.</b> <paramref name="workspaces"/> is optional (ruling R7): a host with the workflow engine off
@@ -73,7 +88,8 @@ public sealed partial class RunMcpServerRegistry(
     private readonly TimeProvider _clock = clock ?? throw new ArgumentNullException(nameof(clock));
     private readonly object _sync = new();
     private readonly Dictionary<Guid, Entry[]> _runs = [];
-    private readonly HashSet<Guid> _removed = [];
+    private readonly Dictionary<Guid, List<Lookup>> _lookups = [];
+    private readonly HashSet<Task> _stops = [];
     private bool _disposed;
 
     /// <summary>Starts every configured server for <paramref name="workspace"/>'s run in the background, and returns without waiting for any.</summary>
@@ -100,7 +116,6 @@ public sealed partial class RunMcpServerRegistry(
                 return ValueTask.CompletedTask;
             }
 
-            _removed.Remove(workspace.RunId);
             if (!_runs.ContainsKey(workspace.RunId))
             {
                 _runs[workspace.RunId] = StartRun(workspace);
@@ -117,18 +132,40 @@ public sealed partial class RunMcpServerRegistry(
     {
         ArgumentNullException.ThrowIfNull(workspace);
         Entry[]? entries;
+        TaskCompletionSource? stopped = null;
         lock (_sync)
         {
             _runs.Remove(workspace.RunId, out entries);
-            if (!_disposed)
+            foreach (var lookup in _lookups.GetValueOrDefault(workspace.RunId) ?? [])
             {
-                _removed.Add(workspace.RunId);
+                lookup.Removed = true;
+            }
+
+            if (entries is not null)
+            {
+                // Registered in the lock that took the entries: a concurrent DisposeAsync either stops them itself or waits for this stop.
+                stopped = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                _stops.Add(stopped.Task);
             }
         }
 
-        if (entries is not null)
+        if (entries is null || stopped is null)
+        {
+            return;
+        }
+
+        try
         {
             await StopAllAsync(entries).ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (_sync)
+            {
+                _stops.Remove(stopped.Task);
+            }
+
+            stopped.TrySetResult();
         }
     }
 
@@ -216,8 +253,9 @@ public sealed partial class RunMcpServerRegistry(
     }
 
     /// <summary>
-    /// The ready client of <paramref name="serverName"/> for <paramref name="runId"/>, after applying a pending reload.
-    /// Fails, and never falls back, when the run has no ready server: the caller must not reach the host server instead.
+    /// A shared lease on the ready client of <paramref name="serverName"/> for <paramref name="runId"/>, after applying a
+    /// pending reload. Fails, and never falls back, when the run has no ready server: the caller must not reach the
+    /// host server instead. Dispose the lease as soon as the call returns; a pending reload waits for it.
     /// </summary>
     /// <remarks>
     /// Never starts a server: <see cref="OnReadyAsync"/> and <see cref="WaitAllReadyAsync"/> do. A server that is still
@@ -227,20 +265,20 @@ public sealed partial class RunMcpServerRegistry(
     /// </remarks>
     /// <param name="serverName">The run-scoped server's source name.</param>
     /// <param name="runId">The calling run.</param>
-    /// <param name="ct">Cancels the wait for the server's lock, its start and its reload call; never the server.</param>
+    /// <param name="ct">Cancels the wait for the server's lock, its start, outstanding leases and its reload call; never the server.</param>
     /// <exception cref="ObjectDisposedException">The registry has been disposed.</exception>
-    public async ValueTask<Result<McpClient, AgentError>> GetReadyClientAsync(string serverName, Guid runId, CancellationToken ct)
+    public async ValueTask<Result<RunMcpClientLease, AgentError>> GetReadyClientAsync(string serverName, Guid runId, CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(serverName);
         if (workspaces is null)
         {
-            return Result<McpClient, AgentError>.Failure(NoProvider(runId));
+            return Result<RunMcpClientLease, AgentError>.Failure(NoProvider(runId));
         }
 
         var entry = Array.Find(TryGetRun(runId) ?? [], e => string.Equals(e.Spec.Name, serverName, StringComparison.Ordinal));
         if (entry is null)
         {
-            return Result<McpClient, AgentError>.Failure(NotRunning(serverName, runId));
+            return Result<RunMcpClientLease, AgentError>.Failure(NotRunning(serverName, runId));
         }
 
         await entry.Gate.WaitAsync(ct).ConfigureAwait(false);
@@ -248,29 +286,22 @@ public sealed partial class RunMcpServerRegistry(
         {
             if (entry.Removed)
             {
-                return Result<McpClient, AgentError>.Failure(NotRunning(serverName, runId));
+                return Result<RunMcpClientLease, AgentError>.Failure(NotRunning(serverName, runId));
             }
 
             var started = await entry.Starting.WaitAsync(ct).ConfigureAwait(false);
-            if (started.IsFailure)
-            {
-                return started;
-            }
-
             var target = Volatile.Read(ref entry.Changes);
-            if (entry.Spec.Reload == ReloadKind.None || target == entry.AppliedChanges)
+            var ready = started.IsSuccess && entry.Spec.Reload != ReloadKind.None && target != entry.AppliedChanges
+                ? await ReloadAsync(entry, started.Value, target, ct).ConfigureAwait(false)
+                : started;
+            if (ready.IsFailure)
             {
-                return started;
+                return Result<RunMcpClientLease, AgentError>.Failure(ready.Error);
             }
 
-            // Recorded before the reload runs: a change reported while it is in flight raises Changes past target,
-            // so the next call reloads again instead of losing it.
-            var previous = entry.AppliedChanges;
-            entry.AppliedChanges = target;
-            LogReloading(_logger, entry.Spec.Name, runId, entry.Spec.Definition.RunScoped!.Reload);
-            return entry.Spec.Reload == ReloadKind.Restart
-                ? await RestartAsync(entry, started.Value, ct).ConfigureAwait(false)
-                : await CallReloadToolAsync(entry, started.Value, previous, ct).ConfigureAwait(false);
+            // Taken under the lock: a reload holds the lock while it waits for the count to reach zero.
+            Interlocked.Increment(ref entry.Leases);
+            return Result<RunMcpClientLease, AgentError>.Success(new RunMcpClientLease(ready.Value, entry.ReleaseLease));
         }
         finally
         {
@@ -278,10 +309,14 @@ public sealed partial class RunMcpServerRegistry(
         }
     }
 
-    /// <summary>Stops every server of every run, including those still starting, and waits until each process is shut down. Idempotent.</summary>
+    /// <summary>
+    /// Stops every server of every run, including those still starting, waits until each process is shut down, and
+    /// waits for any <see cref="OnRemovingAsync"/> already stopping servers. Idempotent.
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
         Entry[] entries;
+        Task[] removals;
         lock (_sync)
         {
             if (_disposed)
@@ -291,11 +326,12 @@ public sealed partial class RunMcpServerRegistry(
 
             _disposed = true;
             entries = [.. _runs.Values.SelectMany(run => run)];
+            removals = [.. _stops];
             _runs.Clear();
-            _removed.Clear();
         }
 
         await StopAllAsync(entries).ConfigureAwait(false);
+        await Task.WhenAll(removals).ConfigureAwait(false); // a removal's stop that was already under way
     }
 
     // ---------- starting ----------
@@ -320,26 +356,64 @@ public sealed partial class RunMcpServerRegistry(
             return Result<Entry[], AgentError>.Success(running);
         }
 
-        var workspace = await provider.FindAsync(runId, ct).ConfigureAwait(false);
+        var lookup = new Lookup();
+        lock (_sync)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (!_lookups.TryGetValue(runId, out var inFlight))
+            {
+                inFlight = [];
+                _lookups[runId] = inFlight;
+            }
+
+            inFlight.Add(lookup);
+        }
+
+        RunWorkspace? workspace;
+        try
+        {
+            workspace = await provider.FindAsync(runId, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (_sync)
+            {
+                var inFlight = _lookups[runId];
+                inFlight.Remove(lookup);
+                if (inFlight.Count == 0)
+                {
+                    _lookups.Remove(runId);
+                }
+            }
+        }
+
         if (workspace is null)
         {
             return Result<Entry[], AgentError>.Failure(AgentError.ProviderError($"No workspace is recorded for run {runId}, so it has no run-scoped MCP server."));
         }
 
+        return StartFound(workspace, lookup);
+    }
+
+    /// <summary>Starts the servers of a workspace a lookup found, unless the run was removed while that lookup was in flight.</summary>
+    private Result<Entry[], AgentError> StartFound(RunWorkspace workspace, Lookup lookup)
+    {
+        var runId = workspace.RunId;
         lock (_sync)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (_removed.Contains(runId))
+            if (_runs.TryGetValue(runId, out var entries))
+            {
+                return Result<Entry[], AgentError>.Success(entries); // started meanwhile, possibly by a new OnReadyAsync
+            }
+
+            if (lookup.Removed)
             {
                 return Result<Entry[], AgentError>.Failure(AgentError.ProviderError($"The workspace of run {runId} was removed, so it has no run-scoped MCP server."));
             }
 
-            if (!_runs.TryGetValue(runId, out var entries))
-            {
-                entries = StartRun(workspace);
-                _runs[runId] = entries;
-            }
-
+            entries = StartRun(workspace);
+            _runs[runId] = entries;
             return Result<Entry[], AgentError>.Success(entries);
         }
     }
@@ -532,12 +606,16 @@ public sealed partial class RunMcpServerRegistry(
                 case "run.id":
                     result.Append(workspace.RunId.ToString("D", CultureInfo.InvariantCulture));
                     break;
+                case "run.workspace.root" when CmdWouldExpand(workspace.Root):
+                    return Result<string, AgentError>.Failure(Unsafe(server, workspace, "root"));
                 case "run.workspace.root":
                     result.Append(workspace.Root);
                     break;
                 case "run.workspace.solution" when workspace.SolutionPath is null:
                     return Result<string, AgentError>.Failure(AgentError.ProviderError(
                         $"Run-scoped MCP server '{server}' cannot start for run {workspace.RunId}: the run workspace has no solution."));
+                case "run.workspace.solution" when CmdWouldExpand(workspace.SolutionPath):
+                    return Result<string, AgentError>.Failure(Unsafe(server, workspace, "solution path"));
                 case "run.workspace.solution":
                     result.Append(workspace.SolutionPath);
                     break;
@@ -552,7 +630,47 @@ public sealed partial class RunMcpServerRegistry(
         return Result<string, AgentError>.Success(result.ToString());
     }
 
+    /// <summary>
+    /// On Windows the MCP SDK, ModelContextProtocol.Core 2.2.0 and the newest release, starts every stdio server as
+    /// <c>cmd.exe /c</c> and escapes only <c>&amp; ^ &lt; &gt; |</c>, so cmd expands a <c>%NAME%</c> inside an argument.
+    /// A substituted value containing <c>%</c> therefore fails the start rather than reach the server changed.
+    /// </summary>
+    private static bool CmdWouldExpand(string value) => OperatingSystem.IsWindows() && value.Contains('%', StringComparison.Ordinal);
+
+    private static AgentError Unsafe(string server, RunWorkspace workspace, string what) => AgentError.ProviderError(
+        $"Run-scoped MCP server '{server}' cannot start for run {workspace.RunId}: the workspace {what} contains '%', which cmd.exe would expand on Windows.");
+
     // ---------- reloading ----------
+
+    /// <summary>
+    /// Applies a pending reload exclusively: called under <see cref="Entry.Gate"/>, so no new lease is handed out, it
+    /// waits until every outstanding lease is disposed, then reloads. Removal cancels the wait.
+    /// </summary>
+    private async ValueTask<Result<McpClient, AgentError>> ReloadAsync(Entry entry, McpClient client, int target, CancellationToken ct)
+    {
+        // Recorded before the reload runs: a change reported while it is in flight raises Changes past target,
+        // so the next call reloads again instead of losing it.
+        var previous = entry.AppliedChanges;
+        entry.AppliedChanges = target;
+        using (var drain = CancellationTokenSource.CreateLinkedTokenSource(ct, entry.Stopping.Token))
+        {
+            try
+            {
+                await entry.WaitForNoLeasesAsync(drain.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                entry.AppliedChanges = previous;
+                ct.ThrowIfCancellationRequested();
+                return Result<McpClient, AgentError>.Failure(NotRunning(entry.Spec.Name, entry.Workspace.RunId)); // the run is being removed
+            }
+        }
+
+        LogReloading(_logger, entry.Spec.Name, entry.Workspace.RunId, entry.Spec.Definition.RunScoped!.Reload);
+        return entry.Spec.Reload == ReloadKind.Restart
+            ? await RestartAsync(entry, client, ct).ConfigureAwait(false)
+            : await CallReloadToolAsync(entry, client, previous, ct).ConfigureAwait(false);
+    }
 
     private async ValueTask<Result<McpClient, AgentError>> RestartAsync(Entry entry, McpClient current, CancellationToken ct)
     {
@@ -631,6 +749,18 @@ public sealed partial class RunMcpServerRegistry(
 
     // ---------- helpers ----------
 
+    /// <summary>How many <see cref="WaitAllReadyAsync"/> lookups, and so removal marks, the registry is tracking; zero once none is in flight.</summary>
+    internal int InFlightLookupCount
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _lookups.Values.Sum(inFlight => inFlight.Count);
+            }
+        }
+    }
+
     private Entry[]? TryGetRun(Guid runId)
     {
         lock (_sync)
@@ -692,11 +822,22 @@ public sealed partial class RunMcpServerRegistry(
 
     private sealed record ServerSpec(string Name, McpServerDefinition Definition, ReloadKind Reload, string? ReloadTool);
 
-    /// <summary>One server of one run. <see cref="Gate"/> serialises every start, reload and stop of it.</summary>
+    /// <summary>A <see cref="WaitAllReadyAsync"/> lookup in flight; <see cref="Removed"/> is set, under the registry lock, when its run is removed.</summary>
+    private sealed class Lookup
+    {
+        public bool Removed { get; set; }
+    }
+
+    /// <summary>One server of one run. <see cref="Gate"/> serialises every start, reload, lease hand-out and stop of it.</summary>
     private sealed class Entry(ServerSpec spec, RunWorkspace workspace)
     {
         /// <summary>Incremented, without a lock, for every change notification.</summary>
         public int Changes;
+
+        /// <summary>Outstanding leases: incremented under <see cref="Gate"/>, decremented by <see cref="ReleaseLease"/> without it.</summary>
+        public int Leases;
+
+        private TaskCompletionSource? _drained;
 
         public ServerSpec Spec { get; } = spec;
 
@@ -715,6 +856,33 @@ public sealed partial class RunMcpServerRegistry(
 
         /// <summary>Set under <see cref="Gate"/> once the run's servers are stopped; nothing starts or reloads it afterwards.</summary>
         public bool Removed { get; set; }
+
+        /// <summary>Called once per lease by <see cref="RunMcpClientLease.DisposeAsync"/>; wakes a reload waiting for the last one.</summary>
+        public void ReleaseLease()
+        {
+            if (Interlocked.Decrement(ref Leases) == 0)
+            {
+                Volatile.Read(ref _drained)?.TrySetResult();
+            }
+        }
+
+        /// <summary>Waits until no lease is outstanding. Called under <see cref="Gate"/>, so the count only falls meanwhile.</summary>
+        public async Task WaitForNoLeasesAsync(CancellationToken ct)
+        {
+            while (Volatile.Read(ref Leases) != 0)
+            {
+                var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                Interlocked.Exchange(ref _drained, drained);
+                if (Volatile.Read(ref Leases) == 0)
+                {
+                    break; // the last lease went between the check and the publish
+                }
+
+                await drained.Task.WaitAsync(ct).ConfigureAwait(false);
+            }
+
+            Interlocked.Exchange(ref _drained, null);
+        }
     }
 
     [LoggerMessage(EventId = 310, Level = LogLevel.Information, Message = "Starting run-scoped MCP server '{Server}' for run {RunId}")]

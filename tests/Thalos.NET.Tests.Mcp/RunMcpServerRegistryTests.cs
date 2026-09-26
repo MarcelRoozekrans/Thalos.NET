@@ -25,8 +25,8 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         await registry.OnReadyAsync(Workspace(solution: "C:/w/run1/App.sln"), CancellationToken.None);
 
         (await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None)).IsSuccess.Should().BeTrue();
-        var client = await ClientAsync(registry);
-        (await CallAsync(client, "args")).Should().Contain("C:/w/run1/App.sln");
+        await using var lease = await LeaseAsync(registry);
+        (await CallAsync(lease.Client, "args")).Should().Contain("C:/w/run1/App.sln");
     }
 
     [Fact]
@@ -47,8 +47,8 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
 
         var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None);
         waited.IsSuccess.Should().BeTrue(waited.IsFailure ? waited.Error.Message : "");
-        var client = await ClientAsync(registry);
-        (await client.CallToolAsync("ready_after")).IsError.Should().NotBe(true, "readiness is reported only once the ready tool answers");
+        await using var lease = await LeaseAsync(registry);
+        (await lease.Client.CallToolAsync("ready_after")).IsError.Should().NotBe(true, "readiness is reported only once the ready tool answers");
     }
 
     [Fact]
@@ -57,10 +57,15 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var registry = Registry(runScoped: new() { Args = ServerArgs, Reload = "tool:reload_count" });
         await registry.OnReadyAsync(Workspace(), CancellationToken.None);
         registry.OnFilesChanged(RunId, ["a.cs"]);
-        var client = await ClientAsync(registry);
-        (await CallAsync(client, "reload_count")).Should().Be("2", "one reload plus this call");
-        await ClientAsync(registry); // not dirty any more
-        (await CallAsync(client, "reload_count")).Should().Be("3");
+        await using (var lease = await LeaseAsync(registry))
+        {
+            (await CallAsync(lease.Client, "reload_count")).Should().Be("2", "one reload plus this call");
+        }
+
+        await using (var lease = await LeaseAsync(registry)) // not dirty any more
+        {
+            (await CallAsync(lease.Client, "reload_count")).Should().Be("3");
+        }
     }
 
     [Fact]
@@ -112,11 +117,14 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var sw = Stopwatch.StartNew();
         await registry.OnReadyAsync(Workspace(), CancellationToken.None);
         sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(2), "the provider calls OnReadyAsync under its repository lock");
+        provider.Calls.Should().Be(0, "OnReadyAsync runs under the provider's lock and must call none of its methods");
 
         var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromMilliseconds(200), CancellationToken.None);
         waited.IsFailure.Should().BeTrue("the server was still starting when OnReadyAsync returned");
+
+        var beforeRemoving = provider.Calls;
         await registry.OnRemovingAsync(Workspace(), CancellationToken.None);
-        provider.CreateOrRemoveCalls.Should().Be(0, "an observer that re-enters the provider deadlocks on its lock");
+        provider.Calls.Should().Be(beforeRemoving, "OnRemovingAsync runs under the provider's lock and must call none of its methods");
     }
 
     [Fact]
@@ -131,7 +139,8 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
             new FakeProvider(null),
             hostEnv: new Dictionary<string, string>(StringComparer.Ordinal) { ["THALOS_HOST_ONLY"] = "host", ["THALOS_RUN_ENV"] = "host-value" });
         await registry.OnReadyAsync(Workspace(), CancellationToken.None);
-        var client = await ClientAsync(registry);
+        await using var lease = await LeaseAsync(registry);
+        var client = lease.Client;
 
         var args = await CallAsync(client, "args");
         args.Should().Contain($"--id {RunId:D}");
@@ -140,6 +149,27 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         (await CallAsync(client, "env", new Dictionary<string, object?>(StringComparer.Ordinal) { ["name"] = "THALOS_RUN_ENV" })).Should().Be($"id={RunId:D}", "runScoped.env wins over the host entry's env");
         (await CallAsync(client, "env", new Dictionary<string, object?>(StringComparer.Ordinal) { ["name"] = "THALOS_HOST_ONLY" })).Should().Be("host", "the host entry's env is kept underneath");
         Normalize(await CallAsync(client, "cwd")).Should().Be(Normalize(_root), "the default cwd is the workspace root");
+    }
+
+    [Fact]
+    public async Task A_percent_sign_in_a_substituted_value_fails_the_start_on_Windows_where_cmd_would_expand_it()
+    {
+        var root = Directory.CreateDirectory(Path.Combine(_root, "a%PATH%b")).FullName;
+        var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--root", "${run.workspace.root}"], Cwd = _root });
+        await registry.OnReadyAsync(Workspace() with { Root = root }, CancellationToken.None);
+
+        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None);
+        if (OperatingSystem.IsWindows())
+        {
+            waited.IsFailure.Should().BeTrue("the MCP SDK starts the server through cmd.exe, which would expand %PATH%");
+            waited.Error.Message.Should().Contain("contains '%'");
+        }
+        else
+        {
+            waited.IsSuccess.Should().BeTrue("no shell parses the arguments off Windows");
+            await using var lease = await LeaseAsync(registry);
+            (await CallAsync(lease.Client, "args")).Should().Contain($"--root {root}", "the value reaches the server unchanged");
+        }
     }
 
     [Fact]
@@ -206,10 +236,12 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var first = Task.Run(async () => await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None));
         await UntilAsync(() => File.Exists(log), "the first reload to begin");
         await Task.Run(() => registry.OnFilesChanged(RunId, ["b.cs"])); // lands while that reload is still running
-        (await first).IsSuccess.Should().BeTrue();
+        var firstLease = await first;
+        firstLease.IsSuccess.Should().BeTrue();
+        await firstLease.Value.DisposeAsync();
 
-        var client = await ClientAsync(registry);
-        (await CallAsync(client, "reload_count")).Should().Be("3", "two reloads, the second for the change made during the first, plus this call");
+        await using var lease = await LeaseAsync(registry);
+        (await CallAsync(lease.Client, "reload_count")).Should().Be("3", "two reloads, the second for the change made during the first, plus this call");
     }
 
     [Fact]
@@ -221,11 +253,111 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
 
         registry.OnFilesChanged(RunId, ["a.cs"]);
         var results = await Task.WhenAll(Enumerable.Range(0, 6).Select(_ => Task.Run(async () => await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None))));
+        try
+        {
+            var client = results.Select(r => r.IsSuccess ? r.Value.Client : null).Distinct().Should().ContainSingle("one restart serves every caller waiting behind it").Which;
+            client.Should().NotBeNull("that restart succeeded");
+            int.Parse(await CallAsync(client!, "pid"), CultureInfo.InvariantCulture).Should().NotBe(before);
+            IsRunning(before).Should().BeFalse();
+        }
+        finally
+        {
+            foreach (var result in results)
+            {
+                if (result.IsSuccess)
+                {
+                    await result.Value.DisposeAsync();
+                }
+            }
+        }
+    }
 
-        var client = results.Select(r => r.IsSuccess ? r.Value : null).Distinct().Should().ContainSingle("one restart serves every caller waiting behind it").Which;
-        client.Should().NotBeNull("that restart succeeded");
-        int.Parse(await CallAsync(client!, "pid"), CultureInfo.InvariantCulture).Should().NotBe(before);
-        IsRunning(before).Should().BeFalse();
+    [Fact]
+    public async Task A_restart_waits_for_a_call_in_flight_instead_of_cutting_it_off()
+    {
+        var log = Path.Combine(_root, "calls.log");
+        var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--call-log", log], Reload = "restart" });
+        await registry.OnReadyAsync(Workspace(), CancellationToken.None);
+        var first = await LeaseAsync(registry);
+        var before = int.Parse(await CallAsync(first.Client, "pid"), CultureInfo.InvariantCulture);
+
+        var inFlight = Task.Run(async () =>
+        {
+            await using (first)
+            {
+                return await first.Client.CallToolAsync("slow", new Dictionary<string, object?>(StringComparer.Ordinal) { ["ms"] = 1500 });
+            }
+        });
+        await UntilAsync(() => File.Exists(log) && File.ReadAllText(log).Contains("slow", StringComparison.Ordinal), "the slow call to begin");
+        registry.OnFilesChanged(RunId, ["a.cs"]);
+        await using var second = await Task.Run(async () => await LeaseAsync(registry));
+
+        var call = async () => await inFlight;
+        await call.Should().NotThrowAsync("the restart waited for the call's lease instead of closing its transport");
+        int.Parse(await CallAsync(second.Client, "pid"), CultureInfo.InvariantCulture).Should().NotBe(before, "the restart still happened, after the call");
+    }
+
+    [Fact]
+    public async Task A_tool_reload_waits_for_a_call_in_flight_and_never_overlaps_it()
+    {
+        var log = Path.Combine(_root, "calls.log");
+        var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--call-log", log, "--reload-delay-ms", "1000"], Reload = "tool:reload_count" });
+        await registry.OnReadyAsync(Workspace(), CancellationToken.None);
+        var first = await LeaseAsync(registry);
+
+        var inFlight = Task.Run(async () =>
+        {
+            await using (first)
+            {
+                return await first.Client.CallToolAsync("slow", new Dictionary<string, object?>(StringComparer.Ordinal) { ["ms"] = 1500 });
+            }
+        });
+        await UntilAsync(() => File.Exists(log) && File.ReadAllText(log).Contains("slow", StringComparison.Ordinal), "the slow call to begin");
+        registry.OnFilesChanged(RunId, ["a.cs"]);
+        await using var second = await Task.Run(async () => await LeaseAsync(registry));
+
+        await inFlight;
+        (await CallAsync(second.Client, "overlaps")).Should().Be("0", "the reload waited until the call's lease was released");
+        (await File.ReadAllLinesAsync(log)).Should().Equal(["slow", "reload_count"], "the reload still ran, after the call");
+    }
+
+    [Fact]
+    public async Task Removing_a_run_cancels_a_reload_waiting_for_a_held_lease_and_stops_the_server_anyway()
+    {
+        var registry = Registry(runScoped: new() { Args = ServerArgs, Reload = "tool:reload_count" });
+        await registry.OnReadyAsync(Workspace(), CancellationToken.None);
+        await using var held = await LeaseAsync(registry);
+        var pid = int.Parse(await CallAsync(held.Client, "pid"), CultureInfo.InvariantCulture);
+
+        registry.OnFilesChanged(RunId, ["a.cs"]);
+        var waiting = Task.Run(async () => await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None));
+        await Task.Delay(500); // let the reload reach its wait for the held lease
+
+        var removal = registry.OnRemovingAsync(Workspace(), CancellationToken.None).AsTask();
+        (await Task.WhenAny(removal, Task.Delay(TimeSpan.FromSeconds(10)))).Should().BeSameAs(removal, "removal does not wait for a held lease");
+        (await waiting).IsFailure.Should().BeTrue("the waiting reload was cancelled, not served");
+        IsRunning(pid).Should().BeFalse("the server is stopped even though a lease is still held");
+    }
+
+    [Fact]
+    public async Task Disposing_a_lease_twice_releases_it_once()
+    {
+        var registry = Registry(runScoped: new() { Args = ServerArgs, Reload = "tool:reload_count" });
+        await registry.OnReadyAsync(Workspace(), CancellationToken.None);
+        var once = await LeaseAsync(registry);
+        await once.DisposeAsync();
+        await once.DisposeAsync();
+        var held = await LeaseAsync(registry);
+
+        registry.OnFilesChanged(RunId, ["a.cs"]);
+        var reload = Task.Run(async () => await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None));
+        await Task.Delay(500);
+        reload.IsCompleted.Should().BeFalse("the reload still waits for the held lease; a second dispose of the other one released nothing");
+
+        await held.DisposeAsync();
+        var reloaded = await reload.WaitAsync(TimeSpan.FromSeconds(10));
+        reloaded.IsSuccess.Should().BeTrue();
+        await reloaded.Value.DisposeAsync();
     }
 
     [Fact]
@@ -242,7 +374,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         failed.Error.Message.Should().Contain("could not reload");
 
         await Task.Delay(TimeSpan.FromSeconds(3.5));
-        await ClientAsync(registry);
+        await (await LeaseAsync(registry)).DisposeAsync();
         (await File.ReadAllLinesAsync(log)).Should().Equal(["ready_after", "ready_after"], "the failed reload is still pending and runs again");
     }
 
@@ -258,18 +390,24 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
     }
 
     [Fact]
-    public async Task A_removed_run_is_not_started_again_from_a_record_that_still_exists_until_it_is_ready_again()
+    public async Task A_lookup_in_flight_when_its_run_is_removed_starts_no_server_and_its_mark_goes_with_it()
     {
-        var registry = Registry(runScoped: new() { Args = ServerArgs }, workspaces: ProviderThatFinds(Workspace()));
-        await registry.OnReadyAsync(Workspace(), CancellationToken.None);
-        await registry.OnRemovingAsync(Workspace(), CancellationToken.None);
+        var provider = ProviderThatFinds(Workspace());
+        var registry = Registry(runScoped: new() { Args = ServerArgs }, workspaces: provider);
+        provider.HoldFinds();
 
-        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None);
-        waited.IsFailure.Should().BeTrue("the provider calls OnRemovingAsync before it deletes the record");
+        var racing = Task.Run(async () => await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None));
+        await provider.FindStarted.Task.WaitAsync(TimeSpan.FromSeconds(20));
+        await registry.OnRemovingAsync(Workspace(), CancellationToken.None); // the record still exists: the provider deletes it after this returns
+        provider.ReleaseFinds();
+
+        var waited = await racing;
+        waited.IsFailure.Should().BeTrue("the lookup began before the removal");
         waited.Error.Message.Should().Contain("was removed");
+        (await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None)).IsFailure.Should().BeTrue("the racing lookup started no server");
+        registry.InFlightLookupCount.Should().Be(0, "a removal mark lives only as long as the lookup it marks");
 
-        await registry.OnReadyAsync(Workspace(), CancellationToken.None);
-        (await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None)).IsSuccess.Should().BeTrue("a new ready notice clears the removal");
+        (await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None)).IsSuccess.Should().BeTrue("nothing about the removal is remembered once no marked lookup is in flight");
     }
 
     [Fact]
@@ -300,6 +438,19 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         IsRunning(pid).Should().BeFalse();
         var act = async () => await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None);
         await act.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    [Fact]
+    public async Task Disposing_the_registry_waits_for_a_removal_that_is_already_stopping_its_servers()
+    {
+        var registry = Registry(runScoped: new() { Args = ServerArgs });
+        await registry.OnReadyAsync(Workspace(), CancellationToken.None);
+        var pid = await PidAsync(registry);
+
+        var removal = registry.OnRemovingAsync(Workspace(), CancellationToken.None).AsTask(); // takes the run's servers at once, then stops them
+        await registry.DisposeAsync();
+        IsRunning(pid).Should().BeFalse("dispose returns only once the removal's stop is done, so the host cannot exit before its child");
+        await removal;
     }
 
     [Fact]
@@ -349,15 +500,18 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
 
     private static FakeProvider ProviderThatFinds(RunWorkspace? workspace) => new(workspace);
 
-    private async Task<McpClient> ClientAsync(RunMcpServerRegistry registry, Guid? runId = null)
+    private async Task<RunMcpClientLease> LeaseAsync(RunMcpServerRegistry registry, Guid? runId = null)
     {
-        var client = await registry.GetReadyClientAsync("roslyn", runId ?? RunId, CancellationToken.None);
-        client.IsSuccess.Should().BeTrue(client.IsFailure ? client.Error.Message : "");
-        return client.Value;
+        var lease = await registry.GetReadyClientAsync("roslyn", runId ?? RunId, CancellationToken.None);
+        lease.IsSuccess.Should().BeTrue(lease.IsFailure ? lease.Error.Message : "");
+        return lease.Value;
     }
 
-    private async Task<int> PidAsync(RunMcpServerRegistry registry, Guid? runId = null) =>
-        int.Parse(await CallAsync(await ClientAsync(registry, runId), "pid"), CultureInfo.InvariantCulture);
+    private async Task<int> PidAsync(RunMcpServerRegistry registry, Guid? runId = null)
+    {
+        await using var lease = await LeaseAsync(registry, runId);
+        return int.Parse(await CallAsync(lease.Client, "pid"), CultureInfo.InvariantCulture);
+    }
 
     private static async Task<string> CallAsync(McpClient client, string tool, IReadOnlyDictionary<string, object?>? arguments = null)
     {
@@ -396,25 +550,47 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
 
     private static string Normalize(string path) => Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
 
+    /// <summary>Counts every call to every provider method; <see cref="HoldFinds"/> parks <see cref="FindAsync"/> until <see cref="ReleaseFinds"/>.</summary>
     private sealed class FakeProvider(RunWorkspace? found) : IRunWorkspaceProvider
     {
-        private int _createOrRemoveCalls;
+        private int _calls;
+        private TaskCompletionSource? _hold;
 
-        public int CreateOrRemoveCalls => Volatile.Read(ref _createOrRemoveCalls);
+        public int Calls => Volatile.Read(ref _calls);
+
+        public TaskCompletionSource FindStarted { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void HoldFinds() => Volatile.Write(ref _hold, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously));
+
+        public void ReleaseFinds() => Interlocked.Exchange(ref _hold, null)?.TrySetResult();
 
         public ValueTask<Result<RunWorkspace, AgentError>> CreateAsync(RunWorkspaceRequest request, CancellationToken ct)
         {
-            Interlocked.Increment(ref _createOrRemoveCalls);
+            Interlocked.Increment(ref _calls);
             return new(Result<RunWorkspace, AgentError>.Failure(AgentError.Validation("the fake creates nothing")));
         }
 
-        public ValueTask<RunWorkspace?> FindAsync(Guid runId, CancellationToken ct) => new(found is not null && found.RunId == runId ? found : null);
+        public async ValueTask<RunWorkspace?> FindAsync(Guid runId, CancellationToken ct)
+        {
+            Interlocked.Increment(ref _calls);
+            FindStarted.TrySetResult();
+            if (Volatile.Read(ref _hold) is { } hold)
+            {
+                await hold.Task.WaitAsync(ct);
+            }
 
-        public ValueTask<IReadOnlyList<RunWorkspace>> ListAsync(CancellationToken ct) => new(found is null ? [] : [found]);
+            return found is not null && found.RunId == runId ? found : null;
+        }
+
+        public ValueTask<IReadOnlyList<RunWorkspace>> ListAsync(CancellationToken ct)
+        {
+            Interlocked.Increment(ref _calls);
+            return new(found is null ? [] : [found]);
+        }
 
         public ValueTask<UnitResult<AgentError>> RemoveAsync(Guid runId, CancellationToken ct)
         {
-            Interlocked.Increment(ref _createOrRemoveCalls);
+            Interlocked.Increment(ref _calls);
             return new(UnitResult<AgentError>.Success());
         }
     }
