@@ -95,6 +95,17 @@ public sealed partial class GitCliRunWorkspaceGit(
         ArgumentNullException.ThrowIfNull(workspace);
         ArgumentNullException.ThrowIfNull(request);
 
+        // Checked before any staging, not only at create (GitWorktreeWorkspaceProvider's own mirror validation):
+        // the mirror's config could have been tampered with after a successful create but before this commit — a
+        // clean or smudge filter driver planted in the interval runs arbitrary commands on add, reset and commit
+        // otherwise (fix round 3 ruling).
+        var disallowedKey = await MirrorConfigSurface.FindDisallowedKeyAsync(_git, workspace.Root, workspace.Remote, ct).ConfigureAwait(false);
+        if (disallowedKey is not null)
+        {
+            return Result<GitCommitResult, AgentError>.Failure(AgentError.Validation(
+                $"Refusing to commit: the mirror's git config is outside the allowed surface. Detail: {disallowedKey}"));
+        }
+
         if (ValidatePaths(workspace.Root, request) is { } invalidPath)
         {
             return Result<GitCommitResult, AgentError>.Failure(invalidPath);
@@ -260,7 +271,7 @@ public sealed partial class GitCliRunWorkspaceGit(
         // mirror's config could have been tampered with after a successful create but before this push — a
         // url.<x>.pushInsteadOf planted in the interval would otherwise redirect this exact push, credentials
         // included, before any network call happens (fix round 2 ruling).
-        var disallowedKey = await MirrorConfigSurface.FindDisallowedKeyAsync(_git, workspace.Root, ct).ConfigureAwait(false);
+        var disallowedKey = await MirrorConfigSurface.FindDisallowedKeyAsync(_git, workspace.Root, workspace.Remote, ct).ConfigureAwait(false);
         if (disallowedKey is not null)
         {
             return UnitResult<AgentError>.Failure(AgentError.Validation(

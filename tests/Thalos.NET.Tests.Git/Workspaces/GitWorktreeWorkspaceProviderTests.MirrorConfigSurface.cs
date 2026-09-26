@@ -60,4 +60,28 @@ public sealed partial class GitWorktreeWorkspaceProviderTests
         second.IsFailure.Should().BeTrue();
         IsIntactBareRepository(mirror).Should().BeTrue("a mirror refused for disallowed config must never be deleted");
     }
+
+    /// <summary>
+    /// Fix round 3, item 3: a single-valued change to <c>remote.origin.url</c> is silently corrected by the next
+    /// create's own overwrite (see <c>MirrorConfigSurface</c>'s remarks on why the value check runs after that
+    /// write, not before — a mirror reused for a genuinely different remote must still succeed). A <em>second</em>
+    /// value, added rather than replacing the first, is what "changed" means here: git itself refuses to
+    /// collapse an already-ambiguous, multi-valued key with a single plain <c>git config</c> write
+    /// ("cannot overwrite multiple values with a single value"), so the next create's own
+    /// <c>remote.origin.url</c> update fails outright, closed, before ever reaching a fetch.
+    /// </summary>
+    [Fact]
+    public async Task A_second_remote_origin_url_value_makes_the_next_create_refuse()
+    {
+        using var remote = LocalGitRemote.Create();
+        var first = await Provider(out _).CreateAsync(Request(remote, Guid.NewGuid()), CancellationToken.None);
+        first.IsSuccess.Should().BeTrue();
+        var mirror = MirrorOf("sandbox");
+        LocalGitRemote.RunGit(mirror, "config", "--add", "remote.origin.url", "https://evil.example/redirect.git");
+
+        var second = await Provider(out _).CreateAsync(Request(remote, Guid.NewGuid()), CancellationToken.None);
+
+        second.IsFailure.Should().BeTrue();
+        IsIntactBareRepository(mirror).Should().BeTrue("a mirror refused for disallowed config must never be deleted");
+    }
 }

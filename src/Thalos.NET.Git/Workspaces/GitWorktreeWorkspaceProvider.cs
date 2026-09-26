@@ -572,6 +572,22 @@ public sealed partial class GitWorktreeWorkspaceProvider(
             }
         }
 
+        return await RetargetFetchAndValidateAsync(mirror, remote, secretConfig, secret, ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Re-targets an existing or freshly cloned mirror at <paramref name="remote"/>, fetches, and only then runs
+    /// the full <see cref="MirrorConfigSurface"/> check — <c>remote.origin.url</c>'s own value included. Running
+    /// that full check here, after this call's own write, rather than before it, is deliberate (fix round 3
+    /// ruling; see <see cref="MirrorConfigSurface"/>'s own remarks for why the timing matters): the earlier,
+    /// pre-fetch <see cref="ValidateMirrorAsync"/> check passes <c>remote: null</c>, since <c>remote.origin.url</c>
+    /// legitimately still holds an older run's value at that point, for a mirror this create is reusing and about
+    /// to re-target. By the time this method's own write has run, it holds this create's own value, so checking it
+    /// strictly here catches a genuine tamper without ever refusing a legitimate remote change.
+    /// </summary>
+    private async Task<UnitResult<AgentError>> RetargetFetchAndValidateAsync(
+        string mirror, string remote, IReadOnlyList<(string Key, string Value)>? secretConfig, string? secret, CancellationToken ct)
+    {
         // Before every fetch, not only on first clone: a mirror kept for a repository name can otherwise go on
         // fetching (and sending credentials to) a remote the current request no longer names.
         var setUrl = await _git.RunAsync(mirror, ["config", "remote.origin.url", remote], null, null, ct).ConfigureAwait(false);
@@ -584,6 +600,13 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         if (!fetched.Succeeded)
         {
             return UnitResult<AgentError>.Failure(GitFailure("git fetch failed.", fetched, secret));
+        }
+
+        var disallowedKey = await MirrorConfigSurface.FindDisallowedKeyAsync(_git, mirror, remote, ct).ConfigureAwait(false);
+        if (disallowedKey is not null)
+        {
+            return UnitResult<AgentError>.Failure(AgentError.Validation(
+                $"The mirror at '{mirror}' has git config outside the allowed surface after this create's own update; refusing it. An operator must resolve this. Detail: {disallowedKey}"));
         }
 
         return UnitResult<AgentError>.Success();
@@ -686,9 +709,15 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     /// exactly that convention, an unrecognised <c>rev-parse</c> answer — is <see cref="MirrorValidation.Indeterminate"/>,
     /// never treated as invalid, and carries git's own extracted error detail (e.g. a "dubious ownership" refusal)
     /// so a failed create says why, not just that validation could not reach a definitive answer. A mirror that is
-    /// otherwise bare with a fetch refspec is still checked against <see cref="MirrorConfigSurface"/>'s allow-list
-    /// before being reported <see cref="MirrorValidation.Valid"/> (fix round 2 ruling).
+    /// otherwise bare with a fetch refspec is still checked against <see cref="MirrorConfigSurface"/>'s allow-list —
+    /// keys, and, for the keys the provider itself writes other than <c>remote.origin.url</c>, their exact values
+    /// too (fix round 2 and 3 rulings). <c>remote.origin.url</c>'s own value is deliberately not checked here: this
+    /// call runs before <c>PrepareMirrorAsync</c> overwrites it for a mirror being reused with a possibly different
+    /// remote, so it may still legitimately hold an earlier run's value; <c>PrepareMirrorAsync</c> checks it
+    /// strictly, separately, right after writing it — see <see cref="MirrorConfigSurface"/>'s own remarks.
     /// </summary>
+    /// <param name="mirror">The mirror to validate.</param>
+    /// <param name="ct">Cancellation token.</param>
     private async Task<(MirrorValidation State, string? Detail)> ValidateMirrorAsync(string mirror, CancellationToken ct)
     {
         var isBare = await _git.RunAsync(mirror, ["rev-parse", "--is-bare-repository"], null, null, ct).ConfigureAwait(false);
@@ -716,7 +745,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
                 : (MirrorValidation.Indeterminate, IndeterminateDetail(fetchSpec, "config --get remote.origin.fetch"));
         }
 
-        var disallowedKey = await MirrorConfigSurface.FindDisallowedKeyAsync(_git, mirror, ct).ConfigureAwait(false);
+        var disallowedKey = await MirrorConfigSurface.FindDisallowedKeyAsync(_git, mirror, remote: null, ct).ConfigureAwait(false);
         return disallowedKey is null
             ? (MirrorValidation.Valid, null)
             : (MirrorValidation.ConfigNotAllowed, disallowedKey);

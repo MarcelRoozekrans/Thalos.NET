@@ -299,13 +299,15 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
     }
 
     /// <summary>
-    /// Fix round 1, item 6: covers <c>pre-commit</c>, <c>commit-msg</c> and <c>post-commit</c>, and plants a
-    /// competing <c>core.hooksPath</c> directly in the mirror's own tracked config (which a worktree shares with
-    /// its mirror) to prove <see cref="GitCli"/>'s own <c>-c core.hooksPath=...</c> — stated on every command line —
-    /// always wins over it. Never touches this test process's own <c>HOME</c>.
+    /// Fix round 1, item 6, updated for fix round 3 item 1: <c>core.hooksPath</c> is not on
+    /// <see cref="MirrorConfigSurface"/>'s allow-list, so <see cref="GitCliRunWorkspaceGit.CommitAsync"/>'s own
+    /// config-surface check (added by round 3) now refuses a mirror configuring it before any git call — including
+    /// the <c>add</c>/<c>reset</c>/<c>diff</c>/<c>commit</c> sequence <c>-c core.hooksPath=...</c> itself used to be
+    /// the only defence against. The hooks plainly never fire, since nothing runs, and the same competing hooks
+    /// directory and default hooks directory setup as before covers both surfaces.
     /// </summary>
     [Fact]
-    public async Task No_hook_ever_fires_on_a_commit_even_when_the_mirror_configures_its_own_hooksPath()
+    public async Task A_competing_hooksPath_in_the_mirrors_config_refuses_the_commit_and_no_hook_ever_fires()
     {
         var ws = await WorktreeAsync();
         var mirror = MirrorOf();
@@ -330,10 +332,10 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
         File.WriteAllText(Path.Combine(ws.Root, "code.cs"), "class C {}");
         var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None);
 
-        committed.Value.Created.Should().BeTrue();
+        committed.IsFailure.Should().BeTrue("core.hooksPath is outside MirrorConfigSurface's allow-list, so CommitAsync must refuse before any git call runs");
         foreach (var (_, marker) in hooks)
         {
-            File.Exists(marker).Should().BeFalse($"'{marker}' must never be created: core.hooksPath isolation must beat both the mirror's own configured hooksPath and the default hooks directory");
+            File.Exists(marker).Should().BeFalse($"'{marker}' must never be created: the commit must be refused before git ever runs, let alone a hook");
         }
     }
 
@@ -367,14 +369,14 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
     }
 
     /// <summary>
-    /// Fix round 2, item 4 minor: item 3's create-time allow-list would refuse a mirror that configures
-    /// <c>core.fsmonitor</c> outright, so this plants it directly against an already-created mirror instead —
-    /// simulating tampering after a successful create, the same reasoning that motivates <see cref="PushAsync"/>'s
-    /// own config check — to exercise <c>-c core.fsmonitor=false</c> itself as defence in depth on the git call
-    /// path.
+    /// Fix round 2, item 4 minor, updated for fix round 3 item 1: <c>core.fsmonitor</c> is not on
+    /// <see cref="MirrorConfigSurface"/>'s allow-list, so <see cref="GitCliRunWorkspaceGit.CommitAsync"/>'s own
+    /// config-surface check (added by round 3) now refuses a mirror configuring it before any git call runs —
+    /// superseding round 2's framing, which planted it after create specifically because a create-time gate would
+    /// otherwise have refused it and <see cref="CommitAsync"/> had no gate of its own yet.
     /// </summary>
     [Fact]
-    public async Task No_fsmonitor_ever_fires_on_a_commit_even_when_the_mirror_configures_one()
+    public async Task An_fsmonitor_in_the_mirrors_config_refuses_the_commit_and_it_never_fires()
     {
         var ws = await WorktreeAsync();
         var marker = Path.Combine(_temp, "fsmonitor-ran.marker");
@@ -384,8 +386,8 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
         File.WriteAllText(Path.Combine(ws.Root, "code.cs"), "class C {}");
         var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None);
 
-        committed.Value.Created.Should().BeTrue();
-        File.Exists(marker).Should().BeFalse("-c core.fsmonitor=false on every call must override a repository-configured fsmonitor hook");
+        committed.IsFailure.Should().BeTrue("core.fsmonitor is outside MirrorConfigSurface's allow-list, so CommitAsync must refuse before any git call runs");
+        File.Exists(marker).Should().BeFalse("the commit must be refused before git ever runs, let alone queries an fsmonitor hook");
     }
 
     /// <summary>
@@ -625,6 +627,89 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
                 // Best effort: already stopped is not a reason to fail test teardown.
             }
         }
+    }
+
+    /// <summary>
+    /// Fix round 3, item 1 (IMPORTANT): a review probe added <c>filter.x.clean</c> to the mirror's config and
+    /// <c>*.cs filter=x</c> to its <c>info/attributes</c> after a successful create, then found
+    /// <see cref="GitCliRunWorkspaceGit.CommitAsync"/> ran the filter — command execution on <c>add</c>. The
+    /// filter's clean command touches a marker file; a successful attack makes the marker exist.
+    /// </summary>
+    [Fact]
+    public async Task A_filter_driver_in_the_mirrors_config_refuses_the_commit_and_never_runs()
+    {
+        var ws = await WorktreeAsync();
+        var mirror = MirrorOf();
+        var marker = Path.Combine(_temp, "filter-ran.marker").Replace('\\', '/');
+        LocalGitRemote.RunGit(mirror, "config", "filter.x.clean", $"sh -c 'touch \"{marker}\"; cat'");
+        Directory.CreateDirectory(Path.Combine(mirror, "info"));
+        File.AppendAllText(Path.Combine(mirror, "info", "attributes"), "*.cs filter=x\n");
+
+        File.WriteAllText(Path.Combine(ws.Root, "code.cs"), "class C {}");
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None);
+
+        committed.IsFailure.Should().BeTrue("filter.x.clean is outside MirrorConfigSurface's allow-list, so CommitAsync must refuse before staging ever runs the filter");
+        File.Exists(marker).Should().BeFalse("the filter's clean command must never execute");
+    }
+
+    /// <summary>
+    /// Fix round 3, item 2 (minor): git treats a config subsection as case-sensitive, so <c>remote.ORIGIN.url</c>
+    /// names a different remote to git than <c>remote.origin.url</c> — a key this provider never wrote, and one
+    /// the allow-list must refuse, not silently accept as if it were the same key under a case-insensitive
+    /// comparison.
+    /// </summary>
+    [Fact]
+    public async Task A_differently_cased_remote_subsection_is_refused()
+    {
+        var ws = await WorktreeAsync();
+        LocalGitRemote.RunGit(MirrorOf(), "config", "remote.ORIGIN.url", "https://evil.example/redirect.git");
+
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None);
+
+        committed.IsFailure.Should().BeTrue("remote.ORIGIN.url is a different config key to git than remote.origin.url, and is not itself allow-listed");
+    }
+
+    /// <summary>Fix round 3, item 3: <c>core.symlinks</c> must hold exactly <c>false</c>, the value the provider itself writes.</summary>
+    [Fact]
+    public async Task A_changed_core_symlinks_value_is_refused()
+    {
+        var ws = await WorktreeAsync();
+        LocalGitRemote.RunGit(MirrorOf(), "config", "core.symlinks", "true");
+
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None);
+
+        committed.IsFailure.Should().BeTrue("core.symlinks must hold exactly the value the provider wrote, 'false'");
+    }
+
+    /// <summary>Fix round 3, item 3: <c>remote.origin.fetch</c> must appear exactly once.</summary>
+    [Fact]
+    public async Task A_second_remote_origin_fetch_value_is_refused()
+    {
+        var ws = await WorktreeAsync();
+        LocalGitRemote.RunGit(MirrorOf(), "config", "--add", "remote.origin.fetch", "+refs/heads/other:refs/remotes/origin/other");
+
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None);
+
+        committed.IsFailure.Should().BeTrue("remote.origin.fetch must be set exactly once");
+    }
+
+    /// <summary>
+    /// Fix round 3, item 3: a single-value change to <c>remote.origin.url</c> after this workspace's own create
+    /// refuses a later push through it — <see cref="GitCliRunWorkspaceGit.PushAsync"/>'s own check compares
+    /// against this workspace's own <see cref="RunWorkspace.Remote"/>, so it never silently pushes once the
+    /// mirror's shared config no longer agrees with this workspace's own record of where it belongs.
+    /// </summary>
+    [Fact]
+    public async Task A_changed_remote_origin_url_refuses_a_push()
+    {
+        var ws = await WorktreeAsync();
+        File.WriteAllText(Path.Combine(ws.Root, "code.cs"), "x");
+        await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None);
+        LocalGitRemote.RunGit(MirrorOf(), "config", "remote.origin.url", "https://evil.example/redirect.git");
+
+        var pushed = await _git.PushAsync(ws, CancellationToken.None);
+
+        pushed.IsFailure.Should().BeTrue("remote.origin.url must equal this workspace's own configured remote");
     }
 
     /// <summary>Creates a fresh remote and a worktree for a new run id, over this test's own <see cref="_options"/>.</summary>
