@@ -184,8 +184,9 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
     /// </summary>
     private WorkflowNodeDispatcher NewDispatcher() =>
         // No run started by these tests carries a manifest, so this ISkillStore is never actually read from —
-        // an empty InMemorySkillStore stands in purely to satisfy the constructor.
-        new(_store, new AlwaysSucceedsRunner(), new AlwaysResolves(), _definitions, new InMemorySkillStore(TimeProvider.System), _ => new StubSecurityContext());
+        // an empty InMemorySkillStore stands in purely to satisfy the constructor. gates: [] - this suite is not
+        // about dispatch gates.
+        new(_store, new AlwaysSucceedsRunner(), new AlwaysResolves(), _definitions, new InMemorySkillStore(TimeProvider.System), _ => new StubSecurityContext(), gates: []);
 
     private sealed class FakeSource : IProcessDefinitionSource
     {

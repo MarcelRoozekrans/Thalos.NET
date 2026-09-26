@@ -69,8 +69,11 @@ services.AddSingleton(sp => new WorkflowNodeDispatcher(
     sp.GetRequiredService<IWorkflowReferenceResolver>(),
     sp.GetRequiredService<IProcessDefinitionStore>(),
     sp.GetRequiredService<ISkillStore>(),
-    resolveCaller: run => new WorkflowCaller(run)));
+    resolveCaller: run => new WorkflowCaller(run),
+    gates: sp.GetServices<IWorkflowDispatchGate>()));
 ```
+
+`gates` is required — pass `[]` if you host none. See §4 for what it is and when it runs.
 
 `ISkillStore` is what a pinned run's task node loads its exact skill body through
 (`ISkillStore.GetVersionAsync`) — `AddThalos`'s `UseSkills` already registers it, the same instance
@@ -157,12 +160,23 @@ services.AddScoped<IAsyncDbConnection>(sp =>
 `OutboxWorkerService` opens a scope per batch, so a scoped dispatcher and a scoped connection are both fine — each
 batch gets its own connection and disposes it with the scope.
 
+**Dispatch gates.** `WorkflowNodeDispatcher`'s `gates` argument (§3) is a list of `IWorkflowDispatchGate` — a
+host-supplied check run immediately before a task node's agent turn, and only before a task node's: a `gate:`
+process node (the `await:` kind — an unrelated use of the word "gate", inherited from the process YAML) and a
+`terminal:` node are never gated, because neither spends a turn. The motivating case is a run's own tool servers:
+a gate can start them, or restart them after a host crash, and refuse the turn outright when they never come up,
+rather than dispatching an agent into a turn that would fail on its first tool call. A gate that refuses returns a
+failed `Result`; the dispatcher fails the run with that message, the same way a rejected outcome does, and calls
+no further gate. Wire none with `gates: []` — a required argument, not an optional one, so a host cannot forget it
+by omission.
+
 Two things about the retry budget, because they decide what a failure costs. The dispatcher deliberately does
 **not** throw for a node-level failure — a turn that failed, an unresolvable agent name, an outcome outside the
-node's declared set — it records the run as `Failed` and returns, so the outbox has nothing to retry and you never
-pay for the same losing agent turn `MaxAttempts` times. What does propagate, and therefore does get retried, is an
-unexpected exception out of `ISubagentRunner` and a `WorkflowConcurrencyException` from the store: both are
-transient by nature. And `MaxAttempts` is what eventually dead-letters a message that never succeeds — which is
+node's declared set, a gate that refused — it records the run as `Failed` and returns, so the outbox has nothing to
+retry and you never pay for the same losing agent turn `MaxAttempts` times. What does propagate, and therefore does
+get retried, is an unexpected exception out of `ISubagentRunner` or out of a gate, and a `WorkflowConcurrencyException`
+from the store: all are transient by nature — a gate that throws (or observes its `CancellationToken` cancelled) is
+treated exactly like `ISubagentRunner` throwing, never turned into a failed run. And `MaxAttempts` is what eventually dead-letters a message that never succeeds — which is
 what leaves a run stranded, and why step 5 exists.
 
 ## 5. The stranded-run sweep

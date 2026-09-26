@@ -36,13 +36,14 @@ namespace Thalos.Workflow;
 /// <remarks>
 /// <b>A node failure must not throw.</b> A throw would hand the message back to the outbox for eight retries with
 /// exponential backoff, re-running the subagent each time — paying for the same failing turn eight times over,
-/// with nobody told until it dead-letters. A result this dispatcher dislikes — the turn itself failed, an
-/// unresolvable agent name, an ambiguous or missing outcome, or <see cref="WorkflowInterpreter.Advance"/> rejecting
-/// the outcome it produced — is recorded through <see cref="IWorkflowStore.FailAsync"/> instead, which marks the
-/// run <see cref="WorkflowStatus.Failed"/> without leaving the outbox anything to retry. Only a turn that never
-/// produced a result at all — an unexpected exception escaping <see cref="ISubagentRunner.RunAsync"/> itself, or
-/// <see cref="IWorkflowStore"/> throwing <see cref="WorkflowConcurrencyException"/> because another dispatch
-/// already won the race to complete this node — is allowed to propagate, because those genuinely are the
+/// with nobody told until it dead-letters. A result this dispatcher dislikes — a failing <see cref="IWorkflowDispatchGate"/>,
+/// the turn itself failing, an unresolvable agent name, an ambiguous or missing outcome, or
+/// <see cref="WorkflowInterpreter.Advance"/> rejecting the outcome it produced — is recorded through
+/// <see cref="IWorkflowStore.FailAsync"/> instead, which marks the run <see cref="WorkflowStatus.Failed"/> without
+/// leaving the outbox anything to retry. Only a turn that never produced a result at all — an unexpected exception
+/// escaping <see cref="IWorkflowDispatchGate.BeforeTaskNodeAsync"/> or <see cref="ISubagentRunner.RunAsync"/>
+/// itself, or <see cref="IWorkflowStore"/> throwing <see cref="WorkflowConcurrencyException"/> because another
+/// dispatch already won the race to complete this node — is allowed to propagate, because those genuinely are the
 /// transient, infrastructure-shaped failures a retry can fix.
 /// </remarks>
 public sealed partial class WorkflowNodeDispatcher(
@@ -52,6 +53,7 @@ public sealed partial class WorkflowNodeDispatcher(
     IProcessDefinitionStore definitions,
     ISkillStore skills,
     Func<WorkflowRun, ISecurityContext> resolveCaller,
+    IEnumerable<IWorkflowDispatchGate> gates,
     ILogger<WorkflowNodeDispatcher>? logger = null)
 {
     /// <summary>
@@ -89,9 +91,18 @@ public sealed partial class WorkflowNodeDispatcher(
         resolveCaller ?? throw new ArgumentNullException(nameof(resolveCaller));
 
     /// <summary>
+    /// Every host-supplied check run before a task node's agent turn, in registration order. Required, never
+    /// defaulted: "no gates" is expressed as an empty sequence a host passes explicitly, not by omitting the
+    /// argument, so a host that forgets to wire its gates fails to compile instead of running every task node
+    /// ungated. See <see cref="IWorkflowDispatchGate"/> for what a failure, a thrown exception and a cancelled
+    /// token each do.
+    /// </summary>
+    private readonly IEnumerable<IWorkflowDispatchGate> _gates = gates ?? throw new ArgumentNullException(nameof(gates));
+
+    /// <summary>
     /// Where this dispatcher tells a host operator what the reading agent can already see. Optional and last so
-    /// every existing five-argument construction still compiles, and defaulted to a no-op rather than made
-    /// required: a host that wires no logger loses the operator's view of dropped variables, not the dispatch.
+    /// every existing construction still compiles, and defaulted to a no-op rather than made required: a host
+    /// that wires no logger loses the operator's view of dropped variables, not the dispatch.
     /// </summary>
     private readonly ILogger _logger = logger ?? (ILogger)Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
 
@@ -154,13 +165,25 @@ public sealed partial class WorkflowNodeDispatcher(
     }
 
     /// <summary>
-    /// Runs a task node's agent turn: pinned, through <see cref="RunPinnedNodeAsync"/>, when
-    /// <see cref="WorkflowRun.Manifest"/> is set — never falling back to live resolution when the manifest does not
-    /// name this node, since a manifest is all or nothing — or unpinned, through today's own name resolution and
-    /// <see cref="RunNodeAsync"/>, when the run carries no manifest at all.
+    /// Runs a task node's agent turn: first every <see cref="IWorkflowDispatchGate"/> in <see cref="_gates"/>, in
+    /// order, failing the run and dispatching nothing on the first one that fails — then, once every gate has
+    /// passed, pinned, through <see cref="RunPinnedNodeAsync"/>, when <see cref="WorkflowRun.Manifest"/> is set —
+    /// never falling back to live resolution when the manifest does not name this node, since a manifest is all or
+    /// nothing — or unpinned, through today's own name resolution and <see cref="RunNodeAsync"/>, when the run
+    /// carries no manifest at all.
     /// </summary>
     private async ValueTask DispatchTaskNodeAsync(WorkflowRun run, ProcessDefinition process, ProcessNode node, long seq, CancellationToken ct)
     {
+        foreach (var gate in _gates)
+        {
+            var gateResult = await gate.BeforeTaskNodeAsync(run, run.CurrentNode, ct).ConfigureAwait(false);
+            if (gateResult.IsFailure)
+            {
+                await _store.FailAsync(run.Id, $"node '{run.CurrentNode}': {gateResult.Error}", ct).ConfigureAwait(false);
+                return;
+            }
+        }
+
         if (run.Manifest is { } manifest)
         {
             // A manifest is all or nothing: a task node it does not name is a gap in the pin, not an invitation to
