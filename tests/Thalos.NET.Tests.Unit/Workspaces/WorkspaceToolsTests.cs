@@ -27,13 +27,54 @@ public sealed class WorkspaceToolsTests : IDisposable
     {
         foreach (var dir in _tempDirs)
         {
-            try
+            DeleteTempDirectory(dir);
+        }
+    }
+
+    /// <summary>
+    /// Deletes a directory one of these tests created. <see cref="Directory.Delete(string, bool)"/>'s own
+    /// recursive walk throws <see cref="UnauthorizedAccessException"/> the instant it reaches a directory
+    /// junction anywhere under <paramref name="dir"/> — the swapped-in links the security tests above create by
+    /// the dozen — whether or not the junction's target still exists, and leaves <paramref name="dir"/> behind
+    /// when it does. So every link under <paramref name="dir"/> is removed as the link itself first, which never
+    /// fails this way; the ordinary recursive delete that follows then has nothing but plain files and
+    /// directories left to remove. This never resolves a link's target, so an "outside" directory these tests
+    /// point links at is never reached from here, only ever named directly by its own registered temp path.
+    /// </summary>
+    private static void DeleteTempDirectory(string dir)
+    {
+        if (!Directory.Exists(dir))
+        {
+            return;
+        }
+
+        RemoveLinksUnder(dir);
+        Directory.Delete(dir, recursive: true);
+    }
+
+    /// <summary>Removes every symlink or junction found anywhere under <paramref name="dir"/>, as the link entry itself, without ever descending into what it points at.</summary>
+    private static void RemoveLinksUnder(string dir)
+    {
+        foreach (var entry in Directory.EnumerateFileSystemEntries(dir))
+        {
+            var attributes = File.GetAttributes(entry);
+            if (attributes.HasFlag(FileAttributes.ReparsePoint))
             {
-                Directory.Delete(dir, recursive: true);
+                if (attributes.HasFlag(FileAttributes.Directory))
+                {
+                    Directory.Delete(entry, recursive: false);
+                }
+                else
+                {
+                    File.Delete(entry);
+                }
+
+                continue;
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+
+            if (attributes.HasFlag(FileAttributes.Directory))
             {
-                // best-effort cleanup
+                RemoveLinksUnder(entry);
             }
         }
     }
