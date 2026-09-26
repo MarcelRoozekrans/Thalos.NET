@@ -28,10 +28,11 @@ public sealed class McpServerDefinition
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// stdio only: how long to wait for the child process to exit after its stdin is closed on dispose before it is killed.
-    /// Default 2 seconds (the SDK default is 5 s): well-behaved servers exit as soon as stdin closes, and the MCP SDK waits the
-    /// <em>full</em> timeout on dispose either way, so a long value only slows host shutdown. In <c>.mcp.json</c> this is the
-    /// <c>shutdownTimeout</c> property as a <c>hh:mm:ss</c> string (e.g. <c>"00:00:01"</c>).
+    /// stdio only: how long disposing the source waits before the server's process tree is killed. ModelContextProtocol
+    /// 2.2.0 does not close the server's stdin on dispose; it waits this long and then kills the whole process tree, so every
+    /// dispose of a stdio server takes the full timeout. Default 2 seconds (the SDK default is 5 s): a long value only slows
+    /// host shutdown and run removal. In <c>.mcp.json</c> this is the <c>shutdownTimeout</c> property as a <c>hh:mm:ss</c>
+    /// string (e.g. <c>"00:00:01"</c>).
     /// </summary>
     public TimeSpan ShutdownTimeout { get; set; } = TimeSpan.FromSeconds(2);
 

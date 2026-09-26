@@ -566,10 +566,9 @@ public sealed partial class RunMcpServerRegistry(
 
         var name = entry.Spec.Name;
         var runId = entry.Workspace.RunId;
-        var options = TransportOptions(entry.Spec, entry.Workspace);
+        var options = Prepare(entry);
         if (options.IsFailure)
         {
-            LogStartRefused(_logger, name, runId, options.Error.Message);
             return Result<McpClient, AgentError>.Failure(options.Error);
         }
 
@@ -618,6 +617,32 @@ public sealed partial class RunMcpServerRegistry(
                 await DisposeClientAsync(entry, client).ConfigureAwait(false);
             }
         }
+    }
+
+    /// <summary>
+    /// The transport options for a start, or why it must not start: the arguments cannot be substituted, or the run is
+    /// already being stopped, for example a restart reload that a removal overtook. The SDK's connect does not observe an
+    /// already-cancelled token before it starts the process, so a stopping run gets no process at all.
+    /// </summary>
+    private Result<StdioClientTransportOptions, AgentError> Prepare(Entry entry)
+    {
+        var name = entry.Spec.Name;
+        var runId = entry.Workspace.RunId;
+        var options = TransportOptions(entry.Spec, entry.Workspace);
+        if (options.IsFailure)
+        {
+            LogStartRefused(_logger, name, runId, options.Error.Message);
+            return options;
+        }
+
+        if (entry.Stopping.IsCancellationRequested)
+        {
+            LogStartSkipped(_logger, name, runId);
+            return Result<StdioClientTransportOptions, AgentError>.Failure(AgentError.ProviderError(
+                $"Run-scoped MCP server '{name}' for run {runId} was stopped before it was ready."));
+        }
+
+        return options;
     }
 
     /// <summary>Calls <paramref name="readyTool"/> every <see cref="ReadyPollInterval"/> until a call does not come back as an error; returns at once when there is none.</summary>
@@ -1106,6 +1131,9 @@ public sealed partial class RunMcpServerRegistry(
 
     [LoggerMessage(EventId = 316, Level = LogLevel.Warning, Message = "Disposing run-scoped MCP server '{Server}' for run {RunId} failed")]
     private static partial void LogDisposeFailed(ILogger logger, Exception exception, string server, Guid runId);
+
+    [LoggerMessage(EventId = 320, Level = LogLevel.Debug, Message = "Run-scoped MCP server '{Server}' for run {RunId} was not started: its run is being stopped")]
+    private static partial void LogStartSkipped(ILogger logger, string server, Guid runId);
 
     [LoggerMessage(EventId = 319, Level = LogLevel.Warning, Message = "Run-scoped MCP server '{Server}' for run {RunId} exited unexpectedly; it is refused until readiness starts it again")]
     private static partial void LogServerExited(ILogger logger, Exception? exception, string server, Guid runId);

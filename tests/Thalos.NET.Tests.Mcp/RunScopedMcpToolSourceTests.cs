@@ -542,7 +542,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
             await _disposables[i].DisposeAsync();
         }
 
-        await TestDirectories.DeleteAsync(_root);
+        Directory.Delete(_root, recursive: true);
         outstanding.Should().Be(0, "no routed call leaves a lease behind");
     }
 

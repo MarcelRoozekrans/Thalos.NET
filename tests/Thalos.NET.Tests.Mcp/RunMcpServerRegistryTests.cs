@@ -406,8 +406,8 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var pidFile = Path.Combine(_root, "server.pid");
         var workspace = Workspace() with { Root = Directory.CreateDirectory(Path.Combine(_root, "restart-ws")).FullName };
         var definition = McpServerFixture.Definition("--host");
-        definition.ShutdownTimeout = TimeSpan.FromSeconds(3); // the old server takes this long to be disposed: it ignores stdin closing
-        definition.RunScoped = new() { Args = [.. ServerArgs, "--pid-file", pidFile, "--shutdown-delay-ms", "30000"], Reload = "restart" };
+        definition.ShutdownTimeout = TimeSpan.FromSeconds(3); // disposing the old server waits this long, then kills its process tree
+        definition.RunScoped = new() { Args = [.. ServerArgs, "--pid-file", pidFile], Reload = "restart" };
         var events = new RecordingLoggerProvider();
         using var loggerFactory = LoggerFactory.Create(b => b.SetMinimumLevel(LogLevel.Trace).AddProvider(events));
         var registry = new RunMcpServerRegistry(Servers(definition), () => new FakeProvider(null), loggerFactory, TimeProvider.System);
@@ -427,7 +427,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var removal = async () => await registry.OnRemovingAsync(workspace, CancellationToken.None);
         await removal.Should().NotThrowAsync("a removal during a restart finishes, whatever the restart is doing");
         var replacementStartsWhenRemoved = events.Count(StartingEvent) - startsBefore;
-        var replacementStoppedWhenRemoved = events.Count(StoppedWhileStartingEvent);
+        var replacementSkippedWhenRemoved = events.Count(StartSkippedEvent);
         var oldAliveAfterRemoval = IsRunning(oldPid);
         var workspaceFreeAtRemoval = TryDelete(workspace.Root); // on Windows, fails while any process has it as its working directory
         await Task.Delay(TimeSpan.FromSeconds(4)); // long enough for a restart the removal did not wait for to have started its process
@@ -444,17 +444,18 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         }
 
         using var _scope = new AssertionScope();
-        replacementStartsWhenRemoved.Should().Be(1, "the removal waited for the restart, whose replacement start had begun by then");
-        replacementStoppedWhenRemoved.Should().Be(1, "that replacement start was stopped before the removal returned");
+        replacementSkippedWhenRemoved.Should().Be(1, "the removal waited for the restart, which then found the run stopping and started nothing");
+        replacementStartsWhenRemoved.Should().Be(0, "no replacement process is started in a workspace being removed");
         oldAliveAfterRemoval.Should().BeFalse("the removal waits for the in-flight restart, which is still shutting the old process down");
         workspaceFreeAtRemoval.Should().BeTrue("once the removal returns, no process has the run's workspace as its working directory");
-        IsRunning(lastPid).Should().BeFalse("no replacement process outlives the removal");
+        lastPid.Should().Be(oldPid, "no replacement process was started, so none wrote its pid");
+        IsRunning(lastPid).Should().BeFalse("no process outlives the removal");
         after.Should().StartWith("refused:", "a call after the removal gets a failure result, not an exception");
     }
 
     private static readonly EventId StartingEvent = new(310);
 
-    private static readonly EventId StoppedWhileStartingEvent = new(318);
+    private static readonly EventId StartSkippedEvent = new(320);
 
     [Fact]
     public async Task Disposing_a_lease_twice_releases_it_once()
@@ -616,7 +617,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
             await registry.DisposeAsync();
         }
 
-        await TestDirectories.DeleteAsync(_root);
+        Directory.Delete(_root, recursive: true);
     }
 
     private RunMcpServerRegistry Registry(RunScopedMcpDefinition runScoped) => Registry(runScoped, new FakeProvider(null));
