@@ -28,10 +28,18 @@ namespace Thalos.Workflow;
 /// not throw.
 /// </para>
 /// <para>
-/// <b>Cancelling <c>ct</c> cancels the dispatch, not the run.</b> An <see cref="OperationCanceledException"/>
-/// out of this method is not converted into a failed run: it propagates out of <see cref="WorkflowNodeDispatcher.DispatchAsync"/>
-/// exactly as an unexpected exception does, leaving the run <see cref="WorkflowStatus.Running"/> for the outbox to
-/// redeliver.
+/// <b>An <see cref="OperationCanceledException"/> out of this method means <c>ct</c> was cancelled — nothing
+/// else.</b> It is not converted into a failed run: it propagates out of
+/// <see cref="WorkflowNodeDispatcher.DispatchAsync"/> uncaught, exactly as an unexpected exception does. That
+/// propagation is <em>not</em> the same as "the outbox will politely redeliver it": both the ZeroAlloc.Outbox
+/// <c>OutboxWorkerService</c> and Daedalus's own outbox loop catch a dispatch failure
+/// <c>when (ex is not OperationCanceledException)</c> — they treat cancellation as the loop's own shutdown
+/// signal, never as "this message failed, retry it" — so an <see cref="OperationCanceledException"/> a gate
+/// throws for any other reason, for example an HTTP client's own request timeout surfacing as
+/// <see cref="TaskCanceledException"/>, escapes both loops uncaught and can stop the worker outright, not merely
+/// get this one message redelivered. A gate must therefore never let its own timeout surface as
+/// <see cref="OperationCanceledException"/>: only cancelling <c>ct</c> may produce one here. A gate's own timeout
+/// returns a failed <see cref="Result"/> instead, the same as any other refusal.
 /// </para>
 /// <para>
 /// Multiple gates run in registration order and short-circuit on the first failure — a gate after the failing one
@@ -41,10 +49,11 @@ namespace Thalos.Workflow;
 public interface IWorkflowDispatchGate
 {
     /// <summary>
-    /// Called once, immediately before <paramref name="run"/> dispatches <paramref name="node"/>'s agent turn. A
-    /// failed <see cref="Result"/> fails the run with its <see cref="Result.Error"/> message; nothing is
-    /// dispatched. See this interface's remarks for how a thrown exception and a cancelled <paramref name="ct"/>
-    /// are handled instead.
+    /// Called once per dispatch attempt, immediately before <paramref name="run"/> dispatches
+    /// <paramref name="node"/>'s agent turn — it may run again for the same node on an outbox redelivery, so a
+    /// gate must be idempotent, the same as the turn it guards. A failed <see cref="Result"/> fails the run with
+    /// its <see cref="Result.Error"/> message; nothing is dispatched. See this interface's remarks for how a
+    /// thrown exception and a cancelled <paramref name="ct"/> are handled instead.
     /// </summary>
     /// <param name="run">The run about to dispatch, positioned at <paramref name="node"/>.</param>
     /// <param name="node">The task node about to run its agent turn — always <c>run.CurrentNode</c>.</param>

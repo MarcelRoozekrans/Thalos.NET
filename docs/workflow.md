@@ -161,23 +161,36 @@ services.AddScoped<IAsyncDbConnection>(sp =>
 batch gets its own connection and disposes it with the scope.
 
 **Dispatch gates.** `WorkflowNodeDispatcher`'s `gates` argument (§3) is a list of `IWorkflowDispatchGate` — a
-host-supplied check run immediately before a task node's agent turn, and only before a task node's: a `gate:`
-process node (the `await:` kind — an unrelated use of the word "gate", inherited from the process YAML) and a
-`terminal:` node are never gated, because neither spends a turn. The motivating case is a run's own tool servers:
-a gate can start them, or restart them after a host crash, and refuse the turn outright when they never come up,
-rather than dispatching an agent into a turn that would fail on its first tool call. A gate that refuses returns a
-failed `Result`; the dispatcher fails the run with that message, the same way a rejected outcome does, and calls
-no further gate. Wire none with `gates: []` — a required argument, not an optional one, so a host cannot forget it
-by omission.
+host-supplied check run immediately before a task node's agent turn, and only before a task node's: a gate node,
+one with `await:` (an unrelated use of the word "gate", inherited from the process YAML) and a `terminal:` node
+are never gated, because neither spends a turn. The motivating case is a run's own tool servers: a gate can start
+them, or restart them after a host crash, and refuse the turn outright when they never come up, rather than
+dispatching an agent into a turn that would fail on its first tool call. A gate that refuses returns a failed
+`Result`; the dispatcher fails the run with that message, the same way a rejected outcome does, and calls no
+further gate. Wire none with `gates: []` — a required argument, not an optional one, so a host cannot forget it by
+omission. A run can sit inside a gate for as long as its own wait allows — up to ten minutes for the tool-server
+case above — and that whole time counts against the reconciler's `olderThan` budget (§5): `updated_at` does not
+move while a gate is running any more than it moves during the agent turn itself, so a gate's own wait has to fit
+comfortably inside `StrandedAfter`, the same constraint the turn length already has to satisfy.
+
+**A gate's own `OperationCanceledException` means `ct` was cancelled, and nothing else.** Both
+`OutboxWorkerService` (ZeroAlloc.Outbox) and Daedalus's own outbox loop catch a dispatch failure
+`when (ex is not OperationCanceledException)` — they treat cancellation as the loop's own shutdown signal, never
+as "this message failed, retry it" — so an `OperationCanceledException` a gate throws for any other reason, for
+example an HTTP client's own request timeout surfacing as `TaskCanceledException`, escapes both loops uncaught and
+can stop the worker outright, not merely get this one message redelivered. A gate's own timeout must return a
+failed `Result`, never throw. Fixing the host loops themselves is out of scope here: Daedalus's is fixed in task
+B9, and ZeroAlloc.Outbox's is filed upstream as ZeroAlloc-Net/ZeroAlloc.Outbox#204.
 
 Two things about the retry budget, because they decide what a failure costs. The dispatcher deliberately does
 **not** throw for a node-level failure — a turn that failed, an unresolvable agent name, an outcome outside the
 node's declared set, a gate that refused — it records the run as `Failed` and returns, so the outbox has nothing to
 retry and you never pay for the same losing agent turn `MaxAttempts` times. What does propagate, and therefore does
-get retried, is an unexpected exception out of `ISubagentRunner` or out of a gate, and a `WorkflowConcurrencyException`
-from the store: all are transient by nature — a gate that throws (or observes its `CancellationToken` cancelled) is
-treated exactly like `ISubagentRunner` throwing, never turned into a failed run. And `MaxAttempts` is what eventually dead-letters a message that never succeeds — which is
-what leaves a run stranded, and why step 5 exists.
+get retried, is an unexpected exception out of `ISubagentRunner` or a gate's own non-cancellation exception, and a
+`WorkflowConcurrencyException` from the store: all three are transient by nature and are caught and retried by the
+outbox exactly alike. A gate's `OperationCanceledException` is the one exception to that: see above. And
+`MaxAttempts` is what eventually dead-letters a message that never succeeds — which is what leaves a run stranded,
+and why step 5 exists.
 
 ## 5. The stranded-run sweep
 

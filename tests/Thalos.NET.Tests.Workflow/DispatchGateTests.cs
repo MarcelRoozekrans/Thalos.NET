@@ -69,16 +69,16 @@ public sealed class DispatchGateTests
         // early "return" stays - leaving the run Running instead of Failed.
         run!.Status.Should().Be(WorkflowStatus.Failed);
 
-        // Same red as above: a failure that is never recorded leaves LastError null, and this assertion fails on
-        // a null actual rather than a mismatched one.
-        run.LastError.Should().Contain("not ready within");
+        // Red for the same reason as above, and also red if the "node '{node}': " prefix is dropped from the
+        // message the dispatcher builds - Contain alone would let that pass, so this pins the full string.
+        run.LastError.Should().Be("node 'work': tool servers not ready within 00:10:00");
     }
 
     [Fact]
     public async Task A_passing_gate_lets_the_turn_run()
     {
         var gate = new CapturingGate(Result.Success());
-        var (dispatcher, runner, store, message) = await ArrangeTaskNodeAsync([gate]);
+        var (dispatcher, runner, _, message) = await ArrangeTaskNodeAsync([gate]);
 
         await dispatcher.DispatchAsync(message, CancellationToken.None);
 
@@ -89,17 +89,44 @@ public sealed class DispatchGateTests
         // Red if the gate is called with a literal node name instead of run.CurrentNode: this would read whatever
         // wrong constant replaced it instead of "work".
         gate.SeenNode.Should().Be("work");
+    }
 
-        // 'work' has no declared outcomes, so completing its turn takes the run straight to 'done' rather than
-        // parking it - one more dispatch, on the message the completion itself enqueued, actually reaches the
-        // terminal. Two dispatches, not one, is what proves the turn genuinely ran rather than the run merely
-        // having moved off 'work' for some other reason.
-        var next = store.TakeNext(message.RunId);
-        next.Should().NotBeNull();
-        await dispatcher.DispatchAsync(next!, CancellationToken.None);
+    [Fact]
+    public async Task A_failing_gate_fails_a_pinned_run_and_runs_no_turn()
+    {
+        var pin = new NodePin("worker", WorkerId, "r1", "do-work", "h1");
+        var (dispatcher, runner, store, message) = await ArrangePinnedTaskNodeAsync(
+            [new FixedGate(Result.Failure("tool servers not ready within 00:10:00"))],
+            new Dictionary<string, NodePin>(StringComparer.Ordinal) { ["work"] = pin });
 
+        await dispatcher.DispatchAsync(message, CancellationToken.None);
+
+        // Red if the gate loop moves to run after the "if (run.Manifest is { } manifest)" branch instead of
+        // before it: a pinned run whose node IS named in the manifest - the shape every Daedalus run takes -
+        // would then run RunPinnedNodeAsync and dispatch to the runner without any gate ever being checked.
+        runner.Requests.Should().BeEmpty();
         var run = await store.FindAsync(message.RunId, CancellationToken.None);
-        run!.Status.Should().Be(WorkflowStatus.Succeeded, "the turn ran, reported nothing, and the single edge out of 'work' is unconditional");
+        run!.Status.Should().Be(WorkflowStatus.Failed);
+        run.LastError.Should().Be("node 'work': tool servers not ready within 00:10:00");
+    }
+
+    [Fact]
+    public async Task A_failing_gate_is_reported_even_when_the_run_manifest_has_a_gap()
+    {
+        var (dispatcher, _, store, message) = await ArrangePinnedTaskNodeAsync(
+            [new FixedGate(Result.Failure("tool servers not ready within 00:10:00"))],
+            new Dictionary<string, NodePin>(StringComparer.Ordinal)); // gap: "work" is not named
+
+        await dispatcher.DispatchAsync(message, CancellationToken.None);
+
+        // Red if the gate loop moves to run after the "if (run.Manifest is { } manifest)" branch: the manifest
+        // gap would then be checked first, before any gate ever runs, and this run would fail with "node 'work'
+        // is missing from the run manifest." instead of the gate's own message - proving the gate genuinely runs
+        // before the manifest branch, not merely before one arm of it. (Whether requests stayed empty would not
+        // tell the two shapes apart here - the missing-node branch returns before reaching the runner either
+        // way - so this message is the one assertion that does.)
+        var run = await store.FindAsync(message.RunId, CancellationToken.None);
+        run!.LastError.Should().Be("node 'work': tool servers not ready within 00:10:00");
     }
 
     [Fact]
@@ -187,7 +214,10 @@ public sealed class DispatchGateTests
         var dispatch = async () => await dispatcher.DispatchAsync(message, CancellationToken.None);
 
         // Red if the gate call is wrapped in a try/catch that reports the exception through FailAsync instead of
-        // letting it propagate: dispatch would then complete normally instead of throwing.
+        // letting it propagate: dispatch would then complete normally instead of throwing. The BeSameAs half is
+        // separately red if the dispatcher instead catches and rethrows a new exception of the same type (for
+        // example wrapping it) rather than letting the original instance escape unchanged - ThrowExactlyAsync
+        // alone would not catch that, since the type still matches.
         (await dispatch.Should().ThrowExactlyAsync<InvalidOperationException>()).Which.Should().BeSameAs(thrown);
 
         var run = await store.FindAsync(message.RunId, CancellationToken.None);
@@ -201,12 +231,22 @@ public sealed class DispatchGateTests
     [Fact]
     public async Task A_gate_observing_cancellation_propagates_it_rather_than_failing_the_run()
     {
-        var (dispatcher, _, store, message) = await ArrangeTaskNodeAsync([new ThrowingGate(new OperationCanceledException())]);
+        var (dispatcher, _, store, message) = await ArrangeTaskNodeAsync([new DelayUntilCancelledGate()]);
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
 
-        var dispatch = async () => await dispatcher.DispatchAsync(message, CancellationToken.None);
+        // DelayUntilCancelledGate awaits Task.Delay(Timeout.InfiniteTimeSpan, ct) using whatever token the
+        // dispatcher actually hands it. cts.Token is already cancelled, so if that token reaches the gate,
+        // Task.Delay throws immediately - this test runs in milliseconds. If the dispatcher instead passes
+        // CancellationToken.None to the gate (the bug this test exists to catch), the gate's delay never
+        // observes cts and would otherwise wait forever; the outer WaitAsync bounds that to two seconds so a
+        // wrong implementation fails fast instead of hanging the suite.
+        var dispatch = async () => await dispatcher.DispatchAsync(message, cts.Token).AsTask().WaitAsync(TimeSpan.FromSeconds(2));
 
-        // Same catch-and-report red as the plain-exception test: a try/catch(Exception) around the gate call
-        // would also swallow this, since OperationCanceledException is an Exception too.
+        // Red if the dispatcher passes CancellationToken.None (or any other token) to the gate instead of the
+        // ct it itself received: see the setup above. A TimeoutException surfacing here, not an
+        // OperationCanceledException, is exactly that red - ThrowAsync reports the mismatch as a clean
+        // assertion failure rather than letting the TimeoutException escape uncaught.
         await dispatch.Should().ThrowAsync<OperationCanceledException>();
 
         var run = await store.FindAsync(message.RunId, CancellationToken.None);
@@ -232,6 +272,45 @@ public sealed class DispatchGateTests
             _ => new FakeSecurityContext("workflow-engine"), gates);
 
         var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "gated-task", Version = 1, CorrelationKey = "c-gated-task", StartNode = "work", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
+        return (dispatcher, runner, store, store.TakeNext(runId)!);
+    }
+
+    /// <summary>
+    /// The same single-task-node process as <see cref="ArrangeTaskNodeAsync"/>, but started with
+    /// <paramref name="manifestNodes"/> as the run's <see cref="RunManifest"/> - so a gate is exercised on the
+    /// pinned path Daedalus actually uses in production, not only on the unpinned, live-resolution path every
+    /// other test in this file uses. The resolver is empty on purpose, exactly as <c>RunPinningDispatchTests</c>
+    /// keeps it: a pinned node must never resolve its agent name live, so a resolver call here would itself be a
+    /// sign this test took the wrong path.
+    /// </summary>
+    private static async Task<(WorkflowNodeDispatcher Dispatcher, FakeSubagentRunner Runner, FakeWorkflowStore Store, WorkflowDispatchMessage Message)> ArrangePinnedTaskNodeAsync(
+        IEnumerable<IWorkflowDispatchGate> gates, IReadOnlyDictionary<string, NodePin> manifestNodes)
+    {
+        var definitions = new InMemoryProcessDefinitionStore().Seed(GatedTaskDefYaml);
+        var resolver = new FakeWorkflowReferenceResolver(new Dictionary<string, AgentId>(StringComparer.Ordinal));
+        var store = new FakeWorkflowStore(definitions);
+        var runner = new FakeSubagentRunner
+        {
+            NextResult = _ => Result<AgentTurnResult, AgentError>.Success(
+                new AgentTurnResult(TurnId.New(), SessionId.New(), "done", TurnUsage.Empty("test-model"), [], TimeSpan.Zero)),
+        };
+        var skills = new InMemorySkillStore(TimeProvider.System);
+        await skills.UpsertAsync(new SkillDocument
+        {
+            Name = SkillName.Parse("do-work"),
+            Description = "a test skill",
+            Body = "Pinned body.",
+            SourcePath = "do-work/SKILL.md",
+            ContentHash = "h1",
+            UpdatedAt = TimeProvider.System.GetUtcNow(),
+        }, CancellationToken.None);
+
+        var dispatcher = new WorkflowNodeDispatcher(
+            store, runner, resolver, definitions, skills,
+            _ => new FakeSecurityContext("workflow-engine"), gates);
+
+        var manifest = new RunManifest { Nodes = manifestNodes };
+        var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "gated-task", Version = 1, CorrelationKey = "c-pinned-gated-task", StartNode = "work", InitialVariables = null, Manifest = manifest, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
         return (dispatcher, runner, store, store.TakeNext(runId)!);
     }
 
@@ -302,10 +381,27 @@ public sealed class DispatchGateTests
         }
     }
 
-    /// <summary>Throws <paramref name="exception"/> synchronously — stands in for a gate whose own dependency (for example a tool-server wait) failed unexpectedly, or observed cancellation, rather than returning a considered failure.</summary>
+    /// <summary>Throws <paramref name="exception"/> synchronously — stands in for a gate whose own dependency (for example a tool-server wait) failed unexpectedly, rather than returning a considered failure.</summary>
     private sealed class ThrowingGate(Exception exception) : IWorkflowDispatchGate
     {
         public ValueTask<Result> BeforeTaskNodeAsync(WorkflowRun run, string node, CancellationToken ct) =>
             throw exception;
+    }
+
+    /// <summary>
+    /// Waits on the <paramref name="ct"/> it is actually called with, forever, until that token is cancelled —
+    /// stands in for a gate whose own wait (for example <c>IRunToolServerReadiness.WaitAllReadyAsync</c>) genuinely
+    /// honours the dispatch token, so a test using this gate can tell "the dispatcher forwarded its real ct to the
+    /// gate" apart from "the dispatcher passed some other token", which a gate that ignores <paramref name="ct"/>
+    /// entirely (like <see cref="ThrowingGate"/> constructed with a bare <see cref="OperationCanceledException"/>)
+    /// cannot.
+    /// </summary>
+    private sealed class DelayUntilCancelledGate : IWorkflowDispatchGate
+    {
+        public async ValueTask<Result> BeforeTaskNodeAsync(WorkflowRun run, string node, CancellationToken ct)
+        {
+            await Task.Delay(Timeout.InfiniteTimeSpan, ct);
+            return Result.Success();
+        }
     }
 }

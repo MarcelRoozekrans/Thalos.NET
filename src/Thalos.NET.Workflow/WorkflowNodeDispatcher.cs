@@ -100,9 +100,9 @@ public sealed partial class WorkflowNodeDispatcher(
     private readonly IEnumerable<IWorkflowDispatchGate> _gates = gates ?? throw new ArgumentNullException(nameof(gates));
 
     /// <summary>
-    /// Where this dispatcher tells a host operator what the reading agent can already see. Optional and last so
-    /// every existing construction still compiles, and defaulted to a no-op rather than made required: a host
-    /// that wires no logger loses the operator's view of dropped variables, not the dispatch.
+    /// Where this dispatcher tells a host operator what the reading agent can already see. Optional and last,
+    /// defaulted to a no-op rather than made required: a host that wires no logger loses the operator's view of
+    /// dropped variables, not the dispatch.
     /// </summary>
     private readonly ILogger _logger = logger ?? (ILogger)Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
 
@@ -110,8 +110,9 @@ public sealed partial class WorkflowNodeDispatcher(
     /// Advances the run named in <paramref name="message"/> by one node: loads it, runs its agent turn, and
     /// persists whatever <see cref="WorkflowInterpreter.Advance"/> decides. Never throws for a node-level failure —
     /// see this class's remarks — but does not catch an unexpected exception from <see cref="ISubagentRunner.RunAsync"/>
-    /// or a <see cref="WorkflowConcurrencyException"/> from <see cref="IWorkflowStore"/>: both indicate the outbox
-    /// should retry, not that this node's outcome was decided.
+    /// or from an <see cref="IWorkflowDispatchGate"/>, nor a <see cref="WorkflowConcurrencyException"/> from
+    /// <see cref="IWorkflowStore"/>: all three indicate the outbox should retry, not that this node's outcome was
+    /// decided.
     /// </summary>
     public async ValueTask DispatchAsync(WorkflowDispatchMessage message, CancellationToken ct)
     {
