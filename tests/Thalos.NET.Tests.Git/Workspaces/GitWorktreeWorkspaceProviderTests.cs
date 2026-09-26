@@ -774,6 +774,12 @@ public sealed partial class GitWorktreeWorkspaceProviderTests : IDisposable
     /// </summary>
     private static bool IsIntactBareRepository(string path)
     {
+        // Checked first: git cannot even start in a directory that is gone, which throws rather than answering.
+        if (!Directory.Exists(path))
+        {
+            return false;
+        }
+
         try
         {
             return string.Equals(LocalGitRemote.RunGit(path, "rev-parse", "--is-bare-repository"), "true", StringComparison.Ordinal);

@@ -48,7 +48,9 @@ internal readonly record struct GitCliResult(int ExitCode, string StdOut, string
 /// closed (a non-<see cref="GitCliResult.Succeeded"/> result, not an exception) until that check passes. On top of
 /// removing the global and system layers entirely, every call also passes <c>-c core.hooksPath=&lt;an empty
 /// provider-owned directory&gt;</c> (so even a hook a caller-supplied <c>extraConfig</c> or the repository's own
-/// tracked config might name cannot exist to run) and <c>-c protocol.allow=never</c> together with every individual
+/// tracked config might name cannot exist to run), <c>-c core.fsmonitor=false</c> (an fsmonitor hook is named by
+/// config, not found in the hooks directory, so <c>core.hooksPath</c> does not cover it), and
+/// <c>-c protocol.allow=never</c> together with every individual
 /// <c>protocol.&lt;name&gt;.allow</c> git itself recognises, each pinned explicitly rather than left to the
 /// <c>protocol.allow</c> default: <c>https</c> and <c>file</c> set to <c>always</c> (the only two transports this
 /// provider actually uses), and <c>http</c>, <c>ext</c>, <c>git</c> and <c>ssh</c> each set to <c>never</c> (fix
@@ -57,7 +59,7 @@ internal readonly record struct GitCliResult(int ExitCode, string StdOut, string
 /// <c>-c http.followRedirects=false</c> (fix round 2 ruling, pre-existing): an origin's HTTP redirect otherwise
 /// makes git resend a request — headers included — to whatever host the redirect names, which this provider never
 /// controls or intends to trust. Removing the global and system config layers is the root fix; the hooksPath,
-/// protocol and redirect flags are stated explicitly on the command line as well because they are cheap to state
+/// fsmonitor, protocol and redirect flags are stated explicitly on the command line as well because they are cheap to state
 /// and give defense in depth against a future caller who reintroduces a config source this type does not control.
 /// </para>
 /// <para>
@@ -489,7 +491,7 @@ internal sealed partial class GitCli
     }
 
     /// <summary>
-    /// The isolation flags every call carries, regardless of caller: <c>core.hooksPath</c>, every
+    /// The isolation flags every call carries, regardless of caller: <c>core.hooksPath</c>, <c>core.fsmonitor</c>, every
     /// <c>protocol.&lt;name&gt;.allow</c> git recognises pinned explicitly rather than left to the
     /// <c>protocol.allow</c> default, and <c>http.followRedirects=false</c>. See the class remarks for why each one
     /// is here.
@@ -498,6 +500,11 @@ internal sealed partial class GitCli
     {
         argumentList.Add("-c");
         argumentList.Add($"core.hooksPath={_hooksDirectory}");
+
+        // An fsmonitor hook is a command git runs on add, status, diff and commit, named by config, not found in the
+        // hooks directory, so core.hooksPath does not cover it.
+        argumentList.Add("-c");
+        argumentList.Add("core.fsmonitor=false");
 
         // Every protocol pinned explicitly — never just protocol.allow=never plus the two allowed ones — so a
         // per-protocol override sitting in a repository's own config (protocol.http.allow=always, say) can never

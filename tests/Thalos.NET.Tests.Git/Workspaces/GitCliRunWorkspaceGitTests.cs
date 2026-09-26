@@ -712,6 +712,161 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
         pushed.IsFailure.Should().BeTrue("remote.origin.url must equal this workspace's own configured remote");
     }
 
+    /// <summary>
+    /// Fix round 4, item 1 (CRITICAL): the reviewer's exact exploit. A valueless <c>extensions.worktreeConfig</c>,
+    /// which git prints under <c>--list -z</c> as a bare key with no newline, turned on per-worktree config; the
+    /// worktree's own <c>config.worktree</c>, which <c>--local</c> never reads, then defined a clean filter that
+    /// <c>info/attributes</c> applied to every <c>.cs</c> file. Round 3's hand parser skipped the valueless key and
+    /// never saw the worktree file, so <see cref="GitCliRunWorkspaceGit.CommitAsync"/> ran the filter.
+    /// </summary>
+    [Fact]
+    public async Task The_valueless_worktreeConfig_exploit_refuses_the_commit_and_the_filter_never_runs()
+    {
+        var ws = await WorktreeAsync();
+        var marker = PlantWorktreeConfigExploit(ws.Root, MirrorOf(), _temp);
+
+        File.WriteAllText(Path.Combine(ws.Root, "code.cs"), "class C {}");
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None);
+
+        committed.IsFailure.Should().BeTrue("a valueless extensions.worktreeConfig and every key in worktree scope are outside the allowed surface");
+        File.Exists(marker).Should().BeFalse("the filter defined in config.worktree must never execute");
+    }
+
+    /// <summary>Fix round 4, item 1: the same exploit, planted after a commit, refuses the push, and the run's branch never reaches the remote.</summary>
+    [Fact]
+    public async Task The_valueless_worktreeConfig_exploit_refuses_the_push()
+    {
+        var ws = await WorktreeAsync();
+        File.WriteAllText(Path.Combine(ws.Root, "code.cs"), "class C {}");
+        (await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        PlantWorktreeConfigExploit(ws.Root, MirrorOf(), _temp);
+
+        var pushed = await _git.PushAsync(ws, CancellationToken.None);
+
+        pushed.IsFailure.Should().BeTrue("a valueless extensions.worktreeConfig and every key in worktree scope are outside the allowed surface");
+        _remote!.TryHeadOf(ws.Branch).Should().BeNull("a refused push must never reach the remote");
+    }
+
+    /// <summary>
+    /// Fix round 4, item 2: a valueless <c>[core] symlinks</c> appended after the provider's <c>false</c> is read by
+    /// git as <c>true</c>, the last value winning. The check reads the value with git's own <c>--type=bool</c>.
+    /// </summary>
+    [Fact]
+    public async Task A_valueless_core_symlinks_is_refused()
+    {
+        var ws = await WorktreeAsync();
+        File.AppendAllText(Path.Combine(MirrorOf(), "config"), "[core]\n\tsymlinks\n");
+
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None);
+
+        committed.IsFailure.Should().BeTrue("a valueless core.symlinks is true to git, and the provider wrote false");
+    }
+
+    /// <summary>Fix round 4, item 4: <c>remote.origin.fetch</c> must appear exactly once, even when the second value is identical to the first.</summary>
+    [Fact]
+    public async Task A_second_identical_remote_origin_fetch_is_refused()
+    {
+        var ws = await WorktreeAsync();
+        LocalGitRemote.RunGit(MirrorOf(), "config", "--add", "remote.origin.fetch", MirrorConfigSurface.ExpectedFetchRefspec);
+
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None);
+
+        committed.IsFailure.Should().BeTrue("remote.origin.fetch must be set exactly once");
+    }
+
+    /// <summary>
+    /// Fix round 4, item 3: a hook in the mirror's default <c>hooks/</c> directory needs no config key at all, so the
+    /// config gate cannot see it; only <see cref="GitCli"/>'s <c>-c core.hooksPath</c> pin stops it. The commit must
+    /// succeed, so every git call on the commit path really runs with the hooks in place.
+    /// </summary>
+    [Fact]
+    public async Task A_hook_in_the_mirrors_default_hooks_directory_never_runs_on_a_successful_commit()
+    {
+        var ws = await WorktreeAsync();
+        var defaultHooksDir = Path.Combine(MirrorOf(), "hooks");
+        Directory.CreateDirectory(defaultHooksDir);
+        var markers = new List<string>();
+        foreach (var name in new[] { "pre-commit", "commit-msg", "post-commit" })
+        {
+            var marker = Path.Combine(_temp, name + ".marker").Replace('\\', '/');
+            WriteHookScript(defaultHooksDir, name, marker);
+            markers.Add(marker);
+        }
+
+        File.WriteAllText(Path.Combine(ws.Root, "code.cs"), "class C {}");
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None);
+
+        committed.IsSuccess.Should().BeTrue("a hook file needs no config key, so the config gate has nothing to refuse");
+        committed.Value.Created.Should().BeTrue();
+        markers.Where(File.Exists).Should().BeEmpty("no hook in the mirror's default hooks directory may run");
+    }
+
+    /// <summary>
+    /// Fix round 4, item 3: <see cref="GitCli"/>'s <c>-c core.fsmonitor=false</c> pin, tested on its own with no config
+    /// gate in the way. A scratch repository, which no provider ever validates, configures an fsmonitor hook, and
+    /// <c>git add -A</c> through <see cref="GitCli"/> must never run it.
+    /// </summary>
+    [Fact]
+    public async Task GitCli_never_runs_an_fsmonitor_the_repository_configures()
+    {
+        var scratch = Path.Combine(_temp, "fsmonitor-scratch");
+        LocalGitRemote.RunGit(_temp, "init", "-q", scratch);
+        var marker = Path.Combine(_temp, "gitcli-fsmonitor.marker");
+        LocalGitRemote.RunGit(scratch, "config", "core.fsmonitor", WriteFsmonitorScript(_temp, marker).Replace('\\', '/'));
+        File.WriteAllText(Path.Combine(scratch, "code.cs"), "class C {}");
+        var git = new GitCli(_options);
+
+        var added = await git.RunAsync(scratch, ["add", "-A"], null, null, CancellationToken.None);
+        var status = await git.RunAsync(scratch, ["status", "--porcelain"], null, null, CancellationToken.None);
+
+        added.Succeeded.Should().BeTrue();
+        status.Succeeded.Should().BeTrue();
+        File.Exists(marker).Should().BeFalse("GitCli pins core.fsmonitor=false on every call, whatever the repository configures");
+    }
+
+    /// <summary>
+    /// Fix round 4, item 1: the check ignores only <c>command</c> scope, on the premise that the only keys there are
+    /// <see cref="GitCli"/>'s own <c>-c</c> pins. This lists them exactly as the check sees them.
+    /// </summary>
+    [Fact]
+    public async Task Command_scope_holds_only_GitClis_own_isolation_pins()
+    {
+        var ws = await WorktreeAsync();
+        var git = new GitCli(_options);
+
+        var listed = await git.RunAsync(ws.Root, ["config", "--list", "--name-only", "--show-scope", "-z"], null, null, CancellationToken.None);
+
+        listed.Succeeded.Should().BeTrue();
+        var tokens = listed.StdOut.TrimEnd('\n').Split('\0');
+        var commandKeys = Enumerable.Range(0, tokens.Length / 2)
+            .Where(i => string.Equals(tokens[2 * i], "command", StringComparison.Ordinal))
+            .Select(i => tokens[(2 * i) + 1])
+            .ToList();
+        commandKeys.Should().BeEquivalentTo(
+        [
+            "core.hookspath", "core.fsmonitor", "protocol.allow", "protocol.https.allow", "protocol.file.allow",
+            "protocol.http.allow", "protocol.ext.allow", "protocol.git.allow", "protocol.ssh.allow", "http.followredirects",
+        ]);
+    }
+
+    /// <summary>
+    /// Plants the reviewer's exploit: a valueless <c>extensions.worktreeConfig</c> in the mirror's config, a
+    /// <c>config.worktree</c> in the worktree's own git directory setting <c>core.bare=false</c> and a clean filter
+    /// that touches a marker, and <c>*.cs filter=x</c> in the mirror's <c>info/attributes</c>. Returns the marker.
+    /// </summary>
+    internal static string PlantWorktreeConfigExploit(string worktreeRoot, string mirror, string markerDir)
+    {
+        var marker = Path.Combine(markerDir, "worktree-filter-ran.marker").Replace('\\', '/');
+        File.AppendAllText(Path.Combine(mirror, "config"), "[extensions]\n\tworktreeConfig\n");
+        var gitDir = LocalGitRemote.RunGit(worktreeRoot, "rev-parse", "--absolute-git-dir");
+        File.WriteAllText(
+            Path.Combine(gitDir, "config.worktree"),
+            $"[core]\n\tbare = false\n[filter \"x\"]\n\tclean = \"sh -c 'touch {marker}; cat'\"\n");
+        Directory.CreateDirectory(Path.Combine(mirror, "info"));
+        File.AppendAllText(Path.Combine(mirror, "info", "attributes"), "*.cs filter=x\n");
+        return marker;
+    }
+
     /// <summary>Creates a fresh remote and a worktree for a new run id, over this test's own <see cref="_options"/>.</summary>
     private async Task<RunWorkspace> WorktreeAsync(params (string Name, string Content)[] seed)
     {

@@ -1,69 +1,57 @@
 namespace Thalos.Git.Workspaces;
 
 /// <summary>
-/// The mirror's own git config is an attack surface a command-line <c>-c</c> pin cannot close: <c>url.&lt;x&gt;
-/// .pushInsteadOf</c> can silently redirect a push — Authorization header included — to an untrusted host;
-/// <c>filter.&lt;x&gt;.clean</c>/<c>.smudge</c> define arbitrary commands that run on <c>add</c>, <c>reset</c> and
-/// <c>commit</c>; <c>core.hooksPath</c>, <c>core.fsmonitor</c> and any <c>protocol.*</c> override reopen exactly
-/// what <see cref="GitCli"/>'s own command-line isolation closes (fix round 2, ruling: the provider owns the
-/// mirror's config).
+/// The git configuration a run's mirror and worktrees are allowed to carry. The mirror's own config, and a worktree's
+/// own <c>config.worktree</c>, are an attack surface a command-line <c>-c</c> pin cannot close:
+/// <c>url.&lt;x&gt;.pushInsteadOf</c> can redirect a push, Authorization header included, to an untrusted host;
+/// <c>filter.&lt;x&gt;.clean</c> and <c>.smudge</c> define arbitrary commands that run on <c>add</c>, <c>reset</c>
+/// and <c>commit</c>; <c>core.hooksPath</c>, <c>core.fsmonitor</c> and any <c>protocol.*</c> override reopen what
+/// <see cref="GitCli"/>'s own isolation closes. The provider owns this config, so anything it did not write is
+/// refused.
 /// </summary>
 /// <remarks>
 /// <para>
-/// Deliberately an allow-list, not a deny-list of the keys reviewers happened to find: a deny-list drifts as git
-/// grows new config surface, and each miss is a silent reopening. Only the keys
-/// <see cref="GitWorktreeWorkspaceProvider"/> itself ever writes, plus git's own repository-format keys
-/// <c>clone --bare</c> writes, are permitted. The bare-clone keys were enumerated empirically, not guessed, from a
-/// real <c>git clone --bare</c> run on both Windows (git 2.54) and Linux (git 2.43): both wrote
-/// <c>core.repositoryformatversion</c>, <c>core.bare</c> and <c>core.filemode</c>; Windows alone also wrote
-/// <c>core.ignorecase</c> (its case-insensitive filesystem) and <c>core.symlinks</c> (which
-/// <see cref="GitWorktreeWorkspaceProvider"/> writes explicitly afterward regardless, on every platform). Neither
-/// run wrote <c>core.precomposeunicode</c> or <c>core.logallrefupdates</c>, so neither is allow-listed; a future
-/// git version, or a platform this was not run on, that starts writing a new key refuses every mirror closed until
-/// this list is updated — an accepted cost, since failing closed on an unrecognised key is exactly the point.
+/// <b>Git is asked, never parsed by hand.</b> <see cref="FindViolationAsync"/> runs
+/// <c>git config --list --name-only --show-scope -z</c> in the directory under check, through <see cref="GitCli"/>, so
+/// it sees exactly the keys git itself will use there, with the scope each came from: the repository's shared config,
+/// a worktree's <c>config.worktree</c> when <c>extensions.worktreeConfig</c> is on, anything an include pulls in, and
+/// <see cref="GitCli"/>'s own <c>-c</c> pins. Values are read back with git's own typing:
+/// <c>git config --type=bool --get</c> for <c>core.bare</c> and <c>core.symlinks</c>, and
+/// <c>git config -z --get-all</c> for <c>remote.origin.fetch</c> and <c>remote.origin.url</c>. A valueless key, such
+/// as <c>[core] symlinks</c> with no <c>=</c>, therefore reads as <c>true</c> exactly as git reads it. An earlier
+/// revision parsed <c>git config --list --local -z</c> itself, and fell to both a valueless key, which git prints
+/// with no newline, and <c>config.worktree</c>, which <c>--local</c> never reads (fix round 4 ruling).
 /// </para>
 /// <para>
-/// A key this allow-list has never heard of is refused regardless of what it is — including
-/// <c>extensions.worktreeConfig</c>, the repository extension that would let each worktree carry its own, separate
-/// <c>config.worktree</c> file layered on top of the shared mirror config it is not itself allow-listed, so a
-/// mirror can never turn it on in the first place, and no worktree this provider creates can ever have a
-/// config.worktree file take effect.
+/// <b>Scopes.</b> A key in <c>command</c> scope is one of <see cref="GitCli"/>'s own <c>-c</c> isolation pins, and
+/// is ignored. A key in <c>local</c> scope must be on <see cref="AllowedLocalKeys"/>. A key in any other scope is
+/// refused whatever it is: <c>worktree</c>, because this provider never writes a <c>config.worktree</c>; and
+/// <c>global</c> or <c>system</c>, which <see cref="GitCli"/>'s isolation keeps empty, so a key there means that
+/// isolation failed.
 /// </para>
 /// <para>
-/// <b>Comparison matches git's own case rules, not a blanket case-insensitive one.</b> A git config key has the
-/// shape <c>section.subsection.name</c> (or <c>section.name</c> with no subsection): git itself always folds
-/// <c>section</c> and <c>name</c> to lower case in its own <c>--list</c> output, regardless of how they were
-/// written, but leaves <c>subsection</c> exactly as written — <c>remote.origin.url</c> and
-/// <c>remote.ORIGIN.url</c> name two different remotes to git, the subsection being an arbitrary, case-sensitive
-/// string. Since git has already done the section/name folding by the time <see cref="FindDisallowedKeyAsync"/>
-/// reads <c>--list</c>'s output, comparing that output <em>ordinally</em> against this allow-list's own
-/// already-lower-case entries reproduces git's exact rule for free: a same-cased key always matches, and
-/// <c>remote.ORIGIN.url</c> — a config key this provider never wrote and did not intend — is refused as a key
-/// outside the allow-list, exactly as it should be. An earlier, case-insensitive comparison here accepted it.
+/// <b>The allow-list.</b> Only the keys <see cref="GitWorktreeWorkspaceProvider"/> itself writes, plus git's own
+/// repository-format keys that <c>clone --bare</c> writes, are permitted. The bare-clone keys were enumerated from a
+/// real <c>git clone --bare</c> on Windows (git 2.54) and Linux (git 2.43): both wrote
+/// <c>core.repositoryformatversion</c>, <c>core.bare</c> and <c>core.filemode</c>; Windows also wrote
+/// <c>core.ignorecase</c> and <c>core.symlinks</c>. A git version that starts writing a new key refuses every mirror
+/// until this list is updated, which fails closed. <c>extensions.worktreeConfig</c> is not on the list, so a mirror
+/// can never turn per-worktree config on. Git folds a key's section and name to lower case in its own output and
+/// keeps a subsection's case, so comparing ordinally against these lower-case entries reproduces git's own rule:
+/// <c>remote.ORIGIN.url</c> is a different key to git, and is refused.
 /// </para>
 /// <para>
-/// <b>Values are checked, not only keys.</b> Every key the provider itself writes must hold exactly the value the
-/// provider wrote: <c>core.bare</c> must be <c>true</c>, <c>core.symlinks</c> must be <c>false</c>,
-/// <c>remote.origin.url</c> must equal <see cref="FindDisallowedKeyAsync"/>'s own <c>remote</c> parameter when one
-/// is given, and <c>remote.origin.fetch</c> must appear exactly once, equal to <see cref="ExpectedFetchRefspec"/> —
-/// a value changed after create (or a second, additional value for a multi-valued key) is refused exactly as a new
-/// key would be. Git's own repository-format keys (<c>core.repositoryformatversion</c>, <c>core.filemode</c>,
-/// <c>core.ignorecase</c>) are checked for presence only, not value: they are git's own bookkeeping, not a lever an
-/// attacker can pull toward code execution or credential exfiltration the way <c>core.symlinks</c> or
-/// <c>remote.origin.url</c> are, and their value varies by filesystem (<c>core.filemode</c>,
-/// <c>core.ignorecase</c>) in ways this type has no reason to pin down further.
+/// <b>Values.</b> <c>core.bare</c> must read <c>true</c> and <c>core.symlinks</c> <c>false</c>;
+/// <c>remote.origin.fetch</c> must hold exactly one value, <see cref="ExpectedFetchRefspec"/>; and
+/// <c>remote.origin.url</c> must hold exactly one value, the caller's <c>remote</c>, when one is given. Git's own
+/// format keys are checked for presence only, since their values vary by filesystem and none of them runs code.
 /// </para>
 /// <para>
-/// <b><c>remote</c> is optional, and a caller's own choice of when to give it matters.</b>
-/// <see cref="GitWorktreeWorkspaceProvider"/> reuses one mirror across every run against the same repository, and
-/// <c>remote.origin.url</c> is deliberately overwritten before every fetch to whichever run's create is running —
-/// see <see cref="GitWorktreeWorkspaceProvider"/>'s own remarks. A caller that checks the value <em>before</em>
-/// that overwrite (validating an existing mirror it is about to reuse and re-target) must pass
-/// <see langword="null"/>, or a create that legitimately changes a repository's remote between two runs would
-/// refuse itself: the mirror still holds the previous run's URL at that point, not this run's own. A caller that
-/// checks <em>after</em> its own write — <see cref="GitWorktreeWorkspaceProvider"/> itself, once more, right before
-/// declaring a create complete, and <c>GitCliRunWorkspaceGit</c>'s <c>CommitAsync</c>/<c>PushAsync</c>, which have
-/// no write of their own to wait on — passes its own trusted value and gets the full check.
+/// <b><c>remote</c> is optional.</b> <see cref="GitWorktreeWorkspaceProvider"/> reuses one mirror across every run
+/// against the same repository and overwrites <c>remote.origin.url</c> before every fetch. A caller checking a
+/// mirror before that overwrite passes <see langword="null"/>, or a create that legitimately changes a repository's
+/// remote would refuse itself. A caller checking after its own write, the provider right before it declares a create
+/// complete, passes its own value; so do <see cref="GitCliRunWorkspaceGit"/>'s commit and push, which write nothing.
 /// </para>
 /// </remarks>
 internal static class MirrorConfigSurface
@@ -71,14 +59,14 @@ internal static class MirrorConfigSurface
     /// <summary>The fetch refspec <see cref="GitWorktreeWorkspaceProvider"/> itself writes onto every mirror it clones.</summary>
     internal const string ExpectedFetchRefspec = "+refs/heads/*:refs/remotes/origin/*";
 
-    private static readonly HashSet<string> AllowedKeys = new(StringComparer.Ordinal)
+    private static readonly HashSet<string> AllowedLocalKeys = new(StringComparer.Ordinal)
     {
         // Written by GitWorktreeWorkspaceProvider itself: CloneMirrorAsync and PrepareMirrorAsync.
         "remote.origin.url",
         "remote.origin.fetch",
         "core.symlinks",
 
-        // Written by "git clone --bare" itself — see the class remarks for how this was enumerated.
+        // Written by "git clone --bare" itself; see the class remarks for how this was enumerated.
         "core.repositoryformatversion",
         "core.filemode",
         "core.bare",
@@ -86,61 +74,82 @@ internal static class MirrorConfigSurface
     };
 
     /// <summary>
-    /// Reads <paramref name="root"/>'s local git config with <paramref name="git"/> and returns <see langword="null"/>
-    /// when every key is on <see cref="AllowedKeys"/> and the keys the provider writes hold exactly the values it
-    /// wrote, or a detail message naming the first violation. <paramref name="root"/> may be the mirror itself or
-    /// one of its worktrees — a worktree's own <c>--local</c> scope resolves to its mirror's shared config, so this
-    /// reads identically either way.
+    /// Asks git for every config key it will use in <paramref name="directory"/>, and for the values of the keys the
+    /// provider writes, and returns <see langword="null"/> when all of them are allowed, or a detail message naming
+    /// the first violation.
     /// </summary>
-    /// <param name="git">Runs the git call.</param>
-    /// <param name="root">The mirror, or one of its worktrees.</param>
+    /// <param name="git">Runs every git call, under its own isolation.</param>
+    /// <param name="directory">The mirror, or one of its worktrees. A worktree also sees its own <c>config.worktree</c>.</param>
     /// <param name="remote">
-    /// The remote <c>remote.origin.url</c> is expected to hold exactly. <see langword="null"/> skips that one
-    /// value check — a supported configuration for a caller validating a mirror before overwriting
-    /// <c>remote.origin.url</c> itself; see the class remarks.
+    /// The single value <c>remote.origin.url</c> must hold. <see langword="null"/> skips that one value check, for a
+    /// caller about to overwrite <c>remote.origin.url</c> itself; see the class remarks.
     /// </param>
     /// <param name="ct">Cancellation token.</param>
-    public static async Task<string?> FindDisallowedKeyAsync(GitCli git, string root, string? remote, CancellationToken ct)
+    public static async Task<string?> FindViolationAsync(GitCli git, string directory, string? remote, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(git);
 
-        // -z: NUL-terminated key/value pairs (key, then LF, then value, then NUL), so a value containing a newline
-        // can never be mistaken for a second entry.
-        var listed = await git.RunAsync(root, ["config", "--list", "--local", "-z"], null, null, ct).ConfigureAwait(false);
+        var listed = await git.RunAsync(directory, ["config", "--list", "--name-only", "--show-scope", "-z"], null, null, ct).ConfigureAwait(false);
         if (!listed.Succeeded)
         {
-            return listed.TimedOut
-                ? "git config --list --local timed out."
-                : $"could not list git config: {GitWorktreeWorkspaceProvider.ExtractErrorDetail(listed.StdErr)}";
+            return Failed("git config --list", listed);
         }
 
-        var fetchCount = 0;
-        foreach (var entry in listed.StdOut.Split('\0', StringSplitOptions.RemoveEmptyEntries))
+        var disallowed = FindDisallowedKey(listed.StdOut);
+        if (disallowed is not null)
         {
-            var newline = entry.IndexOf('\n');
-            if (newline < 0)
-            {
-                // A stray trailing newline after the last NUL-terminated record splits into its own, key-less
-                // entry — a boundary artifact of git's own -z framing, never a real config key.
-                continue;
-            }
+            return disallowed;
+        }
 
-            var key = entry[..newline];
-            var value = entry[(newline + 1)..];
-            if (key.Length == 0)
-            {
-                continue;
-            }
+        return await CheckBoolAsync(git, directory, "core.bare", "true", ct).ConfigureAwait(false)
+            ?? await CheckBoolAsync(git, directory, "core.symlinks", "false", ct).ConfigureAwait(false)
+            ?? await CheckSingleValueAsync(git, directory, "remote.origin.fetch", ExpectedFetchRefspec, ct).ConfigureAwait(false)
+            ?? (remote is null ? null : await CheckSingleValueAsync(git, directory, "remote.origin.url", remote, ct).ConfigureAwait(false));
+    }
 
-            if (!AllowedKeys.Contains(key))
-            {
-                return $"git config key '{key}' is outside the allowed surface.";
-            }
+    /// <summary>
+    /// Checks the output of <c>git config --list --name-only --show-scope -z</c>: a scope and a key per entry, each
+    /// terminated by NUL. Returns <see langword="null"/> when every key is in <c>command</c> scope, or in
+    /// <c>local</c> scope and on <see cref="AllowedLocalKeys"/>; otherwise a detail message naming the first key that
+    /// is not. Output that does not pair up is refused.
+    /// </summary>
+    /// <param name="listing">The command's standard output, as <see cref="GitCli"/> captured it.</param>
+    internal static string? FindDisallowedKey(string listing)
+    {
+        ArgumentNullException.ThrowIfNull(listing);
 
-            var violation = ValidateValue(key, value, remote, ref fetchCount);
-            if (violation is not null)
+        // GitCli captures standard output line by line and ends each line with '\n'. The listing has no newline of
+        // its own, since a config key can never hold one, so this strips exactly that one terminator.
+        var text = listing.EndsWith('\n') ? listing[..^1] : listing;
+        if (text.Length == 0)
+        {
+            return null;
+        }
+
+        if (!text.EndsWith('\0'))
+        {
+            return "git config --list printed output that does not end in NUL.";
+        }
+
+        var tokens = text[..^1].Split('\0');
+        if (tokens.Length % 2 != 0)
+        {
+            return "git config --list printed a scope without a key.";
+        }
+
+        for (var i = 0; i < tokens.Length; i += 2)
+        {
+            var (scope, key) = (tokens[i], tokens[i + 1]);
+            switch (scope)
             {
-                return violation;
+                case "command":
+                    continue;
+                case "local" when AllowedLocalKeys.Contains(key):
+                    continue;
+                case "local":
+                    return $"git config key '{key}' is outside the allowed surface.";
+                default:
+                    return $"git config key '{key}' is set in {scope} scope; only the repository's own config is allowed.";
             }
         }
 
@@ -148,38 +157,45 @@ internal static class MirrorConfigSurface
     }
 
     /// <summary>
-    /// Checks one already-allow-listed key's value against what the provider is known to write. Only the four keys
-    /// named in the class remarks are checked; every other allow-listed key (git's own repository-format keys) is
-    /// accepted with any value.
+    /// Reads <paramref name="key"/> with <c>git config --type=bool --get</c>, git's own typing, under which a
+    /// valueless key is <c>true</c> and the last value wins, and requires <paramref name="expected"/>. A missing key
+    /// or a value git cannot read as a boolean is refused.
     /// </summary>
-    private static string? ValidateValue(string key, string value, string? remote, ref int fetchCount)
+    private static async Task<string?> CheckBoolAsync(GitCli git, string directory, string key, string expected, CancellationToken ct)
     {
-        switch (key)
+        var read = await git.RunAsync(directory, ["config", "--type=bool", "--get", key], null, null, ct).ConfigureAwait(false);
+        if (!read.Succeeded)
         {
-            case "core.bare" when !string.Equals(value, "true", StringComparison.Ordinal):
-                return $"git config key 'core.bare' has an unexpected value '{value}'.";
-
-            case "core.symlinks" when !string.Equals(value, "false", StringComparison.Ordinal):
-                return $"git config key 'core.symlinks' has an unexpected value '{value}'.";
-
-            case "remote.origin.url" when remote is not null && !string.Equals(value, remote, StringComparison.Ordinal):
-                return "git config key 'remote.origin.url' does not match the configured remote.";
-
-            case "remote.origin.fetch":
-                fetchCount++;
-                if (fetchCount > 1)
-                {
-                    return "git config key 'remote.origin.fetch' is set more than once.";
-                }
-
-                if (!string.Equals(value, ExpectedFetchRefspec, StringComparison.Ordinal))
-                {
-                    return $"git config key 'remote.origin.fetch' has an unexpected value '{value}'.";
-                }
-
-                break;
+            return Failed($"git config --type=bool --get {key}", read);
         }
 
-        return null;
+        var value = read.StdOut.Trim();
+        return string.Equals(value, expected, StringComparison.Ordinal)
+            ? null
+            : $"git config key '{key}' reads as '{value}', not '{expected}'.";
     }
+
+    /// <summary>
+    /// Reads every value of <paramref name="key"/> with <c>git config -z --get-all</c> and requires exactly one,
+    /// equal to <paramref name="expected"/>. With <c>-z</c> git ends each value with NUL, so the whole output must
+    /// be exactly <paramref name="expected"/> and one NUL; a second value, even an identical one, is refused.
+    /// </summary>
+    private static async Task<string?> CheckSingleValueAsync(GitCli git, string directory, string key, string expected, CancellationToken ct)
+    {
+        var read = await git.RunAsync(directory, ["config", "-z", "--get-all", key], null, null, ct).ConfigureAwait(false);
+        if (!read.Succeeded)
+        {
+            return Failed($"git config --get-all {key}", read);
+        }
+
+        var output = read.StdOut.EndsWith('\n') ? read.StdOut[..^1] : read.StdOut;
+        return string.Equals(output, expected + "\0", StringComparison.Ordinal)
+            ? null
+            : $"git config key '{key}' does not hold exactly one value equal to the one the provider wrote.";
+    }
+
+    private static string Failed(string command, GitCliResult result) =>
+        result.TimedOut
+            ? $"{command} timed out."
+            : $"{command} failed with exit code {result.ExitCode}: {GitWorktreeWorkspaceProvider.ExtractErrorDetail(result.StdErr)}";
 }

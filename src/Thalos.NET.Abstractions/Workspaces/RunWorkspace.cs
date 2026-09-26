@@ -8,7 +8,12 @@ namespace Thalos.Workspaces;
 /// </summary>
 /// <param name="RunId">The run the workspace belongs to.</param>
 /// <param name="Repository">The repository the run works against, as a local path or clone URL.</param>
-/// <param name="Remote">The URL of the git remote to fetch from and push to.</param>
+/// <param name="Remote">
+/// The URL of the git remote to fetch from and push to. Every run against the same repository shares one mirror, and
+/// a new workspace re-targets that mirror's <c>origin</c> at its own remote. Commits and pushes refuse unless the
+/// mirror's <c>origin</c> still holds exactly this URL, so re-targeting a repository at a different remote makes
+/// every older run's commits and pushes fail closed.
+/// </param>
 /// <param name="DefaultBranch">
 /// The repository's default branch, e.g. <c>"main"</c>. <see cref="BaseRef"/> is the literal string
 /// <c>"origin/" + DefaultBranch</c>; it always assumes the remote is configured under the name <c>"origin"</c> and

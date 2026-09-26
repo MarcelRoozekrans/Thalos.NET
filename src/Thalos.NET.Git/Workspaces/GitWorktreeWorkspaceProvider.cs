@@ -602,11 +602,11 @@ public sealed partial class GitWorktreeWorkspaceProvider(
             return UnitResult<AgentError>.Failure(GitFailure("git fetch failed.", fetched, secret));
         }
 
-        var disallowedKey = await MirrorConfigSurface.FindDisallowedKeyAsync(_git, mirror, remote, ct).ConfigureAwait(false);
-        if (disallowedKey is not null)
+        var violation = await MirrorConfigSurface.FindViolationAsync(_git, mirror, remote, ct).ConfigureAwait(false);
+        if (violation is not null)
         {
             return UnitResult<AgentError>.Failure(AgentError.Validation(
-                $"The mirror at '{mirror}' has git config outside the allowed surface after this create's own update; refusing it. An operator must resolve this. Detail: {disallowedKey}"));
+                $"The mirror at '{mirror}' has git config outside the allowed surface after this create's own update; refusing it. An operator must resolve this. Detail: {violation}"));
         }
 
         return UnitResult<AgentError>.Success();
@@ -745,10 +745,10 @@ public sealed partial class GitWorktreeWorkspaceProvider(
                 : (MirrorValidation.Indeterminate, IndeterminateDetail(fetchSpec, "config --get remote.origin.fetch"));
         }
 
-        var disallowedKey = await MirrorConfigSurface.FindDisallowedKeyAsync(_git, mirror, remote: null, ct).ConfigureAwait(false);
-        return disallowedKey is null
+        var violation = await MirrorConfigSurface.FindViolationAsync(_git, mirror, remote: null, ct).ConfigureAwait(false);
+        return violation is null
             ? (MirrorValidation.Valid, null)
-            : (MirrorValidation.ConfigNotAllowed, disallowedKey);
+            : (MirrorValidation.ConfigNotAllowed, violation);
     }
 
     private static string IndeterminateDetail(GitCliResult result, string command) =>

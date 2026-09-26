@@ -6,7 +6,7 @@ namespace Thalos.Tests.Git.Workspaces;
 /// clean/smudge filter drivers that run on <c>add</c>, <c>reset</c> and <c>commit</c>, or widen a protocol
 /// <see cref="Thalos.Git.Workspaces.GitCli"/> otherwise pins closed — none of which a command-line <c>-c</c> flag
 /// can close, since the mirror's own tracked config is a separate, persistent layer. Mirror validation now reads
-/// <c>git config --list --local</c> and refuses the mirror outright when any key falls outside
+/// every config key git will use in the mirror, with its scope, and refuses the mirror outright when any key falls outside
 /// <see cref="Thalos.Git.Workspaces.MirrorConfigSurface"/>'s allow-list — see that type's own remarks for why an
 /// allow-list, not a deny-list. Each test here plants one disallowed key directly into an already-created mirror's
 /// config (as a later run's own tampering, or a previous run's, would look), then makes a second create for the
@@ -58,6 +58,26 @@ public sealed partial class GitWorktreeWorkspaceProviderTests
         var second = await Provider(out _).CreateAsync(Request(remote, Guid.NewGuid()), CancellationToken.None);
 
         second.IsFailure.Should().BeTrue();
+        IsIntactBareRepository(mirror).Should().BeTrue("a mirror refused for disallowed config must never be deleted");
+    }
+
+    /// <summary>
+    /// Fix round 4, item 1 (CRITICAL): the reviewer's exploit, a valueless <c>extensions.worktreeConfig</c> plus a
+    /// filter in an existing worktree's <c>config.worktree</c> plus <c>*.cs filter=x</c> in the mirror's
+    /// <c>info/attributes</c>, makes the next create for the same repository refuse, and leaves the mirror intact.
+    /// </summary>
+    [Fact]
+    public async Task The_valueless_worktreeConfig_exploit_makes_the_next_create_refuse()
+    {
+        using var remote = LocalGitRemote.Create();
+        var first = await Provider(out _).CreateAsync(Request(remote, Guid.NewGuid()), CancellationToken.None);
+        first.IsSuccess.Should().BeTrue();
+        var mirror = MirrorOf("sandbox");
+        GitCliRunWorkspaceGitTests.PlantWorktreeConfigExploit(first.Value.Root, mirror, _temp);
+
+        var second = await Provider(out _).CreateAsync(Request(remote, Guid.NewGuid()), CancellationToken.None);
+
+        second.IsFailure.Should().BeTrue("a valueless extensions.worktreeConfig is outside the allowed surface");
         IsIntactBareRepository(mirror).Should().BeTrue("a mirror refused for disallowed config must never be deleted");
     }
 

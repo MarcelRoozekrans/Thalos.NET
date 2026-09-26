@@ -14,9 +14,8 @@ namespace Thalos.Git.Workspaces;
 /// configuration — <c>GIT_CONFIG_NOSYSTEM</c>, an empty <c>GIT_CONFIG_GLOBAL</c>, an isolated <c>HOME</c>/
 /// <c>XDG_CONFIG_HOME</c>, and <c>-c core.hooksPath=&lt;an empty provider-owned directory&gt;</c> — so a host or
 /// repository hook (<c>pre-commit</c>, <c>commit-msg</c>, <c>post-commit</c>, ...) never runs on a commit this type
-/// makes; see <see cref="GitCli"/>'s own remarks for the full mechanism. Every call this type makes also passes
-/// <c>-c core.fsmonitor=false</c> — defence in depth on top of that isolation, since a repository's own tracked or
-/// local config can still name an fsmonitor hook that <c>core.hooksPath</c> alone does not cover.
+/// makes, and <c>-c core.fsmonitor=false</c>, so an fsmonitor hook a repository's config names never runs either;
+/// see <see cref="GitCli"/>'s own remarks for the full mechanism.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -96,14 +95,15 @@ public sealed partial class GitCliRunWorkspaceGit(
         ArgumentNullException.ThrowIfNull(request);
 
         // Checked before any staging, not only at create (GitWorktreeWorkspaceProvider's own mirror validation):
-        // the mirror's config could have been tampered with after a successful create but before this commit — a
-        // clean or smudge filter driver planted in the interval runs arbitrary commands on add, reset and commit
-        // otherwise (fix round 3 ruling).
-        var disallowedKey = await MirrorConfigSurface.FindDisallowedKeyAsync(_git, workspace.Root, workspace.Remote, ct).ConfigureAwait(false);
-        if (disallowedKey is not null)
+        // the mirror's config, or this worktree's own config.worktree, could have been changed after a successful
+        // create but before this commit — a clean or smudge filter driver planted in the interval runs arbitrary
+        // commands on add, reset and commit otherwise (fix round 3 and 4 rulings). Run from the worktree, so git
+        // reports every key it will use here, config.worktree included.
+        var violation = await MirrorConfigSurface.FindViolationAsync(_git, workspace.Root, workspace.Remote, ct).ConfigureAwait(false);
+        if (violation is not null)
         {
             return Result<GitCommitResult, AgentError>.Failure(AgentError.Validation(
-                $"Refusing to commit: the mirror's git config is outside the allowed surface. Detail: {disallowedKey}"));
+                $"Refusing to commit: the git config this worktree uses is outside the allowed surface. Detail: {violation}"));
         }
 
         if (ValidatePaths(workspace.Root, request) is { } invalidPath)
@@ -117,7 +117,7 @@ public sealed partial class GitCliRunWorkspaceGit(
             return Result<GitCommitResult, AgentError>.Failure(stageFailure);
         }
 
-        var cached = await RunGitAsync(workspace.Root, ["diff", "--cached", "--quiet"], null, null, ct).ConfigureAwait(false);
+        var cached = await _git.RunAsync(workspace.Root, ["diff", "--cached", "--quiet"], null, null, ct).ConfigureAwait(false);
         if (cached.TimedOut)
         {
             return Result<GitCommitResult, AgentError>.Failure(AgentError.GitOperationFailed("git diff --cached failed. The git command timed out."));
@@ -127,7 +127,7 @@ public sealed partial class GitCliRunWorkspaceGit(
         {
             // Nothing staged: git diff --cached --quiet's own convention for "no differences". No commit is made,
             // and Sha reports HEAD unchanged, per GitCommitResult's existing shape.
-            var unchanged = await RunGitAsync(workspace.Root, ["rev-parse", "HEAD"], null, null, ct).ConfigureAwait(false);
+            var unchanged = await _git.RunAsync(workspace.Root, ["rev-parse", "HEAD"], null, null, ct).ConfigureAwait(false);
             return unchanged.Succeeded
                 ? Result<GitCommitResult, AgentError>.Success(new GitCommitResult(unchanged.StdOut.Trim(), Created: false))
                 : Result<GitCommitResult, AgentError>.Failure(GitFailure("git rev-parse HEAD failed.", unchanged, secret: null));
@@ -139,13 +139,13 @@ public sealed partial class GitCliRunWorkspaceGit(
         }
 
         var commitConfig = new[] { $"user.name={request.Author.Name}", $"user.email={request.Author.Email}", "commit.gpgsign=false" };
-        var committed = await RunGitAsync(workspace.Root, ["commit", "-m", request.Message], commitConfig, null, ct).ConfigureAwait(false);
+        var committed = await _git.RunAsync(workspace.Root, ["commit", "-m", request.Message], commitConfig, null, ct).ConfigureAwait(false);
         if (!committed.Succeeded)
         {
             return Result<GitCommitResult, AgentError>.Failure(GitFailure("git commit failed.", committed, secret: null));
         }
 
-        var head = await RunGitAsync(workspace.Root, ["rev-parse", "HEAD"], null, null, ct).ConfigureAwait(false);
+        var head = await _git.RunAsync(workspace.Root, ["rev-parse", "HEAD"], null, null, ct).ConfigureAwait(false);
         return head.Succeeded
             ? Result<GitCommitResult, AgentError>.Success(new GitCommitResult(head.StdOut.Trim(), Created: true))
             : Result<GitCommitResult, AgentError>.Failure(GitFailure("git rev-parse HEAD failed.", head, secret: null));
@@ -159,7 +159,7 @@ public sealed partial class GitCliRunWorkspaceGit(
     /// </summary>
     private async Task<AgentError?> StageAsync(string root, GitCommitRequest request, CancellationToken ct)
     {
-        var resetToHead = await RunGitAsync(root, ["--literal-pathspecs", "reset", "-q"], null, null, ct).ConfigureAwait(false);
+        var resetToHead = await _git.RunAsync(root, ["--literal-pathspecs", "reset", "-q"], null, null, ct).ConfigureAwait(false);
         if (!resetToHead.Succeeded)
         {
             return GitFailure("git reset failed.", resetToHead, secret: null);
@@ -172,7 +172,7 @@ public sealed partial class GitCliRunWorkspaceGit(
             addArgs.AddRange(paths);
         }
 
-        var added = await RunGitAsync(root, addArgs, null, null, ct).ConfigureAwait(false);
+        var added = await _git.RunAsync(root, addArgs, null, null, ct).ConfigureAwait(false);
         if (!added.Succeeded)
         {
             return GitFailure("git add failed.", added, secret: null);
@@ -185,7 +185,7 @@ public sealed partial class GitCliRunWorkspaceGit(
 
         var resetArgs = new List<string> { "--literal-pathspecs", "reset", "-q", "--" };
         resetArgs.AddRange(excludePaths);
-        var reset = await RunGitAsync(root, resetArgs, null, null, ct).ConfigureAwait(false);
+        var reset = await _git.RunAsync(root, resetArgs, null, null, ct).ConfigureAwait(false);
         return reset.Succeeded ? null : GitFailure("git reset failed.", reset, secret: null);
     }
 
@@ -220,7 +220,7 @@ public sealed partial class GitCliRunWorkspaceGit(
     {
         ArgumentNullException.ThrowIfNull(workspace);
 
-        var mergeBase = await RunGitAsync(workspace.Root, ["merge-base", workspace.BaseRef, "HEAD"], null, null, ct).ConfigureAwait(false);
+        var mergeBase = await _git.RunAsync(workspace.Root, ["merge-base", workspace.BaseRef, "HEAD"], null, null, ct).ConfigureAwait(false);
         if (!mergeBase.Succeeded)
         {
             return Result<IReadOnlyList<GitFileChange>, AgentError>.Failure(GitFailure("git merge-base failed.", mergeBase, secret: null));
@@ -230,7 +230,7 @@ public sealed partial class GitCliRunWorkspaceGit(
         // caller never has to special-case a rename's own numstat shape. -z: NUL-terminated records with raw,
         // unquoted paths, so a filename containing a newline, a tab, or non-ASCII bytes parses correctly instead of
         // being C-style quoted (the default, newline-delimited format) or split apart by an embedded newline.
-        var diff = await RunGitAsync(workspace.Root, ["diff", "--no-renames", "-z", "--numstat", mergeBase.StdOut.Trim(), "HEAD"], null, null, ct).ConfigureAwait(false);
+        var diff = await _git.RunAsync(workspace.Root, ["diff", "--no-renames", "-z", "--numstat", mergeBase.StdOut.Trim(), "HEAD"], null, null, ct).ConfigureAwait(false);
         return diff.Succeeded
             ? Result<IReadOnlyList<GitFileChange>, AgentError>.Success(ParseNumstat(diff.StdOut))
             : Result<IReadOnlyList<GitFileChange>, AgentError>.Failure(GitFailure("git diff --numstat failed.", diff, secret: null));
@@ -271,11 +271,11 @@ public sealed partial class GitCliRunWorkspaceGit(
         // mirror's config could have been tampered with after a successful create but before this push — a
         // url.<x>.pushInsteadOf planted in the interval would otherwise redirect this exact push, credentials
         // included, before any network call happens (fix round 2 ruling).
-        var disallowedKey = await MirrorConfigSurface.FindDisallowedKeyAsync(_git, workspace.Root, workspace.Remote, ct).ConfigureAwait(false);
-        if (disallowedKey is not null)
+        var violation = await MirrorConfigSurface.FindViolationAsync(_git, workspace.Root, workspace.Remote, ct).ConfigureAwait(false);
+        if (violation is not null)
         {
             return UnitResult<AgentError>.Failure(AgentError.Validation(
-                $"Refusing to push: the mirror's git config is outside the allowed surface. Detail: {disallowedKey}"));
+                $"Refusing to push: the git config this worktree uses is outside the allowed surface. Detail: {violation}"));
         }
 
         if (string.Equals(workspace.Branch, workspace.DefaultBranch, StringComparison.Ordinal))
@@ -285,7 +285,7 @@ public sealed partial class GitCliRunWorkspaceGit(
         }
 
         var expectedRef = $"refs/heads/{workspace.Branch}";
-        var symbolicRef = await RunGitAsync(workspace.Root, ["symbolic-ref", "-q", "HEAD"], null, null, ct).ConfigureAwait(false);
+        var symbolicRef = await _git.RunAsync(workspace.Root, ["symbolic-ref", "-q", "HEAD"], null, null, ct).ConfigureAwait(false);
         if (!symbolicRef.Succeeded)
         {
             return UnitResult<AgentError>.Failure(GitFailure("git symbolic-ref HEAD failed.", symbolicRef, secret: null));
@@ -299,7 +299,7 @@ public sealed partial class GitCliRunWorkspaceGit(
 
         var (secretConfig, secret) = CredentialConfig(workspace.Remote);
         var refspec = $"{expectedRef}:{expectedRef}";
-        var pushed = await RunGitAsync(workspace.Root, ["push", "--end-of-options", workspace.Remote, refspec], null, secretConfig, ct).ConfigureAwait(false);
+        var pushed = await _git.RunAsync(workspace.Root, ["push", "--end-of-options", workspace.Remote, refspec], null, secretConfig, ct).ConfigureAwait(false);
         return pushed.Succeeded
             ? UnitResult<AgentError>.Success()
             : UnitResult<AgentError>.Failure(GitFailure("git push failed.", pushed, secret));
@@ -320,24 +320,6 @@ public sealed partial class GitCliRunWorkspaceGit(
 
         var token = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{creds.Username}:{creds.Password}"));
         return ([("http.extraHeader", $"AUTHORIZATION: basic {token}")], token);
-    }
-
-    /// <summary>
-    /// Runs one git call through <see cref="GitCli"/> with <c>-c core.fsmonitor=false</c> merged ahead of
-    /// <paramref name="extraConfig"/> on every call this type makes — defence in depth against a repository's own
-    /// tracked or local config naming an fsmonitor hook, which <see cref="GitCli"/>'s <c>core.hooksPath</c>
-    /// isolation does not cover.
-    /// </summary>
-    private Task<GitCliResult> RunGitAsync(
-        string root, IReadOnlyList<string> args, IReadOnlyList<string>? extraConfig, IReadOnlyList<(string Key, string Value)>? secretConfig, CancellationToken ct)
-    {
-        var config = new List<string> { "core.fsmonitor=false" };
-        if (extraConfig is { Count: > 0 })
-        {
-            config.AddRange(extraConfig);
-        }
-
-        return _git.RunAsync(root, args, config, secretConfig, ct);
     }
 
     /// <summary>
