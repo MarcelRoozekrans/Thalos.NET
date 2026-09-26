@@ -30,7 +30,7 @@ public sealed class McpBuilderTests
             var tools = await catalog.ResolveAsync(new AgentDefinition { Id = AgentId.New(), Name = "a", Instructions = "i" }, default);
 
             tools.IsSuccess.Should().BeTrue();
-            tools.Value.Select(t => t.Name).Should().BeEquivalentTo(["echo__echo", "echo__add", "echo__fail", "echo__env"]);
+            tools.Value.Select(t => t.Name).Should().BeEquivalentTo(["echo__echo", "echo__add", "echo__fail", "echo__env", "echo__args", "echo__cwd", "echo__ready_after", "echo__reload_count", "echo__pid"]);
         }
         finally
         {

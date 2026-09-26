@@ -35,6 +35,13 @@ public sealed class McpServerDefinition
     /// </summary>
     public TimeSpan ShutdownTimeout { get; set; } = TimeSpan.FromSeconds(2);
 
+    /// <summary>
+    /// stdio only: when set, each workflow run also gets its own copy of this server, started against the run's
+    /// workspace by <see cref="RunMcpServerRegistry"/>. In <c>.mcp.json</c> this is the <c>runScoped</c> object.
+    /// <see langword="null"/> means the server is host-wide only.
+    /// </summary>
+    public RunScopedMcpDefinition? RunScoped { get; set; }
+
     /// <summary><see cref="Type"/> lower-cased, or the default inferred from <see cref="Command"/>.</summary>
     public string EffectiveType => (Type ?? (Command is not null ? "stdio" : "http")).ToLowerInvariant();
 }

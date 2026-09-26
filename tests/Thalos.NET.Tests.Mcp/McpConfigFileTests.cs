@@ -29,4 +29,36 @@ public sealed class McpConfigFileTests
         servers["legacy"].ShutdownTimeout.Should().Be(TimeSpan.FromSeconds(1));
         servers["roslyn"].ShutdownTimeout.Should().Be(TimeSpan.FromSeconds(2), "Thalos default when not specified (the SDK waits the full timeout on dispose)");
     }
+    [Fact]
+    public void Binds_a_runScoped_section()
+    {
+        const string json = """
+        {
+          "mcpServers": {
+            "roslyn": {
+              "command": "dnx",
+              "args": ["RoslynCodeLens.Mcp", "--", "C:/host/App.sln"],
+              "runScoped": {
+                "args": ["RoslynCodeLens.Mcp", "--", "${run.workspace.solution}"],
+                "env": { "RUN": "${run.id}" },
+                "cwd": "${run.workspace.root}/src",
+                "readyTool": "list_solutions",
+                "reload": "tool:rebuild_solution"
+              }
+            },
+            "plain": { "command": "npx" }
+          }
+        }
+        """;
+        var servers = McpConfigFile.Parse(json);
+
+        servers["roslyn"].RunScoped.Should().NotBeNull();
+        var runScoped = servers["roslyn"].RunScoped!;
+        runScoped.Args.Should().Equal("RoslynCodeLens.Mcp", "--", "${run.workspace.solution}");
+        runScoped.Env.Should().BeEquivalentTo(new Dictionary<string, string>(StringComparer.Ordinal) { ["RUN"] = "${run.id}" });
+        runScoped.Cwd.Should().Be("${run.workspace.root}/src");
+        runScoped.ReadyTool.Should().Be("list_solutions");
+        runScoped.Reload.Should().Be("tool:rebuild_solution");
+        servers["plain"].RunScoped.Should().BeNull("an entry without runScoped is host-wide only");
+    }
 }

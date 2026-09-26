@@ -14,7 +14,7 @@ public sealed class McpToolSourceTests(McpServerFixture fixture) : IClassFixture
     {
         var first = await Source.GetToolsAsync(default);
         first.IsSuccess.Should().BeTrue(first.IsFailure ? first.Error.ToString() : "");
-        first.Value.Select(t => t.Name).Should().BeEquivalentTo(["echo", "add", "fail", "env"]);
+        first.Value.Select(t => t.Name).Should().BeEquivalentTo(["echo", "add", "fail", "env", "args", "cwd", "ready_after", "reload_count", "pid"]);
 
         var second = await Source.GetToolsAsync(default);
         second.Value.Should().BeSameAs(first.Value, "tool list is cached per connection");
