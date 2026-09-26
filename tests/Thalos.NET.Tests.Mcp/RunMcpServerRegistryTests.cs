@@ -410,6 +410,20 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task A_repeated_removal_notice_is_a_no_op()
+    {
+        var registry = Registry(runScoped: new() { Args = ServerArgs });
+        await registry.OnReadyAsync(Workspace(), CancellationToken.None);
+        var pid = await PidAsync(registry);
+        await registry.OnRemovingAsync(Workspace(), CancellationToken.None);
+
+        var again = async () => await registry.OnRemovingAsync(Workspace(), CancellationToken.None);
+
+        await again.Should().NotThrowAsync("the provider delivers OnRemovingAsync at least once, so a repeat must be harmless");
+        IsRunning(pid).Should().BeFalse();
+    }
+
+    [Fact]
     public async Task A_lookup_that_finds_no_workspace_leaves_nothing_tracked()
     {
         var registry = Registry(runScoped: new() { Args = ServerArgs }, workspaces: ProviderThatFinds(null));

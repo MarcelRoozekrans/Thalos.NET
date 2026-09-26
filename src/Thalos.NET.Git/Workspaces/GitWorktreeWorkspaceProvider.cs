@@ -98,7 +98,9 @@ namespace Thalos.Git.Workspaces;
 /// the moment an observer hears of the removal no caller can find the workspace again, however long the git side
 /// takes; an observer that stops something for the run cannot see it started again from this provider's own
 /// answer. A git failure leaves the record <see cref="WorkspaceSidecarState.Removing"/>: <see cref="ListAsync"/>
-/// still reports it and a later <see cref="RemoveAsync"/> finishes the removal, without telling observers again.
+/// still reports it and a later <see cref="RemoveAsync"/> finishes the removal, telling observers again first:
+/// <see cref="IRunWorkspaceObserver.OnRemovingAsync"/> is delivered at least once, because the call that marked the
+/// record may have been cancelled before every observer heard of it.
 /// A record that cannot be marked fails the removal before anything is torn down.
 /// </para>
 /// <para>
@@ -514,9 +516,10 @@ public sealed partial class GitWorktreeWorkspaceProvider(
                 $"The workspace record for run '{runId}' names repository '{workspace.Repository}', which is not a valid mirror directory name; leaving it for an operator."));
         }
 
-        // Observers were only ever told a ready workspace exists, and hear of its removal once: a Removing record's
-        // observers were told by the removal that marked it. The mark comes first, so no caller can find the
-        // workspace again while observers stop what they started for it, nor after a git failure below.
+        // Observers were only ever told a ready workspace exists. The mark comes first, so no caller can find the
+        // workspace again while observers stop what they started for it, nor after a git failure below. A Removing
+        // record is announced again: the call that marked it may have been cancelled before every observer heard,
+        // so OnRemovingAsync is delivered at least once and observers must treat a repeat as a no-op.
         if (sidecar.State == WorkspaceSidecarState.Ready)
         {
             var marked = await PublishSidecarAsync(sidecar with { State = WorkspaceSidecarState.Removing }, ct).ConfigureAwait(false);
@@ -524,7 +527,10 @@ public sealed partial class GitWorktreeWorkspaceProvider(
             {
                 return marked;
             }
+        }
 
+        if (sidecar.State != WorkspaceSidecarState.Provisional)
+        {
             await NotifyObserversAsync(workspace, removing: true, ct).ConfigureAwait(false);
         }
 
@@ -952,7 +958,10 @@ public sealed partial class GitWorktreeWorkspaceProvider(
                     await observer.OnReadyAsync(workspace, ct).ConfigureAwait(false);
                 }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+            // Only the caller's own cancellation stops the loop. An observer's own OperationCanceledException, such as
+            // an HttpClient timeout, is a failure of that observer like any other: logged, and every later observer
+            // is still told.
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
             {
                 LogObserverFailed(logger, workspace.RunId, removing ? nameof(IRunWorkspaceObserver.OnRemovingAsync) : nameof(IRunWorkspaceObserver.OnReadyAsync), ex.Message);
             }

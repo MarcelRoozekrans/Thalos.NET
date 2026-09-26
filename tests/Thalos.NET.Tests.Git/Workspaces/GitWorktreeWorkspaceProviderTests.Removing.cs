@@ -45,7 +45,33 @@ public sealed partial class GitWorktreeWorkspaceProviderTests
         (await provider.RemoveAsync(ws.RunId, CancellationToken.None)).IsSuccess.Should().BeTrue("a later remove finishes a removing record");
         Directory.Exists(ws.Root).Should().BeFalse();
         (await provider.ListAsync(CancellationToken.None)).Should().NotContain(w => w.RunId == ws.RunId);
-        observer.Removing.Should().ContainSingle("observers hear of a removal once, from the call that marked the record");
+        observer.Removing.Should().HaveCount(2, "a retried removal tells observers again: delivery is at least once, since the first call may not have reached them all");
+    }
+
+    [Fact]
+    public async Task An_observers_own_cancellation_is_logged_and_later_observers_are_still_told()
+    {
+        using var remote = LocalGitRemote.Create();
+        var later = new RecordingObserver(runId => File.Exists(SidecarPath(runId)));
+        var provider = new GitWorktreeWorkspaceProvider(
+            new GitWorkspaceOptions { DataRoot = _dataRoot },
+            [new SelfCancellingObserver(), later],
+            NullLogger<GitWorktreeWorkspaceProvider>.Instance,
+            TimeProvider.System);
+        var ws = (await provider.CreateAsync(Request(remote, Guid.NewGuid()), CancellationToken.None)).Value;
+
+        var remove = async () => await provider.RemoveAsync(ws.RunId, CancellationToken.None);
+
+        (await remove.Should().NotThrowAsync("the caller's token was never cancelled")).Subject.IsSuccess.Should().BeTrue();
+        later.Removing.Should().ContainSingle("an observer that timed out on its own is one failed observer, not a cancelled removal");
+    }
+
+    /// <summary>Throws the <see cref="TaskCanceledException"/> an HttpClient timeout raises, with the caller's token untouched.</summary>
+    private sealed class SelfCancellingObserver : IRunWorkspaceObserver
+    {
+        public ValueTask OnReadyAsync(RunWorkspace workspace, CancellationToken ct) => ValueTask.CompletedTask;
+
+        public ValueTask OnRemovingAsync(RunWorkspace workspace, CancellationToken ct) => throw new TaskCanceledException("observer's own timeout");
     }
 
     [Fact]

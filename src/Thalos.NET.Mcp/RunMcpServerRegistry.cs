@@ -33,9 +33,11 @@ namespace Thalos.Mcp;
 /// </para>
 /// <para>
 /// <b>Not re-entrant into the provider.</b> <c>GitWorktreeWorkspaceProvider</c> calls <see cref="OnReadyAsync"/> and
-/// <see cref="OnRemovingAsync"/> while it holds its per-repository lock. Neither method calls any of the provider's
-/// methods, for any repository, and neither waits for a server to become ready: a change that did would deadlock
-/// the provider or hold its lock for as long as a server takes to load. Only <see cref="WaitAllReadyAsync"/> calls the provider, and only
+/// <see cref="OnRemovingAsync"/> while it holds the run's lock, outside its per-repository lock. Neither method calls
+/// any of the provider's methods, for any run, and neither waits for a server to become ready. A
+/// <see cref="IRunWorkspaceProvider.CreateAsync"/> or <see cref="IRunWorkspaceProvider.RemoveAsync"/> for the same
+/// run from inside a notification would not deadlock but fail at once, because the provider only tries the run lock;
+/// waiting for a server would hold that lock for as long as the server takes to load. Only <see cref="WaitAllReadyAsync"/> calls the provider, and only
 /// <see cref="IRunWorkspaceProvider.FindAsync"/>.
 /// </para>
 /// <para>
@@ -127,7 +129,11 @@ public sealed partial class RunMcpServerRegistry(
         return ValueTask.CompletedTask;
     }
 
-    /// <summary>Stops every server of <paramref name="workspace"/>'s run, including one still starting, and waits until each process is shut down.</summary>
+    /// <summary>
+    /// Stops every server of <paramref name="workspace"/>'s run, including one still starting, and waits until each
+    /// process is shut down. Idempotent, since the provider delivers it at least once: a repeat finds no servers and
+    /// returns at once.
+    /// </summary>
     /// <param name="workspace">The run's workspace, about to be removed.</param>
     /// <param name="ct">Unused: a removal always finishes stopping the run's servers, which is bounded by each server's shutdown timeout.</param>
     public async ValueTask OnRemovingAsync(RunWorkspace workspace, CancellationToken ct)
