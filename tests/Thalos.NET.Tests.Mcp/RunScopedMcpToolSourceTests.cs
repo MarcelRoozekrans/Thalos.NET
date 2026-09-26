@@ -209,10 +209,62 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
                 return $"threw {ex.GetType().Name}";
             }
         });
-        await UntilAsync(() => File.Exists(log) && File.ReadAllText(log).Contains("slow", StringComparison.Ordinal), "the slow call to reach the run's server");
+        await UntilAsync(() => CallLog.Read(log).Contains("slow", StringComparison.Ordinal), "the slow call to reach the run's server");
         await registry.OnRemovingAsync(Workspace(RunId), CancellationToken.None);
 
         (await inFlight.WaitAsync(TimeSpan.FromSeconds(15))).Should().Be("error: run tool server 'roslyn' stopped during 'slow' for this run; the call did not complete.");
+    }
+
+    [Fact]
+    public async Task A_call_sent_while_its_run_server_is_being_stopped_gets_an_error_result_instead_of_waiting_out_the_call_timeout()
+    {
+        var log = Path.Combine(_root, "calls.log");
+        var runScoped = RunScoped("--call-log", log);
+        runScoped.CallTimeout = TimeSpan.FromSeconds(30);
+        // Disposing the client keeps the server's stdin open this long before it kills the server: the window in which a
+        // request is written but never answered.
+        var (args, registry) = await RoutedToolAsync("args", runScoped, ready: [RunId], shutdownTimeout: TimeSpan.FromSeconds(5));
+        var slow = await ToolAsync(args, "slow");
+        var client = await ClientAsync(registry); // the client the routed calls below are handed
+
+        // A probe call in flight on the same client: disposing the client cancels its pending requests, which ends the probe.
+        var probe = Task.Run(async () =>
+        {
+            using var _turn = BeginTurn(RunCaller(RunId));
+            return await InvokeAsync(slow, Args("ms", 60000));
+        });
+        await UntilAsync(() => CallLog.Read(log).Contains("slow", StringComparison.Ordinal), "the probe call to reach the run's server");
+
+        // Runs inside the routed call, after its lease is taken and before its request is sent: the removal has begun,
+        // the client has cancelled its pending requests, which ends the probe, and has finished closing its session,
+        // which takes milliseconds; the server's stdin stays open for the 5 s shutdown timeout after that.
+        Task? removal = null;
+        var windowOpen = false;
+        var hook = new RunWhenSerialized(() =>
+        {
+            removal = registry.OnRemovingAsync(Workspace(RunId), CancellationToken.None).AsTask();
+            probe.Wait(TimeSpan.FromSeconds(15));
+            Thread.Sleep(TimeSpan.FromSeconds(1));
+            windowOpen = !client.Completion.IsCompleted;
+        });
+
+        var sw = Stopwatch.StartNew();
+        string outcome;
+        using (BeginTurn(RunCaller(RunId)))
+        {
+            outcome = await InvokeAsync(args, new AIFunctionArguments(StringComparer.Ordinal) { ["hook"] = hook });
+        }
+
+        var elapsed = sw.Elapsed;
+        await removal!;
+
+        using var _scope = new AssertionScope();
+        hook.Ran.Should().BeTrue("the hook began the removal inside the routed call");
+        probe.IsCompleted.Should().BeTrue("the removal had cancelled the client's pending requests before the call was sent");
+        windowOpen.Should().BeTrue("the call was sent while the server's stdin was still open, so it was written but never answered");
+        // Stopped or exited: as the session closes, the call cannot tell a removal from a crash, and either is a cut-off call.
+        outcome.Should().MatchRegex(@"^error: run tool server 'roslyn' (stopped during 'args' for this run; the call did not complete\.|is not available for this run: its server exited during 'args'\.)$");
+        elapsed.Should().BeLessThan(TimeSpan.FromSeconds(15), "the call ends with its server's session, not at the call timeout");
     }
 
     [Fact]
@@ -233,7 +285,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         await Task.Delay(TimeSpan.FromSeconds(3)); // the reload, if it was left running, is done by now
         var after = await InvokeAsync(args);
         var count = await InvokeAsync(reloadCount);
-        var logged = await File.ReadAllLinesAsync(log);
+        var logged = CallLog.Lines(log);
 
         using var _scope = new AssertionScope();
         during.Should().Be($"error: run tool server 'roslyn' is not available for this run: its server was not ready within {TimeSpan.FromSeconds(1)}.");
@@ -310,7 +362,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
                 return $"threw {ex.GetType().Name}: {ex.Message}";
             }
         });
-        await UntilAsync(() => File.Exists(log) && File.ReadAllText(log).Contains("slow", StringComparison.Ordinal), "the slow call to reach the run's server");
+        await UntilAsync(() => CallLog.Read(log).Contains("slow", StringComparison.Ordinal), "the slow call to reach the run's server");
         await KillAsync(pid);
 
         var result = await inFlight.WaitAsync(TimeSpan.FromSeconds(15));
@@ -486,7 +538,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         await changes;
         var results = (await Task.WhenAll(calls)).SelectMany(r => r).ToList();
 
-        var logged = File.Exists(log) ? await File.ReadAllLinesAsync(log) : [];
+        var logged = CallLog.Lines(log);
         using var _turn = BeginTurn(RunCaller(RunId));
         var overlapCount = await InvokeAsync(overlaps);
 
@@ -549,9 +601,10 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
     private static RunScopedMcpDefinition RunScoped(params string[] extra) =>
         new() { Args = [McpServerFixture.ServerDll, "--run", "--id", "${run.id}", .. extra] };
 
-    private RunMcpServerRegistry Registry(RunScopedMcpDefinition runScoped)
+    private RunMcpServerRegistry Registry(RunScopedMcpDefinition runScoped, TimeSpan? shutdownTimeout = null)
     {
         var definition = McpServerFixture.Definition("--host");
+        definition.ShutdownTimeout = shutdownTimeout ?? definition.ShutdownTimeout;
         definition.RunScoped = runScoped;
         var registry = new RunMcpServerRegistry(
             new Dictionary<string, McpServerDefinition>(StringComparer.Ordinal) { ["roslyn"] = definition },
@@ -561,10 +614,11 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
     }
 
     /// <summary>The routed tool <paramref name="toolName"/>, with a server started and ready for each run in <paramref name="ready"/>.</summary>
-    private async Task<(AIFunction Tool, RunMcpServerRegistry Registry)> RoutedToolAsync(string toolName, RunScopedMcpDefinition? runScoped = null, Guid[]? ready = null)
+    private async Task<(AIFunction Tool, RunMcpServerRegistry Registry)> RoutedToolAsync(
+        string toolName, RunScopedMcpDefinition? runScoped = null, Guid[]? ready = null, TimeSpan? shutdownTimeout = null)
     {
         runScoped ??= RunScoped();
-        var registry = Registry(runScoped);
+        var registry = Registry(runScoped, shutdownTimeout);
         var source = Source(runScoped, registry);
 
         foreach (var runId in ready ?? [])
@@ -602,6 +656,15 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
 
     private static async Task<string> InvokeAsync(AIFunction tool, AIFunctionArguments? arguments = null) =>
         (await tool.InvokeAsync(arguments ?? new AIFunctionArguments(StringComparer.Ordinal), CancellationToken.None))!.ToString()!;
+
+    /// <summary>The client of <see cref="RunId"/>'s server, taken through a lease that is released at once.</summary>
+    private async Task<ModelContextProtocol.Client.McpClient> ClientAsync(RunMcpServerRegistry registry)
+    {
+        var lease = await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None);
+        lease.IsSuccess.Should().BeTrue(lease.IsFailure ? lease.Error.Message : "");
+        await lease.Value.DisposeAsync();
+        return lease.Value.Client;
+    }
 
     /// <summary>Calls <paramref name="tool"/> as a caller of <see cref="RunId"/>.</summary>
     private async Task<string> RoutedAsync(AIFunction tool)

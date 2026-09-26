@@ -4,6 +4,9 @@
     <PackageId>Thalos.NET.Mcp</PackageId>
     <Description>Model Context Protocol servers (stdio, http) as Thalos.NET tool sources. Loads Claude Code-style .mcp.json.</Description>
     <PackageTags>agents;mcp;model-context-protocol;tools</PackageTags>
+    <!-- ServerProcessTree P/Invokes the Toolhelp process snapshot; LibraryImport's generated marshalling needs this
+         even where the source itself has no explicit unsafe block. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />

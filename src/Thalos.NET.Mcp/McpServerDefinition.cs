@@ -30,8 +30,10 @@ public sealed class McpServerDefinition
     /// <summary>
     /// stdio only: how long disposing the source waits before the server's process tree is killed. ModelContextProtocol
     /// 2.2.0 does not close the server's stdin on dispose; it waits this long and then kills the whole process tree, so every
-    /// dispose of a stdio server takes the full timeout. Default 2 seconds (the SDK default is 5 s): a long value only slows
-    /// host shutdown and run removal. In <c>.mcp.json</c> this is the <c>shutdownTimeout</c> property as a <c>hh:mm:ss</c>
+    /// dispose of a stdio server takes the full timeout. On Windows it waits only for the <c>cmd.exe</c> it started the server
+    /// under, so for a run-scoped server <see cref="RunMcpServerRegistry"/> then waits up to this long again for the rest of
+    /// the server's process tree. Default 2 seconds (the SDK default is 5 s): a long value only slows host shutdown and run
+    /// removal. In <c>.mcp.json</c> this is the <c>shutdownTimeout</c> property as a <c>hh:mm:ss</c>
     /// string (e.g. <c>"00:00:01"</c>).
     /// </summary>
     public TimeSpan ShutdownTimeout { get; set; } = TimeSpan.FromSeconds(2);

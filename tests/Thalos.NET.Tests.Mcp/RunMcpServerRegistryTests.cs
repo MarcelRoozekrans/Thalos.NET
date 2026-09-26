@@ -314,7 +314,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
                 return await first.Client.CallToolAsync("slow", new Dictionary<string, object?>(StringComparer.Ordinal) { ["ms"] = 1500 });
             }
         });
-        await UntilAsync(() => File.Exists(log) && File.ReadAllText(log).Contains("slow", StringComparison.Ordinal), "the slow call to begin");
+        await UntilAsync(() => CallLog.Read(log).Contains("slow", StringComparison.Ordinal), "the slow call to begin");
         registry.OnFilesChanged(RunId, ["a.cs"]);
         await using var second = await Task.Run(async () => await LeaseAsync(registry));
 
@@ -338,13 +338,13 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
                 return await first.Client.CallToolAsync("slow", new Dictionary<string, object?>(StringComparer.Ordinal) { ["ms"] = 1500 });
             }
         });
-        await UntilAsync(() => File.Exists(log) && File.ReadAllText(log).Contains("slow", StringComparison.Ordinal), "the slow call to begin");
+        await UntilAsync(() => CallLog.Read(log).Contains("slow", StringComparison.Ordinal), "the slow call to begin");
         registry.OnFilesChanged(RunId, ["a.cs"]);
         await using var second = await Task.Run(async () => await LeaseAsync(registry));
 
         await inFlight;
         (await CallAsync(second.Client, "overlaps")).Should().Be("0", "the reload waited until the call's lease was released");
-        (await File.ReadAllLinesAsync(log)).Should().Equal(["slow", "reload_count"], "the reload still ran, after the call");
+        CallLog.Lines(log).Should().Equal(["slow", "reload_count"], "the reload still ran, after the call");
     }
 
     [Fact]
@@ -481,7 +481,8 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
     public async Task A_failed_tool_reload_is_retried_on_the_next_call()
     {
         var log = Path.Combine(_root, "calls.log");
-        var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--ready-after", "3000", "--call-log", log], Reload = "tool:ready_after" });
+        var ready = Path.Combine(_root, "ready");
+        var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--ready-when", ready, "--call-log", log], Reload = "tool:ready_after" });
         await registry.OnReadyAsync(Workspace(), CancellationToken.None);
         (await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None)).IsSuccess.Should().BeTrue();
 
@@ -490,9 +491,9 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         failed.IsFailure.Should().BeTrue("the reload tool answered with an error");
         failed.Error.Message.Should().Contain("could not reload");
 
-        await Task.Delay(TimeSpan.FromSeconds(3.5));
+        await File.WriteAllTextAsync(ready, ""); // the reload tool succeeds from now on
         await (await LeaseAsync(registry)).DisposeAsync();
-        (await File.ReadAllLinesAsync(log)).Should().Equal(["ready_after", "ready_after"], "the failed reload is still pending and runs again");
+        CallLog.Lines(log).Should().Equal(["ready_after", "ready_after"], "the failed reload is still pending and runs again");
     }
 
     [Fact]
@@ -562,6 +563,46 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         await Task.Run(async () => await registry.OnRemovingAsync(Workspace(), CancellationToken.None));
         sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(8), "the start is cancelled, not waited out");
         IsRunning(pid).Should().BeFalse();
+    }
+
+    [SkippableFact]
+    public async Task Removing_a_run_ends_its_server_process_even_when_the_cmd_wrapper_exited_first()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "Only on Windows does the MCP SDK start a stdio server under a cmd.exe wrapper.");
+        var workspace = Workspace() with { Root = Directory.CreateDirectory(Path.Combine(_root, "wrapped-ws")).FullName };
+        // Outlives the end of its stdin, so only a kill ends it: the SDK's dispose closes stdin but kills nothing once its wrapper is gone.
+        var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--shutdown-delay-ms", "60000"] });
+        await registry.OnReadyAsync(workspace, CancellationToken.None);
+        var pid = await PidAsync(registry);
+        await KillWrapperOnlyAsync(pid); // the SDK waits for the wrapper alone, so it finds nothing left to stop
+
+        await registry.OnRemovingAsync(workspace, CancellationToken.None);
+        var running = IsRunning(pid);
+        var workspaceFree = TryDelete(workspace.Root);
+
+        using var _scope = new AssertionScope();
+        running.Should().BeFalse("the removal ends the server process itself, not only the wrapper the SDK started it under");
+        workspaceFree.Should().BeTrue("once the removal returns, no process has the run's workspace as its working directory");
+    }
+
+    [SkippableFact]
+    public async Task Removing_a_run_while_its_server_is_starting_ends_the_server_process_even_when_the_cmd_wrapper_exited_first()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "Only on Windows does the MCP SDK start a stdio server under a cmd.exe wrapper.");
+        var workspace = Workspace() with { Root = Directory.CreateDirectory(Path.Combine(_root, "wrapped-ws")).FullName };
+        var pidFile = Path.Combine(_root, "server.pid");
+        var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--pid-file", pidFile, "--delay-ms", "60000"] });
+        await registry.OnReadyAsync(workspace, CancellationToken.None);
+        var pid = await PidFromFileAsync(pidFile); // silent for 60 s: its client is still connecting
+        await KillWrapperOnlyAsync(pid);
+
+        await registry.OnRemovingAsync(workspace, CancellationToken.None);
+        var running = IsRunning(pid);
+        var workspaceFree = TryDelete(workspace.Root);
+
+        using var _scope = new AssertionScope();
+        running.Should().BeFalse("the removal ends a server whose client never connected, not only the wrapper the SDK started it under");
+        workspaceFree.Should().BeTrue("once the removal returns, no process has the run's workspace as its working directory");
     }
 
     [Fact]
@@ -670,6 +711,31 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         {
             return false; // no process has that id any more
         }
+    }
+
+    /// <summary>
+    /// Kills the <c>cmd.exe</c> the MCP SDK started server <paramref name="pid"/> under, and only it: the server lives on,
+    /// holding the session's pipes, so the SDK sees nothing wrong until it disposes the client.
+    /// </summary>
+    private static async Task KillWrapperOnlyAsync(int pid)
+    {
+        var query = new ProcessStartInfo("powershell", $"-NoProfile -NonInteractive -Command \"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').ParentProcessId\"")
+        {
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+        };
+        int wrapperPid;
+        using (var powershell = Process.Start(query)!)
+        {
+            wrapperPid = int.Parse((await powershell.StandardOutput.ReadToEndAsync()).Trim(), CultureInfo.InvariantCulture);
+            await powershell.WaitForExitAsync();
+        }
+
+        using var wrapper = Process.GetProcessById(wrapperPid);
+        wrapper.ProcessName.Should().Be("cmd", "the SDK starts a stdio server as cmd.exe /c on Windows");
+        wrapper.Kill(entireProcessTree: false);
+        await wrapper.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+        IsRunning(pid).Should().BeTrue("only the wrapper was killed");
     }
 
     private static bool TryDelete(string directory)

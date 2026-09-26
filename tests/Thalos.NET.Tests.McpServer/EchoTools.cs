@@ -17,6 +17,9 @@ public static class EchoTools
     /// <summary>How long after process start <c>ready_after</c> keeps failing; set from <c>--ready-after</c>.</summary>
     public static TimeSpan ReadyAfter { get; set; }
 
+    /// <summary>A file <c>ready_after</c> also keeps failing until it exists; set from <c>--ready-when</c>.</summary>
+    public static string? ReadyWhen { get; set; }
+
     /// <summary>How long <c>reload_count</c> takes after counting; set from <c>--reload-delay-ms</c>.</summary>
     public static TimeSpan ReloadDelay { get; set; }
 
@@ -41,12 +44,12 @@ public static class EchoTools
     [McpServerTool(Name = "cwd"), Description("Returns the server process's working directory")]
     public static string Cwd() => Environment.CurrentDirectory;
 
-    [McpServerTool(Name = "ready_after"), Description("Fails until --ready-after milliseconds have passed since the process started")]
+    [McpServerTool(Name = "ready_after"), Description("Fails until --ready-after milliseconds have passed since the process started and the --ready-when file exists")]
     public static async Task<string> ReadyAfterTool()
     {
         await LogCallAsync("ready_after");
         using var self = Process.GetCurrentProcess();
-        return DateTime.Now - self.StartTime >= ReadyAfter ? "ready" : throw new InvalidOperationException("not ready yet");
+        return DateTime.Now - self.StartTime >= ReadyAfter && (ReadyWhen is null || File.Exists(ReadyWhen)) ? "ready" : throw new InvalidOperationException("not ready yet");
     }
 
     [McpServerTool(Name = "reload_count"), Description("Counts its own calls and returns the count; records an overlap with a running slow call")]

@@ -1,4 +1,6 @@
+using System.ComponentModel;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Client;
@@ -21,6 +23,13 @@ namespace Thalos.Mcp;
 /// <see cref="DisposeAsync"/> stop every affected server, including one still starting, and return only once its
 /// process has been shut down, so the workspace directory is no longer any process's working directory when the
 /// provider deletes it. <see cref="DisposeAsync"/> also waits for a removal's stop that is already under way.
+/// </para>
+/// <para>
+/// <b>The whole process tree.</b> On Windows the MCP SDK starts a stdio server as <c>cmd.exe /c</c> and, when its
+/// client is disposed, waits for that wrapper alone: the server may still be terminating, or, if the wrapper exited
+/// first, still running. So every time the registry lets go of a server, stopped, found dead, restarted or failed while
+/// connecting, it also ends what is left of that server's tree and waits for it, bounded by the server's
+/// <see cref="McpServerDefinition.ShutdownTimeout"/>; see <see cref="ServerProcessTree"/>.
 /// </para>
 /// <para>
 /// <b>A removed run's server is never started again.</b> <c>GitWorktreeWorkspaceProvider</c> marks the workspace
@@ -111,6 +120,7 @@ public sealed partial class RunMcpServerRegistry(
     private readonly Dictionary<Guid, Entry[]> _runs = [];
     private readonly Dictionary<Guid, List<Lookup>> _lookups = [];
     private readonly HashSet<Task> _stops = [];
+    private readonly ConditionalWeakTable<McpClient, TrackedStdioClientTransport> _transports = [];
     private readonly Lazy<IRunWorkspaceProvider?> _workspaces = new(workspaces ?? throw new ArgumentNullException(nameof(workspaces)), LazyThreadSafetyMode.ExecutionAndPublication);
     private bool _disposed;
 
@@ -573,7 +583,9 @@ public sealed partial class RunMcpServerRegistry(
         }
 
         var stopping = entry.Stopping.Token;
+        var transport = new TrackedStdioClientTransport(new StdioClientTransport(options.Value, _loggerFactory));
         McpClient? client = null;
+        var handedOut = false;
         try
         {
             LogStarting(_logger, name, runId);
@@ -581,7 +593,8 @@ public sealed partial class RunMcpServerRegistry(
             using (var connectTimeout = new CancellationTokenSource(entry.Spec.Definition.Timeout, _clock))
             using (var connect = CancellationTokenSource.CreateLinkedTokenSource(stopping, connectTimeout.Token))
             {
-                client = await McpClient.CreateAsync(new StdioClientTransport(options.Value, _loggerFactory), clientOptions: null, _loggerFactory, connect.Token).ConfigureAwait(false);
+                client = await McpClient.CreateAsync(transport, clientOptions: null, _loggerFactory, connect.Token).ConfigureAwait(false);
+                _transports.AddOrUpdate(client, transport); // every later dispose of the client ends the rest of its tree
                 tools = await client.ListToolsAsync(cancellationToken: connect.Token).ConfigureAwait(false);
             }
 
@@ -594,9 +607,8 @@ public sealed partial class RunMcpServerRegistry(
             await PollReadyToolAsync(client, entry.Spec.Definition.RunScoped!.ReadyTool, stopping).ConfigureAwait(false);
 
             LogReady(_logger, name, runId);
-            var ready = client;
-            client = null;
-            return Result<McpClient, AgentError>.Success(ready);
+            handedOut = true;
+            return Result<McpClient, AgentError>.Success(client);
         }
         catch (Exception ex) when (stopping.IsCancellationRequested)
         {
@@ -612,10 +624,26 @@ public sealed partial class RunMcpServerRegistry(
         }
         finally
         {
-            if (client is not null)
+            if (!handedOut)
             {
-                await DisposeClientAsync(entry, client).ConfigureAwait(false);
+                await ReleaseFailedStartAsync(entry, client, transport).ConfigureAwait(false);
             }
+        }
+    }
+
+    /// <summary>
+    /// Shuts down what a failed start left: its client when it got one; otherwise the SDK has already closed the session
+    /// whose handshake failed, and only the rest of its process tree is left to end.
+    /// </summary>
+    private async Task ReleaseFailedStartAsync(Entry entry, McpClient? client, TrackedStdioClientTransport transport)
+    {
+        if (client is not null)
+        {
+            await DisposeClientAsync(entry, client).ConfigureAwait(false);
+        }
+        else
+        {
+            await EndProcessTreeAsync(entry, transport).ConfigureAwait(false);
         }
     }
 
@@ -882,6 +910,7 @@ public sealed partial class RunMcpServerRegistry(
         entry.Stopping.Dispose();
     }
 
+    /// <summary>Disposes <paramref name="client"/>, which shuts its process down, then ends and waits for the rest of that process's tree.</summary>
     private async ValueTask DisposeClientAsync(Entry entry, McpClient client)
     {
         try
@@ -891,6 +920,47 @@ public sealed partial class RunMcpServerRegistry(
         catch (Exception ex)
         {
             LogDisposeFailed(_logger, ex, entry.Spec.Name, entry.Workspace.RunId);
+        }
+
+        if (_transports.TryGetValue(client, out var transport))
+        {
+            await EndProcessTreeAsync(entry, transport).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// On Windows, kills what is left of the process tree that <paramref name="transport"/>'s closed session started and
+    /// waits for it, bounded by the server's shutdown timeout; see <see cref="ServerProcessTree"/>. Elsewhere the SDK has
+    /// already waited for the server itself.
+    /// </summary>
+    private async Task EndProcessTreeAsync(Entry entry, TrackedStdioClientTransport transport)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        var timeout = entry.Spec.Definition.ShutdownTimeout;
+        if (await transport.ClosedProcessIdAsync(timeout).ConfigureAwait(false) is not { } wrapperPid)
+        {
+            return;
+        }
+
+        try
+        {
+            var (found, stillRunning) = await ServerProcessTree.EndAsync(wrapperPid, transport.StartedAt, timeout).ConfigureAwait(false);
+            if (stillRunning > 0)
+            {
+                LogProcessTreeNotEnded(_logger, entry.Spec.Name, entry.Workspace.RunId, stillRunning, timeout);
+            }
+            else if (found > 0)
+            {
+                LogProcessTreeEnded(_logger, entry.Spec.Name, entry.Workspace.RunId, found);
+            }
+        }
+        catch (Win32Exception ex)
+        {
+            LogProcessTreeNotListed(_logger, ex, entry.Spec.Name, entry.Workspace.RunId);
         }
     }
 
@@ -1142,6 +1212,15 @@ public sealed partial class RunMcpServerRegistry(
 
     [LoggerMessage(EventId = 318, Level = LogLevel.Debug, Message = "Run-scoped MCP server '{Server}' for run {RunId} was stopped while starting")]
     private static partial void LogStartStopped(ILogger logger, Exception exception, string server, Guid runId);
+
+    [LoggerMessage(EventId = 321, Level = LogLevel.Debug, Message = "Ended {Count} leftover processes of run-scoped MCP server '{Server}' for run {RunId}")]
+    private static partial void LogProcessTreeEnded(ILogger logger, string server, Guid runId, int count);
+
+    [LoggerMessage(EventId = 322, Level = LogLevel.Warning, Message = "Run-scoped MCP server '{Server}' for run {RunId} left {Count} processes running {Timeout} after they were killed")]
+    private static partial void LogProcessTreeNotEnded(ILogger logger, string server, Guid runId, int count, TimeSpan timeout);
+
+    [LoggerMessage(EventId = 323, Level = LogLevel.Warning, Message = "The processes of run-scoped MCP server '{Server}' for run {RunId} could not be listed, so any left running were not ended")]
+    private static partial void LogProcessTreeNotListed(ILogger logger, Exception exception, string server, Guid runId);
 
     [LoggerMessage(EventId = 317, Level = LogLevel.Debug, Message = "The workspace of run {RunId} is ready after the registry was disposed; no server started")]
     private static partial void LogReadyAfterDispose(ILogger logger, Guid runId);

@@ -34,6 +34,9 @@ if (TryMilliseconds("ready-after", out var readyAfter))
     EchoTools.ReadyAfter = readyAfter;
 }
 
+// `--ready-when PATH`: the ready_after tool also fails until PATH exists.
+EchoTools.ReadyWhen = builder.Configuration["ready-when"];
+
 // `--reload-delay-ms N`: reload_count takes N ms after counting. `--call-log PATH`: ready_after and reload_count append their name to PATH.
 if (TryMilliseconds("reload-delay-ms", out var reloadDelay))
 {
@@ -44,6 +47,13 @@ EchoTools.CallLog = builder.Configuration["call-log"];
 
 // The stdio transport completes when stdin reaches EOF; the SDK's hosted service then stops the host, so the process exits promptly.
 await builder.Build().RunAsync();
+
+// `--shutdown-delay-ms N`: stay alive for N ms after stdin closes, as a server slow to shut down would.
+if (TryMilliseconds("shutdown-delay-ms", out var shutdownDelay))
+{
+    await Task.Delay(shutdownDelay);
+}
+
 return 0;
 
 bool TryMilliseconds(string key, out TimeSpan value)

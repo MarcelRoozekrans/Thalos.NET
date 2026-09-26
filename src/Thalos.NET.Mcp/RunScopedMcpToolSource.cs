@@ -27,7 +27,8 @@ namespace Thalos.Mcp;
 /// disposes it on every path, including a throw or a cancellation. It never holds a second lease meanwhile, which
 /// <see cref="RunMcpServerRegistry"/> requires. The call is bounded by <see cref="RunScopedMcpDefinition.CallTimeout"/>,
 /// because a held lease holds back that server's reloads. A removal does not wait for leases: a call whose run's server
-/// is stopped under it gets an error result, not a cancellation it never asked for. Only the caller's own token
+/// is stopped under it gets an error result, not a cancellation it never asked for, as soon as the server's session ends,
+/// even when its request was sent while the SDK was already closing the session and so is never answered. Only the caller's own token
 /// cancelling makes a routed call throw <see cref="OperationCanceledException"/>. A server that dies under a call, or
 /// before it, gets the call refused with the same error text as a server that is not running.
 /// </para>
@@ -114,10 +115,7 @@ public sealed partial class RunScopedMcpToolSource(
             using var call = CancellationTokenSource.CreateLinkedTokenSource(ct, callTimeout.Token);
             try
             {
-                // The host tool's own definition and serializer options over the run's client: the same arguments reach
-                // the server, and the result has the same shape, as a host call's.
-                return await new McpClientTool(lease.Value.Client, tool.ProtocolTool, tool.JsonSerializerOptions)
-                    .InvokeAsync(arguments, call.Token).ConfigureAwait(false);
+                return await CallUntilSessionEndsAsync(tool, lease.Value.Client, arguments, call).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (callTimeout.IsCancellationRequested && !ct.IsCancellationRequested)
             {
@@ -126,9 +124,9 @@ public sealed partial class RunScopedMcpToolSource(
             }
             catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
             {
-                // Neither the caller nor the timeout: the SDK cancels a call in flight when its session closes, which is
-                // how a removal, which does not wait for leases, stops the run's server under it. Reported, not thrown as
-                // a cancellation the caller never asked for.
+                // Neither the caller nor the timeout: the call's session closed, which is how a removal, which does not
+                // wait for leases, stops the run's server under it. Reported, not thrown as a cancellation the caller never
+                // asked for.
                 LogCallCutOff(_logger, ex, Name, tool.Name, runId);
                 return $"error: run tool server '{Name}' stopped during '{tool.Name}' for this run; the call did not complete.";
             }
@@ -140,6 +138,25 @@ public sealed partial class RunScopedMcpToolSource(
                 return Refuse(runId, $"its server exited during '{tool.Name}'.");
             }
         }
+    }
+
+    /// <summary>
+    /// Calls <paramref name="tool"/> through <paramref name="client"/>, cancelling <paramref name="call"/> if the client's
+    /// session ends first. Disposing a client cancels the requests pending at that moment, then keeps the server's stdin
+    /// open for its shutdown timeout, so a request sent in between is written but never answered and would otherwise wait
+    /// out the whole call timeout.
+    /// </summary>
+    private static async Task<object?> CallUntilSessionEndsAsync(McpClientTool tool, McpClient client, AIFunctionArguments arguments, CancellationTokenSource call)
+    {
+        // The host tool's own definition and serializer options over the run's client: the same arguments reach the
+        // server, and the result has the same shape, as a host call's.
+        var invocation = new McpClientTool(client, tool.ProtocolTool, tool.JsonSerializerOptions).InvokeAsync(arguments, call.Token).AsTask();
+        if (await Task.WhenAny(invocation, client.Completion).ConfigureAwait(false) != invocation)
+        {
+            await call.CancelAsync().ConfigureAwait(false);
+        }
+
+        return await invocation.ConfigureAwait(false);
     }
 
     private string Refuse(Guid? runId, string reason)
