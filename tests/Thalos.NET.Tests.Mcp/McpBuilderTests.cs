@@ -91,13 +91,23 @@ public sealed class McpBuilderTests
 
         var source = sp.GetServices<IToolSource>().Single(s => string.Equals(s.Name, "roslyn", StringComparison.Ordinal));
         var tool = (await source.GetToolsAsync(CancellationToken.None)).Value.OfType<AIFunction>().Single(t => string.Equals(t.Name, "args", StringComparison.Ordinal));
-        using var _ = TestCallers.BeginTurn(TestCallers.RunCaller(Guid.NewGuid()));
-        var result = (await tool.InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal), CancellationToken.None))!.ToString();
+        string result;
+        using (TestCallers.BeginTurn(TestCallers.RunCaller(Guid.NewGuid())))
+        {
+            result = (await tool.InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal), CancellationToken.None))!.ToString()!;
+        }
+
+        string hostResult;
+        using (TestCallers.BeginTurn(new TestCaller("chat-user")))
+        {
+            hostResult = (await tool.InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal), CancellationToken.None))!.ToString()!;
+        }
 
         using var _scope = new AssertionScope();
         result.Should().StartWith("error: run tool server 'roslyn' is not available for this run: ");
         result.Should().Contain("no run workspace provider");
         result.Should().NotContain("--host");
+        hostResult.Should().Contain("--host", "with no workspace provider, host callers are still served by the host server");
     }
 
     [Fact]
@@ -137,7 +147,33 @@ public sealed class McpBuilderTests
         act.Should().Throw<ArgumentException>().WithParameterName("name").WithMessage("*'roslyn' was already added*");
     }
 
+    [Fact]
+    public void A_run_scoped_entry_named_like_an_earlier_plain_entry_is_rejected_at_composition()
+    {
+        var services = new ServiceCollection();
+        var act = () => services.AddThalos(t => t.AddMcpServer("roslyn", Definition(runScoped: false)).AddMcpServer("roslyn", Definition(runScoped: true)));
+        act.Should().Throw<ArgumentException>().WithParameterName("name").WithMessage("*'roslyn' was already added*");
+    }
+
+    [Fact]
+    public void A_plain_entry_named_like_an_earlier_run_scoped_entry_is_rejected_at_composition()
+    {
+        var services = new ServiceCollection();
+        var act = () => services.AddThalos(t => t.AddMcpServer("roslyn", Definition(runScoped: true)).AddMcpServer("roslyn", Definition(runScoped: false)));
+        act.Should().Throw<ArgumentException>().WithParameterName("name").WithMessage("*'roslyn' was already added*");
+    }
+
+    [Fact]
+    public void Two_plain_entries_with_the_same_name_are_still_accepted_first_wins_as_before()
+    {
+        var services = new ServiceCollection();
+        var act = () => services.AddThalos(t => t.AddMcpServer("echo", McpServerFixture.Definition()).AddMcpServer("echo", McpServerFixture.Definition()));
+        act.Should().NotThrow();
+        services.Count(d => d.ServiceType == typeof(IToolSource)).Should().Be(2, "both are registered; the catalog keeps the first");
+    }
+
     private static McpServerDefinition Definition(bool runScoped)
+
     {
         var definition = McpServerFixture.Definition("--host");
         definition.RunScoped = runScoped ? new RunScopedMcpDefinition { Args = [McpServerFixture.ServerDll, "--run"] } : null;

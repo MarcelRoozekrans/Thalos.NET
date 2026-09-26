@@ -56,9 +56,11 @@ public sealed class RunScopedMcpDefinition
     /// <c>hh:mm:ss</c> string. Must be positive and at most <see cref="int.MaxValue"/> milliseconds.
     /// </summary>
     /// <remarks>
-    /// A host normally waits for the run's servers with <see cref="IRunToolServerReadiness.WaitAllReadyAsync"/> before it
-    /// dispatches the run's work, so this bounds the reloads that file changes cause, which re-load the workspace. Set it
-    /// above the server's own load time for the largest workspace it serves.
+    /// It bounds the caller's wait only, never the start or the reload: those belong to the server, so a reload that
+    /// takes longer still completes, and the calls after it are served. A host normally waits for the run's servers with
+    /// <see cref="IRunToolServerReadiness.WaitAllReadyAsync"/> before it dispatches the run's work, so in practice this
+    /// bounds the wait for reloads that file changes cause, which re-load the workspace. Set it above the server's own
+    /// load time for the largest workspace it serves, or calls made during a reload are refused until it finishes.
     /// </remarks>
     public TimeSpan ReadyWaitTimeout { get; set; } = TimeSpan.FromMinutes(2);
 

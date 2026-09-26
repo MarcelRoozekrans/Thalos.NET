@@ -28,7 +28,8 @@ namespace Thalos.Mcp;
 /// <see cref="RunMcpServerRegistry"/> requires. The call is bounded by <see cref="RunScopedMcpDefinition.CallTimeout"/>,
 /// because a held lease holds back that server's reloads. A removal does not wait for leases: a call whose run's server
 /// is stopped under it gets an error result, not a cancellation it never asked for. Only the caller's own token
-/// cancelling makes a routed call throw <see cref="OperationCanceledException"/>.
+/// cancelling makes a routed call throw <see cref="OperationCanceledException"/>. A server that dies under a call, or
+/// before it, gets the call refused with the same error text as a server that is not running.
 /// </para>
 /// <para>
 /// <b>Ownership.</b> The source owns <paramref name="host"/> and disposes it; the registry is shared and owned by the
@@ -131,6 +132,13 @@ public sealed partial class RunScopedMcpToolSource(
                 LogCallCutOff(_logger, ex, Name, tool.Name, runId);
                 return $"error: run tool server '{Name}' stopped during '{tool.Name}' for this run; the call did not complete.";
             }
+            catch (Exception ex) when (ex is IOException || lease.Value.Client.Completion.IsCompleted)
+            {
+                // The server died under the call: its transport closed. The registry finds it dead on the next call and
+                // refuses the run until readiness starts it again, so this call is refused the same way, not thrown.
+                LogCallCutOff(_logger, ex, Name, tool.Name, runId);
+                return Refuse(runId, $"its server exited during '{tool.Name}'.");
+            }
         }
     }
 
@@ -172,6 +180,6 @@ public sealed partial class RunScopedMcpToolSource(
     [LoggerMessage(EventId = 331, Level = LogLevel.Warning, Message = "Call to '{Tool}' on run tool server '{Server}' for run {RunId} did not finish within {Timeout} and was cancelled")]
     private static partial void LogCallTimedOut(ILogger logger, string server, string tool, Guid runId, TimeSpan timeout);
 
-    [LoggerMessage(EventId = 332, Level = LogLevel.Warning, Message = "Call to '{Tool}' on run tool server '{Server}' for run {RunId} was cut off: the server's session closed")]
+    [LoggerMessage(EventId = 332, Level = LogLevel.Warning, Message = "Call to '{Tool}' on run tool server '{Server}' for run {RunId} was cut off: the server was stopped or exited")]
     private static partial void LogCallCutOff(ILogger logger, Exception exception, string server, string tool, Guid runId);
 }

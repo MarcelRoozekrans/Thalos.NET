@@ -1,7 +1,9 @@
 using System.Diagnostics;
+using System.Globalization;
 using AwesomeAssertions.Execution;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
+using ModelContextProtocol.Protocol;
 using Thalos.Mcp;
 using Thalos.Workspaces;
 using ZeroAlloc.Authorization;
@@ -211,6 +213,98 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         (await inFlight.WaitAsync(TimeSpan.FromSeconds(15))).Should().Be("error: run tool server 'roslyn' stopped during 'slow' for this run; the call did not complete.");
     }
 
+    [Fact]
+    public async Task A_reload_slower_than_the_ready_wait_still_completes_and_a_later_call_is_served()
+    {
+        var log = Path.Combine(_root, "calls.log");
+        var runScoped = RunScoped("--reload-delay-ms", "3000", "--call-log", log);
+        runScoped.Reload = "tool:reload_count";
+        runScoped.ReadyWaitTimeout = TimeSpan.FromSeconds(1);
+        var (args, registry) = await RoutedToolAsync("args", runScoped, ready: [RunId]);
+        var reloadCount = await ToolAsync(args, "reload_count");
+
+        registry.OnFilesChanged(RunId, ["a.cs"]);
+        using var _turn = BeginTurn(RunCaller(RunId));
+        var during = await InvokeAsync(args); // gives up after 1 s; the reload takes 3 s
+        await Task.Delay(TimeSpan.FromSeconds(4)); // the reload, if it was left running, is done by now
+        var after = await InvokeAsync(args);
+        var count = await InvokeAsync(reloadCount);
+        var logged = await File.ReadAllLinesAsync(log);
+
+        using var _scope = new AssertionScope();
+        during.Should().Be($"error: run tool server 'roslyn' is not available for this run: its server was not ready within {TimeSpan.FromSeconds(1)}.");
+        after.Should().Contain($"--id {RunId:D}", "the reload completed, so the next call is served");
+        count.Should().Be("2", "one reload, not restarted by each waiter, plus this call");
+        logged.Should().Equal(["reload_count", "reload_count"], "the server ran the reload once, then this test's own call");
+    }
+
+    [Fact]
+    public async Task A_run_server_killed_under_a_call_refuses_that_call_instead_of_throwing()
+    {
+        var log = Path.Combine(_root, "calls.log");
+        var (slow, _) = await RoutedToolAsync("slow", RunScoped("--call-log", log), ready: [RunId]);
+        var pid = int.Parse(await RoutedAsync(await ToolAsync(slow, "pid")), CultureInfo.InvariantCulture);
+
+        var inFlight = Task.Run(async () =>
+        {
+            using var _turn = BeginTurn(RunCaller(RunId));
+            try
+            {
+                return await InvokeAsync(slow, Args("ms", 20000));
+            }
+            catch (Exception ex)
+            {
+                return $"threw {ex.GetType().Name}: {ex.Message}";
+            }
+        });
+        await UntilAsync(() => File.Exists(log) && File.ReadAllText(log).Contains("slow", StringComparison.Ordinal), "the slow call to reach the run's server");
+        await KillAsync(pid);
+
+        var result = await inFlight.WaitAsync(TimeSpan.FromSeconds(15));
+
+        using var _scope = new AssertionScope();
+        result.Should().StartWith("error: run tool server 'roslyn' ", "the dead server's call is refused with the error text");
+        result.Should().NotStartWith("threw");
+        result.Should().NotContain("--host");
+    }
+
+    [Fact]
+    public async Task A_killed_run_server_refuses_calls_with_the_error_text_until_readiness_restarts_it()
+    {
+        var (args, registry) = await RoutedToolAsync("args", ready: [RunId]);
+        var pidTool = await ToolAsync(args, "pid");
+        var pid = await KillAndWaitForSessionEndAsync(registry);
+
+        var refused = await RoutedOrThrownAsync(args);
+        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None);
+        var restartedPid = await RoutedOrThrownAsync(pidTool);
+        var served = await RoutedOrThrownAsync(args);
+
+        using var _scope = new AssertionScope();
+        refused.Should().Be($"error: run tool server 'roslyn' is not available for this run: Run-scoped MCP server 'roslyn' for run {RunId} exited unexpectedly.");
+        waited.IsSuccess.Should().BeTrue(waited.IsFailure ? waited.Error.Message : "readiness starts a dead server again");
+        restartedPid.Should().MatchRegex("^[0-9]+$", "the pid tool is served again");
+        restartedPid.Should().NotBe(pid.ToString(CultureInfo.InvariantCulture), "a new process serves the run");
+        served.Should().Contain($"--id {RunId:D}");
+        IsRunning(pid).Should().BeFalse("the dead process is not left behind");
+    }
+
+    [Fact]
+    public async Task A_killed_run_server_is_not_reported_ready_before_it_is_started_again()
+    {
+        var (_, registry) = await RoutedToolAsync("args", ready: [RunId]);
+        await KillAndWaitForSessionEndAsync(registry);
+
+        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.Zero, CancellationToken.None);
+
+        using var _scope = new AssertionScope();
+        waited.IsFailure.Should().BeTrue("the only server there was is dead, and its replacement has not started yet");
+        if (waited.IsFailure)
+        {
+            waited.Error.Message.Should().Contain("was not ready within", "readiness began a new start instead of reporting the dead one");
+        }
+    }
+
     // ---------- concurrency ----------
 
     [Fact]
@@ -247,37 +341,58 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
     public async Task Calls_racing_a_run_removal_are_served_by_the_run_or_refused_never_by_the_host()
     {
         var (tool, registry) = await RoutedToolAsync("args", ready: [RunId]);
+        var servedMarker = $"--id {RunId:D}";
+        var served = 0;
         using var start = new ManualResetEventSlim();
-        var calls = Enumerable.Range(0, 16).Select(_ => Task.Run(async () =>
+        var calls = Enumerable.Range(0, 8).Select(_ => Task.Run(async () =>
         {
             using var _turn = BeginTurn(RunCaller(RunId));
             start.Wait(TimeSpan.FromSeconds(10));
-            try
+            var results = new List<string>();
+            for (var i = 0; i < 50; i++)
             {
-                return await InvokeAsync(tool);
+                string result;
+                try
+                {
+                    result = await InvokeAsync(tool);
+                }
+                catch (Exception ex)
+                {
+                    result = $"threw {ex.GetType().Name}: {ex.Message}"; // collected, so the assertions below name it
+                }
+
+                results.Add(result);
+                if (!result.Contains(servedMarker, StringComparison.Ordinal))
+                {
+                    break; // refused: the removal has happened
+                }
+
+                Interlocked.Increment(ref served);
             }
-            catch (Exception ex)
-            {
-                return $"threw {ex.GetType().Name}"; // collected, so every outcome is asserted below
-            }
+
+            return results;
         })).ToArray();
         var removal = Task.Run(async () =>
         {
             start.Wait(TimeSpan.FromSeconds(10));
+            // The assertion that at least one call reached the run before its removal: the removal waits for one.
+            await UntilAsync(() => Volatile.Read(ref served) > 0, "a call to reach the run's server before the removal");
             await registry.OnRemovingAsync(Workspace(RunId), CancellationToken.None);
         });
 
         start.Set();
         await removal;
-        var results = await Task.WhenAll(calls);
+        var results = (await Task.WhenAll(calls)).SelectMany(r => r).ToList();
 
-        using var _after = BeginTurn(RunCaller(RunId));
-        var afterRemoval = await InvokeAsync(tool);
+        var afterRemoval = await RoutedOrThrownAsync(tool);
 
         using var _scope = new AssertionScope();
-        results.Should().OnlyContain(r => r.Contains($"--id {RunId:D}", StringComparison.Ordinal) || r.StartsWith("error: run tool server", StringComparison.Ordinal) || r.StartsWith("threw", StringComparison.Ordinal));
+        results.Should().OnlyContain(
+            r => r.Contains(servedMarker, StringComparison.Ordinal)
+                || r.StartsWith("error: run tool server 'roslyn' is not available for this run: ", StringComparison.Ordinal)
+                || r.StartsWith("error: run tool server 'roslyn' stopped during 'args' for this run", StringComparison.Ordinal),
+            "each call is served by its run, refused as not available, or reported as cut off; none throws");
         results.Should().NotContain(r => r.Contains("--host", StringComparison.Ordinal));
-        results.Should().NotContain(r => r.Contains("Canceled", StringComparison.Ordinal), "a call cut off by the removal is an error result, never a cancellation the caller did not ask for");
         afterRemoval.Should().StartWith("error: run tool server 'roslyn' is not available for this run: ", "a removed run's calls are refused");
     }
 
@@ -367,12 +482,15 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
+        // Leak probe: every routed call disposed its lease, on every path, by the time its test returned.
+        var outstanding = _disposables.OfType<RunMcpServerRegistry>().Sum(registry => registry.OutstandingLeases);
         for (var i = _disposables.Count - 1; i >= 0; i--)
         {
             await _disposables[i].DisposeAsync();
         }
 
         Directory.Delete(_root, recursive: true);
+        outstanding.Should().Be(0, "no routed call leaves a lease behind");
     }
 
     private static RunScopedMcpDefinition RunScoped(params string[] extra) =>
@@ -431,6 +549,63 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
 
     private static async Task<string> InvokeAsync(AIFunction tool, AIFunctionArguments? arguments = null) =>
         (await tool.InvokeAsync(arguments ?? new AIFunctionArguments(StringComparer.Ordinal), CancellationToken.None))!.ToString()!;
+
+    /// <summary>Calls <paramref name="tool"/> as a caller of <see cref="RunId"/>.</summary>
+    private async Task<string> RoutedAsync(AIFunction tool)
+    {
+        using var _turn = BeginTurn(RunCaller(RunId));
+        return await InvokeAsync(tool);
+    }
+
+    /// <summary>Calls <paramref name="tool"/> as a caller of <see cref="RunId"/>; an exception becomes <c>threw</c> text, so an assertion names it.</summary>
+    private async Task<string> RoutedOrThrownAsync(AIFunction tool)
+    {
+        try
+        {
+            return await RoutedAsync(tool);
+        }
+        catch (Exception ex)
+        {
+            return $"threw {ex.GetType().Name}: {ex.Message}";
+        }
+    }
+
+    /// <summary>
+    /// Kills the run's server from outside, as a crash would, and waits until its client's session has ended, so the
+    /// registry can see it dead. Returns the killed process id.
+    /// </summary>
+    private async Task<int> KillAndWaitForSessionEndAsync(RunMcpServerRegistry registry)
+    {
+        var lease = await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None);
+        lease.IsSuccess.Should().BeTrue(lease.IsFailure ? lease.Error.Message : "");
+        await using (lease.Value)
+        {
+            var pid = int.Parse(((TextContentBlock)(await lease.Value.Client.CallToolAsync("pid")).Content.Single()).Text, CultureInfo.InvariantCulture);
+            await KillAsync(pid);
+            await lease.Value.Client.Completion.WaitAsync(TimeSpan.FromSeconds(15));
+            return pid;
+        }
+    }
+
+    private static async Task KillAsync(int pid)
+    {
+        using var process = Process.GetProcessById(pid);
+        process.Kill(entireProcessTree: true);
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+    }
+
+    private static bool IsRunning(int pid)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false; // no process has that id any more
+        }
+    }
 
     private static async Task UntilAsync(Func<bool> condition, string what)
     {

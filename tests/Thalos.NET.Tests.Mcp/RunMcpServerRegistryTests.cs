@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Globalization;
+using AwesomeAssertions.Execution;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
@@ -360,6 +361,41 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         (await Task.WhenAny(removal, Task.Delay(TimeSpan.FromSeconds(10)))).Should().BeSameAs(removal, "removal does not wait for a held lease");
         (await waiting).IsFailure.Should().BeTrue("the waiting reload was cancelled, not served");
         IsRunning(pid).Should().BeFalse("the server is stopped even though a lease is still held");
+    }
+
+    [Fact]
+    public async Task A_waiter_that_gives_up_leaves_the_reload_running_and_no_lease_is_handed_out_before_it_finishes()
+    {
+        var registry = Registry(runScoped: new() { Args = ServerArgs, Reload = "tool:reload_count" });
+        await registry.OnReadyAsync(Workspace(), CancellationToken.None);
+        var held = await LeaseAsync(registry);
+
+        registry.OnFilesChanged(RunId, ["a.cs"]);
+        using (var impatient = new CancellationTokenSource(TimeSpan.FromMilliseconds(500)))
+        {
+            var giveUp = async () => await registry.GetReadyClientAsync("roslyn", RunId, impatient.Token);
+            await giveUp.Should().ThrowAsync<OperationCanceledException>("the waiter's own token ends its wait");
+        }
+
+        var stillWaiting = registry.ReloadsWaitingForLeases;
+        var next = Task.Run(async () => await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None));
+        await Task.Delay(TimeSpan.FromMilliseconds(500));
+        var handedOutBeforeRelease = next.IsCompleted;
+        await held.DisposeAsync();
+        var lease = await next.WaitAsync(TimeSpan.FromSeconds(10));
+        var count = lease.IsFailure ? $"refused: {lease.Error.Message}" : null;
+        if (lease.IsSuccess)
+        {
+            await using (lease.Value)
+            {
+                count = await CallAsync(lease.Value.Client, "reload_count");
+            }
+        }
+
+        using var _scope = new AssertionScope();
+        stillWaiting.Should().Be(1, "the reload belongs to the server; the waiter that began it giving up does not cancel it");
+        handedOutBeforeRelease.Should().BeFalse("no lease is handed out while the reload waits for the held one");
+        count.Should().Be("2", "the one reload ran once the held lease was released, plus this call");
     }
 
     [Fact]

@@ -25,8 +25,8 @@ public static class McpThalosBuilderExtensions
     /// </para>
     /// </remarks>
     /// <exception cref="ArgumentException">
-    /// <paramref name="name"/> violates <see cref="ToolSourceName"/>, a run-scoped entry named <paramref name="name"/> was
-    /// already added, or <paramref name="definition"/> is incomplete/unsupported.
+    /// <paramref name="name"/> violates <see cref="ToolSourceName"/>, a run-scoped entry shares <paramref name="name"/> with an MCP
+    /// entry already added, in either order, or <paramref name="definition"/> is incomplete/unsupported.
     /// </exception>
     public static ThalosBuilder AddMcpServer(this ThalosBuilder builder, string name, McpServerDefinition definition)
     {
@@ -34,21 +34,27 @@ public static class McpThalosBuilderExtensions
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ToolSourceName.ThrowIfInvalid(name, nameof(name));
         ArgumentNullException.ThrowIfNull(definition);
-        if (definition.RunScoped is not { } runScoped)
+        var services = builder.Services;
+        var servers = McpServers(services);
+        var runScoped = definition.RunScoped;
+        if (servers.RunScopedNames.TryGetValue(name, out var earlierRunScoped) && (earlierRunScoped || runScoped is not null))
+        {
+            // Plain with plain stays first-wins, as before. With a run-scoped entry either way round, the catalog's
+            // first-wins could hand run callers the plain source, which is the host server.
+            throw new ArgumentException(
+                $"An MCP server named '{name}' was already added; a run-scoped entry cannot share its name with another MCP entry.", nameof(name));
+        }
+
+        servers.RunScopedNames.TryAdd(name, runScoped is not null);
+        if (runScoped is null)
         {
             // works without AddLogging(): the MCP SDK and the source itself only need a factory, not a configured one
             return builder.AddToolSource(sp => new McpToolSource(name, definition, LoggerFactory(sp)));
         }
 
-        var services = builder.Services;
-        var runScopedServers = RunScopedServers(services);
-        if (!runScopedServers.Definitions.TryAdd(name, definition))
-        {
-            throw new ArgumentException($"A run-scoped MCP server named '{name}' was already added.", nameof(name));
-        }
-
+        servers.Definitions.Add(name, definition);
         services.TryAddSingleton(sp => new RunMcpServerRegistry(
-            runScopedServers.Definitions,
+            servers.Definitions,
             () => sp.GetService<IRunWorkspaceProvider>(), // deferred: the provider observes the registry, so it is built while the provider is
             LoggerFactory(sp),
             Clock(sp)));
@@ -95,22 +101,26 @@ public static class McpThalosBuilderExtensions
 
     private static TimeProvider Clock(IServiceProvider sp) => sp.GetService<TimeProvider>() ?? TimeProvider.System;
 
-    /// <summary>The collection's run-scoped entries, gathered across <see cref="AddMcpServer"/> calls for the one registry.</summary>
-    private static RunScopedServerSet RunScopedServers(IServiceCollection services)
+    /// <summary>The collection's MCP entries, gathered across <see cref="AddMcpServer"/> calls.</summary>
+    private static McpServerSet McpServers(IServiceCollection services)
     {
-        if (services.FirstOrDefault(d => d.ServiceType == typeof(RunScopedServerSet))?.ImplementationInstance is RunScopedServerSet existing)
+        if (services.FirstOrDefault(d => d.ServiceType == typeof(McpServerSet))?.ImplementationInstance is McpServerSet existing)
         {
             return existing;
         }
 
-        var created = new RunScopedServerSet();
+        var created = new McpServerSet();
         services.AddSingleton(created);
         return created;
     }
 
-    /// <summary>Every run-scoped entry added to one service collection, keyed by source name.</summary>
-    private sealed class RunScopedServerSet
+    /// <summary>The MCP entries added to one service collection.</summary>
+    private sealed class McpServerSet
     {
+        /// <summary>Every MCP entry's source name, plain or run-scoped, mapped to whether the first entry by that name is run-scoped.</summary>
+        public Dictionary<string, bool> RunScopedNames { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>The run-scoped entries, keyed by source name, for the one registry.</summary>
         public Dictionary<string, McpServerDefinition> Definitions { get; } = new(StringComparer.Ordinal);
     }
 }

@@ -43,22 +43,30 @@ namespace Thalos.Mcp;
 /// <para>
 /// <b>Reloads.</b> <see cref="OnFilesChanged"/> only counts a change, so it is cheap, never blocks on a server, and
 /// does not care in which order notifications for one path arrive. The next <see cref="GetReadyClientAsync"/> for the
-/// run applies the reload under the server's lock before it hands the client out. It records the count it is
-/// applying before the reload runs, so a change reported while a reload is in flight is reloaded again on the call
-/// after. Reloading
+/// run begins the reload before it hands the client out. The reload is a task the server owns, like its start: it is
+/// bounded only by the run's removal, every caller waits for it with its own token, and a caller that stops waiting
+/// leaves it running, so a reload slower than any one caller's patience still completes and later callers are
+/// served. It records the count it is applying before it runs, so a change reported while a reload is in flight is
+/// reloaded again on the call after. Reloading
 /// re-evaluates the workspace's build files; see <see cref="RunScopedMcpDefinition.Reload"/> for why that is only
 /// safe while a run cannot write MSBuild files.
 /// </para>
 /// <para>
 /// <b>Leases.</b> <see cref="GetReadyClientAsync"/> hands out a <see cref="RunMcpClientLease"/>, not a bare client. A
-/// lease is shared: any number of calls may hold one at once. A reload is exclusive: it holds the server's lock, so no
-/// new lease is handed out, and waits until every outstanding lease is disposed before it calls the reload tool or
-/// restarts the server. A call is therefore never cut off by a restart and never overlaps a reload. A caller must
-/// dispose its lease as soon as its call returns, and must hold at most one lease per run at a time, across all of
-/// the run's servers. A file change marks every server of the run for a reload, so a caller holding a lease on server
-/// A while asking for one on server B waits for B's reload, which waits for every lease on B; if another caller holds
-/// B while asking for A, the two wait for each other forever. Removal and dispose do not wait for leases: they cancel
+/// lease is shared: any number of calls may hold one at once. A reload is exclusive: while it is in flight no new
+/// lease is handed out, because every caller waits for it first, and it waits until every outstanding lease is
+/// disposed before it calls the reload tool or restarts the server. A call is therefore never cut off by a restart
+/// and never overlaps a reload. A caller must dispose its lease as soon as its call returns, and must hold at most
+/// one lease per run at a time, across all of the run's servers. A file change marks every server of the run for a
+/// reload, so a caller holding a lease on server A while asking for one on server B waits for B's reload, which
+/// waits for every lease on B; if another caller holds B while asking for A, the two wait for each other forever. Removal and dispose do not wait for leases: they cancel
 /// a waiting reload and stop the server, and a call still running on it then fails.
+/// </para>
+/// <para>
+/// <b>A server that dies.</b> A server whose process exits or whose transport closes without the registry stopping it
+/// is found dead by its client's <c>Completion</c>. <see cref="GetReadyClientAsync"/> then disposes the client, which
+/// reaps the process, and fails with "exited unexpectedly" until <see cref="WaitAllReadyAsync"/> starts it again;
+/// <see cref="WaitAllReadyAsync"/> never reports a dead server as ready.
 /// </para>
 /// <para>
 /// <b>Provider found on first use.</b> <paramref name="workspaces"/> is called once, the first time the registry needs
@@ -258,12 +266,19 @@ public sealed partial class RunMcpServerRegistry(
             }
         }
 
-        foreach (var start in starts)
+        for (var i = 0; i < starts.Length; i++)
         {
-            var started = await start.ConfigureAwait(false);
+            var started = await starts[i].ConfigureAwait(false);
             if (started.IsFailure)
             {
                 return UnitResult<AgentError>.Failure(started.Error);
+            }
+
+            if (IsDead(started.Value))
+            {
+                // Died after it started: never reported ready. The next readiness wait starts it again.
+                return UnitResult<AgentError>.Failure(AgentError.ProviderError(
+                    $"Run-scoped MCP server '{entries[i].Spec.Name}' for run {runId} exited unexpectedly."));
             }
         }
 
@@ -278,12 +293,12 @@ public sealed partial class RunMcpServerRegistry(
     /// <remarks>
     /// Never starts a server: <see cref="OnReadyAsync"/> and <see cref="WaitAllReadyAsync"/> do. A server that is still
     /// starting is waited for, bounded only by <paramref name="ct"/>; use <see cref="WaitAllReadyAsync"/> for a bounded
-    /// wait. A server whose start or <c>restart</c> reload failed stays failed until the next
+    /// wait. A server whose start or <c>restart</c> reload failed, or that died, stays failed until the next
     /// <see cref="WaitAllReadyAsync"/> starts it again; a failed <c>tool:</c> reload is retried on the next call.
     /// </remarks>
     /// <param name="serverName">The run-scoped server's source name.</param>
     /// <param name="runId">The calling run.</param>
-    /// <param name="ct">Cancels the wait for the server's lock, its start, outstanding leases and its reload call; never the server.</param>
+    /// <param name="ct">Cancels this caller's wait for the server's lock, its start and its reload; never the reload itself, nor the server.</param>
     /// <exception cref="ObjectDisposedException">The registry has been disposed.</exception>
     public async ValueTask<Result<RunMcpClientLease, AgentError>> GetReadyClientAsync(string serverName, Guid runId, CancellationToken ct)
     {
@@ -307,17 +322,15 @@ public sealed partial class RunMcpServerRegistry(
                 return Result<RunMcpClientLease, AgentError>.Failure(NotRunning(serverName, runId));
             }
 
-            var started = await entry.Starting.WaitAsync(ct).ConfigureAwait(false);
-            var target = Volatile.Read(ref entry.Changes);
-            var ready = started.IsSuccess && entry.Spec.Reload != ReloadKind.None && target != entry.AppliedChanges
-                ? await ReloadAsync(entry, started.Value, target, ct).ConfigureAwait(false)
-                : started;
+            var ready = entry.Reloading is { IsCompleted: false } inFlight
+                ? await inFlight.WaitAsync(ct).ConfigureAwait(false) // a reload a caller before this one began: its outcome stands for this call
+                : await ReadyOrReloadAsync(entry, ct).ConfigureAwait(false);
             if (ready.IsFailure)
             {
                 return Result<RunMcpClientLease, AgentError>.Failure(ready.Error);
             }
 
-            // Taken under the lock: a reload holds the lock while it waits for the count to reach zero.
+            // Taken under the lock, with no reload in flight: a reload begins only under the lock, and then waits for the count to reach zero.
             Interlocked.Increment(ref entry.Leases);
             return Result<RunMcpClientLease, AgentError>.Success(new RunMcpClientLease(ready.Value, entry.ReleaseLease));
         }
@@ -325,6 +338,53 @@ public sealed partial class RunMcpServerRegistry(
         {
             entry.Gate.Release();
         }
+    }
+
+    /// <summary>
+    /// The server's client once its start is done, found dead or reloaded first when needed. Called under
+    /// <see cref="Entry.Gate"/> with no reload in flight. <paramref name="ct"/> bounds only this caller's wait: a reload
+    /// begun here is the server's, and keeps running when the caller stops waiting.
+    /// </summary>
+    private async Task<Result<McpClient, AgentError>> ReadyOrReloadAsync(Entry entry, CancellationToken ct)
+    {
+        var started = await entry.Starting.WaitAsync(ct).ConfigureAwait(false);
+        if (started.IsSuccess && IsDead(started.Value))
+        {
+            return await MarkDeadAsync(entry, started.Value).ConfigureAwait(false);
+        }
+
+        var target = Volatile.Read(ref entry.Changes);
+        if (started.IsFailure || entry.Spec.Reload == ReloadKind.None || target == entry.AppliedChanges)
+        {
+            return started;
+        }
+
+        var reload = ReloadAsync(entry, started.Value, target);
+        entry.Reloading = reload;
+        return await reload.WaitAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="client"/>'s session has ended although the registry never disposed it: the process
+    /// exited or its transport closed. Only the current start's client is asked, and the registry disposes that one
+    /// only while stopping the entry, after which nothing asks.
+    /// </summary>
+    private static bool IsDead(McpClient client) => client.Completion.IsCompleted;
+
+    /// <summary>
+    /// Records that the server died: disposes its client, which reaps the process, and replaces the start with a failed
+    /// one, so every caller is refused until <see cref="WaitAllReadyAsync"/> starts it again. Called under
+    /// <see cref="Entry.Gate"/>.
+    /// </summary>
+    private async Task<Result<McpClient, AgentError>> MarkDeadAsync(Entry entry, McpClient client)
+    {
+        var details = await client.Completion.ConfigureAwait(false);
+        LogServerExited(_logger, details.Exception, entry.Spec.Name, entry.Workspace.RunId);
+        await DisposeClientAsync(entry, client).ConfigureAwait(false);
+        var exited = Result<McpClient, AgentError>.Failure(AgentError.ProviderError(
+            $"Run-scoped MCP server '{entry.Spec.Name}' for run {entry.Workspace.RunId} exited unexpectedly."));
+        entry.Starting = Task.FromResult(exited);
+        return exited;
     }
 
     /// <summary>
@@ -451,9 +511,13 @@ public sealed partial class RunMcpServerRegistry(
         }
     }
 
+    /// <summary>
+    /// Starts the server again when its start failed or it has died since, unless a reload is in flight, which leaves
+    /// the server started or failed by itself. The check is repeated under <see cref="Entry.Gate"/>.
+    /// </summary>
     private async Task RestartIfFailedAsync(Entry entry, CancellationToken ct)
     {
-        if (!entry.Starting.IsCompleted || (await entry.Starting.ConfigureAwait(false)).IsSuccess)
+        if (!entry.Starting.IsCompleted || await IsUpAsync(entry.Starting).ConfigureAwait(false))
         {
             return;
         }
@@ -462,7 +526,18 @@ public sealed partial class RunMcpServerRegistry(
         try
         {
             // Re-checked under the lock: a concurrent caller may have restarted it, or the run may be stopping.
-            if (!entry.Removed && entry.Starting.IsCompleted && (await entry.Starting.ConfigureAwait(false)).IsFailure)
+            if (entry.Removed || entry.Reloading is { IsCompleted: false } || !entry.Starting.IsCompleted)
+            {
+                return;
+            }
+
+            var started = await entry.Starting.ConfigureAwait(false);
+            if (started.IsSuccess && IsDead(started.Value))
+            {
+                started = await MarkDeadAsync(entry, started.Value).ConfigureAwait(false);
+            }
+
+            if (started.IsFailure)
             {
                 entry.Starting = StartAsync(entry);
             }
@@ -471,6 +546,13 @@ public sealed partial class RunMcpServerRegistry(
         {
             entry.Gate.Release();
         }
+    }
+
+    /// <summary>Whether a completed start produced a client whose server is still running.</summary>
+    private static async Task<bool> IsUpAsync(Task<Result<McpClient, AgentError>> start)
+    {
+        var started = await start.ConfigureAwait(false);
+        return started.IsSuccess && !IsDead(started.Value);
     }
 
     /// <summary>
@@ -676,49 +758,49 @@ public sealed partial class RunMcpServerRegistry(
     // ---------- reloading ----------
 
     /// <summary>
-    /// Applies a pending reload exclusively: called under <see cref="Entry.Gate"/>, so no new lease is handed out, it
-    /// waits until every outstanding lease is disposed, then reloads. Removal cancels the wait.
+    /// The shared reload of <paramref name="entry"/>, begun under <see cref="Entry.Gate"/> and kept as
+    /// <see cref="Entry.Reloading"/>. It belongs to the server, not to the call that began it: it is bounded only by
+    /// <see cref="Entry.Stopping"/>, and a caller that stops waiting for it leaves it running. No lease is handed out
+    /// while it runs, because every caller waits for it first, and it waits until every outstanding lease is disposed
+    /// before it reloads. Never throws: every outcome is a result.
     /// </summary>
-    private async ValueTask<Result<McpClient, AgentError>> ReloadAsync(Entry entry, McpClient client, int target, CancellationToken ct)
+    private async Task<Result<McpClient, AgentError>> ReloadAsync(Entry entry, McpClient client, int target)
     {
         // Recorded before the reload runs: a change reported while it is in flight raises Changes past target,
         // so the next call reloads again instead of losing it.
         var previous = entry.AppliedChanges;
         entry.AppliedChanges = target;
-        using (var drain = CancellationTokenSource.CreateLinkedTokenSource(ct, entry.Stopping.Token))
+        var stopping = entry.Stopping.Token; // read under the gate, before any removal can dispose Stopping
+        try
         {
-            try
-            {
-                await entry.WaitForNoLeasesAsync(drain.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                entry.AppliedChanges = previous;
-                ct.ThrowIfCancellationRequested();
-                return Result<McpClient, AgentError>.Failure(NotRunning(entry.Spec.Name, entry.Workspace.RunId)); // the run is being removed
-            }
+            await entry.WaitForNoLeasesAsync(stopping).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return Result<McpClient, AgentError>.Failure(NotRunning(entry.Spec.Name, entry.Workspace.RunId)); // the run is being removed
         }
 
         LogReloading(_logger, entry.Spec.Name, entry.Workspace.RunId, entry.Spec.Definition.RunScoped!.Reload);
         return entry.Spec.Reload == ReloadKind.Restart
-            ? await RestartAsync(entry, client, ct).ConfigureAwait(false)
-            : await CallReloadToolAsync(entry, client, previous, ct).ConfigureAwait(false);
+            ? await RestartAsync(entry, client).ConfigureAwait(false)
+            : await CallReloadToolAsync(entry, client, previous, stopping).ConfigureAwait(false);
     }
 
-    private async ValueTask<Result<McpClient, AgentError>> RestartAsync(Entry entry, McpClient current, CancellationToken ct)
+    /// <summary>Replaces the server with a new process. Only the in-flight reload replaces <see cref="Entry.Starting"/> this way.</summary>
+    private async Task<Result<McpClient, AgentError>> RestartAsync(Entry entry, McpClient current)
     {
         await DisposeClientAsync(entry, current).ConfigureAwait(false);
-        entry.Starting = StartAsync(entry);
-        return await entry.Starting.WaitAsync(ct).ConfigureAwait(false);
+        var next = StartAsync(entry);
+        entry.Starting = next;
+        return await next.ConfigureAwait(false);
     }
 
-    private async ValueTask<Result<McpClient, AgentError>> CallReloadToolAsync(Entry entry, McpClient client, int previous, CancellationToken ct)
+    private async Task<Result<McpClient, AgentError>> CallReloadToolAsync(Entry entry, McpClient client, int previous, CancellationToken stopping)
     {
         var tool = entry.Spec.ReloadTool!;
-        using var call = CancellationTokenSource.CreateLinkedTokenSource(ct, entry.Stopping.Token);
         try
         {
-            var result = await client.CallToolAsync(tool, arguments: null, progress: null, options: null, call.Token).ConfigureAwait(false);
+            var result = await client.CallToolAsync(tool, arguments: null, progress: null, options: null, stopping).ConfigureAwait(false);
             if (result.IsError != true)
             {
                 return Result<McpClient, AgentError>.Success(client);
@@ -726,10 +808,9 @@ public sealed partial class RunMcpServerRegistry(
 
             LogReloadFailed(_logger, null, entry.Spec.Name, entry.Workspace.RunId, $"tool '{tool}' reported an error");
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (stopping.IsCancellationRequested)
         {
-            entry.AppliedChanges = previous;
-            throw;
+            return Result<McpClient, AgentError>.Failure(NotRunning(entry.Spec.Name, entry.Workspace.RunId)); // the run is being removed
         }
         catch (Exception ex)
         {
@@ -752,7 +833,13 @@ public sealed partial class RunMcpServerRegistry(
         try
         {
             entry.Removed = true;
-            // Every start observes Stopping, so this completes promptly; a start disposes its own client when stopped.
+            // Every reload and start observes Stopping, so these complete promptly; a start disposes its own client when
+            // stopped. The reload first: a restart reload replaces Starting, and its new start must be the one stopped.
+            if (entry.Reloading is { } reloading)
+            {
+                await reloading.ConfigureAwait(false);
+            }
+
             var started = await entry.Starting.ConfigureAwait(false);
             if (started.IsSuccess)
             {
@@ -790,6 +877,18 @@ public sealed partial class RunMcpServerRegistry(
             lock (_sync)
             {
                 return _runs.Values.Sum(run => run.Sum(entry => Volatile.Read(ref entry.WaitingForLeases)));
+            }
+        }
+    }
+
+    /// <summary>How many leases are outstanding right now, across every run's servers; zero once every call has disposed its lease.</summary>
+    internal int OutstandingLeases
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _runs.Values.Sum(run => run.Sum(entry => Volatile.Read(ref entry.Leases)));
             }
         }
     }
@@ -917,11 +1016,36 @@ public sealed partial class RunMcpServerRegistry(
         /// <summary>Cancelled when the run's servers are stopped; every start, poll and reload observes it.</summary>
         public CancellationTokenSource Stopping { get; } = new();
 
-        /// <summary>The current start; replaced only under <see cref="Gate"/>, or before the entry is published.</summary>
-        public Task<Result<McpClient, AgentError>> Starting { get; set; } = Task.FromResult(Result<McpClient, AgentError>.Failure(AgentError.ProviderError("not started")));
+        private Task<Result<McpClient, AgentError>> _starting = Task.FromResult(Result<McpClient, AgentError>.Failure(AgentError.ProviderError("not started")));
+        private Task<Result<McpClient, AgentError>>? _reloading;
+        private int _appliedChanges;
 
-        /// <summary>The <see cref="Changes"/> count the server last reloaded for; read and written under <see cref="Gate"/>.</summary>
-        public int AppliedChanges { get; set; }
+        /// <summary>
+        /// The current start; replaced under <see cref="Gate"/>, before the entry is published, or by the in-flight
+        /// <see cref="Reloading"/> of a <c>restart</c> reload, during which no one else replaces it.
+        /// </summary>
+        public Task<Result<McpClient, AgentError>> Starting
+        {
+            get => Volatile.Read(ref _starting);
+            set => Volatile.Write(ref _starting, value);
+        }
+
+        /// <summary>The latest reload, begun under <see cref="Gate"/>; while it is not completed, every caller waits for it before taking a lease.</summary>
+        public Task<Result<McpClient, AgentError>>? Reloading
+        {
+            get => Volatile.Read(ref _reloading);
+            set => Volatile.Write(ref _reloading, value);
+        }
+
+        /// <summary>
+        /// The <see cref="Changes"/> count the server last reloaded for. Written under <see cref="Gate"/> when a reload
+        /// begins, and by that reload alone while it is in flight; read under the gate once it is done.
+        /// </summary>
+        public int AppliedChanges
+        {
+            get => Volatile.Read(ref _appliedChanges);
+            set => Volatile.Write(ref _appliedChanges, value);
+        }
 
         /// <summary>Set under <see cref="Gate"/> once the run's servers are stopped; nothing starts or reloads it afterwards.</summary>
         public bool Removed { get; set; }
@@ -982,6 +1106,9 @@ public sealed partial class RunMcpServerRegistry(
 
     [LoggerMessage(EventId = 316, Level = LogLevel.Warning, Message = "Disposing run-scoped MCP server '{Server}' for run {RunId} failed")]
     private static partial void LogDisposeFailed(ILogger logger, Exception exception, string server, Guid runId);
+
+    [LoggerMessage(EventId = 319, Level = LogLevel.Warning, Message = "Run-scoped MCP server '{Server}' for run {RunId} exited unexpectedly; it is refused until readiness starts it again")]
+    private static partial void LogServerExited(ILogger logger, Exception? exception, string server, Guid runId);
 
     [LoggerMessage(EventId = 318, Level = LogLevel.Debug, Message = "Run-scoped MCP server '{Server}' for run {RunId} was stopped while starting")]
     private static partial void LogStartStopped(ILogger logger, Exception exception, string server, Guid runId);
