@@ -19,6 +19,9 @@
     <PackageReference Include="Microsoft.Extensions.AI.Abstractions" />
   </ItemGroup>
   <ItemGroup>
+    <!-- WorkspacePath.FinalPathOfHandle is the internal seam Thalos.NET's workspace__* tools use to close the
+         check-to-use gap between WorkspacePath.Resolve and their own file open; see its doc comment. -->
+    <InternalsVisibleTo Include="Thalos.NET" />
     <InternalsVisibleTo Include="Thalos.NET.Tests.Unit" />
   </ItemGroup>
 </Project>

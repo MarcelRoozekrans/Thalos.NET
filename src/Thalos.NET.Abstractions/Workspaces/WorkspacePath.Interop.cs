@@ -75,6 +75,18 @@ public static partial class WorkspacePath
             if (handle.IsInvalid)
                 return null;
 
+            return GetFinalPathOfHandle(handle);
+        }
+
+        /// <summary>
+        /// Queries an already-open handle's final, fully resolved path via <c>GetFinalPathNameByHandleW</c>, without
+        /// opening anything itself. <see cref="GetFinalPath"/> calls this after opening its own handle;
+        /// <see cref="WorkspacePath.FinalPathOfHandle"/> calls it directly on a handle a caller already holds open, so
+        /// a caller closing the check-to-use gap between <see cref="Resolve"/> and its own file open never has to
+        /// reopen the path — reopening by path would just re-introduce the same gap it is trying to close.
+        /// </summary>
+        public static string? GetFinalPathOfHandle(SafeFileHandle handle)
+        {
             var buffer = new char[4096];
             while (true)
             {

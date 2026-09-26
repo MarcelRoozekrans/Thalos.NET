@@ -6,5 +6,7 @@ internal sealed class TestSecurityContext(string id, params string[] roles) : IS
 {
     public string Id { get; } = id;
     public IReadOnlySet<string> Roles { get; } = roles.ToHashSet(StringComparer.Ordinal);
-    public IReadOnlyDictionary<string, string> Claims { get; } = new Dictionary<string, string>(StringComparer.Ordinal);
+
+    /// <summary>Empty unless set via an object initializer, e.g. <c>new TestSecurityContext("id") { Claims = myClaims }</c>.</summary>
+    public IReadOnlyDictionary<string, string> Claims { get; init; } = new Dictionary<string, string>(StringComparer.Ordinal);
 }

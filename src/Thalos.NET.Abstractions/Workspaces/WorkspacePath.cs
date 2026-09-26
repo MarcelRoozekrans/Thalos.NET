@@ -1,3 +1,4 @@
+using Microsoft.Win32.SafeHandles;
 using ZeroAlloc.Results;
 
 namespace Thalos.Workspaces;
@@ -301,6 +302,37 @@ public static partial class WorkspacePath
     {
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         return path.Equals(root, comparison) || path.StartsWith(root + Path.DirectorySeparatorChar, comparison);
+    }
+
+    /// <summary>
+    /// Internal seam for a caller — <c>Thalos.NET</c>'s <c>workspace__*</c> tools — that needs to close the
+    /// check-to-use gap <see cref="Resolve"/> itself leaves open (see the type-level remarks): a symlink swapped in
+    /// after <see cref="Resolve"/> returns but before the caller's own open would let a plain string comparison
+    /// against its result pass an unintended target. This re-derives the real, symlink-resolved path from a handle
+    /// the caller already has open, so the caller can compare that instead — and, for a write, take the extension to
+    /// gate from that same real path — with no second, racy open by path.
+    /// </summary>
+    /// <remarks>
+    /// On Windows this queries <paramref name="handle"/> directly via <c>GetFinalPathNameByHandleW</c>. On Linux it
+    /// resolves the handle's <c>/proc/self/fd/&lt;fd&gt;</c> entry through the same <c>realpath</c> binding
+    /// <see cref="Resolve"/> itself uses: that entry is a magic symlink whose target is already exactly this
+    /// handle's real path, so resolving it through the already-vetted <c>realpath</c> binding gets the same answer
+    /// as a raw <c>readlink</c> would, without a second, bespoke P/Invoke. Not supported on macOS, which has no
+    /// <c>/proc</c>, or on any other platform: returns <see langword="null"/>, and the caller must fail closed
+    /// rather than trust a path it could not independently verify.
+    /// </remarks>
+    /// <param name="handle">A handle the caller already has open to the file or directory to re-check.</param>
+    internal static string? FinalPathOfHandle(SafeFileHandle handle)
+    {
+        ArgumentNullException.ThrowIfNull(handle);
+
+        if (OperatingSystem.IsWindows())
+            return Windows.GetFinalPathOfHandle(handle);
+
+        if (OperatingSystem.IsLinux())
+            return Unix.RealPath("/proc/self/fd/" + handle.DangerousGetHandle());
+
+        return null;
     }
 
     private static Result<string, AgentError> Failure(string relativePath, string reason) =>
