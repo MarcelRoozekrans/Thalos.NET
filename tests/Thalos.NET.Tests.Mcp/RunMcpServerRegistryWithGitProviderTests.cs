@@ -39,7 +39,7 @@ public sealed class RunMcpServerRegistryWithGitProviderTests : IAsyncLifetime
         definition.RunScoped = new RunScopedMcpDefinition { Args = [McpServerFixture.ServerDll] };
         var registry = new RunMcpServerRegistry(
             new Dictionary<string, McpServerDefinition>(StringComparer.Ordinal) { ["roslyn"] = definition },
-            provider,
+            () => provider,
             NullLoggerFactory.Instance,
             TimeProvider.System);
         _disposables.Add(registry);
@@ -119,7 +119,7 @@ public sealed class RunMcpServerRegistryWithGitProviderTests : IAsyncLifetime
         definition.RunScoped = new RunScopedMcpDefinition { Args = [McpServerFixture.ServerDll] };
         var registry = new RunMcpServerRegistry(
             new Dictionary<string, McpServerDefinition>(StringComparer.Ordinal) { ["roslyn"] = definition },
-            provider,
+            () => provider,
             NullLoggerFactory.Instance,
             TimeProvider.System);
         _disposables.Add(registry);

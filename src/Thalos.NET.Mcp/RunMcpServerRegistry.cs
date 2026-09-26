@@ -61,9 +61,14 @@ namespace Thalos.Mcp;
 /// a waiting reload and stop the server, and a call still running on it then fails.
 /// </para>
 /// <para>
-/// <b>No provider.</b> <paramref name="workspaces"/> is optional (ruling R7): a host with the workflow engine off
-/// registers no <see cref="IRunWorkspaceProvider"/> but may still declare <c>runScoped</c> in <c>.mcp.json</c>. With
-/// none, no run can have a server: <see cref="OnReadyAsync"/> starts nothing, and
+/// <b>Provider found on first use.</b> <paramref name="workspaces"/> is called once, the first time the registry needs
+/// the provider, never while the registry is being built. The provider observes this registry, so a container builds
+/// the registry while it builds the provider; resolving the provider there would wait on itself.
+/// </para>
+/// <para>
+/// <b>No provider.</b> <paramref name="workspaces"/> may return <see langword="null"/> (ruling R7): a host with the
+/// workflow engine off registers no <see cref="IRunWorkspaceProvider"/> but may still declare <c>runScoped</c> in
+/// <c>.mcp.json</c>. With none, no run can have a server: <see cref="OnReadyAsync"/> starts nothing, and
 /// <see cref="GetReadyClientAsync"/> and <see cref="WaitAllReadyAsync"/> fail for every run id with "no run workspace
 /// provider is registered", so run callers are refused, never served by the host server. Host callers never reach
 /// the registry and are served as before.
@@ -71,20 +76,24 @@ namespace Thalos.Mcp;
 /// </remarks>
 /// <param name="runScopedServers">
 /// The <c>.mcp.json</c> entries that declare <see cref="McpServerDefinition.RunScoped"/>, keyed by source name. Each
-/// must be a stdio server with a command and a valid <see cref="RunScopedMcpDefinition.Reload"/>.
+/// must be a stdio server with a command, a valid <see cref="RunScopedMcpDefinition.Reload"/> and valid timeouts.
 /// </param>
-/// <param name="workspaces">Finds a run's workspace after a host restart; <see langword="null"/> when the host has no run workspaces.</param>
+/// <param name="workspaces">
+/// Returns the provider that finds a run's workspace after a host restart, or <see langword="null"/> when the host has no
+/// run workspaces. Called once, on first use.
+/// </param>
 /// <param name="loggerFactory">Creates the registry's logger and is passed to the MCP SDK.</param>
 /// <param name="clock">Times the connect timeout, the ready-tool polling and <see cref="WaitAllReadyAsync"/>'s timeout.</param>
 /// <exception cref="ArgumentException">A server entry is not a valid run-scoped stdio definition.</exception>
 public sealed partial class RunMcpServerRegistry(
-    IReadOnlyDictionary<string, McpServerDefinition> runScopedServers, IRunWorkspaceProvider? workspaces,
+    IReadOnlyDictionary<string, McpServerDefinition> runScopedServers, Func<IRunWorkspaceProvider?> workspaces,
     ILoggerFactory loggerFactory, TimeProvider clock)
     : IRunWorkspaceObserver, IRunWorkspaceChangeListener, IRunToolServerReadiness, IAsyncDisposable
 {
     private const string RootPlaceholderValue = "${run.workspace.root}";
     private const string ToolReloadPrefix = "tool:";
     private static readonly TimeSpan ReadyPollInterval = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan MaxTimeout = TimeSpan.FromMilliseconds(int.MaxValue);
 
     private readonly ServerSpec[] _servers = Validate(runScopedServers);
     private readonly ILoggerFactory _loggerFactory = loggerFactory ?? throw new ArgumentNullException(nameof(loggerFactory));
@@ -94,6 +103,7 @@ public sealed partial class RunMcpServerRegistry(
     private readonly Dictionary<Guid, Entry[]> _runs = [];
     private readonly Dictionary<Guid, List<Lookup>> _lookups = [];
     private readonly HashSet<Task> _stops = [];
+    private readonly Lazy<IRunWorkspaceProvider?> _workspaces = new(workspaces ?? throw new ArgumentNullException(nameof(workspaces)), LazyThreadSafetyMode.ExecutionAndPublication);
     private bool _disposed;
 
     /// <summary>Starts every configured server for <paramref name="workspace"/>'s run in the background, and returns without waiting for any.</summary>
@@ -107,7 +117,7 @@ public sealed partial class RunMcpServerRegistry(
     public ValueTask OnReadyAsync(RunWorkspace workspace, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(workspace);
-        if (_servers.Length == 0 || workspaces is null)
+        if (_servers.Length == 0 || Workspaces is null)
         {
             return ValueTask.CompletedTask;
         }
@@ -214,12 +224,12 @@ public sealed partial class RunMcpServerRegistry(
             return UnitResult<AgentError>.Success();
         }
 
-        if (workspaces is null)
+        if (Workspaces is not { } provider)
         {
             return UnitResult<AgentError>.Failure(NoProvider(runId));
         }
 
-        var run = await FindOrStartRunAsync(workspaces, runId, ct).ConfigureAwait(false);
+        var run = await FindOrStartRunAsync(provider, runId, ct).ConfigureAwait(false);
         if (run.IsFailure)
         {
             return UnitResult<AgentError>.Failure(run.Error);
@@ -278,7 +288,7 @@ public sealed partial class RunMcpServerRegistry(
     public async ValueTask<Result<RunMcpClientLease, AgentError>> GetReadyClientAsync(string serverName, Guid runId, CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(serverName);
-        if (workspaces is null)
+        if (Workspaces is null)
         {
             return Result<RunMcpClientLease, AgentError>.Failure(NoProvider(runId));
         }
@@ -796,6 +806,9 @@ public sealed partial class RunMcpServerRegistry(
         }
     }
 
+    /// <summary>The workspace provider, found on first use; never during construction, since the provider observes this registry.</summary>
+    private IRunWorkspaceProvider? Workspaces => _workspaces.Value;
+
     private Entry[]? TryGetRun(Guid runId)
     {
         lock (_sync)
@@ -842,10 +855,28 @@ public sealed partial class RunMcpServerRegistry(
                 throw new ArgumentException($"Run-scoped MCP server '{name}' has a blank readyTool.", nameof(servers));
             }
 
+            ThrowIfInvalidTimeouts(name, runScoped, nameof(servers));
+
             specs.Add(new ServerSpec(name, definition, reload, reloadTool));
         }
 
         return [.. specs.OrderBy(s => s.Name, StringComparer.Ordinal)];
+    }
+
+    /// <summary>
+    /// Rejects a <see cref="RunScopedMcpDefinition.ReadyWaitTimeout"/> or <see cref="RunScopedMcpDefinition.CallTimeout"/>
+    /// that is not positive or exceeds <see cref="MaxTimeout"/>, the longest delay a timer accepts.
+    /// </summary>
+    internal static void ThrowIfInvalidTimeouts(string name, RunScopedMcpDefinition runScoped, string paramName)
+    {
+        foreach (var (property, value) in new[] { ("readyWaitTimeout", runScoped.ReadyWaitTimeout), ("callTimeout", runScoped.CallTimeout) })
+        {
+            if (value <= TimeSpan.Zero || value > MaxTimeout)
+            {
+                throw new ArgumentException(
+                    $"Run-scoped MCP server '{name}' has {property} {value}; it must be positive and at most {MaxTimeout}.", paramName);
+            }
+        }
     }
 
     private enum ReloadKind

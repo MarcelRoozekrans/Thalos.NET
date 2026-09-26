@@ -26,5 +26,7 @@
     <InternalsVisibleTo Include="Thalos.NET.Testing" />
     <InternalsVisibleTo Include="Thalos.NET.Tests.Memory" />
     <InternalsVisibleTo Include="Thalos.NET.Tests.Skills" />
+    <!-- RunScopedMcpToolSourceTests begin a TurnScope to route a direct tool call as a given caller. -->
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Mcp" />
   </ItemGroup>
 </Project>

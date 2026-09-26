@@ -206,12 +206,35 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         act.Should().Throw<ArgumentException>().WithMessage($"*reload '{reload}'*");
     }
 
+    [Theory]
+    [InlineData(0, 60, "readyWaitTimeout")]
+    [InlineData(-1, 60, "readyWaitTimeout")]
+    [InlineData(60, 0, "callTimeout")]
+    [InlineData(60, 2_147_484, "callTimeout")] // past int.MaxValue milliseconds, the longest a timer takes
+    public void A_timeout_that_is_not_positive_or_too_long_for_a_timer_is_rejected_at_construction(int readySeconds, int callSeconds, string property)
+    {
+        var act = () => Registry(runScoped: new() { Args = ServerArgs, ReadyWaitTimeout = TimeSpan.FromSeconds(readySeconds), CallTimeout = TimeSpan.FromSeconds(callSeconds) });
+        act.Should().Throw<ArgumentException>().WithMessage($"*{property}*");
+    }
+
+    [Fact]
+    public void The_workspace_provider_is_not_looked_up_while_the_registry_is_built()
+    {
+        var lookedUp = false;
+        var definition = McpServerFixture.Definition();
+        definition.RunScoped = new() { Args = ServerArgs };
+        var registry = new RunMcpServerRegistry(Servers(definition), () => { lookedUp = true; return null; }, NullLoggerFactory.Instance, TimeProvider.System);
+        _registries.Add(registry);
+
+        lookedUp.Should().BeFalse("a container builds the registry while it builds the provider that observes it");
+    }
+
     [Fact]
     public void A_definition_without_runScoped_or_that_is_not_stdio_is_rejected_at_construction()
     {
-        var noRunScoped = () => new RunMcpServerRegistry(Servers(McpServerFixture.Definition()), new FakeProvider(null), NullLoggerFactory.Instance, TimeProvider.System);
+        var noRunScoped = () => new RunMcpServerRegistry(Servers(McpServerFixture.Definition()), () => new FakeProvider(null), NullLoggerFactory.Instance, TimeProvider.System);
         var http = () => new RunMcpServerRegistry(
-            Servers(new McpServerDefinition { Type = "http", Url = "http://localhost:1", RunScoped = new() }), new FakeProvider(null), NullLoggerFactory.Instance, TimeProvider.System);
+            Servers(new McpServerDefinition { Type = "http", Url = "http://localhost:1", RunScoped = new() }), () => new FakeProvider(null), NullLoggerFactory.Instance, TimeProvider.System);
         noRunScoped.Should().Throw<ArgumentException>().WithMessage("*no runScoped*");
         http.Should().Throw<ArgumentException>().WithMessage("*must be a stdio server*");
     }
@@ -219,7 +242,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
     [Fact]
     public async Task With_no_run_scoped_server_configured_readiness_succeeds_at_once_even_without_a_provider()
     {
-        var registry = new RunMcpServerRegistry(new Dictionary<string, McpServerDefinition>(StringComparer.Ordinal), workspaces: null, NullLoggerFactory.Instance, TimeProvider.System);
+        var registry = new RunMcpServerRegistry(new Dictionary<string, McpServerDefinition>(StringComparer.Ordinal), workspaces: () => null, NullLoggerFactory.Instance, TimeProvider.System);
         _registries.Add(registry);
         (await registry.WaitAllReadyAsync(RunId, TimeSpan.Zero, CancellationToken.None)).IsSuccess.Should().BeTrue();
     }
@@ -510,7 +533,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var definition = McpServerFixture.Definition("--host");
         definition.Env = hostEnv;
         definition.RunScoped = runScoped;
-        var registry = new RunMcpServerRegistry(Servers(definition), workspaces, NullLoggerFactory.Instance, TimeProvider.System);
+        var registry = new RunMcpServerRegistry(Servers(definition), () => workspaces, NullLoggerFactory.Instance, TimeProvider.System);
         _registries.Add(registry);
         return registry;
     }

@@ -24,7 +24,7 @@ public sealed partial class McpToolSource : IToolSource, IAsyncDisposable, IDisp
     private readonly CancellationTokenSource _disposeCts = new();
     private readonly string _type;
     private McpClient? _client;
-    private AITool[]? _tools;
+    private McpClientTool[]? _tools;
     private bool _disposed;
 
     /// <summary>Creates a source named <paramref name="name"/> for <paramref name="definition"/>.</summary>
@@ -51,10 +51,23 @@ public sealed partial class McpToolSource : IToolSource, IAsyncDisposable, IDisp
     /// <exception cref="ObjectDisposedException">The source has been disposed.</exception>
     public async ValueTask<Result<IReadOnlyList<AITool>, AgentError>> GetToolsAsync(CancellationToken ct)
     {
+        var tools = await GetClientToolsAsync(ct).ConfigureAwait(false);
+        return tools.IsSuccess
+            ? Result<IReadOnlyList<AITool>, AgentError>.Success(tools.Value)
+            : Result<IReadOnlyList<AITool>, AgentError>.Failure(tools.Error);
+    }
+
+    /// <summary>
+    /// <see cref="GetToolsAsync"/> typed as the MCP tools they are, so <see cref="RunScopedMcpToolSource"/> can call the
+    /// same tool definition through a run's own client. Returns the same cached array, with the same failures.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The source has been disposed.</exception>
+    internal async ValueTask<Result<IReadOnlyList<McpClientTool>, AgentError>> GetClientToolsAsync(CancellationToken ct)
+    {
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (Volatile.Read(ref _tools) is { } cached)
         {
-            return Result<IReadOnlyList<AITool>, AgentError>.Success(cached);
+            return Result<IReadOnlyList<McpClientTool>, AgentError>.Success(cached);
         }
 
         await _gate.WaitAsync(ct).ConfigureAwait(false);
@@ -63,7 +76,7 @@ public sealed partial class McpToolSource : IToolSource, IAsyncDisposable, IDisp
             ObjectDisposedException.ThrowIf(_disposed, this);
             if (_tools is not null)
             {
-                return Result<IReadOnlyList<AITool>, AgentError>.Success(_tools);
+                return Result<IReadOnlyList<McpClientTool>, AgentError>.Success(_tools);
             }
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposeCts.Token);
@@ -83,10 +96,10 @@ public sealed partial class McpToolSource : IToolSource, IAsyncDisposable, IDisp
             }
 
             _client = client;
-            var snapshot = tools.Cast<AITool>().ToArray();
+            var snapshot = tools.ToArray();
             Volatile.Write(ref _tools, snapshot);
             LogConnected(_logger, Name, snapshot.Length);
-            return Result<IReadOnlyList<AITool>, AgentError>.Success(snapshot);
+            return Result<IReadOnlyList<McpClientTool>, AgentError>.Success(snapshot);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -95,7 +108,7 @@ public sealed partial class McpToolSource : IToolSource, IAsyncDisposable, IDisp
         catch (Exception ex)
         {
             LogConnectFailed(_logger, ex, Name, ex.Message);
-            return Result<IReadOnlyList<AITool>, AgentError>.Failure(AgentError.ProviderError($"MCP server '{Name}' is unavailable.", ex.GetType().Name)); // message is logged (302); Detail carries no raw exception text by policy
+            return Result<IReadOnlyList<McpClientTool>, AgentError>.Failure(AgentError.ProviderError($"MCP server '{Name}' is unavailable.", ex.GetType().Name)); // message is logged (302); Detail carries no raw exception text by policy
         }
         finally
         {

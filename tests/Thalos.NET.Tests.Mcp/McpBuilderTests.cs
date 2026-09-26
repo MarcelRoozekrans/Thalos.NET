@@ -1,6 +1,9 @@
+using AwesomeAssertions.Execution;
+using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Thalos.Mcp;
 using Thalos.Tools;
+using Thalos.Workspaces;
 
 namespace Thalos.Tests.Mcp;
 
@@ -63,5 +66,81 @@ public sealed class McpBuilderTests
         var services = new ServiceCollection();
         var act = () => services.AddThalos(t => t.AddMcpServer("bad__name", McpServerFixture.Definition()));
         act.Should().Throw<ArgumentException>().Which.ParamName.Should().Be("name");
+    }
+
+    // ---------- run-scoped entries ----------
+
+    [Fact]
+    public async Task An_entry_with_runScoped_registers_the_routed_source_and_the_registry()
+    {
+        var services = new ServiceCollection();
+        services.AddThalos(t => t.AddMcpServer("roslyn", Definition(runScoped: true)));
+        await using var sp = services.BuildServiceProvider();
+
+        using var _scope = new AssertionScope();
+        sp.GetServices<IToolSource>().Should().ContainSingle(s => string.Equals(s.Name, "roslyn", StringComparison.Ordinal)).Which.Should().BeOfType<RunScopedMcpToolSource>();
+        sp.GetServices<IRunWorkspaceObserver>().Should().ContainSingle().Which.Should().BeSameAs(sp.GetRequiredService<IRunToolServerReadiness>());
+    }
+
+    [Fact]
+    public async Task With_no_workspace_provider_the_source_still_builds_and_a_run_caller_is_refused()
+    {
+        var services = new ServiceCollection();
+        services.AddThalos(t => t.AddMcpServer("roslyn", Definition(runScoped: true))); // no IRunWorkspaceProvider registered
+        await using var sp = services.BuildServiceProvider();
+
+        var source = sp.GetServices<IToolSource>().Single(s => string.Equals(s.Name, "roslyn", StringComparison.Ordinal));
+        var tool = (await source.GetToolsAsync(CancellationToken.None)).Value.OfType<AIFunction>().Single(t => string.Equals(t.Name, "args", StringComparison.Ordinal));
+        using var _ = TestCallers.BeginTurn(TestCallers.RunCaller(Guid.NewGuid()));
+        var result = (await tool.InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal), CancellationToken.None))!.ToString();
+
+        using var _scope = new AssertionScope();
+        result.Should().StartWith("error: run tool server 'roslyn' is not available for this run: ");
+        result.Should().Contain("no run workspace provider");
+        result.Should().NotContain("--host");
+    }
+
+    [Fact]
+    public async Task Every_run_scoped_entry_shares_one_registry_under_every_interface()
+    {
+        var services = new ServiceCollection();
+        services.AddThalos(t => t.AddMcpServer("roslyn", Definition(runScoped: true)).AddMcpServer("plain", McpServerFixture.Definition()).AddMcpServer("second", Definition(runScoped: true)));
+        await using var sp = services.BuildServiceProvider();
+
+        var registry = sp.GetRequiredService<RunMcpServerRegistry>();
+        using var _scope = new AssertionScope();
+        sp.GetServices<IRunWorkspaceObserver>().Should().ContainSingle().Which.Should().BeSameAs(registry);
+        sp.GetServices<IRunWorkspaceChangeListener>().Should().ContainSingle().Which.Should().BeSameAs(registry);
+        sp.GetRequiredService<IRunToolServerReadiness>().Should().BeSameAs(registry);
+        sp.GetServices<IToolSource>().Select(s => (s.Name, s.GetType())).Should().BeEquivalentTo(
+            [("roslyn", typeof(RunScopedMcpToolSource)), ("plain", typeof(McpToolSource)), ("second", typeof(RunScopedMcpToolSource))]);
+    }
+
+    [Fact]
+    public async Task An_entry_without_runScoped_registers_no_registry()
+    {
+        var services = new ServiceCollection();
+        services.AddThalos(t => t.AddMcpServer("plain", McpServerFixture.Definition()));
+        await using var sp = services.BuildServiceProvider();
+
+        using var _scope = new AssertionScope();
+        sp.GetService<RunMcpServerRegistry>().Should().BeNull();
+        sp.GetServices<IRunWorkspaceObserver>().Should().BeEmpty();
+        sp.GetService<IRunToolServerReadiness>().Should().BeNull();
+    }
+
+    [Fact]
+    public void A_second_run_scoped_entry_with_the_same_name_is_rejected_at_composition()
+    {
+        var services = new ServiceCollection();
+        var act = () => services.AddThalos(t => t.AddMcpServer("roslyn", Definition(runScoped: true)).AddMcpServer("roslyn", Definition(runScoped: true)));
+        act.Should().Throw<ArgumentException>().WithParameterName("name").WithMessage("*'roslyn' was already added*");
+    }
+
+    private static McpServerDefinition Definition(bool runScoped)
+    {
+        var definition = McpServerFixture.Definition("--host");
+        definition.RunScoped = runScoped ? new RunScopedMcpDefinition { Args = [McpServerFixture.ServerDll, "--run"] } : null;
+        return definition;
     }
 }

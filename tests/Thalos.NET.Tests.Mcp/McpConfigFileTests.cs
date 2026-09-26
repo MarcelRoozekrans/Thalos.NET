@@ -43,9 +43,12 @@ public sealed class McpConfigFileTests
                 "env": { "RUN": "${run.id}" },
                 "cwd": "${run.workspace.root}/src",
                 "readyTool": "list_solutions",
-                "reload": "tool:rebuild_solution"
+                "reload": "tool:rebuild_solution",
+                "readyWaitTimeout": "00:10:00",
+                "callTimeout": "00:00:45"
               }
             },
+            "other": { "command": "dnx", "runScoped": {} },
             "plain": { "command": "npx" }
           }
         }
@@ -59,6 +62,10 @@ public sealed class McpConfigFileTests
         runScoped.Cwd.Should().Be("${run.workspace.root}/src");
         runScoped.ReadyTool.Should().Be("list_solutions");
         runScoped.Reload.Should().Be("tool:rebuild_solution");
+        runScoped.ReadyWaitTimeout.Should().Be(TimeSpan.FromMinutes(10));
+        runScoped.CallTimeout.Should().Be(TimeSpan.FromSeconds(45));
+        servers["other"].RunScoped!.ReadyWaitTimeout.Should().Be(TimeSpan.FromMinutes(2), "the default when not specified");
+        servers["other"].RunScoped!.CallTimeout.Should().Be(TimeSpan.FromMinutes(2), "the default when not specified");
         servers["plain"].RunScoped.Should().BeNull("an entry without runScoped is host-wide only");
     }
 }

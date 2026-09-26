@@ -48,4 +48,25 @@ public sealed class RunScopedMcpDefinition
     /// every build file it evaluates came from the repository. This registry adds no protection of its own.
     /// </remarks>
     public string Reload { get; set; } = "none";
+
+    /// <summary>
+    /// How long one routed call waits for the run's server to take it: a start still in progress, a pending reload or
+    /// restart, and the calls such a reload first waits out. On expiry the call is refused with an error result; the
+    /// server keeps starting or reloading. Default two minutes. In <c>.mcp.json</c> this is <c>readyWaitTimeout</c> as a
+    /// <c>hh:mm:ss</c> string. Must be positive and at most <see cref="int.MaxValue"/> milliseconds.
+    /// </summary>
+    /// <remarks>
+    /// A host normally waits for the run's servers with <see cref="IRunToolServerReadiness.WaitAllReadyAsync"/> before it
+    /// dispatches the run's work, so this bounds the reloads that file changes cause, which re-load the workspace. Set it
+    /// above the server's own load time for the largest workspace it serves.
+    /// </remarks>
+    public TimeSpan ReadyWaitTimeout { get; set; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// How long one routed call may run on the run's server. A call holds its server's lease, and a reload waits for every
+    /// lease, so an unbounded call would hold that server's reloads back. On expiry the call is cancelled and an error
+    /// result is returned. Default two minutes. In <c>.mcp.json</c> this is <c>callTimeout</c> as a <c>hh:mm:ss</c>
+    /// string. Must be positive and at most <see cref="int.MaxValue"/> milliseconds.
+    /// </summary>
+    public TimeSpan CallTimeout { get; set; } = TimeSpan.FromMinutes(2);
 }
