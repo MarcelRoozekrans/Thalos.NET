@@ -1072,18 +1072,26 @@ public sealed partial class GitWorktreeWorkspaceProviderTests : IDisposable
 
         public List<bool> SidecarExistedWhenRemoving { get; } = [];
 
+        /// <summary>When set, called during <see cref="OnRemovingAsync"/>; its answer is recorded in <see cref="FoundWhenRemoving"/>.</summary>
+        public Func<Guid, ValueTask<RunWorkspace?>>? FindWhenRemoving { get; set; }
+
+        public List<RunWorkspace?> FoundWhenRemoving { get; } = [];
+
         public ValueTask OnReadyAsync(RunWorkspace workspace, CancellationToken ct)
         {
             Ready.Add(workspace);
             return ValueTask.CompletedTask;
         }
 
-        public ValueTask OnRemovingAsync(RunWorkspace workspace, CancellationToken ct)
+        public async ValueTask OnRemovingAsync(RunWorkspace workspace, CancellationToken ct)
         {
             Removing.Add(workspace);
             RootExistedWhenRemoving.Add(Directory.Exists(workspace.Root));
             SidecarExistedWhenRemoving.Add(sidecarExists(workspace.RunId));
-            return ValueTask.CompletedTask;
+            if (FindWhenRemoving is { } find)
+            {
+                FoundWhenRemoving.Add(await find(workspace.RunId));
+            }
         }
     }
 

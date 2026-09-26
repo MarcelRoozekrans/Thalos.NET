@@ -91,6 +91,17 @@ namespace Thalos.Git.Workspaces;
 /// together with the run.
 /// </para>
 /// <para>
+/// <b>A removal is recorded before anyone hears of it.</b> <see cref="RemoveAsync"/>, and the undo of a create that
+/// had already published its ready record, first replace the ready record with a
+/// <see cref="WorkspaceSidecarState.Removing"/> one, flushed to disk and moved into place like every other record,
+/// and only then tell observers the workspace is going. <see cref="FindAsync"/> reports only ready records, so from
+/// the moment an observer hears of the removal no caller can find the workspace again, however long the git side
+/// takes; an observer that stops something for the run cannot see it started again from this provider's own
+/// answer. A git failure leaves the record <see cref="WorkspaceSidecarState.Removing"/>: <see cref="ListAsync"/>
+/// still reports it and a later <see cref="RemoveAsync"/> finishes the removal, without telling observers again.
+/// A record that cannot be marked fails the removal before anything is torn down.
+/// </para>
+/// <para>
 /// <b>Git on a mirror is serialised across processes; that lock has nothing to do with ownership.</b> Every git call
 /// this provider makes against a repository's mirror — clone, fetch, worktree add, worktree remove, and branch
 /// delete — runs under that repository's lock, which is two locks taken in order: a <see cref="SemaphoreSlim"/> for
@@ -337,17 +348,26 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     }
 
     /// <summary>
-    /// Undoes an incomplete create: tells observers the workspace is going if they were told it was ready, removes
-    /// the worktree, its registration and the run branch if this call attempted to add them, and deletes the claimed
-    /// sidecar last, so a crash part-way through the undo still leaves a record a sweeper can see. Runs uncancelled —
-    /// the caller's token may be the very reason this runs — and does not throw: a git step's failure is logged, and
-    /// a repository lock that cannot be taken is logged and leaves the record in place, provisional, for a later
+    /// Undoes an incomplete create: if observers were told the workspace was ready, marks the record
+    /// <see cref="WorkspaceSidecarState.Removing"/> and then tells them it is going; removes the worktree, its
+    /// registration and the run branch if this call attempted to add them; and deletes the claimed sidecar last, so a
+    /// crash part-way through the undo still leaves a record a sweeper can see. Runs uncancelled — the caller's token
+    /// may be the very reason this runs — and does not throw: a git step's failure is logged, and a repository lock
+    /// that cannot be taken is logged and leaves the record in place, provisional or removing, for a later
     /// <see cref="RemoveAsync"/> to finish once this create's run lock is released. Returns whether the record is gone.
     /// </summary>
     private async Task<bool> UndoCreateAsync(RunWorkspaceRequest request, string mirror, string root, CreateProgress progress)
     {
         if (progress.Ready is { } ready)
         {
+            // Marked first, as RemoveAsync does, so a caller cannot find the workspace while observers tear down. The
+            // undo goes on regardless: its last step deletes the record either way.
+            var marked = await PublishSidecarAsync(new WorkspaceSidecar(WorkspaceSidecarState.Removing, ready), CancellationToken.None).ConfigureAwait(false);
+            if (marked.IsFailure)
+            {
+                LogCleanupFailed(logger, "mark the ready record as removing before undoing the create", marked.Error.ToString());
+            }
+
             await NotifyObserversAsync(ready, removing: true, CancellationToken.None).ConfigureAwait(false);
         }
 
@@ -383,7 +403,8 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     /// <inheritdoc />
     /// <remarks>
     /// Reports only a <see cref="WorkspaceSidecarState.Ready"/> workspace: a record still being created is not a
-    /// workspace yet. An unreadable record is logged and reported as absent.
+    /// workspace yet, and one being removed is not a workspace any more. An unreadable record is logged and reported
+    /// as absent.
     /// </remarks>
     public async ValueTask<RunWorkspace?> FindAsync(Guid runId, CancellationToken ct)
     {
@@ -404,8 +425,9 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
     /// <inheritdoc />
     /// <remarks>
-    /// Reports provisional records too, so a sweeper can see a crashed claimant's record and remove it once it is
-    /// older than <see cref="PendingTempGracePeriod"/>. Also sweeps claim temp files older than that grace period.
+    /// Reports provisional and removing records too, so a sweeper can see a crashed claimant's record, or a removal
+    /// whose git side failed, and finish it with <see cref="RemoveAsync"/>. Also sweeps claim temp files older than
+    /// <see cref="PendingTempGracePeriod"/>.
     /// </remarks>
     public async ValueTask<IReadOnlyList<RunWorkspace>> ListAsync(CancellationToken ct)
     {
@@ -492,9 +514,17 @@ public sealed partial class GitWorktreeWorkspaceProvider(
                 $"The workspace record for run '{runId}' names repository '{workspace.Repository}', which is not a valid mirror directory name; leaving it for an operator."));
         }
 
-        // Observers were only ever told a ready workspace exists.
+        // Observers were only ever told a ready workspace exists, and hear of its removal once: a Removing record's
+        // observers were told by the removal that marked it. The mark comes first, so no caller can find the
+        // workspace again while observers stop what they started for it, nor after a git failure below.
         if (sidecar.State == WorkspaceSidecarState.Ready)
         {
+            var marked = await PublishSidecarAsync(sidecar with { State = WorkspaceSidecarState.Removing }, ct).ConfigureAwait(false);
+            if (marked.IsFailure)
+            {
+                return marked;
+            }
+
             await NotifyObserversAsync(workspace, removing: true, ct).ConfigureAwait(false);
         }
 

@@ -331,7 +331,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
 
         registry.OnFilesChanged(RunId, ["a.cs"]);
         var waiting = Task.Run(async () => await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None));
-        await Task.Delay(500); // let the reload reach its wait for the held lease
+        await UntilAsync(() => registry.ReloadsWaitingForLeases == 1, "the reload to wait for the held lease");
 
         var removal = registry.OnRemovingAsync(Workspace(), CancellationToken.None).AsTask();
         (await Task.WhenAny(removal, Task.Delay(TimeSpan.FromSeconds(10)))).Should().BeSameAs(removal, "removal does not wait for a held lease");
@@ -351,8 +351,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
 
         registry.OnFilesChanged(RunId, ["a.cs"]);
         var reload = Task.Run(async () => await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None));
-        await Task.Delay(500);
-        reload.IsCompleted.Should().BeFalse("the reload still waits for the held lease; a second dispose of the other one released nothing");
+        await UntilAsync(() => registry.ReloadsWaitingForLeases == 1, "the reload to wait for the held lease, which a second dispose of the other lease must not have released");
 
         await held.DisposeAsync();
         var reloaded = await reload.WaitAsync(TimeSpan.FromSeconds(10));
@@ -408,6 +407,15 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         registry.InFlightLookupCount.Should().Be(0, "a removal mark lives only as long as the lookup it marks");
 
         (await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None)).IsSuccess.Should().BeTrue("nothing about the removal is remembered once no marked lookup is in flight");
+    }
+
+    [Fact]
+    public async Task A_lookup_that_finds_no_workspace_leaves_nothing_tracked()
+    {
+        var registry = Registry(runScoped: new() { Args = ServerArgs }, workspaces: ProviderThatFinds(null));
+
+        (await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(5), CancellationToken.None)).IsFailure.Should().BeTrue();
+        registry.InFlightLookupCount.Should().Be(0, "a lookup that found nothing is un-tracked too, not only one that goes on to start servers");
     }
 
     [Fact]

@@ -2,8 +2,13 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\Thalos.NET.Mcp\Thalos.NET.Mcp.csproj" />
     <ProjectReference Include="..\..\src\Thalos.NET.Testing\Thalos.NET.Testing.csproj" />
+    <!-- RunMcpServerRegistryWithGitProviderTests drives the registry from the real workspace provider over a real git remote. -->
+    <ProjectReference Include="..\..\src\Thalos.NET.Git\Thalos.NET.Git.csproj" />
     <ProjectReference Include="..\Thalos.NET.Tests.McpServer\Thalos.NET.Tests.McpServer.csproj" ReferenceOutputAssembly="false" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
     <PackageReference Include="Microsoft.Extensions.Logging" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\Thalos.NET.Tests.Git\Workspaces\LocalGitRemote.cs" Link="LocalGitRemote.cs" />
   </ItemGroup>
 </Project>

@@ -5,7 +5,9 @@ namespace Thalos.Mcp;
 /// <summary>
 /// A shared hold on one run's MCP server client, handed out by <see cref="RunMcpServerRegistry.GetReadyClientAsync"/>.
 /// While any lease is held, the registry does not reload or restart that server; dispose the lease as soon as the call
-/// made through <see cref="Client"/> returns. Disposing is idempotent.
+/// made through <see cref="Client"/> returns. Disposing is idempotent. Hold at most one lease per run at a time: a
+/// file change marks every server of the run for a reload, so two callers each holding a lease on one of the run's
+/// servers while asking for the other would wait for each other forever.
 /// </summary>
 public sealed class RunMcpClientLease : IAsyncDisposable
 {
