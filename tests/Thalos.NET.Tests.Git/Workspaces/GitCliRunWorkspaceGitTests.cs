@@ -762,6 +762,25 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
         committed.IsFailure.Should().BeTrue("a valueless core.symlinks is true to git, and the provider wrote false");
     }
 
+    /// <summary>
+    /// Fix round 5: an unknown <c>extensions.*</c> key on repository format version 1 makes git ignore the mirror, so
+    /// the listing holds only command scope and exits 0. The <c>core.bare</c> value read is what refuses it. Without
+    /// the gate git still fails later, on staging, so the assertion is on the gate's own refusal, not on failure alone.
+    /// </summary>
+    [Fact]
+    public async Task An_unknown_extension_on_format_version_1_is_refused_by_the_core_bare_read()
+    {
+        var ws = await WorktreeAsync();
+        File.AppendAllText(Path.Combine(MirrorOf(), "config"), "[core]\n\trepositoryformatversion = 1\n[extensions]\n\tthalosunknown = true\n");
+
+        File.WriteAllText(Path.Combine(ws.Root, "code.cs"), "class C {}");
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None);
+
+        committed.IsFailure.Should().BeTrue();
+        committed.Error.Code.Should().Be(AgentErrorCode.Validation);
+        committed.Error.Message.Should().Contain("core.bare", "the core.bare value read is the check that refuses a repository git ignores");
+    }
+
     /// <summary>Fix round 4, item 4: <c>remote.origin.fetch</c> must appear exactly once, even when the second value is identical to the first.</summary>
     [Fact]
     public async Task A_second_identical_remote_origin_fetch_is_refused()

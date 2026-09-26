@@ -101,6 +101,11 @@ internal static class MirrorConfigSurface
             return disallowed;
         }
 
+        // Load-bearing, never an optimisation to skip when the listing is clean. When git ignores the repository,
+        // for dubious ownership or an unknown extensions.* key, or when discovery would climb to a parent
+        // repository, the listing holds only command scope and exits 0, so the check above passes. The value reads,
+        // core.bare above all, are what refuse those cases: core.bare is missing, or reads false, whenever git is
+        // not looking at this mirror.
         return await CheckBoolAsync(git, directory, "core.bare", "true", ct).ConfigureAwait(false)
             ?? await CheckBoolAsync(git, directory, "core.symlinks", "false", ct).ConfigureAwait(false)
             ?? await CheckSingleValueAsync(git, directory, "remote.origin.fetch", ExpectedFetchRefspec, ct).ConfigureAwait(false)
