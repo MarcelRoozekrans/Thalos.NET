@@ -4,6 +4,10 @@
     <PackageId>Thalos.NET</PackageId>
     <Description>Thalos.NET agent runtime on Microsoft Agent Framework: agent factory, tool catalog with authorization, session state machine, in-memory session store.</Description>
     <PackageTags>agents;ai;llm;microsoft-agent-framework;zeroalloc</PackageTags>
+    <!-- PinnedDirectory.Interop.cs P/Invokes pinned-handle directory and file operations (CreateFileW,
+         GetFileInformationByHandleEx, openat, getdents64); LibraryImport's generated marshalling needs this
+         even where the source itself has no explicit unsafe block. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Thalos.NET.Abstractions\Thalos.NET.Abstractions.csproj" />

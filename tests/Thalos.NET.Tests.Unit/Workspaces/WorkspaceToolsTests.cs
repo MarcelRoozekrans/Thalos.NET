@@ -96,8 +96,12 @@ public sealed class WorkspaceToolsTests : IDisposable
     /// <c>WorkspacePath.Resolve("sub/AGENT.md")</c> resolves cleanly and the pre-check — comparing
     /// <c>"sub/AGENT.md"</c> against the protected path <c>"AGENT.md"</c> — correctly sees no match. Between that
     /// resolve and the tool's own open, <c>sub</c> is swapped for a junction pointing at the workspace root itself,
-    /// via the <see cref="WorkspaceTools.BeforeOpenForTesting"/> seam; the open then really reaches
-    /// <c>root/AGENT.md</c>. Only the post-check, run against the handle's real path, catches this.
+    /// via the <see cref="WorkspaceTools.BeforeOpenForTesting"/> seam. This round's chain pinning now catches the
+    /// swap even earlier than the leaf-level protected-path check: pinning <c>sub</c> as a chain member verifies
+    /// its real path equals the pinned root's own real path plus <c>"sub"</c> exactly, which the swapped junction's
+    /// real path — the root itself — does not, so the whole chain build refuses with the same generic message
+    /// <see cref="WorkspacePath.Resolve"/> itself uses, before the write ever reaches the leaf or the protected-path
+    /// check. The security property under test is unchanged either way: <c>AGENT.md</c> is never touched.
     /// </summary>
     [SkippableFact]
     public async Task A_swap_through_a_subdirectory_does_not_bypass_agent_md_protection()
@@ -105,6 +109,8 @@ public sealed class WorkspaceToolsTests : IDisposable
         var (tools, _, root) = Build(protectedPaths: ["AGENT.md"]);
         File.WriteAllText(Path.Combine(root, "AGENT.md"), "pinned");
         Directory.CreateDirectory(Path.Combine(root, "sub"));
+        var cleanupFired = false;
+        tools.BeforeCleanupForTesting = () => cleanupFired = true;
 
         tools.BeforeOpenForTesting = _ =>
         {
@@ -112,23 +118,29 @@ public sealed class WorkspaceToolsTests : IDisposable
             CreateDirectoryLinkOrSkip(Path.Combine(root, "sub"), root);
         };
 
-        (await tools.WriteFile(Caller(RunId), "sub/AGENT.md", "hijack")).Should().Contain("protected");
+        (await tools.WriteFile(Caller(RunId), "sub/AGENT.md", "hijack")).Should().StartWith("error:");
         File.ReadAllText(Path.Combine(root, "AGENT.md")).Should().Be("pinned");
+        cleanupFired.Should().BeTrue("even a chain-build refusal must run the cleanup seam, so a test can prove that window is safe too");
     }
 
     /// <summary>
-    /// The review's second finding: <c>sub</c> is a real, empty directory; between resolve and open it is swapped
-    /// for a link to a directory outside the workspace, so <c>write_file("sub/new.cs")</c>'s <c>FileMode.CreateNew</c>
-    /// fallback actually creates <c>outside/new.cs</c> before the post-check can run. The post-check must still
-    /// refuse the write, and — because this call created that file — must also remove it, by its real path, so
-    /// nothing is left outside once the write is refused.
+    /// The review's second finding, and the "P02" variant it asked for: <c>sub</c> is a real, empty directory;
+    /// before this call's own chain ever pins it, <c>sub</c> is swapped for a link to a directory outside the
+    /// workspace — via <see cref="WorkspaceTools.BeforeOpenForTesting"/>, fired from inside
+    /// <see cref="PinnedDirectory.CreateChild"/> itself, since <c>sub</c> is not yet a held-open, unswappable handle
+    /// at that point. The chain build's own per-level verification — <c>sub</c>'s real path must equal the pinned
+    /// root's own real path plus <c>"sub"</c> exactly — catches this before <c>write_file</c> ever reaches
+    /// <c>FileMode.CreateNew</c> or the leaf. <see cref="WorkspaceTools.BeforeCleanupForTesting"/> still fires from
+    /// the chain-build failure branch, proving that window is safe too, even though nothing was created to clean up.
     /// </summary>
     [SkippableFact]
-    public async Task A_write_through_a_swap_to_outside_leaves_nothing_behind()
+    public async Task A_swap_through_a_subdirectory_leaves_nothing_outside()
     {
         var (tools, _, root) = Build();
         var outside = NewTempDir("thalos-workspace-tools-outside-");
         Directory.CreateDirectory(Path.Combine(root, "sub"));
+        var cleanupFired = false;
+        tools.BeforeCleanupForTesting = () => cleanupFired = true;
 
         tools.BeforeOpenForTesting = _ =>
         {
@@ -140,6 +152,156 @@ public sealed class WorkspaceToolsTests : IDisposable
 
         result.Should().Contain("not permitted");
         File.Exists(Path.Combine(outside, "new.cs")).Should().BeFalse();
+        cleanupFired.Should().BeTrue();
+    }
+
+    /// <summary>
+    /// "P03" isolated from any ancestor swap the chain build would already catch on its own: <c>sub</c> stays real
+    /// and legitimately pinned all the way through the leaf's own creation — the refusal comes from narrowing the
+    /// allow-list, via <see cref="WorkspaceTools.BeforeOpenForTesting"/>, to nothing right after the pre-check
+    /// already passed it. Only once that refusal is decided does <see cref="WorkspaceTools.BeforeCleanupForTesting"/>
+    /// swap <c>sub</c> for a link to <paramref name="outside"/>, whose own, unrelated <c>new.cs</c> the review's bug
+    /// — deleting by <c>confined.RealPath</c>, re-resolved after the handle was already disposed — would reach a
+    /// second time. Removal by the still-open handle, or by <c>unlinkat</c> against the pinned parent's descriptor,
+    /// cannot be redirected this way.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_swap_at_the_cleanup_seam_cannot_redirect_file_removal()
+    {
+        var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cs" };
+        var (tools, _, root) = Build(allowedWriteExtensions: allowed);
+        var outside = NewTempDir("thalos-workspace-tools-outside-");
+        File.WriteAllText(Path.Combine(outside, "new.cs"), "outside-original");
+        Directory.CreateDirectory(Path.Combine(root, "sub"));
+
+        tools.BeforeOpenForTesting = candidate =>
+        {
+            if (candidate.EndsWith("new.cs", StringComparison.Ordinal))
+            {
+                allowed.Clear(); // the post-check, run after this open, now refuses every extension
+            }
+        };
+        tools.BeforeCleanupForTesting = () =>
+        {
+            try
+            {
+                Directory.Delete(Path.Combine(root, "sub"), recursive: true);
+                CreateDirectoryLinkOrSkip(Path.Combine(root, "sub"), outside);
+            }
+            catch (IOException)
+            {
+                // Windows: sub is still pinned with FILE_SHARE_DELETE excluded at this point.
+            }
+        };
+
+        var result = await tools.WriteFile(Caller(RunId), "sub/new.cs", "hijack");
+
+        result.Should().Contain("extension");
+        File.ReadAllText(Path.Combine(outside, "new.cs")).Should().Be("outside-original");
+    }
+
+    /// <summary>
+    /// The "P01" variant: <c>d</c> does not exist yet, so this call's own <see cref="PinnedDirectory.CreateChild"/>
+    /// would create it — but the seam fires before that, so a link to <paramref name="outside"/> occupies the name
+    /// first. <paramref name="outside"/> already has its own, unrelated, non-empty <c>e</c> subdirectory: the
+    /// review's point is that a path-based cleanup, following the same swapped name a second time, could delete or
+    /// write into it. This call's cleanup never re-resolves a path, so it cannot reach <paramref name="outside"/>'s
+    /// <c>e</c> at all, whatever is inside it.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_swap_of_a_new_ancestor_during_its_own_creation_touches_nothing_outside()
+    {
+        var (tools, _, root) = Build();
+        var outside = NewTempDir("thalos-workspace-tools-outside-");
+        Directory.CreateDirectory(Path.Combine(outside, "e"));
+        File.WriteAllText(Path.Combine(outside, "e", "keep.txt"), "outside-original");
+
+        tools.BeforeOpenForTesting = _ =>
+        {
+            if (!Directory.Exists(Path.Combine(root, "d")))
+            {
+                CreateDirectoryLinkOrSkip(Path.Combine(root, "d"), outside);
+            }
+        };
+
+        var result = await tools.WriteFile(Caller(RunId), "d/e/new.cs", "hijack");
+
+        result.Should().StartWith("error:");
+        File.ReadAllText(Path.Combine(outside, "e", "keep.txt")).Should().Be("outside-original");
+        File.Exists(Path.Combine(outside, "e", "new.cs")).Should().BeFalse();
+    }
+
+    /// <summary>
+    /// "P01" itself: <c>d</c> and <c>e</c> are both genuinely created by this call, for real — the chain build sees
+    /// no swap at all — and only once both are pinned does <c>d</c> get swapped for a link to
+    /// <paramref name="outside"/>, whose own, unrelated, <em>empty</em> <c>e</c> subdirectory the review's
+    /// <c>Directory.Delete("root/d/e")</c> bug reached by following the swapped name a second time, deleting it. A
+    /// fixed cleanup removes <c>d</c> and <c>e</c> through the handles this call already holds, never by
+    /// re-resolving <c>"root/d/e"</c>, so it cannot reach <paramref name="outside"/> at all. On Windows, pinning
+    /// <c>d</c> with a share mode that excludes <c>FILE_SHARE_DELETE</c> means the swap this probe wants often
+    /// cannot even be performed — an <see cref="IOException"/> from the attempt is swallowed here, since failing to
+    /// construct the race is itself already the property under test; the race is reliably constructible on Linux,
+    /// where an open descriptor does not pin a directory's name this way.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_swap_of_an_ancestor_right_before_cleanup_does_not_delete_outside()
+    {
+        var (tools, _, root) = Build();
+        var outside = NewTempDir("thalos-workspace-tools-outside-");
+        Directory.CreateDirectory(Path.Combine(outside, "e"));
+
+        tools.BeforeOpenForTesting = candidate =>
+        {
+            if (!candidate.EndsWith("new.cs", StringComparison.Ordinal))
+            {
+                return; // only swap once d/e are genuinely created, right before the leaf itself opens
+            }
+
+            try
+            {
+                Directory.Delete(Path.Combine(root, "d"), recursive: true);
+                CreateDirectoryLinkOrSkip(Path.Combine(root, "d"), outside);
+            }
+            catch (IOException)
+            {
+                // Windows: d is already pinned with FILE_SHARE_DELETE excluded, so the swap cannot be performed —
+                // which is exactly the property under test, just proven a different way.
+            }
+        };
+
+        await tools.WriteFile(Caller(RunId), "d/e/new.cs", "hijack");
+
+        Directory.Exists(Path.Combine(outside, "e")).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// A variant of the "P01"/"P02" probes with <c>d</c> already present, so the chain build takes
+    /// <see cref="PinnedDirectory.CreateChild"/>'s already-occupied branch — <c>CreateDirectoryW</c> failing because
+    /// something is there, falling back to opening it — rather than the genuinely-new branch, exercising both.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_swap_of_an_existing_ancestor_during_chain_creation_touches_nothing_outside()
+    {
+        var (tools, _, root) = Build();
+        var outside = NewTempDir("thalos-workspace-tools-outside-");
+        Directory.CreateDirectory(Path.Combine(outside, "e"));
+        File.WriteAllText(Path.Combine(outside, "e", "keep.txt"), "outside-original");
+        Directory.CreateDirectory(Path.Combine(root, "d"));
+
+        tools.BeforeOpenForTesting = _ =>
+        {
+            if (Directory.Exists(Path.Combine(root, "d")) && new DirectoryInfo(Path.Combine(root, "d")).LinkTarget is null)
+            {
+                Directory.Delete(Path.Combine(root, "d"));
+                CreateDirectoryLinkOrSkip(Path.Combine(root, "d"), outside);
+            }
+        };
+
+        var result = await tools.WriteFile(Caller(RunId), "d/e/new.cs", "hijack");
+
+        result.Should().StartWith("error:");
+        File.ReadAllText(Path.Combine(outside, "e", "keep.txt")).Should().Be("outside-original");
+        File.Exists(Path.Combine(outside, "e", "new.cs")).Should().BeFalse();
     }
 
     /// <summary>
@@ -156,6 +318,56 @@ public sealed class WorkspaceToolsTests : IDisposable
         result.Should().Contain("extension ''");
         Directory.Exists(Path.Combine(root, "d", "e")).Should().BeFalse();
         Directory.Exists(Path.Combine(root, "d")).Should().BeFalse();
+    }
+
+    /// <summary>
+    /// One of the review's minors: a check-then-create race must not record a directory this call did not create —
+    /// including simply finding it already there — as its own. <c>sub</c> pre-exists; the refusal comes from
+    /// narrowing the allow-list after the pre-check, so the chain build itself takes the ordinary,
+    /// nothing-swapped path for an already-occupied name.
+    /// </summary>
+    [Fact]
+    public async Task A_disallowed_write_never_removes_a_directory_it_did_not_create()
+    {
+        var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cs" };
+        var (tools, _, root) = Build(allowedWriteExtensions: allowed);
+        Directory.CreateDirectory(Path.Combine(root, "sub"));
+
+        tools.BeforeOpenForTesting = candidate =>
+        {
+            if (candidate.EndsWith("new.cs", StringComparison.Ordinal))
+            {
+                allowed.Clear();
+            }
+        };
+
+        var result = await tools.WriteFile(Caller(RunId), "sub/new.cs", "hijack");
+
+        result.Should().Contain("extension");
+        Directory.Exists(Path.Combine(root, "sub")).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// Another of the review's minors: an exception partway through pinning the chain — rather than an ordinary
+    /// refusal — must still release every already-pinned ancestor. If <c>d</c>'s handle leaked, held with a share
+    /// mode that excludes deletion, an ordinary external delete of it right afterwards would fail.
+    /// </summary>
+    [Fact]
+    public async Task An_exception_mid_chain_still_releases_pinned_handles()
+    {
+        var (tools, _, root) = Build();
+        tools.BeforeOpenForTesting = candidate =>
+        {
+            if (candidate.EndsWith('e'))
+            {
+                throw new InvalidOperationException("boom");
+            }
+        };
+
+        var act = () => tools.WriteFile(Caller(RunId), "d/e/f.cs", "x");
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+        Directory.Delete(Path.Combine(root, "d"), recursive: true);
     }
 
     [Fact]
@@ -177,6 +389,34 @@ public sealed class WorkspaceToolsTests : IDisposable
         File.WriteAllText(Path.Combine(root, ".git", "HEAD"), "x");
 
         (await tools.ListFiles(Caller(RunId))).Should().NotContain(".git");
+    }
+
+    /// <summary>
+    /// The review's fifth finding: the old walk checked whether an entry was a reparse point, then separately
+    /// enumerated it as a subdirectory — two calls, with a gap between them a swap could use to make the second one
+    /// list an outside directory's names instead. This walk enumerates each directory in one handle-based call and
+    /// descends by opening the child relative to the same pinned parent, so the seam fires right where the old code
+    /// would have made its second, separate call — and finds nothing to reach, since the child no longer resolves
+    /// where the walk expects.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_swap_during_the_walk_never_lists_outside_names()
+    {
+        var (tools, _, root) = Build();
+        var outside = NewTempDir("thalos-workspace-tools-outside-");
+        File.WriteAllText(Path.Combine(outside, "secret.cs"), "outside-original");
+        Directory.CreateDirectory(Path.Combine(root, "sub"));
+
+        tools.BeforeOpenForTesting = _ =>
+        {
+            Directory.Delete(Path.Combine(root, "sub"));
+            CreateDirectoryLinkOrSkip(Path.Combine(root, "sub"), outside);
+        };
+
+        var listing = await tools.ListFiles(Caller(RunId));
+
+        listing.Should().NotContain("secret");
+        File.ReadAllText(Path.Combine(outside, "secret.cs")).Should().Be("outside-original");
     }
 
     // Ruling R29. Build() uses AllowedWriteExtensions = [".cs", ".md"] unless a test passes its own.
@@ -375,6 +615,45 @@ public sealed class WorkspaceToolsTests : IDisposable
         (await tools.WriteFile(Caller(RunId), "a.cs", "class A {}")).Should().StartWith("wrote");
         (await tools.ReadFile(Caller(RunId), "a.cs")).Should().Be("class A {}");
         File.ReadAllText(Path.Combine(real, "a.cs")).Should().Be("class A {}");
+    }
+
+    /// <summary>
+    /// Regression for the ancestor-pinning rewrite: 300 concurrent writes to the very same file, each opening it
+    /// with a share mode that excludes <c>FILE_SHARE_DELETE</c>, must never throw — a losing writer gets a clean
+    /// refusal, never an unhandled sharing-violation exception — and the file itself must still exist afterwards.
+    /// </summary>
+    [Fact]
+    public async Task Concurrent_writes_to_the_same_file_never_throw_and_never_lose_the_file()
+    {
+        var (tools, _, root) = Build();
+        var caller = Caller(RunId);
+
+        var tasks = Enumerable.Range(0, 300).Select(i => tools.WriteFile(caller, "shared.cs", $"content-{i}"));
+        var results = await Task.WhenAll(tasks);
+
+        results.Should().OnlyContain(r => r.StartsWith("wrote", StringComparison.Ordinal) || r.StartsWith("error:", StringComparison.Ordinal));
+        File.Exists(Path.Combine(root, "shared.cs")).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// A second concurrency regression specific to this round: many writers racing to create the very same new
+    /// ancestor directory — <see cref="PinnedDirectory.CreateChild"/>'s already-occupied fallback — must all
+    /// succeed cleanly, each still landing its own distinct file.
+    /// </summary>
+    [Fact]
+    public async Task Concurrent_writes_creating_the_same_new_directory_never_throw()
+    {
+        var (tools, _, root) = Build();
+        var caller = Caller(RunId);
+
+        var tasks = Enumerable.Range(0, 50).Select(i => tools.WriteFile(caller, $"newdir/f{i}.cs", $"content-{i}"));
+        var results = await Task.WhenAll(tasks);
+
+        results.Should().OnlyContain(r => r.StartsWith("wrote", StringComparison.Ordinal));
+        for (var i = 0; i < 50; i++)
+        {
+            File.Exists(Path.Combine(root, "newdir", $"f{i}.cs")).Should().BeTrue();
+        }
     }
 
     private (WorkspaceTools Tools, FakeChangeListener Listener, string Root) Build(

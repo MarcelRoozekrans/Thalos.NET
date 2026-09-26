@@ -54,17 +54,27 @@ namespace Thalos.Workspaces;
 public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, RunWorkspaceToolOptions options, IEnumerable<IRunWorkspaceChangeListener> listeners, ILogger<WorkspaceTools> logger)
 {
     private const string NoWorkspace = "error: this turn has no run workspace";
-    private const string GenericRefusal = "error: the path is not permitted.";
+
+    /// <summary>The fixed, generic refusal — never a path, an errno, or a Win32 error code — shared with <see cref="PinnedDirectory"/> and <see cref="PinnedFile"/>, which fail closed with the same text whenever pinning or a per-level verification cannot succeed.</summary>
+    internal const string GenericRefusalText = "error: the path is not permitted.";
 
     /// <summary>
-    /// Test-only seam: invoked with the path <see cref="OpenExisting"/> or <see cref="OpenForWrite"/> is about to
-    /// open, immediately before it opens it, so a test can deterministically simulate the check-to-use race the
+    /// Test-only seam: invoked with the path <see cref="OpenExisting"/> is about to open, immediately before it
+    /// opens it, so a test can deterministically simulate the check-to-use race the
     /// type-level remarks describe — e.g. swapping a directory for a link between <see cref="WorkspacePath.Resolve"/>
     /// and the open — instead of depending on real timing. Always <see langword="null"/> in production; instance-level
     /// and internal, so only a test in this assembly's <c>InternalsVisibleTo</c> grant, holding its own instance, can
     /// set it — never shared, mutable state across instances or tests.
     /// </summary>
     internal Action<string>? BeforeOpenForTesting { get; set; }
+
+    /// <summary>
+    /// Test-only seam: invoked once, immediately before <c>write_file</c> attempts to clean up a refusal — remove a
+    /// file it created, or a directory it created — so a test can simulate a swap at exactly that window and assert
+    /// it has no effect, since cleanup goes through a pinned handle or descriptor rather than a path string.
+    /// Instance-level and internal, matching <see cref="BeforeOpenForTesting"/>.
+    /// </summary>
+    internal Action? BeforeCleanupForTesting { get; set; }
 
     /// <summary><c>workspace__read_file</c>: reads a text file from the run's workspace. Ungated by the write allow-list.</summary>
     [ThalosTool("read_file")]
@@ -86,7 +96,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         using var confined = opened.Value!;
         if (!IsContained(confined.RealPath, target.CanonicalRoot!))
         {
-            return GenericRefusal;
+            return GenericRefusalText;
         }
 
         var read = await ReadBoundedAsync(confined.Stream, path, ct).ConfigureAwait(false);
@@ -111,7 +121,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
 
         if (WorkspacePath.CanonicalizeRoot(workspace.Root) is not { } canonicalRoot)
         {
-            return GenericRefusal;
+            return GenericRefusalText;
         }
 
         var start = ResolveListStart(workspace.Root, canonicalRoot, directory);
@@ -120,27 +130,65 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
             return startError;
         }
 
-        if (!Directory.Exists(start.Path))
-        {
-            return $"error: '{directory ?? "."}' is not a directory.";
-        }
-
+        using var startDirectory = start.Directory!;
         var entries = new List<string>();
-        Walk(canonicalRoot, start.Path!, entries, options.MaxListEntries, ct);
+        Walk(startDirectory, "", entries, options.MaxListEntries, ct);
         entries.Sort(StringComparer.Ordinal);
 
         return entries.Count == 0 ? "(empty)" : FormatListing(entries, options.MaxListEntries);
     }
 
-    private static (string? Path, string? Error) ResolveListStart(string root, string canonicalRoot, string? directory)
+    /// <summary>
+    /// Pins the directory <c>list_files</c> should start walking from — the canonical root itself, or a
+    /// caller-supplied subdirectory, resolved and lexically validated via <see cref="WorkspacePath.Resolve"/> first,
+    /// then reached by opening one already-verified level at a time, exactly as a write's directory chain does — so
+    /// the starting point is pinned the same way, never re-resolved by a path string once found.
+    /// </summary>
+    private static (PinnedDirectory? Directory, string? Error) ResolveListStart(string root, string canonicalRoot, string? directory)
     {
         if (string.IsNullOrEmpty(directory))
         {
-            return (canonicalRoot, null);
+            return PinRoot(canonicalRoot);
         }
 
         var resolved = WorkspacePath.Resolve(root, directory);
-        return resolved.IsSuccess ? (resolved.Value, null) : (null, "error: " + resolved.Error.Message);
+        if (resolved.IsFailure)
+        {
+            return (null, "error: " + resolved.Error.Message);
+        }
+
+        var relative = Path.GetRelativePath(canonicalRoot, resolved.Value);
+        if (string.Equals(relative, ".", StringComparison.Ordinal))
+        {
+            return PinRoot(canonicalRoot);
+        }
+
+        var rootPin = PinnedDirectory.OpenRoot(canonicalRoot);
+        if (rootPin.IsFailure)
+        {
+            return (null, GenericRefusalText);
+        }
+
+        var current = rootPin.Value;
+        foreach (var segment in relative.Split(Path.DirectorySeparatorChar))
+        {
+            var child = current.OpenChild(segment);
+            current.Dispose();
+            if (child.IsFailure)
+            {
+                return (null, $"error: '{directory}' is not a directory.");
+            }
+
+            current = child.Value;
+        }
+
+        return (current, null);
+    }
+
+    private static (PinnedDirectory? Directory, string? Error) PinRoot(string canonicalRoot)
+    {
+        var rootPin = PinnedDirectory.OpenRoot(canonicalRoot);
+        return rootPin.IsSuccess ? (rootPin.Value, null) : (null, GenericRefusalText);
     }
 
     private static string FormatListing(List<string> entries, int limit)
@@ -184,51 +232,165 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
             return FormatGate(pre, path, preExtension);
         }
 
-        var createdDirectories = CreateDirectoryChain(Path.GetDirectoryName(resolved));
-
-        var opened = OpenForWrite(path, resolved);
-        if (!opened.Ok)
+        var chainResult = PinDirectoryChain(canonicalRoot, Path.GetDirectoryName(resolved) ?? canonicalRoot);
+        if (!chainResult.Ok)
         {
-            RemoveCreatedDirectories(createdDirectories);
-            return opened.Error!;
+            BeforeCleanupForTesting?.Invoke();
+            return chainResult.Error!;
         }
 
-        var confined = opened.Value!;
-
-        // Post-check: the same three checks, now against the handle's real path.
-        var post = CheckWrite(caller, canonicalRoot, confined.RealPath, out var postExtension);
-        if (post != WriteGate.Ok)
+        var chain = chainResult.Chain!;
+        try
         {
-            CleanUpRefusedWrite(confined, createdDirectories);
-            return FormatGate(post, path, postExtension);
+            return await OpenAndWriteLeafAsync(caller, workspace, canonicalRoot, path, resolved, content, chain, ct).ConfigureAwait(false);
+        }
+        finally
+        {
+            DisposeChain(chain);
+        }
+    }
+
+    /// <summary>The leaf open, post-check, write and notify for <c>write_file</c>, once its directory chain is pinned — split out from <see cref="WriteFile"/> only to keep it under the method-length limit.</summary>
+    private async Task<string> OpenAndWriteLeafAsync(ISecurityContext caller, RunWorkspace workspace, string canonicalRoot, string path, string resolved, string content, List<PinnedDirectory> chain, CancellationToken ct)
+    {
+        var leafName = Path.GetFileName(resolved);
+        var opened = chain[^1].OpenOrCreateFile(leafName, BeforeOpenForTesting);
+        if (opened.IsFailure)
+        {
+            BeforeCleanupForTesting?.Invoke();
+            RemoveCreatedDirectories(chain);
+            return opened.Error;
         }
 
+        var file = opened.Value;
         int byteCount;
         string relativePath;
         try
         {
-            byteCount = await WriteAllBytesAsync(confined.Stream, content, ct).ConfigureAwait(false);
-            relativePath = RelativeToRoot(canonicalRoot, confined.RealPath);
+            var post = CheckWrite(caller, canonicalRoot, file.RealPath, out var postExtension);
+            if (post != WriteGate.Ok)
+            {
+                CleanUpRefusedFile(file, chain);
+                return FormatGate(post, path, postExtension);
+            }
+
+            byteCount = await WriteAllBytesAsync(file.Stream, content, ct).ConfigureAwait(false);
+            relativePath = RelativeToRoot(canonicalRoot, file.RealPath);
         }
         finally
         {
-            confined.Dispose();
+            file.Dispose();
         }
 
+        // Notify only after the handle above is disposed: a listener that reads the file back must not collide
+        // with the still-open, exclusively-shared handle this call just wrote through.
         Notify(workspace.RunId, relativePath);
         return $"wrote {byteCount} bytes to '{path}'.";
     }
 
-    /// <summary>Disposes a write's handle and, since the post-check refused it, undoes exactly what this call itself created: the file, if <see cref="ConfinedHandle.CreatedNew"/>, and any parent directories, innermost first.</summary>
-    private static void CleanUpRefusedWrite(ConfinedHandle confined, List<string> createdDirectories)
+    /// <summary>Since the post-check refused it: marks the file for removal, by handle, if this call created it, and removes any directories this call created, innermost first — never by a path string. The caller's own <c>finally</c> blocks dispose the file and the chain in every case, including this one.</summary>
+    private void CleanUpRefusedFile(PinnedFile file, List<PinnedDirectory> chain)
     {
-        confined.Dispose();
-        if (confined.CreatedNew)
+        BeforeCleanupForTesting?.Invoke();
+        if (file.CreatedNew)
         {
-            TryDelete(confined.RealPath);
+            file.TryRemove();
+
+            // On Windows, marking a handle for deletion only removes it once every handle to it is closed; dispose
+            // it now, rather than waiting for the caller's own outer finally, so a parent directory this call also
+            // created is genuinely empty by the time RemoveCreatedDirectories tries it, not just marked-for-empty.
+            file.Dispose();
         }
 
-        RemoveCreatedDirectories(createdDirectories);
+        RemoveCreatedDirectories(chain);
+    }
+
+    /// <summary>
+    /// Pins the whole chain of directories from the canonical root down to <paramref name="targetDirectory"/>,
+    /// creating any level that is missing — never a path-based <see cref="Directory.CreateDirectory(string)"/> —
+    /// and holds every level open, root first, so the type-level remarks' "hold the whole chain" applies from here
+    /// until the caller disposes it via <see cref="DisposeChain"/>.
+    /// </summary>
+    private ChainResult PinDirectoryChain(string canonicalRoot, string targetDirectory)
+    {
+        var rootPin = PinnedDirectory.OpenRoot(canonicalRoot);
+        if (rootPin.IsFailure)
+        {
+            return ChainResult.Failure(rootPin.Error);
+        }
+
+        var chain = new List<PinnedDirectory> { rootPin.Value };
+        var relative = Path.GetRelativePath(canonicalRoot, targetDirectory);
+        if (string.Equals(relative, ".", StringComparison.Ordinal))
+        {
+            return ChainResult.Success(chain);
+        }
+
+        try
+        {
+            var current = rootPin.Value;
+            foreach (var segment in relative.Split(Path.DirectorySeparatorChar))
+            {
+                var child = current.CreateChild(segment, BeforeOpenForTesting);
+                if (child.IsFailure)
+                {
+                    DisposeChain(chain);
+                    return ChainResult.Failure(child.Error);
+                }
+
+                chain.Add(child.Value);
+                current = child.Value;
+            }
+
+            return ChainResult.Success(chain);
+        }
+        catch
+        {
+            // Never leak an already-pinned ancestor if creating or verifying a deeper level throws instead of
+            // returning a Result failure — this rethrows unchanged; it only guarantees the handles are released.
+            DisposeChain(chain);
+            throw;
+        }
+    }
+
+    /// <summary>Removes exactly the directories this call created, innermost first, stopping at the first one that was not created by this call or that removal itself refuses — e.g. because it is not empty. Never the root.</summary>
+    private static void RemoveCreatedDirectories(List<PinnedDirectory> chain)
+    {
+        for (var i = chain.Count - 1; i >= 0; i--)
+        {
+            if (!chain[i].WasCreated || !chain[i].TryRemoveSelf())
+            {
+                break;
+            }
+        }
+    }
+
+    private static void DisposeChain(List<PinnedDirectory> chain)
+    {
+        for (var i = chain.Count - 1; i >= 0; i--)
+        {
+            chain[i].Dispose();
+        }
+    }
+
+    /// <summary>The outcome of <see cref="PinDirectoryChain"/>: either the whole open chain, root first, or ready-to-return error text.</summary>
+    private readonly struct ChainResult
+    {
+        private ChainResult(List<PinnedDirectory>? chain, string? error)
+        {
+            Chain = chain;
+            Error = error;
+        }
+
+        public List<PinnedDirectory>? Chain { get; }
+
+        public string? Error { get; }
+
+        public bool Ok => Error is null;
+
+        public static ChainResult Success(List<PinnedDirectory> chain) => new(chain, null);
+
+        public static ChainResult Failure(string error) => new(null, error);
     }
 
     private static async Task<int> WriteAllBytesAsync(FileStream stream, string content, CancellationToken ct)
@@ -347,7 +509,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
 
         if (WorkspacePath.CanonicalizeRoot(workspace.Root) is not { } canonicalRoot)
         {
-            return PathResolution.Failure(GenericRefusal);
+            return PathResolution.Failure(GenericRefusalText);
         }
 
         var resolved = WorkspacePath.Resolve(workspace.Root, path);
@@ -395,7 +557,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
 
     private static string FormatGate(WriteGate gate, string path, string? extensionMessage) => gate switch
     {
-        WriteGate.NotPermitted => GenericRefusal,
+        WriteGate.NotPermitted => GenericRefusalText,
         WriteGate.Protected => Protected(path),
         WriteGate.Extension => extensionMessage!,
         _ => throw new InvalidOperationException($"{nameof(CheckWrite)} returned {nameof(WriteGate.Ok)}; there is nothing to format."),
@@ -417,64 +579,17 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            return ConfinedHandleResult.Failure(GenericRefusal);
+            return ConfinedHandleResult.Failure(GenericRefusalText);
         }
 
         var real = WorkspacePath.FinalPathOfHandle(stream.SafeFileHandle);
         if (real is null)
         {
             stream.Dispose();
-            return ConfinedHandleResult.Failure(GenericRefusal);
+            return ConfinedHandleResult.Failure(GenericRefusalText);
         }
 
         return ConfinedHandleResult.Success(new ConfinedHandle(stream, real, createdNew: false));
-    }
-
-    /// <summary>
-    /// Opens <paramref name="resolvedPath"/> for <c>write_file</c>: <see cref="FileMode.Open"/> when it already
-    /// exists, falling back to <see cref="FileMode.CreateNew"/> only when it is absent — see the type-level remarks
-    /// for why the fallback specifically must not be <see cref="FileMode.OpenOrCreate"/>.
-    /// </summary>
-    private ConfinedHandleResult OpenForWrite(string originalPath, string resolvedPath)
-    {
-        BeforeOpenForTesting?.Invoke(resolvedPath);
-
-        FileStream stream;
-        var createdNew = false;
-        try
-        {
-            stream = new FileStream(resolvedPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-        }
-        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
-        {
-            try
-            {
-                stream = new FileStream(resolvedPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
-                createdNew = true;
-            }
-            catch (Exception ex2) when (ex2 is IOException or UnauthorizedAccessException)
-            {
-                return ConfinedHandleResult.Failure(GenericRefusal);
-            }
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return ConfinedHandleResult.Failure(GenericRefusal);
-        }
-
-        var real = WorkspacePath.FinalPathOfHandle(stream.SafeFileHandle);
-        if (real is null)
-        {
-            stream.Dispose();
-            if (createdNew)
-            {
-                TryDelete(resolvedPath);
-            }
-
-            return ConfinedHandleResult.Failure(GenericRefusal);
-        }
-
-        return ConfinedHandleResult.Success(new ConfinedHandle(stream, real, createdNew));
     }
 
     /// <summary><see langword="null"/> when <paramref name="caller"/> may write a file whose real final path is <paramref name="realPath"/>; otherwise the error text.</summary>
@@ -595,8 +710,14 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         return (Encoding.UTF8.GetString(buffer, 0, total), null);
     }
 
-    /// <summary>Walks <paramref name="directory"/> recursively, collecting paths relative to <paramref name="root"/>; skips <c>.git</c> and does not follow reparse points. Stops once one more than <paramref name="limit"/> entries have been collected, rather than walking the whole tree only to truncate the result afterwards.</summary>
-    private static void Walk(string root, string directory, List<string> results, int limit, CancellationToken ct)
+    /// <summary>
+    /// Walks <paramref name="directory"/>'s own entries via its pinned handle — never re-resolving a name by path —
+    /// skipping <c>.git</c> and any reparse point; a name found to be a subdirectory is descended into by opening it
+    /// as a child of this same pinned directory, closing the gap between checking an entry's attributes and
+    /// enumerating what a swap could have made it point to since. Stops once one more than <paramref name="limit"/>
+    /// entries have been collected.
+    /// </summary>
+    private void Walk(PinnedDirectory directory, string relativePrefix, List<string> results, int limit, CancellationToken ct)
     {
         if (results.Count > limit)
         {
@@ -605,121 +726,53 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
 
         ct.ThrowIfCancellationRequested();
 
-        IEnumerable<string> children;
+        List<PinnedDirEntry> children;
         try
         {
-            children = Directory.EnumerateFileSystemEntries(directory);
+            children = directory.EnumerateEntries();
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return;
         }
 
-        foreach (var child in children)
+        foreach (var entry in children)
         {
             if (results.Count > limit)
             {
                 return;
             }
 
-            var name = Path.GetFileName(child);
-            if (name.Equals(".git", StringComparison.OrdinalIgnoreCase))
+            if (entry.Name.Equals(".git", StringComparison.OrdinalIgnoreCase) || entry.IsReparsePoint)
             {
                 continue;
             }
 
-            FileAttributes attributes;
-            try
-            {
-                attributes = File.GetAttributes(child);
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                continue;
-            }
-
-            if (attributes.HasFlag(FileAttributes.ReparsePoint))
-            {
-                continue;
-            }
-
-            var relative = NormalizeSeparators(Path.GetRelativePath(root, child));
-            if (attributes.HasFlag(FileAttributes.Directory))
-            {
-                results.Add(relative + "/");
-                Walk(root, child, results, limit, ct);
-            }
-            else
+            var relative = relativePrefix.Length == 0 ? entry.Name : relativePrefix + "/" + entry.Name;
+            if (!entry.IsDirectory)
             {
                 results.Add(relative);
+                continue;
             }
-        }
-    }
 
-    /// <summary>
-    /// Creates every directory from the deepest existing ancestor of <paramref name="directory"/> down to
-    /// <paramref name="directory"/> itself, and returns exactly the ones this call created — nothing that already
-    /// existed — so a later refusal can remove exactly those and no others.
-    /// </summary>
-    private static List<string> CreateDirectoryChain(string? directory)
-    {
-        var created = new List<string>();
-        if (string.IsNullOrEmpty(directory))
-        {
-            return created;
-        }
-
-        var toCreate = new Stack<string>();
-        var current = directory;
-        while (!Directory.Exists(current))
-        {
-            toCreate.Push(current);
-            var parent = Path.GetDirectoryName(current);
-            if (string.IsNullOrEmpty(parent) || string.Equals(parent, current, StringComparison.Ordinal))
+            results.Add(relative + "/");
+            var child = directory.OpenChild(entry.Name, BeforeOpenForTesting);
+            if (child.IsFailure)
             {
-                break;
+                continue; // gone, or no longer a plain directory, since it was listed a moment ago
             }
 
-            current = parent;
-        }
-
-        while (toCreate.Count > 0)
-        {
-            var dir = toCreate.Pop();
-            Directory.CreateDirectory(dir);
-            created.Add(dir);
-        }
-
-        return created;
-    }
-
-    /// <summary>Removes exactly the directories <see cref="CreateDirectoryChain"/> created, innermost first, stopping at the first one that is not both present and empty.</summary>
-    private static void RemoveCreatedDirectories(List<string> created)
-    {
-        for (var i = created.Count - 1; i >= 0; i--)
-        {
             try
             {
-                Directory.Delete(created[i]);
+                Walk(child.Value, relative, results, limit, ct);
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            finally
             {
-                break;
+                child.Value.Dispose();
             }
         }
     }
 
-    private static void TryDelete(string path)
-    {
-        try
-        {
-            File.Delete(path);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            // best-effort cleanup of a file this call itself created before refusing it
-        }
-    }
 
     private static bool IsContained(string path, string root)
     {
@@ -773,7 +826,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         public static ConfinedHandleResult Failure(string error) => new(null, error);
     }
 
-    /// <summary>An open file handle together with its real, symlink-resolved path, and whether this call itself created the file (via <see cref="FileMode.CreateNew"/>) — see <see cref="OpenForWrite"/>.</summary>
+    /// <summary>An open file handle together with its real, symlink-resolved path, from <see cref="OpenExisting"/>; <c>CreatedNew</c> is always false here, since this path never creates a file — see <see cref="PinnedFile"/> for the one that does.</summary>
     private sealed class ConfinedHandle(FileStream stream, string realPath, bool createdNew) : IDisposable
     {
         public FileStream Stream { get; } = stream;
