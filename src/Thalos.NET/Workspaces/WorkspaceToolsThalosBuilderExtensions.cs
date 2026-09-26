@@ -19,8 +19,12 @@ public static class WorkspaceToolsThalosBuilderExtensions
     /// </param>
     /// <param name="configure">
     /// Customises the rest of <see cref="RunWorkspaceToolOptions"/>. <see langword="null"/> keeps the defaults: no
-    /// protected paths, a 256 KiB read cap and 500 listed entries.
+    /// protected paths, a 256 KiB read cap, 500 listed entries and a 5-second contention timeout.
     /// </param>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="configure"/> left a value that cannot work, such as a negative
+    /// <see cref="RunWorkspaceToolOptions.ContentionTimeout"/> other than <see cref="Timeout.InfiniteTimeSpan"/>.
+    /// </exception>
     [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
     [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     public static ThalosBuilder UseRunWorkspaceTools(
@@ -31,6 +35,7 @@ public static class WorkspaceToolsThalosBuilderExtensions
 
         var options = new RunWorkspaceToolOptions { AllowedWriteExtensions = allowedWriteExtensions };
         configure?.Invoke(options);
+        options.Validate(nameof(configure));
 
         builder.Services.AddSingleton(options);
         return builder.AddLocalTools(RunWorkspaceToolOptions.SourceName, typeof(WorkspaceTools));

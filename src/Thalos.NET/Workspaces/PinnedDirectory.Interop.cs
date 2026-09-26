@@ -16,10 +16,18 @@ namespace Thalos.Workspaces;
 /// </summary>
 internal static partial class PinnedIo
 {
-    /// <summary>Test-only seam: overrides the architecture <see cref="FlagsFor"/> is evaluated against, so a test can pin the unknown-architecture refusal without needing to run this process under one. Always <see langword="null"/> in production. Kept here, on the platform-neutral outer class, rather than on <see cref="Linux"/>, since it and <see cref="FlagsFor"/> are pure functions of an <see cref="Architecture"/> value — safe to call, and to unit-test, on any host OS — and <see cref="Linux"/> itself carries a <c>[SupportedOSPlatform("linux")]</c> attribute that would otherwise make every call site outside a Linux-only branch a build error.</summary>
-    internal static Architecture? ArchitectureOverrideForTesting { get; set; }
-
-    /// <summary>The real <c>O_DIRECTORY</c> and <c>O_NOFOLLOW</c> values for <paramref name="architecture"/>, or <see langword="null"/> for one this table does not cover. x86_64 defines its own values (arch/x86/include/uapi/asm/fcntl.h); every other architecture Thalos.NET runs on, arm64 included, uses the "generic" ABI's values (asm-generic/fcntl.h) instead, which differ. The round-3 Critical finding: this file previously hardcoded the x86_64 values everywhere, so on arm64 these two resolved to arm64's <c>O_DIRECT</c> (0x4000) and <c>O_LARGEFILE</c> (0x8000) instead — no directory-only, no-follow-symlinks behaviour at all, so nothing on arm64 was ever refused for being a symlink; the tool failed open. Fixed with this per-architecture table (ruling (a)): known architectures resolve to their real values, and any other architecture — one this table has not been verified for — refuses before ever calling into libc, rather than guessing.</summary>
+    /// <summary>
+    /// The real <c>O_DIRECTORY</c> and <c>O_NOFOLLOW</c> values for <paramref name="architecture"/>, or
+    /// <see langword="null"/> for one this table does not cover. The generic Linux ABI (include/uapi/asm-generic
+    /// /fcntl.h) defines <c>O_DIRECTORY</c> as 0x10000 and <c>O_NOFOLLOW</c> as 0x20000; x86_64 uses those generic
+    /// values, as do riscv64 and loongarch64. arm64 overrides them (arch/arm64/include/uapi/asm/fcntl.h):
+    /// <c>O_DIRECTORY</c> is 0x4000 and <c>O_NOFOLLOW</c> is 0x8000, and arm64 gives the generic bit patterns to
+    /// <c>O_DIRECT</c> (0x10000) and <c>O_LARGEFILE</c> (0x20000) instead. Before round 3 this file hardcoded the
+    /// generic values for every architecture, so on arm64 a pinned open asked for <c>O_DIRECT | O_LARGEFILE</c>:
+    /// no directory-only open and no refusal of a symlink, so the tools failed open there. Only x64 and arm64 are in
+    /// the table (ruling (a)); any other architecture, including the generic-ABI ones not verified here, gets
+    /// <see langword="null"/>, and <see cref="PinnedDirectory.OpenRoot"/> refuses before any open.
+    /// </summary>
     internal static (int ODirectory, int ONoFollow)? FlagsFor(Architecture architecture) => architecture switch
     {
         Architecture.X64 => (0x10000, 0x20000),
@@ -175,16 +183,10 @@ internal static partial class PinnedIo
     [SupportedOSPlatform("linux")]
     internal static partial class Linux
     {
-        // O_CREAT, O_EXCL, O_CLOEXEC and the O_RD* access modes are defined identically for every Linux kernel ABI
-        // (asm-generic/fcntl.h; x86_64's own bits/fcntl.h does not override them), so these four are safe as plain
-        // constants. O_DIRECTORY and O_NOFOLLOW are NOT: x86_64 defines its own values in arch/x86/include/uapi/asm
-        // /fcntl.h, while every other architecture Thalos.NET supports (arm64 included) uses the asm-generic values,
-        // which differ. The critical round-3 finding: this file previously hardcoded the x86_64 values everywhere,
-        // so on arm64, ODirectory and ONoFollow resolved to arm64's O_DIRECT (0x4000) and O_LARGEFILE (0x8000)
-        // instead — no directory-only, no-follow-symlinks behaviour at all, so nothing on arm64 was ever refused for
-        // being a symlink; the tool failed open. Fixed with a per-architecture table (ruling (a)): known
-        // architectures resolve to their real flag values, and any other architecture — one this table has not been
-        // verified for — refuses before ever calling into libc, rather than guessing.
+        // O_CREAT, O_EXCL, O_CLOEXEC and the O_RD* access modes have the same values on x86_64 and arm64, both of
+        // which use asm-generic/fcntl.h for them, so these are plain constants. O_DIRECTORY and O_NOFOLLOW do not:
+        // arm64 overrides the generic values, so they come from PinnedIo.FlagsFor, resolved once per chain by
+        // PinnedDirectory.OpenRoot for the process architecture and carried by every PinnedDirectory in that chain.
         public const int OCloExec = 0x8_0000;
         public const int OCreat = 0x40;
         public const int OExcl = 0x80;
@@ -196,20 +198,12 @@ internal static partial class PinnedIo
         public const int ENoEnt = 2;
         public const int EExist = 17;
         public const int EBusy = 16;
+        public const int ENotDir = 20;
 
         /// <summary>Whether <paramref name="errno"/> is one a caller should treat as transient contention rather than a policy refusal. Ruling (j). Regular-file opens on Linux do not have Windows' mandatory sharing conflicts, so this is reachable only for the narrower set of cases <c>EBUSY</c> actually covers; kept for symmetry with <see cref="Windows.IsContention"/> and so the same classification vocabulary works on both OSes.</summary>
         public static bool IsContention(int errno) => errno == EBusy;
 
-        private static Architecture CurrentArchitecture => ArchitectureOverrideForTesting ?? RuntimeInformation.ProcessArchitecture;
-
-        /// <summary>Whether this process's architecture — or <see cref="PinnedIo.ArchitectureOverrideForTesting"/> — is one <see cref="PinnedIo.FlagsFor"/> covers. Every Linux entry point below checks this before its first <c>open</c>/<c>openat</c> call, per ruling (a): fail closed before any open, not after guessing wrong flag values.</summary>
-        public static bool IsSupportedArchitecture => FlagsFor(CurrentArchitecture) is not null;
-
-        public static int ODirectory => FlagsFor(CurrentArchitecture)?.ODirectory ?? 0;
-
-        public static int ONoFollow => FlagsFor(CurrentArchitecture)?.ONoFollow ?? 0;
-
-        /// <summary>Opens the starting directory fd for a chain — the one unavoidable path-based open, since a chain has to start somewhere; the caller verifies it against the canonical root immediately via <see cref="WorkspacePath.FinalPathOfHandle"/>. The caller checks <see cref="IsSupportedArchitecture"/> first; this is never called for an architecture <see cref="PinnedIo.FlagsFor"/> does not cover.</summary>
+        /// <summary>Opens the starting directory fd for a chain — the one unavoidable path-based open, since a chain has to start somewhere; the caller verifies it against the canonical root immediately via <see cref="WorkspacePath.FinalPathOfHandle"/>. The caller passes the <c>O_DIRECTORY</c> and <c>O_NOFOLLOW</c> values <see cref="PinnedIo.FlagsFor"/> gave it for this process's architecture; it never calls this for an architecture that table does not cover.</summary>
         public static SafeFileHandle Open(string path, int flags) => new(OpenNative(path, flags, 0), ownsHandle: true);
 
         /// <summary>Opens or creates <paramref name="name"/> relative to <paramref name="dirFd"/> — never by a path string that walks through anything but this one already-pinned fd.</summary>
@@ -281,6 +275,29 @@ internal static partial class PinnedIo
                         offset += reclen;
                     }
                 }
+            }
+            finally
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+        }
+
+        /// <summary>
+        /// Whether <paramref name="fd"/> refers to a directory, asked of the descriptor itself, never of a path:
+        /// <c>getdents64</c> succeeds only on a directory and fails with <c>ENOTDIR</c> on anything else. Used to
+        /// refuse a directory where <c>read_file</c> expects a plain file (ruling (f)): unlike a read-write open, a
+        /// read-only <c>open</c> of a directory succeeds on Linux, and the first read then throws <c>EISDIR</c>. Any
+        /// error other than <c>ENOTDIR</c> is reported as a directory too, so the caller refuses rather than guesses.
+        /// Reading the entries moves the descriptor's position, which is harmless, since a descriptor this answers
+        /// <see langword="true"/> for is closed and refused.
+        /// </summary>
+        public static bool IsDirectory(SafeFileHandle fd)
+        {
+            const int bufferSize = 4096;
+            var buffer = Marshal.AllocHGlobal(bufferSize);
+            try
+            {
+                return GetDEntries64(fd, buffer, bufferSize) >= 0 || Marshal.GetLastPInvokeError() != ENotDir;
             }
             finally
             {

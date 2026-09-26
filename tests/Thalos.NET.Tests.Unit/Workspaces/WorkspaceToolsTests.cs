@@ -1,4 +1,7 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
+using AwesomeAssertions.Execution;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Thalos.Tests.Unit.Runtime;
 using Thalos.Workspaces;
@@ -10,6 +13,14 @@ namespace Thalos.Tests.Unit.Workspaces;
 public sealed class WorkspaceToolsTests : IDisposable
 {
     private static readonly Guid RunId = Guid.NewGuid();
+
+    /// <summary>
+    /// The contention timeout for the tests that queue hundreds of calls on one file. They test that the calls take
+    /// turns without colliding, not how fast the queue drains, and with every test assembly running at once the last
+    /// of 300 serialized writes can wait longer than the 5-second default. Past that bound a call correctly returns
+    /// busy, which is not what these tests are about.
+    /// </summary>
+    private static readonly TimeSpan SameFileQueueTimeout = TimeSpan.FromMinutes(2);
     private readonly List<string> _tempDirs = [];
 
     public void Dispose()
@@ -28,9 +39,9 @@ public sealed class WorkspaceToolsTests : IDisposable
     }
 
     /// <summary>
-    /// Round-3 finding A, the Critical: <c>O_DIRECTORY</c> and <c>O_NOFOLLOW</c> are architecture-dependent on Linux
-    /// — x86_64 and the "generic" ABI most other architectures (arm64 included) use disagree on their values — and
-    /// <see cref="PinnedIo.FlagsFor"/> is the table ruling (a) asks for. A pure function of its argument, so
+    /// Round-3 finding A, the Critical: <c>O_DIRECTORY</c> and <c>O_NOFOLLOW</c> are architecture-dependent on Linux.
+    /// The generic ABI, which x86_64 uses, defines them as 0x10000 and 0x20000; arm64 overrides them with 0x4000 and
+    /// 0x8000. <see cref="PinnedIo.FlagsFor"/> is the table ruling (a) asks for. A pure function of its argument, so
     /// this pins it without needing to run under either architecture.
     /// </summary>
     [Fact]
@@ -43,26 +54,26 @@ public sealed class WorkspaceToolsTests : IDisposable
 
     /// <summary>
     /// Ruling (a)'s other half: an architecture the table above does not cover must refuse before ever calling into
-    /// libc, rather than opening with flag values that might mean something else entirely there. Linux-only, since
-    /// <see cref="PinnedDirectory.OpenRoot"/> only consults <see cref="PinnedIo.ArchitectureOverrideForTesting"/>
-    /// from its Linux branch.
+    /// libc, rather than opening with flag values that might mean something else entirely there. Every tool starts
+    /// its chain at <see cref="PinnedDirectory.OpenRoot"/>, so every tool refuses. The architecture comes from the
+    /// instance seam <see cref="WorkspaceTools.ArchitectureOverrideForTesting"/> (ruling (r)), so no other test sees
+    /// it. Linux-only, since <see cref="PinnedDirectory.OpenRoot"/> reads the table only in its Linux branch.
     /// </summary>
     [SkippableFact]
     public async Task An_unsupported_linux_architecture_refuses_every_call_before_any_open()
     {
-        Skip.IfNot(OperatingSystem.IsLinux(), "PinnedIo.Linux's architecture gate only runs on Linux");
+        Skip.IfNot(OperatingSystem.IsLinux(), "the architecture table is read only on Linux");
         var (tools, _, root) = Build();
-        PinnedIo.ArchitectureOverrideForTesting = Architecture.Arm;
+        File.WriteAllText(Path.Combine(root, "existing.cs"), "original");
+        tools.ArchitectureOverrideForTesting = Architecture.Arm;
 
-        try
-        {
-            (await tools.WriteFile(Caller(RunId), "a.cs", "x")).Should().StartWith("error:");
-            File.Exists(Path.Combine(root, "a.cs")).Should().BeFalse();
-        }
-        finally
-        {
-            PinnedIo.ArchitectureOverrideForTesting = null;
-        }
+        using var scope = new AssertionScope();
+        (await tools.WriteFile(Caller(RunId), "a.cs", "x")).Should().StartWith("error:");
+        File.Exists(Path.Combine(root, "a.cs")).Should().BeFalse();
+        (await tools.ReadFile(Caller(RunId), "existing.cs")).Should().StartWith("error:");
+        (await tools.EditFile(Caller(RunId), "existing.cs", "original", "edited")).Should().StartWith("error:");
+        File.ReadAllText(Path.Combine(root, "existing.cs")).Should().Be("original");
+        (await tools.ListFiles(Caller(RunId))).Should().StartWith("error:");
     }
 
     /// <summary>
@@ -84,31 +95,208 @@ public sealed class WorkspaceToolsTests : IDisposable
     }
 
     /// <summary>
+    /// Ruling (f) for the other two leaf opens: <c>read_file</c> and <c>edit_file</c> open an existing leaf through
+    /// <see cref="PinnedDirectory.OpenExistingFile"/>, whose own directory check refuses a directory named like a
+    /// file before its handle reaches a <see cref="FileStream"/>. On Linux a read-write open of a directory fails
+    /// with <c>EISDIR</c> in the kernel, but a read-only one succeeds and the first read throws, so the check is
+    /// needed there too: this test found that on Linux in round 4.
+    /// </summary>
+    [Theory]
+    [InlineData("read")]
+    [InlineData("edit")]
+    public async Task Reading_or_editing_a_directory_where_a_file_is_expected_is_refused_without_throwing(string operation)
+    {
+        var (tools, _, root) = Build();
+        Directory.CreateDirectory(Path.Combine(root, "dir.cs"));
+
+        var act = () => string.Equals(operation, "read", StringComparison.Ordinal)
+            ? tools.ReadFile(Caller(RunId), "dir.cs")
+            : tools.EditFile(Caller(RunId), "dir.cs", "a", "b");
+
+        (await act.Should().NotThrowAsync()).Which.Should().StartWith("error:");
+    }
+
+    /// <summary>
     /// Ruling (j): a leaf open refused only because something else currently holds it — here, an external,
     /// non-participating <see cref="FileStream"/> opened with <see cref="FileShare.None"/> — gets the distinct busy
     /// text once the bounded wait for it to let go runs out, never the one generic refusal text a policy check
-    /// returns. <see cref="RunWorkspaceToolOptions.WriteContentionTimeout"/> is set short so this test does not wait
-    /// the production default of 5 seconds. Windows-only: <see cref="FileShare.None"/> is a Windows, kernel-enforced
-    /// concept; a plain Linux <c>open()</c> has no equivalent mandatory sharing conflict, so a second writer's own
-    /// open there succeeds regardless of another handle's requested share mode — this is the same asymmetry finding
-    /// B1 turned up, not a gap in the fix.
+    /// returns. Ruling (k): that wait is real, retrying the open with backoff for the whole
+    /// <see cref="RunWorkspaceToolOptions.ContentionTimeout"/>, so the call cannot return before it has passed.
+    /// Windows-only: <see cref="FileShare.None"/> is a Windows, kernel-enforced concept; a plain Linux <c>open()</c>
+    /// has no equivalent mandatory sharing conflict, so a second writer's own open there succeeds regardless of
+    /// another handle's requested share mode.
     /// </summary>
     [SkippableFact]
     public async Task Write_file_reports_a_distinct_busy_result_when_another_holder_never_lets_go()
     {
         Skip.IfNot(OperatingSystem.IsWindows(), "FileShare.None is a Windows-enforced concept");
-        var (tools, _, root) = Build(writeContentionTimeout: TimeSpan.FromMilliseconds(200));
+        var timeout = TimeSpan.FromMilliseconds(500);
+        var (tools, _, root) = Build(contentionTimeout: timeout);
         var target = Path.Combine(root, "held.cs");
         File.WriteAllText(target, "original");
 
         string result;
+        var elapsed = Stopwatch.StartNew();
         using (new FileStream(target, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
         {
             result = await tools.WriteFile(Caller(RunId), "held.cs", "hijack");
+            elapsed.Stop();
         }
 
         result.Should().Be("error: the file is busy; try again.");
+        elapsed.Elapsed.Should().BeGreaterThanOrEqualTo(timeout - TimeSpan.FromMilliseconds(50), "the busy result comes only after retrying for the whole contention timeout");
         File.ReadAllText(target).Should().Be("original");
+    }
+
+    /// <summary>
+    /// Ruling (k), the falsifiable half of the wait: a holder outside the tool's own locks — an ordinary
+    /// <see cref="FileStream"/> with <see cref="FileShare.None"/> — lets go while the call is still waiting, and the
+    /// call then succeeds instead of reporting busy. The holder is released from the seam on the second attempt to
+    /// open the leaf, so the release lands inside the wait by construction, not by timing. Windows-only, for the
+    /// same reason as the busy test above.
+    /// </summary>
+    [SkippableTheory]
+    [InlineData("write")]
+    [InlineData("read")]
+    [InlineData("edit")]
+    public async Task A_holder_that_lets_go_during_the_wait_lets_the_call_succeed(string operation)
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "FileShare.None is a Windows-enforced concept");
+        var (tools, _, root) = Build(contentionTimeout: TimeSpan.FromSeconds(30));
+        var target = Path.Combine(root, "held.cs");
+        File.WriteAllText(target, "original");
+        var holder = new FileStream(target, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        var leafAttempts = 0;
+        tools.BeforeOpenForTesting = candidate =>
+        {
+            if (string.Equals(Path.GetFileName(candidate), "held.cs", StringComparison.Ordinal) && ++leafAttempts == 2)
+            {
+                holder.Dispose();
+            }
+        };
+
+        try
+        {
+            var result = operation switch
+            {
+                "write" => await tools.WriteFile(Caller(RunId), "held.cs", "written"),
+                "read" => await tools.ReadFile(Caller(RunId), "held.cs"),
+                _ => await tools.EditFile(Caller(RunId), "held.cs", "original", "edited"),
+            };
+
+            using var scope = new AssertionScope();
+            leafAttempts.Should().BeGreaterThanOrEqualTo(2, "the release happens on the second attempt, inside the wait");
+            result.Should().Be(operation switch
+            {
+                "write" => "wrote 7 bytes to 'held.cs'.",
+                "read" => "original",
+                _ => "edited 'held.cs'.",
+            });
+        }
+        finally
+        {
+            holder.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Round-4 finding N1: with 100 truly parallel writes and 100 truly parallel reads of one file, reads opened the
+    /// leaf without the per-path lock writes take, so a read met a write's exclusive handle and returned busy at
+    /// once, and a write met a read's handle the same way. Ruling (k): reads take the same lock, so every call
+    /// succeeds on both OSes, and every read sees one whole version of the file.
+    /// </summary>
+    [Fact]
+    public async Task Concurrent_reads_and_writes_of_the_same_file_all_succeed()
+    {
+        var (tools, _, root) = Build(contentionTimeout: SameFileQueueTimeout);
+        File.WriteAllText(Path.Combine(root, "shared.cs"), "content-initial");
+        var caller = Caller(RunId);
+
+        var writes = Enumerable.Range(0, 100).Select(i => Task.Run(() => tools.WriteFile(caller, "shared.cs", $"content-{i:D3}"))).ToList();
+        var reads = Enumerable.Range(0, 100).Select(_ => Task.Run(() => tools.ReadFile(caller, "shared.cs"))).ToList();
+        var written = await Task.WhenAll(writes);
+        var read = await Task.WhenAll(reads);
+
+        written.Should().OnlyContain(r => r.StartsWith("wrote", StringComparison.Ordinal));
+        var versions = Enumerable.Range(0, 100).Select(i => $"content-{i:D3}").Append("content-initial").ToHashSet(StringComparer.Ordinal);
+        read.Should().OnlyContain(r => versions.Contains(r));
+    }
+
+    /// <summary>
+    /// Round-4 finding N5 and ruling (l): the per-path lock table held one entry for every path ever written, 1,151
+    /// after 1,000 distinct writes. Entries are reference-counted and removed at zero, so after the writes finish the
+    /// table is back where it started. The instance gets its own table, so no other test's calls reach the count.
+    /// </summary>
+    [Fact]
+    public async Task The_leaf_lock_table_returns_to_its_baseline_after_a_thousand_distinct_writes()
+    {
+        var (tools, _, _) = Build();
+        var table = new LeafLockTable();
+        tools.LeafLocks = table;
+        var caller = Caller(RunId);
+
+        for (var i = 0; i < 1000; i++)
+        {
+            (await tools.WriteFile(caller, $"f{i}.cs", "x")).Should().StartWith("wrote");
+        }
+
+        table.Count.Should().Be(0);
+    }
+
+    /// <summary>
+    /// Ruling (l)'s race: a caller that gives up waiting must drop only its own reference, never the entry the
+    /// holder still uses, or the next caller would be handed a fresh semaphore and enter while the holder is still
+    /// inside. Once the holder lets go, the entry is gone.
+    /// </summary>
+    [Fact]
+    public async Task A_caller_that_gives_up_waiting_never_evicts_a_lock_still_held()
+    {
+        var table = new LeafLockTable();
+
+        var holder = await table.AcquireAsync("dir/f.cs", TimeSpan.Zero, CancellationToken.None);
+        holder.Should().NotBeNull();
+        (await table.AcquireAsync("DIR/F.CS", TimeSpan.Zero, CancellationToken.None)).Should().BeNull("the key compares case-insensitively and the lock is held");
+        (await table.AcquireAsync("dir/f.cs", TimeSpan.Zero, CancellationToken.None)).Should().BeNull("the caller that gave up must not have removed the holder's entry");
+
+        holder!.Dispose();
+        table.Count.Should().Be(0);
+    }
+
+    /// <summary>
+    /// Ruling (s): <see cref="RunWorkspaceToolOptions.ContentionTimeout"/> is validated when the tools are
+    /// registered, following the <c>Validate(nameof(configure))</c> pattern <c>UseRagNetMemory</c> uses:
+    /// <see cref="Timeout.InfiniteTimeSpan"/> and anything from zero to <see cref="int.MaxValue"/> milliseconds are
+    /// accepted, and anything else is refused there instead of failing on every call. The two size limits, which
+    /// the same method now checks, are refused when negative.
+    /// </summary>
+    [Theory]
+    [InlineData("timeout", -1d, true)]
+    [InlineData("timeout", 0d, true)]
+    [InlineData("timeout", 2147483647d, true)]
+    [InlineData("timeout", -2d, false)]
+    [InlineData("timeout", 2147483648d, false)]
+    [InlineData("read", -1d, false)]
+    [InlineData("list", -1d, false)]
+    public void Registration_refuses_options_that_cannot_work(string member, double value, bool valid)
+    {
+        var extensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cs" };
+        Action<RunWorkspaceToolOptions> configure = member switch
+        {
+            "timeout" => o => o.ContentionTimeout = TimeSpan.FromMilliseconds(value),
+            "read" => o => o.MaxReadBytes = (int)value,
+            _ => o => o.MaxListEntries = (int)value,
+        };
+
+        var act = () => new ServiceCollection().AddThalos(t => t.UseRunWorkspaceTools(extensions, configure));
+
+        if (valid)
+        {
+            act.Should().NotThrow();
+        }
+        else
+        {
+            act.Should().Throw<ArgumentException>().Which.ParamName.Should().Be("configure");
+        }
     }
 
     /// <summary>
@@ -133,6 +321,66 @@ public sealed class WorkspaceToolsTests : IDisposable
         var results = await Task.WhenAll(tasks);
 
         results.Should().OnlyContain(listing => Enumerable.Range(0, 5).All(i => listing.Contains($"sub/f{i}.cs", StringComparison.Ordinal)));
+    }
+
+    /// <summary>
+    /// Round-4 finding N4, ruling (h): <c>read_file</c> and <c>edit_file</c> reach the leaf through a pinned chain of
+    /// ancestors, each verified when it is opened. Here <c>a</c> is swapped for a link to the in-workspace <c>b</c>
+    /// right before the chain opens it, so the leaf's own containment check passes either way: only the ancestor's
+    /// verification, and on Linux its <c>O_NOFOLLOW</c> too, stands between the call and <c>b/f.cs</c>.
+    /// </summary>
+    [SkippableTheory]
+    [InlineData("read")]
+    [InlineData("edit")]
+    public async Task An_ancestor_swapped_for_a_link_inside_the_workspace_is_not_followed(string operation)
+    {
+        var (tools, _, root) = Build();
+        Directory.CreateDirectory(Path.Combine(root, "a"));
+        Directory.CreateDirectory(Path.Combine(root, "b"));
+        File.WriteAllText(Path.Combine(root, "a", "f.cs"), "old-a");
+        File.WriteAllText(Path.Combine(root, "b", "f.cs"), "old-b");
+        var swapped = false;
+        tools.BeforeOpenForTesting = candidate =>
+        {
+            if (!swapped && string.Equals(Path.GetFileName(candidate), "a", StringComparison.Ordinal))
+            {
+                swapped = true;
+                Directory.Delete(Path.Combine(root, "a"), recursive: true);
+                CreateDirectoryLinkOrSkip(Path.Combine(root, "a"), Path.Combine(root, "b"));
+            }
+        };
+
+        var result = string.Equals(operation, "read", StringComparison.Ordinal)
+            ? await tools.ReadFile(Caller(RunId), "a/f.cs")
+            : await tools.EditFile(Caller(RunId), "a/f.cs", "old", "new");
+
+        using var scope = new AssertionScope();
+        swapped.Should().BeTrue();
+        result.Should().StartWith("error:");
+        if (string.Equals(operation, "edit", StringComparison.Ordinal))
+        {
+            File.ReadAllText(Path.Combine(root, "b", "f.cs")).Should().Be("old-b");
+        }
+    }
+
+    /// <summary>
+    /// Round-4 finding N4, ruling (e): an enumeration that fails must come back as a failure, never as a listing
+    /// cut short. On Linux a directory removed while its descriptor is still open makes <c>getdents64</c> fail with
+    /// <c>ENOENT</c>, which is a real enumeration error rather than the end of the listing. Linux-only: on Windows the
+    /// pin itself stops the directory from being removed.
+    /// </summary>
+    [SkippableFact]
+    public void An_enumeration_error_is_a_failure_not_a_short_listing()
+    {
+        Skip.IfNot(OperatingSystem.IsLinux(), "a pinned directory can be removed only on Linux");
+        var dir = NewTempDir("thalos-workspace-tools-enumerate-");
+        var pinned = PinnedDirectory.OpenRoot(dir);
+        pinned.IsSuccess.Should().BeTrue();
+
+        using var directory = pinned.Value;
+        Directory.Delete(dir);
+
+        directory.EnumerateEntries().IsFailure.Should().BeTrue();
     }
 
     [Fact]
@@ -268,11 +516,12 @@ public sealed class WorkspaceToolsTests : IDisposable
     /// "P03" isolated from any ancestor swap the chain build would already catch on its own: <c>sub</c> stays real
     /// and legitimately pinned all the way through the leaf's own creation — the refusal comes from narrowing the
     /// allow-list, via <see cref="WorkspaceTools.BeforeOpenForTesting"/>, to nothing right after the pre-check
-    /// already passed it. Only once that refusal is decided does <see cref="WorkspaceTools.BeforeCleanupForTesting"/>
-    /// swap <c>sub</c> for a link to <paramref name="outside"/>, whose own, unrelated <c>new.cs</c> the review's bug
-    /// — deleting by <c>confined.RealPath</c>, re-resolved after the handle was already disposed — would reach a
-    /// second time. Removal by the still-open handle, or by <c>unlinkat</c> against the pinned parent's descriptor,
-    /// cannot be redirected this way.
+    /// already passed it. <see cref="WorkspaceTools.BeforeCleanupForTesting"/> then runs once the refused file is
+    /// removed and its handle closed, the window in which the review's bug — deleting by <c>confined.RealPath</c>,
+    /// re-resolved after the handle was disposed — would follow a swapped <c>sub</c> to <c>outside</c>'s own, unrelated
+    /// <c>new.cs</c>. On Linux the swap goes through and the outside file must survive it. On Windows, ruling (m):
+    /// with the leaf's handle already closed, only the pin on <c>sub</c> can stop the swap, so the swap must fail with
+    /// a sharing violation, HResult low word 32.
     /// </summary>
     [SkippableFact]
     public async Task A_swap_at_the_cleanup_seam_cannot_redirect_file_removal()
@@ -300,9 +549,9 @@ public sealed class WorkspaceToolsTests : IDisposable
 
             if (OperatingSystem.IsWindows())
             {
-                // Ruling (g): sub is still pinned with FILE_SHARE_DELETE excluded at this point — assert the swap
-                // itself is refused by the OS, rather than silently swallowing whatever it throws.
-                swap.Should().Throw<IOException>();
+                // Rulings (g) and (m): sub is still pinned with FILE_SHARE_DELETE excluded and the leaf's handle is
+                // closed, so the sharing violation can come only from that pin.
+                SwapIsRefusedWithASharingViolation(swap);
                 return;
             }
 
@@ -312,7 +561,8 @@ public sealed class WorkspaceToolsTests : IDisposable
         var result = await tools.WriteFile(Caller(RunId), "sub/new.cs", "hijack");
 
         result.Should().Contain("extension");
-        File.ReadAllText(Path.Combine(outside, "new.cs")).Should().Be("outside-original");
+        var outsideFile = Path.Combine(outside, "new.cs");
+        (File.Exists(outsideFile) ? File.ReadAllText(outsideFile) : "(deleted)").Should().Be("outside-original");
     }
 
     /// <summary>
@@ -380,7 +630,8 @@ public sealed class WorkspaceToolsTests : IDisposable
 
             if (OperatingSystem.IsWindows())
             {
-                swap.Should().Throw<IOException>();
+                // Ruling (m): no leaf is open yet, so only the pins on d and d/e can refuse the swap.
+                SwapIsRefusedWithASharingViolation(swap);
                 return;
             }
 
@@ -484,8 +735,81 @@ public sealed class WorkspaceToolsTests : IDisposable
     }
 
     /// <summary>
+    /// Round-4 finding N2, ruling (n): <c>a</c> is renamed out of the workspace just before this call creates
+    /// <c>a/b</c>. <c>mkdirat</c> works relative to <c>a</c>'s descriptor, so it creates <c>b</c> under the renamed
+    /// directory, outside the workspace. The level's verification then fails, and the level must be removed
+    /// through the same descriptor, not left there. Linux-only: on Windows the pin on <c>a</c> refuses the rename.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_rename_before_a_new_level_is_created_leaves_no_directory_outside()
+    {
+        Skip.IfNot(OperatingSystem.IsLinux(), "an open fd only survives a rename-away on Linux");
+        var (tools, _, root) = Build();
+        var outside = NewTempDir("thalos-workspace-tools-outside-");
+        Directory.Delete(outside); // Directory.Move refuses an already-existing destination.
+        Directory.CreateDirectory(Path.Combine(root, "a"));
+        tools.BeforeOpenForTesting = candidate =>
+        {
+            if (string.Equals(candidate, "b", StringComparison.Ordinal))
+            {
+                Directory.Move(Path.Combine(root, "a"), outside);
+            }
+        };
+
+        var result = await tools.WriteFile(Caller(RunId), "a/b/new.cs", "hijack");
+
+        using var scope = new AssertionScope();
+        result.Should().StartWith("error:");
+        Directory.Exists(Path.Combine(outside, "b")).Should().BeFalse();
+    }
+
+    /// <summary>
+    /// Round-4 finding N4, ruling (d): the leaf's path is verified when it is opened and again right before the
+    /// content is committed. Here <c>a</c> is renamed out of the workspace between the two, through
+    /// <see cref="WorkspaceTools.BeforeCommitForTesting"/>, so only the second verification can refuse the write, and
+    /// the file this call created is then removed through <c>a</c>'s descriptor. Linux-only: on Windows the pin on
+    /// <c>a</c> refuses the rename.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_rename_between_open_and_commit_refuses_the_write()
+    {
+        Skip.IfNot(OperatingSystem.IsLinux(), "an open fd only survives a rename-away on Linux");
+        var (tools, _, root) = Build();
+        var outside = NewTempDir("thalos-workspace-tools-outside-");
+        Directory.Delete(outside);
+        Directory.CreateDirectory(Path.Combine(root, "a"));
+        tools.BeforeCommitForTesting = () => Directory.Move(Path.Combine(root, "a"), outside);
+
+        var result = await tools.WriteFile(Caller(RunId), "a/new.cs", "hijack");
+
+        using var scope = new AssertionScope();
+        result.Should().StartWith("error:");
+        File.Exists(Path.Combine(outside, "new.cs")).Should().BeFalse();
+    }
+
+    /// <summary>The <c>edit_file</c> side of the test above: the edit is refused and the moved file keeps its content.</summary>
+    [SkippableFact]
+    public async Task A_rename_between_open_and_commit_refuses_the_edit()
+    {
+        Skip.IfNot(OperatingSystem.IsLinux(), "an open fd only survives a rename-away on Linux");
+        var (tools, _, root) = Build();
+        var outside = NewTempDir("thalos-workspace-tools-outside-");
+        Directory.Delete(outside);
+        Directory.CreateDirectory(Path.Combine(root, "a"));
+        File.WriteAllText(Path.Combine(root, "a", "f.cs"), "old");
+        tools.BeforeCommitForTesting = () => Directory.Move(Path.Combine(root, "a"), outside);
+
+        var result = await tools.EditFile(Caller(RunId), "a/f.cs", "old", "new");
+
+        using var scope = new AssertionScope();
+        result.Should().StartWith("error:");
+        File.ReadAllText(Path.Combine(outside, "f.cs")).Should().Be("old");
+    }
+
+    /// <summary>
     /// The review's third finding: a disallowed-extension write must leave no trace, including the parent
-    /// directories it created to get there. <c>d</c> and <c>d/e</c> do not exist beforehand.
+    /// directories it created to get there. <c>d</c> and <c>d/e</c> do not exist beforehand. The pre-check refuses
+    /// this before anything is created, so the test below covers the cleanup itself.
     /// </summary>
     [Fact]
     public async Task A_disallowed_extension_write_leaves_no_directories_behind()
@@ -497,6 +821,33 @@ public sealed class WorkspaceToolsTests : IDisposable
         result.Should().Contain("extension ''");
         Directory.Exists(Path.Combine(root, "d", "e")).Should().BeFalse();
         Directory.Exists(Path.Combine(root, "d")).Should().BeFalse();
+    }
+
+    /// <summary>
+    /// Round-4 finding N4: a refusal after the leaf is open must remove every level this call created, not only the
+    /// innermost. The allow-list is narrowed after the pre-check passed, so <c>x</c>, <c>x/y</c> and <c>x/y/z</c> are
+    /// all created before the post-check refuses the write.
+    /// </summary>
+    [Fact]
+    public async Task A_refusal_after_the_open_removes_every_level_this_call_created()
+    {
+        var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cs" };
+        var (tools, _, root) = Build(allowedWriteExtensions: allowed);
+        tools.BeforeOpenForTesting = candidate =>
+        {
+            if (candidate.EndsWith("new.cs", StringComparison.Ordinal))
+            {
+                allowed.Clear();
+            }
+        };
+
+        var result = await tools.WriteFile(Caller(RunId), "x/y/z/new.cs", "x");
+
+        using var scope = new AssertionScope();
+        result.Should().Contain("extension");
+        Directory.Exists(Path.Combine(root, "x", "y", "z")).Should().BeFalse();
+        Directory.Exists(Path.Combine(root, "x", "y")).Should().BeFalse();
+        Directory.Exists(Path.Combine(root, "x")).Should().BeFalse();
     }
 
     /// <summary>
@@ -550,7 +901,9 @@ public sealed class WorkspaceToolsTests : IDisposable
 
         // Ruling (g): "the mid-chain test on Linux asserts that the /proc/self/fd count returns to its baseline" —
         // a leaked fd on Linux would not block the Directory.Exists check above, unlike a leaked Windows handle.
-        var baselineFds = OperatingSystem.IsLinux() ? CountOpenFileDescriptors() : -1;
+        // Ruling (o): only descriptors whose target is under this test's root count, so other tests running in
+        // parallel cannot move the number.
+        var baselineFds = OperatingSystem.IsLinux() ? CountOpenFileDescriptorsUnder(root) : -1;
 
         var act = () => tools.WriteFile(Caller(RunId), "d/e/f.cs", "x");
 
@@ -559,11 +912,26 @@ public sealed class WorkspaceToolsTests : IDisposable
 
         if (OperatingSystem.IsLinux())
         {
-            CountOpenFileDescriptors().Should().Be(baselineFds);
+            CountOpenFileDescriptorsUnder(root).Should().Be(baselineFds);
         }
     }
 
-    private static int CountOpenFileDescriptors() => Directory.EnumerateFileSystemEntries("/proc/self/fd").Count();
+    private static int CountOpenFileDescriptorsUnder(string root) =>
+        Directory.EnumerateFileSystemEntries("/proc/self/fd").Count(fd => LinkTargetOf(fd) is { } target
+            && (string.Equals(target, root, StringComparison.Ordinal) || target.StartsWith(root + "/", StringComparison.Ordinal)));
+
+    /// <summary>The target of one <c>/proc/self/fd</c> entry, or <see langword="null"/> when that descriptor closed while the directory was being read.</summary>
+    private static string? LinkTargetOf(string fd)
+    {
+        try
+        {
+            return new FileInfo(fd).LinkTarget;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
 
     // Ruling (i)'s "ordinary Result failure" branch in PinDirectoryChain calls the exact same
     // RemoveCreatedDirectories(chain); DisposeChain(chain); pair as the catch block the test above exercises, on
@@ -830,7 +1198,7 @@ public sealed class WorkspaceToolsTests : IDisposable
     [Fact]
     public async Task Concurrent_writes_to_the_same_file_never_throw_and_never_lose_the_file()
     {
-        var (tools, _, root) = Build();
+        var (tools, _, root) = Build(contentionTimeout: SameFileQueueTimeout);
         var caller = Caller(RunId);
 
         var tasks = Enumerable.Range(0, 300).Select(i => Task.Run(() => tools.WriteFile(caller, "shared.cs", $"content-{i}")));
@@ -892,7 +1260,7 @@ public sealed class WorkspaceToolsTests : IDisposable
         IEnumerable<string>? protectedPaths = null,
         int? maxReadBytes = null,
         int? maxListEntries = null,
-        TimeSpan? writeContentionTimeout = null,
+        TimeSpan? contentionTimeout = null,
         Func<string, IRunWorkspaceChangeListener>? extraListener = null)
     {
         var root = NewTempDir("thalos-workspace-tools-");
@@ -914,9 +1282,9 @@ public sealed class WorkspaceToolsTests : IDisposable
             options.MaxListEntries = entries;
         }
 
-        if (writeContentionTimeout is { } timeout)
+        if (contentionTimeout is { } timeout)
         {
-            options.WriteContentionTimeout = timeout;
+            options.ContentionTimeout = timeout;
         }
 
         if (protectedPaths is not null)
@@ -933,6 +1301,10 @@ public sealed class WorkspaceToolsTests : IDisposable
         var tools = new WorkspaceTools(provider, options, registered, NullLogger<WorkspaceTools>.Instance);
         return (tools, fake, root);
     }
+
+    /// <summary>Asserts that <paramref name="swap"/> fails with a sharing violation: an <see cref="IOException"/> whose HResult's low word is 32, <c>ERROR_SHARING_VIOLATION</c> (ruling (m)).</summary>
+    private static void SwapIsRefusedWithASharingViolation(Action swap) =>
+        (swap.Should().Throw<IOException>().Which.HResult & 0xFFFF).Should().Be(32);
 
     private string NewTempDir(string prefix)
     {

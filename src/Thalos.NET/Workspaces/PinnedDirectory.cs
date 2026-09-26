@@ -40,11 +40,12 @@ internal enum PinnedOpenOutcome
 /// <b>Linux.</b> Each level is opened via <c>openat</c> with <c>O_DIRECTORY | O_NOFOLLOW</c>, relative to the
 /// already-pinned parent's file descriptor — resolved directly against that one specific inode, never by walking a
 /// path string, so there is nothing for a swap to redirect. <c>O_NOFOLLOW</c> makes the open itself fail if the name
-/// is a symlink, rather than needing a separate check afterward. The real flag values are architecture-dependent —
-/// x86_64 and the "generic" ABI most other architectures use, arm64 included, disagree on <c>O_DIRECTORY</c> and
-/// <c>O_NOFOLLOW</c> specifically — so <see cref="OpenRoot"/> resolves them from <see cref="PinnedIo.FlagsFor"/>
-/// and fails closed before any open on an architecture that table does not cover, rather than silently opening with
-/// the wrong flags (round-3 finding A). Every level's real path, and the leaf file's, is verified the same way as
+/// is a symlink, rather than needing a separate check afterward. The real flag values are architecture-dependent:
+/// x86_64 uses the generic Linux values, <c>O_DIRECTORY</c> 0x10000 and <c>O_NOFOLLOW</c> 0x20000, and arm64
+/// overrides them with 0x4000 and 0x8000. So <see cref="OpenRoot"/> resolves them once per chain from
+/// <see cref="PinnedIo.FlagsFor"/>, every level of the chain carries them, and the chain fails closed before any open
+/// on an architecture that table does not cover, rather than silently opening with the wrong flags (round-3 finding
+/// A). Every level's real path, and the leaf file's, is verified the same way as
 /// Windows — reading <c>/proc/self/fd</c> back via <see cref="WorkspacePath.FinalPathOfHandle"/> — never computed by
 /// concatenating a name onto the parent's own already-verified path, which is not a verification at all (round-3
 /// finding B3).
@@ -74,10 +75,12 @@ internal sealed class PinnedDirectory : IDisposable
     private readonly SafeFileHandle _handle;
     private readonly PinnedDirectory? _parent;
     private readonly string? _name;
+    private readonly (int ODirectory, int ONoFollow) _linuxFlags;
 
-    private PinnedDirectory(SafeFileHandle handle, string realPath, bool wasCreated, PinnedDirectory? parent, string? name)
+    private PinnedDirectory(SafeFileHandle handle, string realPath, bool wasCreated, PinnedDirectory? parent, string? name, (int ODirectory, int ONoFollow) linuxFlags)
     {
         _handle = handle;
+        _linuxFlags = linuxFlags;
         RealPath = realPath;
         WasCreated = wasCreated;
         _parent = parent;
@@ -94,17 +97,19 @@ internal sealed class PinnedDirectory : IDisposable
     public bool WasCreated { get; }
 
     /// <summary>Opens the workspace's canonical root as the start of a chain, verified to equal <paramref name="canonicalRoot"/> exactly. Fails closed on a platform other than Windows or Linux, or on a Linux process architecture <see cref="PinnedIo.FlagsFor"/> does not cover.</summary>
-    public static Result<PinnedDirectory, string> OpenRoot(string canonicalRoot)
+    /// <param name="canonicalRoot">The workspace's canonical root.</param>
+    /// <param name="architectureOverride">Test-only seam: the architecture the Linux flag table is read for, in place of this process's own. See <see cref="WorkspaceTools.ArchitectureOverrideForTesting"/>. <see langword="null"/> in production.</param>
+    public static Result<PinnedDirectory, string> OpenRoot(string canonicalRoot, Architecture? architectureOverride = null)
     {
         if (OperatingSystem.IsWindows())
         {
             var handle = PinnedIo.Windows.CreateFileW(canonicalRoot, PinnedIo.Windows.GenericRead, PinnedIo.Windows.FileShareRead | PinnedIo.Windows.FileShareWrite, PinnedIo.Windows.OpenExisting);
-            return Verify(handle, canonicalRoot, wasCreated: false, parent: null, name: null);
+            return Verify(handle, canonicalRoot, wasCreated: false, parent: null, name: null, linuxFlags: default);
         }
 
         if (OperatingSystem.IsLinux())
         {
-            if (!PinnedIo.Linux.IsSupportedArchitecture)
+            if (PinnedIo.FlagsFor(architectureOverride ?? RuntimeInformation.ProcessArchitecture) is not { } flags)
             {
                 // Ruling (a): fail closed before the first open, on the one architecture-dependent table every
                 // Linux entry point below relies on, rather than opening with flag values that might mean something
@@ -112,8 +117,8 @@ internal sealed class PinnedDirectory : IDisposable
                 return Result<PinnedDirectory, string>.Failure(WorkspaceTools.GenericRefusalText);
             }
 
-            var handle = PinnedIo.Linux.Open(canonicalRoot, PinnedIo.Linux.ODirectory | PinnedIo.Linux.ONoFollow | PinnedIo.Linux.OCloExec);
-            return Verify(handle, canonicalRoot, wasCreated: false, parent: null, name: null);
+            var handle = PinnedIo.Linux.Open(canonicalRoot, flags.ODirectory | flags.ONoFollow | PinnedIo.Linux.OCloExec);
+            return Verify(handle, canonicalRoot, wasCreated: false, parent: null, name: null, flags);
         }
 
         return Result<PinnedDirectory, string>.Failure(WorkspaceTools.GenericRefusalText);
@@ -134,19 +139,19 @@ internal sealed class PinnedDirectory : IDisposable
                 return Result<PinnedDirectory, PinnedOpenOutcome>.Failure(ClassifyWindowsError(Marshal.GetLastPInvokeError()));
             }
 
-            return VerifyClassified(handle, candidate, wasCreated: false, parent: this, name: name);
+            return VerifyClassified(handle, candidate, parent: this, name: name);
         }
 
         if (OperatingSystem.IsLinux())
         {
             beforeOpen?.Invoke(name);
-            var handle = PinnedIo.Linux.OpenAt(_handle, name, PinnedIo.Linux.ODirectory | PinnedIo.Linux.ONoFollow | PinnedIo.Linux.OCloExec);
+            var handle = PinnedIo.Linux.OpenAt(_handle, name, _linuxFlags.ODirectory | _linuxFlags.ONoFollow | PinnedIo.Linux.OCloExec);
             if (handle.IsInvalid)
             {
                 return Result<PinnedDirectory, PinnedOpenOutcome>.Failure(ClassifyLinuxError(Marshal.GetLastPInvokeError()));
             }
 
-            return VerifyClassified(handle, Path.Combine(RealPath, name), wasCreated: false, parent: this, name: name);
+            return VerifyClassified(handle, Path.Combine(RealPath, name), parent: this, name: name);
         }
 
         return Result<PinnedDirectory, PinnedOpenOutcome>.Failure(PinnedOpenOutcome.Refused);
@@ -167,15 +172,25 @@ internal sealed class PinnedDirectory : IDisposable
             beforeOpen?.Invoke(candidate);
             var created = PinnedIo.Windows.CreateDirectoryW(candidate); // a false return — already occupied, by a concurrent creator or otherwise — is resolved by the open-and-verify step below, but must not be recorded as this call's own creation
             var handle = PinnedIo.Windows.CreateFileW(candidate, PinnedIo.Windows.GenericRead, PinnedIo.Windows.FileShareRead | PinnedIo.Windows.FileShareWrite, PinnedIo.Windows.OpenExisting);
-            return Verify(handle, candidate, created, parent: this, name: name);
+            return Verify(handle, candidate, created, parent: this, name: name, _linuxFlags);
         }
 
         if (OperatingSystem.IsLinux())
         {
             beforeOpen?.Invoke(name);
             var created = PinnedIo.Linux.MkDirAt(_handle, name);
-            var handle = PinnedIo.Linux.OpenAt(_handle, name, PinnedIo.Linux.ODirectory | PinnedIo.Linux.ONoFollow | PinnedIo.Linux.OCloExec);
-            return Verify(handle, Path.Combine(RealPath, name), created, parent: this, name: name);
+            var handle = PinnedIo.Linux.OpenAt(_handle, name, _linuxFlags.ODirectory | _linuxFlags.ONoFollow | PinnedIo.Linux.OCloExec);
+            var verified = Verify(handle, Path.Combine(RealPath, name), created, parent: this, name: name, _linuxFlags);
+            if (verified.IsFailure && created)
+            {
+                // Ruling (n): mkdirat created the level relative to this directory's descriptor, which still refers
+                // to this directory wherever a rename has since moved it, so the new level can sit outside the
+                // workspace. Remove it through the same descriptor. AT_REMOVEDIR removes only an empty directory,
+                // never a file or a link.
+                PinnedIo.Linux.UnlinkAt(_handle, name, removeDirectory: true);
+            }
+
+            return verified;
         }
 
         return Result<PinnedDirectory, string>.Failure(WorkspaceTools.GenericRefusalText);
@@ -259,18 +274,18 @@ internal sealed class PinnedDirectory : IDisposable
     private Result<PinnedFile, PinnedOpenOutcome> OpenOrCreateFileLinux(string name, Action<string>? beforeOpen)
     {
         beforeOpen?.Invoke(name);
-        var handle = PinnedIo.Linux.OpenAt(_handle, name, PinnedIo.Linux.ORdWr | PinnedIo.Linux.ONoFollow | PinnedIo.Linux.OCloExec);
+        var handle = PinnedIo.Linux.OpenAt(_handle, name, PinnedIo.Linux.ORdWr | _linuxFlags.ONoFollow | PinnedIo.Linux.OCloExec);
         var createdNew = false;
         if (handle.IsInvalid)
         {
-            handle = PinnedIo.Linux.OpenAt(_handle, name, PinnedIo.Linux.OCreat | PinnedIo.Linux.OExcl | PinnedIo.Linux.ONoFollow | PinnedIo.Linux.OCloExec | PinnedIo.Linux.ORdWr, 0x1B4 /* 0644 */);
+            handle = PinnedIo.Linux.OpenAt(_handle, name, PinnedIo.Linux.OCreat | PinnedIo.Linux.OExcl | _linuxFlags.ONoFollow | PinnedIo.Linux.OCloExec | PinnedIo.Linux.ORdWr, 0x1B4 /* 0644 */);
             createdNew = !handle.IsInvalid;
             if (handle.IsInvalid && Marshal.GetLastPInvokeError() == PinnedIo.Linux.EExist)
             {
                 // Another writer created it in the gap between our "does it exist" open and this O_CREAT|O_EXCL
                 // one; fall back to opening what is there now, the same as the ordinary already-occupied path
                 // above, instead of refusing a legitimate write (ruling (c) minor).
-                handle = PinnedIo.Linux.OpenAt(_handle, name, PinnedIo.Linux.ORdWr | PinnedIo.Linux.ONoFollow | PinnedIo.Linux.OCloExec);
+                handle = PinnedIo.Linux.OpenAt(_handle, name, PinnedIo.Linux.ORdWr | _linuxFlags.ONoFollow | PinnedIo.Linux.OCloExec);
                 createdNew = false;
             }
         }
@@ -338,27 +353,41 @@ internal sealed class PinnedDirectory : IDisposable
 
         if (OperatingSystem.IsLinux())
         {
-            beforeOpen?.Invoke(name);
-            var flags = (readOnly ? PinnedIo.Linux.ORdOnly : PinnedIo.Linux.ORdWr) | PinnedIo.Linux.ONoFollow | PinnedIo.Linux.OCloExec;
-            var handle = PinnedIo.Linux.OpenAt(_handle, name, flags);
-            if (handle.IsInvalid)
-            {
-                return Result<PinnedFile, PinnedOpenOutcome>.Failure(ClassifyLinuxError(Marshal.GetLastPInvokeError()));
-            }
-
-            var expected = Path.Combine(RealPath, name);
-            var real = WorkspacePath.FinalPathOfHandle(handle);
-            if (real is null || !string.Equals(real, expected, StringComparison.Ordinal))
-            {
-                handle.Dispose();
-                return Result<PinnedFile, PinnedOpenOutcome>.Failure(PinnedOpenOutcome.Refused);
-            }
-
-            var mode = readOnly ? FileAccess.Read : FileAccess.ReadWrite;
-            return Result<PinnedFile, PinnedOpenOutcome>.Success(new PinnedFile(new FileStream(handle, mode), real, createdNew: false, this, name));
+            return OpenExistingFileLinux(name, readOnly, beforeOpen);
         }
 
         return Result<PinnedFile, PinnedOpenOutcome>.Failure(PinnedOpenOutcome.Refused);
+    }
+
+    [SupportedOSPlatform("linux")]
+    private Result<PinnedFile, PinnedOpenOutcome> OpenExistingFileLinux(string name, bool readOnly, Action<string>? beforeOpen)
+    {
+        beforeOpen?.Invoke(name);
+        var flags = (readOnly ? PinnedIo.Linux.ORdOnly : PinnedIo.Linux.ORdWr) | _linuxFlags.ONoFollow | PinnedIo.Linux.OCloExec;
+        var handle = PinnedIo.Linux.OpenAt(_handle, name, flags);
+        if (handle.IsInvalid)
+        {
+            return Result<PinnedFile, PinnedOpenOutcome>.Failure(ClassifyLinuxError(Marshal.GetLastPInvokeError()));
+        }
+
+        if (PinnedIo.Linux.IsDirectory(handle))
+        {
+            // Ruling (f): a read-only open of a directory succeeds on Linux, so refuse it here, before the handle
+            // reaches a FileStream whose first read would throw.
+            handle.Dispose();
+            return Result<PinnedFile, PinnedOpenOutcome>.Failure(PinnedOpenOutcome.Refused);
+        }
+
+        var expected = Path.Combine(RealPath, name);
+        var real = WorkspacePath.FinalPathOfHandle(handle);
+        if (real is null || !string.Equals(real, expected, StringComparison.Ordinal))
+        {
+            handle.Dispose();
+            return Result<PinnedFile, PinnedOpenOutcome>.Failure(PinnedOpenOutcome.Refused);
+        }
+
+        var mode = readOnly ? FileAccess.Read : FileAccess.ReadWrite;
+        return Result<PinnedFile, PinnedOpenOutcome>.Success(new PinnedFile(new FileStream(handle, mode), real, createdNew: false, this, name));
     }
 
     /// <summary>Enumerates this directory's own entries via its open handle — never by path, and never requesting <c>DELETE</c> access to get here (ruling (e); round-3 finding B2) — so a swap between checking a name's attributes and listing it cannot substitute an outside directory's contents, and a concurrent pin of the same directory by another call never collides with this one. A genuine enumeration error is distinguished from ordinary exhaustion and returned as a failure, never silently truncated (ruling (e)).</summary>
@@ -448,7 +477,7 @@ internal sealed class PinnedDirectory : IDisposable
 
     public void Dispose() => _handle.Dispose();
 
-    private static Result<PinnedDirectory, string> Verify(SafeFileHandle handle, string expectedRealPath, bool wasCreated, PinnedDirectory? parent, string? name)
+    private static Result<PinnedDirectory, string> Verify(SafeFileHandle handle, string expectedRealPath, bool wasCreated, PinnedDirectory? parent, string? name, (int ODirectory, int ONoFollow) linuxFlags)
     {
         if (handle.IsInvalid)
         {
@@ -463,10 +492,10 @@ internal sealed class PinnedDirectory : IDisposable
             return Result<PinnedDirectory, string>.Failure(WorkspaceTools.GenericRefusalText);
         }
 
-        return Result<PinnedDirectory, string>.Success(new PinnedDirectory(handle, real, wasCreated, parent, name));
+        return Result<PinnedDirectory, string>.Success(new PinnedDirectory(handle, real, wasCreated, parent, name, linuxFlags));
     }
 
-    private static Result<PinnedDirectory, PinnedOpenOutcome> VerifyClassified(SafeFileHandle handle, string expectedRealPath, bool wasCreated, PinnedDirectory? parent, string? name)
+    private static Result<PinnedDirectory, PinnedOpenOutcome> VerifyClassified(SafeFileHandle handle, string expectedRealPath, PinnedDirectory parent, string name)
     {
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         var real = WorkspacePath.FinalPathOfHandle(handle);
@@ -476,7 +505,7 @@ internal sealed class PinnedDirectory : IDisposable
             return Result<PinnedDirectory, PinnedOpenOutcome>.Failure(PinnedOpenOutcome.Refused);
         }
 
-        return Result<PinnedDirectory, PinnedOpenOutcome>.Success(new PinnedDirectory(handle, real, wasCreated, parent, name));
+        return Result<PinnedDirectory, PinnedOpenOutcome>.Success(new PinnedDirectory(handle, real, wasCreated: false, parent, name, parent._linuxFlags));
     }
 
     [SupportedOSPlatform("windows")]

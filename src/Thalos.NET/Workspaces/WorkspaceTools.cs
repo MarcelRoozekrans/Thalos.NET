@@ -1,8 +1,10 @@
-using System.Collections.Concurrent;
 using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using ZeroAlloc.Authorization;
+using ZeroAlloc.Results;
 
 namespace Thalos.Workspaces;
 
@@ -61,26 +63,28 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
 
     /// <summary>
     /// Returned instead of <see cref="GenericRefusalText"/> when a leaf open failed only because something else —
-    /// this run's own concurrent call to the same path, or an outside process — currently holds it, and the bounded
-    /// wait for it to let go ran out. Ruling (j): this reveals nothing a caller could not already see (they know they
-    /// just tried to write a contended file), unlike a policy refusal, so it gets its own distinct text rather than
-    /// folding into the one generic message.
+    /// this run's own concurrent call to the same path, or an outside process — currently holds it, and
+    /// <see cref="RunWorkspaceToolOptions.ContentionTimeout"/> ran out waiting for it to let go. Ruling (j): this
+    /// reveals nothing a caller could not already see, unlike a policy refusal, so it gets its own distinct text
+    /// rather than folding into the one generic message.
     /// </summary>
     private const string BusyText = "error: the file is busy; try again.";
 
-    /// <summary>
-    /// Serializes writers to the very same leaf path within this process: round-3 finding B1 measured 300 truly
-    /// parallel writers to one file succeeding only 103 times, because each one's leaf open was fully exclusive
-    /// (<see cref="FileShare.None"/> on Windows) with no retry on contention. Keyed by the pre-open resolved path
-    /// (case-insensitive, matching Windows' own path comparison; a harmless over-approximation on Linux, where two
-    /// differently-cased names are genuinely different files) rather than the post-open real path, since the whole
-    /// point is to serialize before either writer has opened anything. Never evicted: a very long-running process
-    /// that writes an unbounded number of distinct paths will accumulate one <see cref="SemaphoreSlim"/> per path —
-    /// a known, accepted limit for this round, noted in the report rather than solved here.
-    /// </summary>
-    private static readonly ConcurrentDictionary<string, SemaphoreSlim> LeafLocks = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>The first backoff between leaf-open attempts that failed on contention from outside the process; each later one doubles, up to <see cref="MaxContentionRetryDelay"/>.</summary>
+    private static readonly TimeSpan FirstContentionRetryDelay = TimeSpan.FromMilliseconds(10);
 
-    private static SemaphoreSlim LeafLock(string resolvedPath) => LeafLocks.GetOrAdd(resolvedPath, static _ => new SemaphoreSlim(1, 1));
+    /// <summary>The longest single backoff between leaf-open attempts.</summary>
+    private static readonly TimeSpan MaxContentionRetryDelay = TimeSpan.FromMilliseconds(250);
+
+    /// <summary>
+    /// The per-path locks <c>read_file</c>, <c>write_file</c> and <c>edit_file</c> take before opening a leaf file,
+    /// so this process's own calls on one file take turns instead of colliding on the open's share mode (round-3
+    /// finding B1, round-4 finding N1). Keyed by the pre-open resolved path, since the point is to serialize before
+    /// either call has opened anything. <see cref="LeafLockTable.Shared"/> in production, because the tool source
+    /// creates a new instance per call; internal and settable only so a test can give an instance its own table and
+    /// count its entries without seeing other tests' calls.
+    /// </summary>
+    internal LeafLockTable LeafLocks { get; set; } = LeafLockTable.Shared;
 
     /// <summary>
     /// Test-only seam: invoked with the candidate path or name a pinned open is about to try, immediately before it
@@ -93,12 +97,30 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
     internal Action<string>? BeforeOpenForTesting { get; set; }
 
     /// <summary>
-    /// Test-only seam: invoked once, immediately before <c>write_file</c> attempts to clean up a refusal — remove a
-    /// file it created, or a directory it created — so a test can simulate a swap at exactly that window and assert
-    /// it has no effect, since cleanup goes through a pinned handle or descriptor rather than a path string.
-    /// Instance-level and internal, matching <see cref="BeforeOpenForTesting"/>.
+    /// Test-only seam: invoked once when <c>write_file</c> cleans up a refusal, immediately before it removes any
+    /// directory it created. When the refusal came after the leaf file was opened, the seam runs after that file is
+    /// removed, if this call created it, and after its handle is closed: the window in which a cleanup by path string
+    /// would re-resolve a name a swap could have redirected, and in which only the directory pins still hold the
+    /// chain. Instance-level and internal, matching <see cref="BeforeOpenForTesting"/>.
     /// </summary>
     internal Action? BeforeCleanupForTesting { get; set; }
+
+    /// <summary>
+    /// Test-only seam: invoked once in <c>write_file</c> and <c>edit_file</c> after the post-open check passed and
+    /// immediately before the leaf's path is verified a second time and the content is committed, so a test can move
+    /// the file between the two verifications (ruling (d)). Instance-level and internal, matching
+    /// <see cref="BeforeOpenForTesting"/>.
+    /// </summary>
+    internal Action? BeforeCommitForTesting { get; set; }
+
+    /// <summary>
+    /// Test-only seam: the architecture the Linux <c>O_DIRECTORY</c> and <c>O_NOFOLLOW</c> table is read for, in
+    /// place of this process's own, so a test can pin the unknown-architecture refusal (ruling (a)) without running
+    /// under one. Passed into every <see cref="PinnedDirectory.OpenRoot"/> call, the same way
+    /// <see cref="BeforeOpenForTesting"/> is passed into every pinned open. Always <see langword="null"/> in
+    /// production; instance-level and internal, so no test's setting reaches another instance.
+    /// </summary>
+    internal Architecture? ArchitectureOverrideForTesting { get; set; }
 
     /// <summary><c>workspace__read_file</c>: reads a text file from the run's workspace. Ungated by the write allow-list.</summary>
     [ThalosTool("read_file")]
@@ -113,6 +135,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
 
         var canonicalRoot = target.CanonicalRoot!;
         var resolved = target.Resolved!;
+        var deadline = new ContentionDeadline(options.ContentionTimeout);
         var chainResult = PinExistingDirectoryChain(canonicalRoot, Path.GetDirectoryName(resolved) ?? canonicalRoot, path);
         if (!chainResult.Ok)
         {
@@ -122,8 +145,16 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         var chain = chainResult.Chain!;
         try
         {
+            // Ruling (k): a read takes the same per-path lock a write does, so it never meets this process's own
+            // exclusive write handle on the leaf open.
+            using var lease = await LeafLocks.AcquireAsync(resolved, deadline.Remaining, ct).ConfigureAwait(false);
+            if (lease is null)
+            {
+                return BusyText;
+            }
+
             var leafName = Path.GetFileName(resolved);
-            var opened = chain[^1].OpenExistingFile(leafName, readOnly: true, BeforeOpenForTesting);
+            var opened = await OpenLeafAsync(() => chain[^1].OpenExistingFile(leafName, readOnly: true, BeforeOpenForTesting), deadline, ct).ConfigureAwait(false);
             if (opened.IsFailure)
             {
                 return FormatLeafOpenFailure(opened.Error, path);
@@ -144,6 +175,57 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         }
     }
 
+    /// <summary>
+    /// Runs <paramref name="open"/>, and while it fails with <see cref="PinnedOpenOutcome.Contended"/> — a sharing or
+    /// lock violation from a holder this process's own leaf locks do not cover, such as another process — waits and
+    /// runs it again, with a backoff from <see cref="FirstContentionRetryDelay"/> doubling up to
+    /// <see cref="MaxContentionRetryDelay"/>, until <paramref name="deadline"/> has no time left (ruling (k)). Returns
+    /// the first result that is not contention, or the last contended one once the time is spent.
+    /// </summary>
+    private static async Task<Result<PinnedFile, PinnedOpenOutcome>> OpenLeafAsync(Func<Result<PinnedFile, PinnedOpenOutcome>> open, ContentionDeadline deadline, CancellationToken ct)
+    {
+        var delay = FirstContentionRetryDelay;
+        while (true)
+        {
+            var opened = open();
+            if (opened.IsSuccess || opened.Error != PinnedOpenOutcome.Contended)
+            {
+                return opened;
+            }
+
+            var remaining = deadline.Remaining;
+            if (remaining == TimeSpan.Zero)
+            {
+                return opened;
+            }
+
+            await Task.Delay(remaining == Timeout.InfiniteTimeSpan || delay < remaining ? delay : remaining, ct).ConfigureAwait(false);
+            delay = delay * 2 < MaxContentionRetryDelay ? delay * 2 : MaxContentionRetryDelay;
+        }
+    }
+
+    /// <summary>The time left of <see cref="RunWorkspaceToolOptions.ContentionTimeout"/>, counted from when the call began: shared by the wait for the per-path lock and the retries of the leaf open, so together they never exceed it.</summary>
+    [StructLayout(LayoutKind.Auto)]
+    private readonly struct ContentionDeadline(TimeSpan timeout)
+    {
+        private readonly long _start = Stopwatch.GetTimestamp();
+
+        /// <summary><see cref="Timeout.InfiniteTimeSpan"/> for an infinite timeout; otherwise what is left, never negative.</summary>
+        public TimeSpan Remaining
+        {
+            get
+            {
+                if (timeout == Timeout.InfiniteTimeSpan)
+                {
+                    return Timeout.InfiniteTimeSpan;
+                }
+
+                var left = timeout - Stopwatch.GetElapsedTime(_start);
+                return left > TimeSpan.Zero ? left : TimeSpan.Zero;
+            }
+        }
+    }
+
     /// <summary>Maps a failed leaf or ancestor open to the text a caller returns: "does not exist" for a missing target, the distinct busy text for contention, and the one generic refusal text for anything else (ruling (j)).</summary>
     private static string FormatLeafOpenFailure(PinnedOpenOutcome outcome, string path) => outcome switch
     {
@@ -160,7 +242,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
     /// </summary>
     private ChainResult PinExistingDirectoryChain(string canonicalRoot, string targetDirectory, string originalPath)
     {
-        var rootPin = PinnedDirectory.OpenRoot(canonicalRoot);
+        var rootPin = PinnedDirectory.OpenRoot(canonicalRoot, ArchitectureOverrideForTesting);
         if (rootPin.IsFailure)
         {
             return ChainResult.Failure(rootPin.Error);
@@ -243,7 +325,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
     /// then reached by opening one already-verified level at a time, exactly as a write's directory chain does — so
     /// the starting point is pinned the same way, never re-resolved by a path string once found.
     /// </summary>
-    private static (PinnedDirectory? Directory, string? Error) ResolveListStart(string root, string canonicalRoot, string? directory)
+    private (PinnedDirectory? Directory, string? Error) ResolveListStart(string root, string canonicalRoot, string? directory)
     {
         if (string.IsNullOrEmpty(directory))
         {
@@ -262,7 +344,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
             return PinRoot(canonicalRoot);
         }
 
-        var rootPin = PinnedDirectory.OpenRoot(canonicalRoot);
+        var rootPin = PinnedDirectory.OpenRoot(canonicalRoot, ArchitectureOverrideForTesting);
         if (rootPin.IsFailure)
         {
             return (null, GenericRefusalText);
@@ -287,9 +369,9 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         return (current, null);
     }
 
-    private static (PinnedDirectory? Directory, string? Error) PinRoot(string canonicalRoot)
+    private (PinnedDirectory? Directory, string? Error) PinRoot(string canonicalRoot)
     {
-        var rootPin = PinnedDirectory.OpenRoot(canonicalRoot);
+        var rootPin = PinnedDirectory.OpenRoot(canonicalRoot, ArchitectureOverrideForTesting);
         return rootPin.IsSuccess ? (rootPin.Value, null) : (null, GenericRefusalText);
     }
 
@@ -326,6 +408,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         var workspace = target.Workspace!;
         var canonicalRoot = target.CanonicalRoot!;
         var resolved = target.Resolved!;
+        var deadline = new ContentionDeadline(options.ContentionTimeout);
 
         // Pre-check: nothing is created before this passes.
         var pre = CheckWrite(caller, canonicalRoot, resolved, out var preExtension);
@@ -342,88 +425,92 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         }
 
         var chain = chainResult.Chain!;
-
-        // Serializes writers to this exact leaf path, so the leaf open below never contends with another one of
-        // this run's own concurrent WriteFile calls — round-3 finding B1. A bounded wait, not an unbounded one:
-        // exhausting it returns the distinct busy text (ruling (j)) rather than hanging or refusing outright.
-        var gate = LeafLock(resolved);
-        if (!await gate.WaitAsync(options.WriteContentionTimeout, ct).ConfigureAwait(false))
-        {
-            DisposeChain(chain);
-            return BusyText;
-        }
-
+        (string? RelativePath, string Result) written;
         try
         {
-            return await OpenAndWriteLeafAsync(caller, workspace, canonicalRoot, path, resolved, content, chain, ct).ConfigureAwait(false);
+            // Serializes every call on this exact leaf path, so the leaf open below never contends with another
+            // of this process's own calls: round-3 finding B1, round-4 finding N1. A bounded wait: exhausting it
+            // returns the distinct busy text (ruling (j)) rather than hanging or refusing outright.
+            using var lease = await LeafLocks.AcquireAsync(resolved, deadline.Remaining, ct).ConfigureAwait(false);
+            if (lease is null)
+            {
+                return BusyText;
+            }
+
+            written = await OpenAndWriteLeafAsync(caller, canonicalRoot, path, resolved, content, chain, deadline, ct).ConfigureAwait(false);
         }
         finally
         {
-            gate.Release();
             DisposeChain(chain);
         }
+
+        // Notify only once the file's handle is closed and its per-path lock released: a listener that reads the
+        // file back, even through read_file, must not meet either one.
+        if (written.RelativePath is { } relativePath)
+        {
+            Notify(workspace.RunId, relativePath);
+        }
+
+        return written.Result;
     }
 
-    /// <summary>The leaf open, post-check, write and notify for <c>write_file</c>, once its directory chain is pinned — split out from <see cref="WriteFile"/> only to keep it under the method-length limit.</summary>
-    private async Task<string> OpenAndWriteLeafAsync(ISecurityContext caller, RunWorkspace workspace, string canonicalRoot, string path, string resolved, string content, List<PinnedDirectory> chain, CancellationToken ct)
+    /// <summary>The leaf open, post-check and write for <c>write_file</c>, once its directory chain is pinned and its per-path lock is held. Returns the changed path relative to the canonical root and the success text, or a null path and the refusal text. Split out from <see cref="WriteFile"/> only to keep it under the method-length limit.</summary>
+    private async Task<(string? RelativePath, string Result)> OpenAndWriteLeafAsync(ISecurityContext caller, string canonicalRoot, string path, string resolved, string content, List<PinnedDirectory> chain, ContentionDeadline deadline, CancellationToken ct)
     {
         var leafName = Path.GetFileName(resolved);
-        var opened = chain[^1].OpenOrCreateFile(leafName, BeforeOpenForTesting);
+        var opened = await OpenLeafAsync(() => chain[^1].OpenOrCreateFile(leafName, BeforeOpenForTesting), deadline, ct).ConfigureAwait(false);
         if (opened.IsFailure)
         {
             BeforeCleanupForTesting?.Invoke();
             RemoveCreatedDirectories(chain);
-            return opened.Error == PinnedOpenOutcome.Contended ? BusyText : GenericRefusalText;
+            return (null, opened.Error == PinnedOpenOutcome.Contended ? BusyText : GenericRefusalText);
         }
 
         var file = opened.Value;
-        int byteCount;
-        string relativePath;
         try
         {
             var post = CheckWrite(caller, canonicalRoot, file.RealPath, out var postExtension);
             if (post != WriteGate.Ok)
             {
                 CleanUpRefusedFile(file, chain);
-                return FormatGate(post, path, postExtension);
+                return (null, FormatGate(post, path, postExtension));
             }
 
             // Ruling (d): verified once at open time (file.RealPath); verified again, live, right before the
             // content is actually committed — closing the gap between that first verification and this moment.
+            BeforeCommitForTesting?.Invoke();
             if (!file.StillAtVerifiedPath())
             {
                 CleanUpRefusedFile(file, chain);
-                return GenericRefusalText;
+                return (null, GenericRefusalText);
             }
 
-            byteCount = await WriteAllBytesAsync(file.Stream, content, ct).ConfigureAwait(false);
-            relativePath = RelativeToRoot(canonicalRoot, file.RealPath);
+            var byteCount = await WriteAllBytesAsync(file.Stream, content, ct).ConfigureAwait(false);
+            return (RelativeToRoot(canonicalRoot, file.RealPath), $"wrote {byteCount} bytes to '{path}'.");
         }
         finally
         {
             file.Dispose();
         }
-
-        // Notify only after the handle above is disposed: a listener that reads the file back must not collide
-        // with the still-open, exclusively-shared handle this call just wrote through.
-        Notify(workspace.RunId, relativePath);
-        return $"wrote {byteCount} bytes to '{path}'.";
     }
 
-    /// <summary>Since the post-check refused it: marks the file for removal, by handle, if this call created it, and removes any directories this call created, innermost first — never by a path string. The caller's own <c>finally</c> blocks dispose the file and the chain in every case, including this one.</summary>
+    /// <summary>
+    /// Since a check after the open refused the write: removes the file, if this call created it, through its own
+    /// handle or its pinned parent's descriptor; closes the file's handle; then removes any directories this call
+    /// created, innermost first. Never by a path string. <see cref="BeforeCleanupForTesting"/> runs between closing
+    /// the file and removing the directories, so a test's swap there meets only the directory pins.
+    /// </summary>
     private void CleanUpRefusedFile(PinnedFile file, List<PinnedDirectory> chain)
     {
-        BeforeCleanupForTesting?.Invoke();
         if (file.CreatedNew)
         {
             file.TryRemove();
-
-            // On Windows, marking a handle for deletion only removes it once every handle to it is closed; dispose
-            // it now, rather than waiting for the caller's own outer finally, so a parent directory this call also
-            // created is genuinely empty by the time RemoveCreatedDirectories tries it, not just marked-for-empty.
-            file.Dispose();
         }
 
+        // Closed now, not in the caller's finally: on Windows a directory this call also created is then empty
+        // for RemoveCreatedDirectories, and only the directory pins still hold the chain.
+        file.Dispose();
+        BeforeCleanupForTesting?.Invoke();
         RemoveCreatedDirectories(chain);
     }
 
@@ -435,7 +522,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
     /// </summary>
     private ChainResult PinDirectoryChain(string canonicalRoot, string targetDirectory)
     {
-        var rootPin = PinnedDirectory.OpenRoot(canonicalRoot);
+        var rootPin = PinnedDirectory.OpenRoot(canonicalRoot, ArchitectureOverrideForTesting);
         if (rootPin.IsFailure)
         {
             return ChainResult.Failure(rootPin.Error);
@@ -569,6 +656,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
     /// <summary>Pins the chain, opens the leaf and applies the edit for <see cref="EditFile"/>, once the pre-check has passed — split out only to keep <see cref="EditFile"/> under the method-length limit. Ruling (h): edit_file goes through the same pinned chain write_file does, opening only what already exists — never creating a missing parent directory as a side effect the way write_file's own chain would.</summary>
     private async Task<(string? RelativePath, string Result)> OpenAndApplyEditAsync(ISecurityContext caller, string canonicalRoot, string path, string resolved, string oldText, string newText, CancellationToken ct)
     {
+        var deadline = new ContentionDeadline(options.ContentionTimeout);
         var chainResult = PinExistingDirectoryChain(canonicalRoot, Path.GetDirectoryName(resolved) ?? canonicalRoot, path);
         if (!chainResult.Ok)
         {
@@ -576,17 +664,16 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         }
 
         var chain = chainResult.Chain!;
-        var gate = LeafLock(resolved);
-        if (!await gate.WaitAsync(options.WriteContentionTimeout, ct).ConfigureAwait(false))
-        {
-            DisposeChain(chain);
-            return (null, BusyText);
-        }
-
         try
         {
+            using var lease = await LeafLocks.AcquireAsync(resolved, deadline.Remaining, ct).ConfigureAwait(false);
+            if (lease is null)
+            {
+                return (null, BusyText);
+            }
+
             var leafName = Path.GetFileName(resolved);
-            var opened = chain[^1].OpenExistingFile(leafName, readOnly: false, BeforeOpenForTesting);
+            var opened = await OpenLeafAsync(() => chain[^1].OpenExistingFile(leafName, readOnly: false, BeforeOpenForTesting), deadline, ct).ConfigureAwait(false);
             if (opened.IsFailure)
             {
                 return (null, FormatLeafOpenFailure(opened.Error, path));
@@ -604,7 +691,6 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         }
         finally
         {
-            gate.Release();
             DisposeChain(chain);
         }
     }
@@ -624,6 +710,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         }
 
         // Ruling (d): verified again, live, right before committing the edit — see PinnedFile.StillAtVerifiedPath.
+        BeforeCommitForTesting?.Invoke();
         if (!file.StillAtVerifiedPath())
         {
             return (null, GenericRefusalText);
