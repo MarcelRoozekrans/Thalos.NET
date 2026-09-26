@@ -244,6 +244,16 @@ internal static partial class PinnedIo
             const int bufferSize = 65536;
 
             var entries = new List<PinnedDirEntry>();
+
+            // Start from the first entry on every call, as the Windows branch does with its restart information class.
+            // getdents64 reads from the descriptor's current position, so a second enumeration of one pinned directory
+            // (list_files rebuilding a listing after the tree changed under it) would otherwise read nothing at all and
+            // report an empty directory.
+            if (LSeek(dirFd, 0, SeekSet) < 0)
+            {
+                return (entries, false);
+            }
+
             var buffer = Marshal.AllocHGlobal(bufferSize);
             try
             {
@@ -307,5 +317,11 @@ internal static partial class PinnedIo
 
         [LibraryImport("libc", EntryPoint = "getdents64", SetLastError = true)]
         private static partial int GetDEntries64(SafeFileHandle fd, nint dirp, uint count);
+
+        private const int SeekSet = 0;
+
+        // off_t is 64 bits on both architectures PinnedIo.FlagsFor covers, x64 and arm64.
+        [LibraryImport("libc", EntryPoint = "lseek", SetLastError = true)]
+        private static partial long LSeek(SafeFileHandle fd, long offset, int whence);
     }
 }

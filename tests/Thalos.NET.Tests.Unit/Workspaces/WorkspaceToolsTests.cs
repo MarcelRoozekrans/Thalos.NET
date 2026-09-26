@@ -1568,6 +1568,97 @@ public sealed class WorkspaceToolsTests : IDisposable
         Directory.Exists(Path.Combine(root, "f")).Should().BeFalse();
     }
 
+    /// <summary>
+    /// The breaker adjudication's M-b, the reviewer's probe: an outside holder of <c>sub</c>, with <c>DELETE</c>
+    /// access and no <c>FILE_SHARE_DELETE</c>, made the walk's open of <c>sub</c> fail, and the walk skipped it. The
+    /// listing showed <c>sub/</c> and <c>top.cs</c> with <c>sub/inner.cs</c> missing, and no error. Ruling (e):
+    /// never a short listing. The walk must wait for the holder, which lets go on the second attempt to open
+    /// <c>sub</c>, inside the wait by construction, and then list the whole tree. Windows-only: Linux has no mandatory
+    /// sharing mode.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_subdirectory_an_outside_holder_has_is_waited_for_not_left_out_of_the_listing()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "sharing violations are a Windows-enforced concept");
+        var (tools, _, root) = Build(contentionTimeout: TimeSpan.FromSeconds(30));
+        var sub = Path.Combine(root, "sub");
+        Directory.CreateDirectory(sub);
+        File.WriteAllText(Path.Combine(sub, "inner.cs"), "x");
+        File.WriteAllText(Path.Combine(root, "top.cs"), "x");
+        using var holder = HoldForDeletion(sub);
+        var subAttempts = 0;
+        tools.BeforeOpenForTesting = candidate =>
+        {
+            if (candidate.EndsWith(Path.DirectorySeparatorChar + "sub", StringComparison.Ordinal) && ++subAttempts == 2)
+            {
+                holder.Dispose();
+            }
+        };
+
+        var result = await tools.ListFiles(Caller(RunId));
+
+        using var scope = new AssertionScope();
+        subAttempts.Should().BeGreaterThanOrEqualTo(2, "the holder lets go on the second attempt, inside the wait");
+        result.Should().Be("sub/\nsub/inner.cs\ntop.cs");
+    }
+
+    /// <summary>
+    /// The bound on the same wait: an outside holder of <c>sub</c> that never lets go ends in the busy text once the
+    /// contention timeout is spent, never a listing without <c>sub</c>'s contents. Windows-only, as above.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_subdirectory_an_outside_holder_never_lets_go_of_ends_the_listing_in_busy()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "sharing violations are a Windows-enforced concept");
+        var timeout = TimeSpan.FromMilliseconds(500);
+        var (tools, _, root) = Build(contentionTimeout: timeout);
+        var sub = Path.Combine(root, "sub");
+        Directory.CreateDirectory(sub);
+        File.WriteAllText(Path.Combine(sub, "inner.cs"), "x");
+
+        string result;
+        var elapsed = Stopwatch.StartNew();
+        using (HoldForDeletion(sub))
+        {
+            result = await tools.ListFiles(Caller(RunId));
+            elapsed.Stop();
+        }
+
+        using var scope = new AssertionScope();
+        result.Should().Be("error: the file is busy; try again.");
+        elapsed.Elapsed.Should().BeGreaterThanOrEqualTo(timeout - TimeSpan.FromMilliseconds(50), "busy comes only after retrying for the whole contention timeout");
+    }
+
+    /// <summary>
+    /// M-b's equivalent on both OSes: <c>sub</c>, with <c>inner.cs</c> in it, is renamed to <c>sub2</c> after the
+    /// root was enumerated and right before the walk opens <c>sub</c>. The walk then found <c>sub</c> gone and skipped
+    /// it, so the listing showed a <c>sub/</c> that no longer existed and missed <c>sub2/inner.cs</c>, a file that is
+    /// in the workspace. The walk must notice that the tree changed under it and list it again as it now is.
+    /// </summary>
+    [Fact]
+    public async Task A_subdirectory_renamed_during_the_walk_is_listed_where_it_now_is()
+    {
+        var (tools, _, root) = Build();
+        Directory.CreateDirectory(Path.Combine(root, "sub"));
+        File.WriteAllText(Path.Combine(root, "sub", "inner.cs"), "x");
+        File.WriteAllText(Path.Combine(root, "top.cs"), "x");
+        var renamed = false;
+        tools.BeforeOpenForTesting = candidate =>
+        {
+            if (!renamed && string.Equals(Path.GetFileName(candidate), "sub", StringComparison.Ordinal))
+            {
+                renamed = true;
+                Directory.Move(Path.Combine(root, "sub"), Path.Combine(root, "sub2"));
+            }
+        };
+
+        var result = await tools.ListFiles(Caller(RunId));
+
+        using var scope = new AssertionScope();
+        renamed.Should().BeTrue();
+        result.Should().Be("sub2/\nsub2/inner.cs\ntop.cs");
+    }
+
     private (WorkspaceTools Tools, FakeChangeListener Listener, string Root) Build(
         IReadOnlySet<string>? allowedWriteExtensions = null,
         IEnumerable<string>? protectedPaths = null,

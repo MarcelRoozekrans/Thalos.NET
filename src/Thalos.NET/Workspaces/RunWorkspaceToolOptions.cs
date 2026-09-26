@@ -37,6 +37,9 @@ public sealed class RunWorkspaceToolOptions
     /// sharing violation, or, for <c>write_file</c>, the directory is gone again between its creation and its open,
     /// every directory the call holds is released and the walk starts again from the workspace root, with the same
     /// backoff (round-5 ruling (t)).</item>
+    /// <item>A holder outside the process of a subdirectory <c>list_files</c> walks, or a subdirectory that is gone
+    /// by the time the walk opens it: the listing is rebuilt from its start with the same backoff, never returned
+    /// without that subtree (ruling (e)).</item>
     /// </list>
     /// Directory opens never contend with this process's own calls: they request read access and share read and
     /// write; a call removes a directory it created only when no other call holds that directory, and leaves it in

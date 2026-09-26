@@ -78,8 +78,9 @@ public static partial class WorkspacePath
     /// a directory it created. Canonicalising a directory that is gone fails, and on Windows a handle opened just
     /// before the removal can report a final path outside the workspace. Either would refuse a path that is
     /// perfectly valid. So when canonicalisation fails, or lands outside the workspace, and the ancestor no longer
-    /// exists, the probe runs again from the root, up to <see cref="MaxAncestorProbes"/> times. An ancestor that
-    /// still exists is refused exactly as before, and every result is checked the same way whichever probe found it.
+    /// exists, the probe runs again from the root, once for every level between the root and the target, plus the
+    /// first probe (see <see cref="MaxAncestorProbes"/>). An ancestor that still exists is refused exactly as before,
+    /// and every result is checked the same way whichever probe found it.
     /// </para>
     /// </remarks>
     /// <param name="workspaceRoot">The workspace's root directory.</param>
@@ -88,11 +89,22 @@ public static partial class WorkspacePath
         ResolveCore(workspaceRoot, relativePath, beforeCanonicalize: null);
 
     /// <summary>
-    /// How many times <see cref="Resolve"/> probes for the deepest existing ancestor when the one it
-    /// found vanished before it could be canonicalised. Each extra probe needs a concurrent removal of its own, so a
-    /// few are enough for any caller that is not removing directories in a loop.
+    /// How many times <see cref="Resolve"/> may probe for the deepest existing ancestor of <paramref name="full"/>:
+    /// one more than the number of path segments between <paramref name="root"/> and <paramref name="full"/>.
     /// </summary>
-    private const int MaxAncestorProbes = 4;
+    /// <remarks>
+    /// That is enough for any number of concurrent removals. The deepest existing ancestor is at most as deep as the
+    /// target itself, and a probe is repeated only when the ancestor it found is conclusively gone. With that level
+    /// gone, the next probe's deepest existing ancestor is strictly shallower, so each repeat moves at least one level
+    /// up, and the root, at depth zero, was verified before the first probe. A cleanup removing every level on the
+    /// way therefore needs exactly one probe per level plus the last one at the root. Only a level created again
+    /// between two probes, and then removed again, can use up the bound, and that is refused, which fails closed.
+    /// </remarks>
+    private static int MaxAncestorProbes(string root, string full)
+    {
+        var relative = Path.GetRelativePath(root, full);
+        return string.Equals(relative, ".", StringComparison.Ordinal) ? 1 : relative.Split(Path.DirectorySeparatorChar).Length + 1;
+    }
 
     /// <summary>
     /// <see cref="Resolve"/>, with a test-only seam: <paramref name="beforeCanonicalize"/> is invoked
@@ -120,7 +132,8 @@ public static partial class WorkspacePath
 
         var full = Path.GetFullPath(Path.Combine(root, relativePath));
 
-        for (var probe = 1; probe <= MaxAncestorProbes; probe++)
+        var maxProbes = MaxAncestorProbes(root, full);
+        for (var probe = 1; probe <= maxProbes; probe++)
         {
             var ancestor = DeepestExistingAncestor(root, full);
             if (ancestor is null)

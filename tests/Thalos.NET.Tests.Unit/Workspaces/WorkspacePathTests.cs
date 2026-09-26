@@ -1,5 +1,6 @@
 using System.Runtime.Versioning;
 using AwesomeAssertions;
+using AwesomeAssertions.Execution;
 using Thalos.Workspaces;
 
 namespace Thalos.Tests.Unit.Workspaces;
@@ -676,6 +677,50 @@ public sealed class WorkspacePathTests : IDisposable
         probed.Should().HaveCount(2);
         result.IsSuccess.Should().BeTrue();
         result.Value.Should().Be(Path.Combine(WorkspacePath.CanonicalizeRoot(_workspace)!, "d", "x.cs"));
+    }
+
+    /// <summary>
+    /// The breaker adjudication's M-a: a fixed bound of four probes refused a valid five-level path when every
+    /// probed ancestor was removed in turn. The seam removes each ancestor the probe finds, the target itself
+    /// included when it exists, until only the workspace root is left. That takes one probe per level plus the one
+    /// at the root: 6 for the missing <c>x.cs</c>, 7 when <c>x.cs</c> exists and is removed first. The resolution
+    /// must survive all of them.
+    /// </summary>
+    [Theory]
+    [InlineData(false, 6)]
+    [InlineData(true, 7)]
+    public void Every_ancestor_down_a_five_level_path_removed_in_turn_still_resolves(bool targetExists, int expectedProbes)
+    {
+        var deepest = Path.Combine(_workspace, "a", "b", "c", "d", "e");
+        Directory.CreateDirectory(deepest);
+        if (targetExists)
+        {
+            File.WriteAllText(Path.Combine(deepest, "x.cs"), "x");
+        }
+
+        var probes = 0;
+        var result = WorkspacePath.ResolveCore(_workspace, "a/b/c/d/e/x.cs", ancestor =>
+        {
+            probes++;
+            if (string.Equals(Path.GetFileName(ancestor), "workspace", StringComparison.Ordinal))
+            {
+                return; // the root: nothing left to remove
+            }
+
+            if (File.Exists(ancestor))
+            {
+                File.Delete(ancestor);
+            }
+            else
+            {
+                Directory.Delete(ancestor);
+            }
+        });
+
+        using var scope = new AssertionScope();
+        probes.Should().Be(expectedProbes);
+        result.IsSuccess.Should().BeTrue();
+        (result.IsSuccess ? result.Value : "(refused)").Should().Be(Path.Combine(WorkspacePath.CanonicalizeRoot(_workspace)!, "a", "b", "c", "d", "e", "x.cs"));
     }
 
     /// <summary>

@@ -358,29 +358,71 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
             return GenericRefusalText;
         }
 
-        var start = await PinListStartAsync(workspace.Root, canonicalRoot, directory, ct).ConfigureAwait(false);
+        var deadline = new ContentionDeadline(options.ContentionTimeout);
+        var start = await PinListStartAsync(workspace.Root, canonicalRoot, directory, deadline, ct).ConfigureAwait(false);
         if (!start.Ok)
         {
             return start.Error!;
         }
 
         var chain = start.Chain!;
-        var entries = new List<string>();
         try
         {
-            if (!Walk(chain[^1], "", entries, options.MaxListEntries, ct))
-            {
-                return GenericRefusalText;
-            }
+            return await WalkUntilCompleteAsync(chain[^1], deadline, ct).ConfigureAwait(false);
         }
         finally
         {
             DisposeChain(chain);
         }
+    }
 
-        entries.Sort(StringComparer.Ordinal);
+    /// <summary>
+    /// Walks the pinned start directory and formats the listing. Ruling (e): never a short listing. A subdirectory
+    /// the walk cannot open is never skipped:
+    /// <list type="bullet">
+    /// <item>A sharing violation from a holder outside the process, or a subdirectory that is gone since its parent
+    /// was enumerated, means the tree changed under the walk. The whole listing is rebuilt from the pinned start, with
+    /// the same backoff and <paramref name="deadline"/> a directory open in a chain build uses, and once the deadline
+    /// is spent the result is the busy text, as for the start directory.</item>
+    /// <item>Any other refusal fails the call, with the same generic text as an enumeration error.</item>
+    /// </list>
+    /// A vanished subdirectory is rebuilt rather than refused because it can come from legitimate concurrency: a
+    /// write in this process removing an empty directory it created and then was refused for. Rebuilding lists the
+    /// tree as it now is. Refusing would turn that into an error (ruling (c)).
+    /// </summary>
+    private async Task<string> WalkUntilCompleteAsync(PinnedDirectory start, ContentionDeadline deadline, CancellationToken ct)
+    {
+        var delay = FirstContentionRetryDelay;
+        while (true)
+        {
+            var entries = new List<string>();
+            var walked = Walk(start, "", entries, options.MaxListEntries, ct);
+            if (walked == WalkOutcome.Complete)
+            {
+                entries.Sort(StringComparer.Ordinal);
+                return entries.Count == 0 ? "(empty)" : FormatListing(entries, options.MaxListEntries);
+            }
 
-        return entries.Count == 0 ? "(empty)" : FormatListing(entries, options.MaxListEntries);
+            if (walked == WalkOutcome.Failed)
+            {
+                return GenericRefusalText;
+            }
+
+            if (!await WaitBeforeRetryAsync(delay, deadline, ct).ConfigureAwait(false))
+            {
+                return BusyText;
+            }
+
+            delay = NextRetryDelay(delay);
+        }
+    }
+
+    /// <summary>How one <see cref="Walk"/> ended: the whole subtree listed; a genuine failure; or the tree changed under the walk, so the listing must be rebuilt.</summary>
+    private enum WalkOutcome
+    {
+        Complete,
+        Failed,
+        Changed,
     }
 
     /// <summary>
@@ -391,7 +433,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
     /// the walk runs. A missing or refused start keeps the one "is not a directory" text it always had; only an
     /// exhausted wait reports busy.
     /// </summary>
-    private async Task<ChainResult> PinListStartAsync(string root, string canonicalRoot, string? directory, CancellationToken ct)
+    private async Task<ChainResult> PinListStartAsync(string root, string canonicalRoot, string? directory, ContentionDeadline deadline, CancellationToken ct)
     {
         var target = canonicalRoot;
         if (!string.IsNullOrEmpty(directory))
@@ -405,7 +447,6 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
             target = resolved.Value;
         }
 
-        var deadline = new ContentionDeadline(options.ContentionTimeout);
         var pinned = await PinChainAsync(canonicalRoot, target, create: false, directory ?? "", deadline, ct).ConfigureAwait(false);
         if (pinned.Ok || string.Equals(target, canonicalRoot, StringComparison.Ordinal) || string.Equals(pinned.Error, BusyText, StringComparison.Ordinal))
         {
@@ -952,14 +993,16 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
     /// skipping <c>.git</c> and any reparse point; a name found to be a subdirectory is descended into by opening it
     /// as a child of this same pinned directory, closing the gap between checking an entry's attributes and
     /// enumerating what a swap could have made it point to since. Stops once one more than <paramref name="limit"/>
-    /// entries have been collected. Returns <see langword="false"/> on a genuine enumeration error at this level or
-    /// any descendant, so <c>list_files</c> reports a failure rather than a silently truncated listing (ruling (e)).
+    /// entries have been collected. Returns <see cref="WalkOutcome.Failed"/> on a genuine enumeration error, or a
+    /// subdirectory refused for any reason other than contention or absence, at this level or any descendant; and
+    /// <see cref="WalkOutcome.Changed"/> for a subdirectory that is contended or gone. Either way <c>list_files</c>
+    /// never returns a silently truncated listing (ruling (e)); see <see cref="WalkUntilCompleteAsync"/>.
     /// </summary>
-    private bool Walk(PinnedDirectory directory, string relativePrefix, List<string> results, int limit, CancellationToken ct)
+    private WalkOutcome Walk(PinnedDirectory directory, string relativePrefix, List<string> results, int limit, CancellationToken ct)
     {
         if (results.Count > limit)
         {
-            return true;
+            return WalkOutcome.Complete;
         }
 
         ct.ThrowIfCancellationRequested();
@@ -967,14 +1010,14 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         var enumerated = directory.EnumerateEntries();
         if (enumerated.IsFailure)
         {
-            return false;
+            return WalkOutcome.Failed;
         }
 
         foreach (var entry in enumerated.Value)
         {
             if (results.Count > limit)
             {
-                return true;
+                return WalkOutcome.Complete;
             }
 
             if (entry.Name.Equals(".git", StringComparison.OrdinalIgnoreCase) || entry.IsReparsePoint)
@@ -993,14 +1036,15 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
             var child = directory.OpenChild(entry.Name, BeforeOpenForTesting);
             if (child.IsFailure)
             {
-                continue; // gone, or no longer a plain directory, since it was listed a moment ago
+                return child.Error is PinnedOpenOutcome.Contended or PinnedOpenOutcome.Missing ? WalkOutcome.Changed : WalkOutcome.Failed;
             }
 
             try
             {
-                if (!Walk(child.Value, relative, results, limit, ct))
+                var walked = Walk(child.Value, relative, results, limit, ct);
+                if (walked != WalkOutcome.Complete)
                 {
-                    return false;
+                    return walked;
                 }
             }
             finally
@@ -1009,7 +1053,7 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
             }
         }
 
-        return true;
+        return WalkOutcome.Complete;
     }
 
 
