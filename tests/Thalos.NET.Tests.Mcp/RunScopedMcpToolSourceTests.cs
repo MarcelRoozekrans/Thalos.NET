@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using AwesomeAssertions.Execution;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -217,7 +219,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
     public async Task A_reload_slower_than_the_ready_wait_still_completes_and_a_later_call_is_served()
     {
         var log = Path.Combine(_root, "calls.log");
-        var runScoped = RunScoped("--reload-delay-ms", "3000", "--call-log", log);
+        var runScoped = RunScoped("--reload-delay-ms", "4000", "--call-log", log);
         runScoped.Reload = "tool:reload_count";
         runScoped.ReadyWaitTimeout = TimeSpan.FromSeconds(1);
         var (args, registry) = await RoutedToolAsync("args", runScoped, ready: [RunId]);
@@ -225,17 +227,68 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
 
         registry.OnFilesChanged(RunId, ["a.cs"]);
         using var _turn = BeginTurn(RunCaller(RunId));
-        var during = await InvokeAsync(args); // gives up after 1 s; the reload takes 3 s
-        await Task.Delay(TimeSpan.FromSeconds(4)); // the reload, if it was left running, is done by now
+        var during = await InvokeAsync(args); // gives up after 1 s; the reload takes 4 s
+        await Task.Delay(TimeSpan.FromMilliseconds(500));
+        var stillDuring = await InvokeAsync(args); // from about 1.5 s to 2.5 s: the reload is still running
+        await Task.Delay(TimeSpan.FromSeconds(3)); // the reload, if it was left running, is done by now
         var after = await InvokeAsync(args);
         var count = await InvokeAsync(reloadCount);
         var logged = await File.ReadAllLinesAsync(log);
 
         using var _scope = new AssertionScope();
         during.Should().Be($"error: run tool server 'roslyn' is not available for this run: its server was not ready within {TimeSpan.FromSeconds(1)}.");
+        stillDuring.Should().Be($"error: run tool server 'roslyn' is not available for this run: its server was not ready within {TimeSpan.FromSeconds(1)}.", "the reload the first waiter began is still running; it was not cancelled when that waiter gave up");
         after.Should().Contain($"--id {RunId:D}", "the reload completed, so the next call is served");
         count.Should().Be("2", "one reload, not restarted by each waiter, plus this call");
         logged.Should().Equal(["reload_count", "reload_count"], "the server ran the reload once, then this test's own call");
+    }
+
+    [Fact]
+    public async Task A_caller_that_cancels_while_its_run_server_is_dead_gets_the_cancellation_not_an_error_result()
+    {
+        var (echo, registry) = await RoutedToolAsync("echo", ready: [RunId]);
+        var probe = await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None);
+        probe.IsSuccess.Should().BeTrue(probe.IsFailure ? probe.Error.Message : "");
+        var client = probe.Value.Client; // the client the routed call below is handed; watched to see its session end
+        var pid = int.Parse(((TextContentBlock)(await client.CallToolAsync("pid")).Content.Single()).Text, CultureInfo.InvariantCulture);
+        await probe.Value.DisposeAsync();
+
+        // Runs inside the routed call, after its lease is taken and before the request is sent: the server dies, its
+        // session ends, and then the caller cancels, as a run cancelled and torn down at once would.
+        using var cts = new CancellationTokenSource();
+        var hook = new RunWhenSerialized(() =>
+        {
+            using (var process = Process.GetProcessById(pid))
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(15_000);
+            }
+
+            SpinWait.SpinUntil(() => client.Completion.IsCompleted, TimeSpan.FromSeconds(15));
+            cts.Cancel();
+        });
+
+        string outcome;
+        using (BeginTurn(RunCaller(RunId)))
+        {
+            try
+            {
+                outcome = (await echo.InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal) { ["text"] = hook }, cts.Token))!.ToString()!;
+            }
+            catch (OperationCanceledException ex)
+            {
+                outcome = $"cancelled: {ex.GetType().Name}";
+            }
+            catch (Exception ex)
+            {
+                outcome = $"threw {ex.GetType().Name}: {ex.Message}";
+            }
+        }
+
+        using var _scope = new AssertionScope();
+        hook.Ran.Should().BeTrue("the hook killed the server and cancelled the caller inside the routed call");
+        client.Completion.IsCompleted.Should().BeTrue("the server's session had ended when the caller cancelled");
+        outcome.Should().StartWith("cancelled", "a caller's own cancellation propagates, even when its server is dead by then");
     }
 
     [Fact]
@@ -489,7 +542,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
             await _disposables[i].DisposeAsync();
         }
 
-        Directory.Delete(_root, recursive: true);
+        await TestDirectories.DeleteAsync(_root);
         outstanding.Should().Be(0, "no routed call leaves a lease behind");
     }
 
@@ -618,6 +671,35 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
     }
 
     private RunWorkspace Workspace(Guid runId) => new(runId, "repo", "https://example.invalid/repo.git", "main", "run/branch", _root, null);
+
+    /// <summary>An argument whose serialization runs <paramref name="onWrite"/> once: a hook inside the routed call, before the request is sent.</summary>
+    [JsonConverter(typeof(RunWhenSerializedConverter))]
+    private sealed class RunWhenSerialized(Action onWrite)
+    {
+        private int _ran;
+
+        public bool Ran => Volatile.Read(ref _ran) == 1;
+
+        public void Run()
+        {
+            if (Interlocked.Exchange(ref _ran, 1) == 0)
+            {
+                onWrite();
+            }
+        }
+    }
+
+    private sealed class RunWhenSerializedConverter : JsonConverter<RunWhenSerialized>
+    {
+        public override RunWhenSerialized Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) =>
+            throw new NotSupportedException("only written");
+
+        public override void Write(Utf8JsonWriter writer, RunWhenSerialized value, JsonSerializerOptions options)
+        {
+            value.Run();
+            writer.WriteStringValue("hook");
+        }
+    }
 
     /// <summary>A provider with no records: the tests start run servers through <see cref="RunMcpServerRegistry.OnReadyAsync"/>.</summary>
     private sealed class NoRecordsProvider : IRunWorkspaceProvider

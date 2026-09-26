@@ -173,7 +173,6 @@ public sealed class McpBuilderTests
     }
 
     private static McpServerDefinition Definition(bool runScoped)
-
     {
         var definition = McpServerFixture.Definition("--host");
         definition.RunScoped = runScoped ? new RunScopedMcpDefinition { Args = [McpServerFixture.ServerDll, "--run"] } : null;

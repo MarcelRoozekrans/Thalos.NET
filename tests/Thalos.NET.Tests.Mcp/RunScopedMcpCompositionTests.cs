@@ -65,15 +65,14 @@ public sealed class RunScopedMcpCompositionTests : IAsyncLifetime
 
     public Task InitializeAsync() => Task.CompletedTask;
 
-    public Task DisposeAsync()
+    public async Task DisposeAsync()
     {
         foreach (var file in Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories))
         {
             File.SetAttributes(file, FileAttributes.Normal); // git writes read-only object files
         }
 
-        Directory.Delete(_root, recursive: true);
-        return Task.CompletedTask;
+        await TestDirectories.DeleteAsync(_root);
     }
 
     /// <summary>Runs one turn in which the model calls <c>roslyn__args</c>; returns what the tool put back into the conversation.</summary>

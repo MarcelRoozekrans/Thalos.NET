@@ -44,6 +44,14 @@ EchoTools.CallLog = builder.Configuration["call-log"];
 
 // The stdio transport completes when stdin reaches EOF; the SDK's hosted service then stops the host, so the process exits promptly.
 await builder.Build().RunAsync();
+
+// `--shutdown-delay-ms N`: stay alive for N ms after stdin closes, as a server slow to shut down would, so a client's
+// dispose takes up to its shutdown timeout.
+if (TryMilliseconds("shutdown-delay-ms", out var shutdownDelay))
+{
+    await Task.Delay(shutdownDelay);
+}
+
 return 0;
 
 bool TryMilliseconds(string key, out TimeSpan value)

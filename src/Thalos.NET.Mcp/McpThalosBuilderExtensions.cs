@@ -37,7 +37,7 @@ public static class McpThalosBuilderExtensions
         var services = builder.Services;
         var servers = McpServers(services);
         var runScoped = definition.RunScoped;
-        if (servers.RunScopedNames.TryGetValue(name, out var earlierRunScoped) && (earlierRunScoped || runScoped is not null))
+        if (servers.McpNames.TryGetValue(name, out var earlierRunScoped) && (earlierRunScoped || runScoped is not null))
         {
             // Plain with plain stays first-wins, as before. With a run-scoped entry either way round, the catalog's
             // first-wins could hand run callers the plain source, which is the host server.
@@ -45,7 +45,7 @@ public static class McpThalosBuilderExtensions
                 $"An MCP server named '{name}' was already added; a run-scoped entry cannot share its name with another MCP entry.", nameof(name));
         }
 
-        servers.RunScopedNames.TryAdd(name, runScoped is not null);
+        servers.McpNames.TryAdd(name, runScoped is not null);
         if (runScoped is null)
         {
             // works without AddLogging(): the MCP SDK and the source itself only need a factory, not a configured one
@@ -118,7 +118,7 @@ public static class McpThalosBuilderExtensions
     private sealed class McpServerSet
     {
         /// <summary>Every MCP entry's source name, plain or run-scoped, mapped to whether the first entry by that name is run-scoped.</summary>
-        public Dictionary<string, bool> RunScopedNames { get; } = new(StringComparer.Ordinal);
+        public Dictionary<string, bool> McpNames { get; } = new(StringComparer.Ordinal);
 
         /// <summary>The run-scoped entries, keyed by source name, for the one registry.</summary>
         public Dictionary<string, McpServerDefinition> Definitions { get; } = new(StringComparer.Ordinal);

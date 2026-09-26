@@ -1,6 +1,8 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using AwesomeAssertions.Execution;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
@@ -399,6 +401,62 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task Removing_a_run_while_a_restart_reload_replaces_its_server_waits_for_the_reload_and_leaves_no_process()
+    {
+        var pidFile = Path.Combine(_root, "server.pid");
+        var workspace = Workspace() with { Root = Directory.CreateDirectory(Path.Combine(_root, "restart-ws")).FullName };
+        var definition = McpServerFixture.Definition("--host");
+        definition.ShutdownTimeout = TimeSpan.FromSeconds(3); // the old server takes this long to be disposed: it ignores stdin closing
+        definition.RunScoped = new() { Args = [.. ServerArgs, "--pid-file", pidFile, "--shutdown-delay-ms", "30000"], Reload = "restart" };
+        var events = new RecordingLoggerProvider();
+        using var loggerFactory = LoggerFactory.Create(b => b.SetMinimumLevel(LogLevel.Trace).AddProvider(events));
+        var registry = new RunMcpServerRegistry(Servers(definition), () => new FakeProvider(null), loggerFactory, TimeProvider.System);
+        _registries.Add(registry);
+        await registry.OnReadyAsync(workspace, CancellationToken.None);
+        var oldPid = await PidAsync(registry);
+        var startsBefore = events.Count(StartingEvent);
+
+        registry.OnFilesChanged(RunId, ["a.cs"]);
+        using (var impatient = new CancellationTokenSource(TimeSpan.FromMilliseconds(300)))
+        {
+            // Begins the restart, then gives up while the restart is still disposing the old server.
+            var begin = async () => await registry.GetReadyClientAsync("roslyn", RunId, impatient.Token);
+            await begin.Should().ThrowAsync<OperationCanceledException>();
+        }
+
+        var removal = async () => await registry.OnRemovingAsync(workspace, CancellationToken.None);
+        await removal.Should().NotThrowAsync("a removal during a restart finishes, whatever the restart is doing");
+        var replacementStartsWhenRemoved = events.Count(StartingEvent) - startsBefore;
+        var replacementStoppedWhenRemoved = events.Count(StoppedWhileStartingEvent);
+        var oldAliveAfterRemoval = IsRunning(oldPid);
+        var workspaceFreeAtRemoval = TryDelete(workspace.Root); // on Windows, fails while any process has it as its working directory
+        await Task.Delay(TimeSpan.FromSeconds(4)); // long enough for a restart the removal did not wait for to have started its process
+        var lastPid = await PidFromFileAsync(pidFile);
+        string after;
+        try
+        {
+            var result = await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None);
+            after = result.IsFailure ? $"refused: {result.Error.Message}" : "served";
+        }
+        catch (Exception ex)
+        {
+            after = $"threw {ex.GetType().Name}: {ex.Message}";
+        }
+
+        using var _scope = new AssertionScope();
+        replacementStartsWhenRemoved.Should().Be(1, "the removal waited for the restart, whose replacement start had begun by then");
+        replacementStoppedWhenRemoved.Should().Be(1, "that replacement start was stopped before the removal returned");
+        oldAliveAfterRemoval.Should().BeFalse("the removal waits for the in-flight restart, which is still shutting the old process down");
+        workspaceFreeAtRemoval.Should().BeTrue("once the removal returns, no process has the run's workspace as its working directory");
+        IsRunning(lastPid).Should().BeFalse("no replacement process outlives the removal");
+        after.Should().StartWith("refused:", "a call after the removal gets a failure result, not an exception");
+    }
+
+    private static readonly EventId StartingEvent = new(310);
+
+    private static readonly EventId StoppedWhileStartingEvent = new(318);
+
+    [Fact]
     public async Task Disposing_a_lease_twice_releases_it_once()
     {
         var registry = Registry(runScoped: new() { Args = ServerArgs, Reload = "tool:reload_count" });
@@ -558,7 +616,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
             await registry.DisposeAsync();
         }
 
-        Directory.Delete(_root, recursive: true);
+        await TestDirectories.DeleteAsync(_root);
     }
 
     private RunMcpServerRegistry Registry(RunScopedMcpDefinition runScoped) => Registry(runScoped, new FakeProvider(null));
@@ -613,10 +671,34 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         }
     }
 
+    private static bool TryDelete(string directory)
+    {
+        try
+        {
+            Directory.Delete(directory, recursive: true);
+            return true;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
+    }
+
     private static async Task<int> PidFromFileAsync(string pidFile)
     {
         await UntilAsync(() => File.Exists(pidFile) && new FileInfo(pidFile).Length > 0, "the server to write its pid");
-        return int.Parse(await File.ReadAllTextAsync(pidFile), CultureInfo.InvariantCulture);
+        var sw = Stopwatch.StartNew();
+        while (true)
+        {
+            try
+            {
+                return int.Parse(await File.ReadAllTextAsync(pidFile), CultureInfo.InvariantCulture);
+            }
+            catch (IOException) when (sw.Elapsed < TimeSpan.FromSeconds(20))
+            {
+                await Task.Delay(50); // the server may still hold the file open on Windows while it finishes writing
+            }
+        }
     }
 
     private static async Task UntilAsync(Func<bool> condition, string what)
@@ -630,6 +712,31 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
     }
 
     private static string Normalize(string path) => Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+
+    /// <summary>Records the event id of every log entry, in order, so a test can tell what the registry did and when.</summary>
+    private sealed class RecordingLoggerProvider : ILoggerProvider
+    {
+        private readonly ConcurrentQueue<int> _events = new();
+
+        public int Count(EventId eventId) => _events.Count(id => id == eventId.Id);
+
+        public ILogger CreateLogger(string categoryName) => new Recorder(_events);
+
+        public void Dispose()
+        {
+        }
+
+        private sealed class Recorder(ConcurrentQueue<int> events) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state)
+                where TState : notnull => null;
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
+                events.Enqueue(eventId.Id);
+        }
+    }
 
     /// <summary>Counts every call to every provider method; <see cref="HoldFinds"/> parks <see cref="FindAsync"/> until <see cref="ReleaseFinds"/>.</summary>
     private sealed class FakeProvider(RunWorkspace? found) : IRunWorkspaceProvider

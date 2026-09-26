@@ -132,7 +132,7 @@ public sealed partial class RunScopedMcpToolSource(
                 LogCallCutOff(_logger, ex, Name, tool.Name, runId);
                 return $"error: run tool server '{Name}' stopped during '{tool.Name}' for this run; the call did not complete.";
             }
-            catch (Exception ex) when (ex is IOException || lease.Value.Client.Completion.IsCompleted)
+            catch (Exception ex) when (ex is not OperationCanceledException && (ex is IOException || lease.Value.Client.Completion.IsCompleted))
             {
                 // The server died under the call: its transport closed. The registry finds it dead on the next call and
                 // refuses the run until readiness starts it again, so this call is refused the same way, not thrown.
