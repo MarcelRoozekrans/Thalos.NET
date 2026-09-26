@@ -860,6 +860,8 @@ public sealed partial class RunMcpServerRegistry(
             entry.Removed = true;
             // Every reload and start observes Stopping, so these complete promptly; a start disposes its own client when
             // stopped. The reload first: a restart reload replaces Starting, and its new start must be the one stopped.
+            // Today no test can see this await: Prepare refuses a start once Stopping is cancelled, and the SDK's second
+            // dispose of a client waits for the first. It stays so that the order holds without relying on either.
             if (entry.Reloading is { } reloading)
             {
                 await reloading.ConfigureAwait(false);
