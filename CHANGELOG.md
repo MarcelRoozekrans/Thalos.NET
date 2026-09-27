@@ -1,5 +1,52 @@
 # Changelog
 
+## [0.11.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.10.0...v0.11.0) (2026-09-27)
+
+
+### ⚠ BREAKING CHANGES
+
+* **workflow:** WorkflowStartRequest.StartedBy is required; the positional IWorkflowStore.StartAsync overload is removed from IWorkflowStore and OrmWorkflowStore
+* **workflow:** WorkflowRunStarter.StartAsync takes WorkflowRunStartOptions with a required StartedBy; the five-argument overload is removed
+* **workflow:** IWorkflowStore.StartAsync returns Result<Guid>; an over-cap InitialVariables bag or a colliding caller-supplied RunId is a Result failure, not an exception
+* **workflow:** IWorkflowStore.ResumeAsync takes a WorkflowResumeRequest whose ResumedBy is required; the positional ResumeAsync overload is removed from IWorkflowStore and OrmWorkflowStore
+* **tools:** a ThalosTool parameter typed exactly ISecurityContext is bound to the turn's caller and left out of the schema; LocalToolSource, reached through AddLocalTools on first IToolSource resolution, throws ArgumentException for any other parameter whose System.Text.Json shape contains an ISecurityContext-assignable type. object, JsonElement, JsonNode and custom-converter types stay free-form
+* **workflow:** WorkflowNodeDispatcher takes a required gates parameter after resolveCaller; pass an empty sequence for none
+* **workflow:** IWorkflowReferenceResolver gains the abstract HostActionExistsAsync; every implementation must add it
+* **workflow:** WorkflowReferenceResolver and WorkflowNodeDispatcher take a required hostActions parameter; pass an empty sequence for none
+* **subagents:** SubagentRunner no longer fails a completed turn over budget; the runtime stops a turn before the model round trip that would start at or above MaxTotalTokens, and a non-positive MaxTotalTokens fails validation
+* **abstractions:** the one-argument AgentError.SubagentBudgetExceeded is deleted; use SubagentBudgetExceeded with maxTokens, roundTrip and tokensSoFar
+* **memory:** MemoryContextProvider places recalled memories in a transient user message before the latest user message instead of in the system instructions, and history stores skip it
+* **workflow:** Thalos.NET.Workflow.Orm requires ZeroAlloc.Outbox and ZeroAlloc.Outbox.Orm 3.0.1 or later and ZeroAlloc.ORM 2.0.1 or later; outbox consumers must be on the lease-based 3.0, and outbox migration 2 add_outbox_lease must be applied before any 3.0 consumer starts
+* **workflow:** a node's action key is now meaningful; a node that also names agent or skill, or declares no outcomes, fails validation
+* **workflow:** a task node that leaves by next and declares outcomes now fails the run on an undeclared outcome instead of advancing
+
+### Features
+
+* **caching:** provider-neutral prompt caching with an Anthropic cache_control translator ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+* **mcp:** run-scoped MCP servers routed per call to the calling run's own server ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+* **runtime:** a turn stops before the model round trip that would start at its token ceiling ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+* **workflow:** dispatch gates, host action nodes and a run workspace sweeper ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+* **workflow:** per-node token usage on completion events, readable through IWorkflowRunHistory ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+* **workspaces:** run workspaces, one git worktree per run with confined workspace__* file tools ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+
+
+### Code Refactoring
+
+* **abstractions:** the one-argument AgentError.SubagentBudgetExceeded is deleted; use SubagentBudgetExceeded with maxTokens, roundTrip and tokensSoFar ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+* **memory:** MemoryContextProvider places recalled memories in a transient user message before the latest user message instead of in the system instructions, and history stores skip it ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+* **subagents:** SubagentRunner no longer fails a completed turn over budget; the runtime stops a turn before the model round trip that would start at or above MaxTotalTokens, and a non-positive MaxTotalTokens fails validation ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+* **tools:** a ThalosTool parameter typed exactly ISecurityContext is bound to the turn's caller and left out of the schema; LocalToolSource, reached through AddLocalTools on first IToolSource resolution, throws ArgumentException for any other parameter whose System.Text.Json shape contains an ISecurityContext-assignable type. object, JsonElement, JsonNode and custom-converter types stay free-form ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+* **workflow:** a node's action key is now meaningful; a node that also names agent or skill, or declares no outcomes, fails validation ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+* **workflow:** a task node that leaves by next and declares outcomes now fails the run on an undeclared outcome instead of advancing ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+* **workflow:** IWorkflowReferenceResolver gains the abstract HostActionExistsAsync; every implementation must add it ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+* **workflow:** IWorkflowStore.ResumeAsync takes a WorkflowResumeRequest whose ResumedBy is required; the positional ResumeAsync overload is removed from IWorkflowStore and OrmWorkflowStore ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+* **workflow:** IWorkflowStore.StartAsync returns Result&lt;Guid&gt;; an over-cap InitialVariables bag or a colliding caller-supplied RunId is a Result failure, not an exception ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+* **workflow:** Thalos.NET.Workflow.Orm requires ZeroAlloc.Outbox and ZeroAlloc.Outbox.Orm 3.0.1 or later and ZeroAlloc.ORM 2.0.1 or later; outbox consumers must be on the lease-based 3.0, and outbox migration 2 add_outbox_lease must be applied before any 3.0 consumer starts ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+* **workflow:** WorkflowNodeDispatcher takes a required gates parameter after resolveCaller; pass an empty sequence for none ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+* **workflow:** WorkflowReferenceResolver and WorkflowNodeDispatcher take a required hostActions parameter; pass an empty sequence for none ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+* **workflow:** WorkflowRunStarter.StartAsync takes WorkflowRunStartOptions with a required StartedBy; the five-argument overload is removed ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+* **workflow:** WorkflowStartRequest.StartedBy is required; the positional IWorkflowStore.StartAsync overload is removed from IWorkflowStore and OrmWorkflowStore ([8f3b6d4](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8f3b6d48da0c927b0b32e016ed2dfb4866db65d6))
+
 ## [0.10.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.9.0...v0.10.0) (2026-09-24)
 
 
