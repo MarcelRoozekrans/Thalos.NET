@@ -59,7 +59,10 @@ internal static class AnthropicCacheMarkers
     }
 
     /// <summary>Markers the caller set itself, through the SDK's seams or inside raw SDK objects, that will reach the wire.</summary>
-    public static int CountCallerMarkers(IList<ChatMessage> messages, ChatOptions? options, IChatClient sdkClient)
+    /// <param name="messages">The request's messages.</param>
+    /// <param name="tools">The request's tools, if any.</param>
+    /// <param name="rawRequest">What the options' <see cref="ChatOptions.RawRepresentationFactory"/> returned for this request, if anything.</param>
+    public static int CountCallerMarkers(IList<ChatMessage> messages, IList<AITool>? tools, object? rawRequest)
     {
         var count = 0;
         foreach (var message in messages)
@@ -71,12 +74,12 @@ internal static class AnthropicCacheMarkers
             }
         }
 
-        foreach (var tool in options?.Tools ?? [])
+        foreach (var tool in tools ?? [])
         {
             count += CountInTool(tool);
         }
 
-        if (options?.RawRepresentationFactory?.Invoke(sdkClient) is MessageCreateParams raw)
+        if (rawRequest is MessageCreateParams raw)
         {
             count += Count(JsonSerializer.SerializeToElement(raw.RawBodyData));
         }

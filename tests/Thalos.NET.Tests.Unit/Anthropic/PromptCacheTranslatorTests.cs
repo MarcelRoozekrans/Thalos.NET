@@ -252,6 +252,33 @@ public sealed class PromptCacheTranslatorTests
     }
 
     [Fact]
+    public async Task The_representation_factory_runs_once_per_request()
+    {
+        // No PromptCachingChatClient, so the translator gets the caller's own options object.
+        var (client, _) = Provider(enabled: true, hints: false);
+        var calls = 0;
+        Func<IChatClient, object?> factory = _ =>
+        {
+            calls++;
+            return new MessageCreateParams { MaxTokens = 100, Model = "claude-test", Messages = [] };
+        };
+        var options = HintedOptions();
+        options.RawRepresentationFactory = factory;
+
+        await client.GetResponseAsync(FourHintHistory(new(ChatRole.User, "q1")), options, CancellationToken.None);
+        var afterResponse = calls;
+        await foreach (var update in client.GetStreamingResponseAsync(FourHintHistory(new(ChatRole.User, "q1")), options, CancellationToken.None))
+        {
+            _ = update;
+        }
+
+        using var scope = new AssertionScope();
+        afterResponse.Should().Be(1);
+        (calls - afterResponse).Should().Be(1);
+        options.RawRepresentationFactory.Should().BeSameAs(factory);
+    }
+
+    [Fact]
     public async Task A_raw_text_block_in_a_user_message_is_mapped_and_so_can_carry_the_marker()
     {
         var (client, handler) = Provider(enabled: true);

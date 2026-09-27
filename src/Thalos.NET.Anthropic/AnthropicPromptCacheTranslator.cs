@@ -32,8 +32,9 @@ namespace Thalos.Anthropic;
 /// message, then every other hinted message in list order, then every other hinted tool in list order. Markers the
 /// caller set itself already count toward Anthropic's limit, so they reduce the four: those set through
 /// <c>WithCacheControl</c> or a function's <c>CacheControl</c> property, and those inside raw SDK objects the SDK sends
-/// verbatim, which are counted by serialising them with the SDK's converters. Counting calls the options'
-/// <see cref="ChatOptions.RawRepresentationFactory"/> once more, with the SDK client, as the SDK itself does.
+/// verbatim, which are counted by serialising them with the SDK's converters. A
+/// <see cref="ChatOptions.RawRepresentationFactory"/> is called once, with the SDK client as the SDK would call it; its
+/// result is counted and handed on through a cloned options object whose factory returns that same instance.
 /// </para>
 /// <para>
 /// <b>Nothing the caller passed is mutated.</b> The messages and options the SDK sees are new objects wherever a marker
@@ -104,8 +105,19 @@ internal sealed class AnthropicPromptCacheTranslator(IChatClient inner, CacheCon
             return (messages, options);
         }
 
+        // The caller's raw request is built once: counted here and handed to the SDK as the same instance, which the SDK
+        // clones before changing, so the caller's factory runs once per request as it would without this client.
+        object? rawRequest = null;
+        if (options?.RawRepresentationFactory is { } factory)
+        {
+            var captured = factory(InnerClient);
+            rawRequest = captured;
+            options = options.Clone();
+            options.RawRepresentationFactory = _ => captured;
+        }
+
         var list = messages as IList<ChatMessage> ?? messages.ToList();
-        var plan = new Plan(list, options?.Tools, MaxBreakpoints - AnthropicCacheMarkers.CountCallerMarkers(list, options, InnerClient));
+        var plan = new Plan(list, options?.Tools, MaxBreakpoints - AnthropicCacheMarkers.CountCallerMarkers(list, options?.Tools, rawRequest));
 
         // Candidates in priority order; the first ones that can be marked, up to the budget, win.
         var hintedTools = HintedToolIndices(options?.Tools);
