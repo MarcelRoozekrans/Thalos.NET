@@ -78,7 +78,10 @@ public enum AgentErrorCode
     /// <summary>Skill search is unavailable (no embedding generator or the index is down); the catalogue is still authoritative. HTTP 503.</summary>
     SkillSearchUnavailable,
 
-    /// <summary>A detached subagent run hit its token budget and was stopped.</summary>
+    /// <summary>
+    /// A turn with a token budget, such as a detached subagent run, reached it and was stopped before its next model
+    /// round trip. See <see cref="AgentTurnRequest.MaxTotalTokens"/>.
+    /// </summary>
     SubagentBudgetExceeded,
 
     /// <summary>A detached subagent run hit its deadline and was stopped.</summary>
@@ -181,6 +184,15 @@ public readonly record struct AgentError(AgentErrorCode Code, string Message, st
     /// <summary><see cref="AgentErrorCode.SubagentBudgetExceeded"/>: the run exceeded <paramref name="maxTokens"/>.</summary>
     public static AgentError SubagentBudgetExceeded(int maxTokens) =>
         new(AgentErrorCode.SubagentBudgetExceeded, $"The subagent run exceeded its budget of {maxTokens} tokens.");
+
+    /// <summary>
+    /// <see cref="AgentErrorCode.SubagentBudgetExceeded"/>: the turn was stopped before model round trip
+    /// <paramref name="roundTrip"/>, because it had already used <paramref name="tokensSoFar"/> of its
+    /// <paramref name="maxTokens"/> budget.
+    /// </summary>
+    public static AgentError SubagentBudgetExceeded(int maxTokens, int roundTrip, long tokensSoFar) =>
+        new(AgentErrorCode.SubagentBudgetExceeded,
+            $"Stopped before model round trip {roundTrip}: {tokensSoFar} tokens used of a budget of {maxTokens}.");
 
     /// <summary><see cref="AgentErrorCode.SubagentDeadlineExceeded"/>: the run exceeded <paramref name="deadline"/>.</summary>
     public static AgentError SubagentDeadlineExceeded(TimeSpan deadline) =>

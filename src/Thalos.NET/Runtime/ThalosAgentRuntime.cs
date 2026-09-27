@@ -158,7 +158,7 @@ public sealed partial class ThalosAgentRuntime(
         // 2. the producer owns the scope (created here so it flows into the producer's async context) and writes every event.
         //    A linked CTS lets an abandoned enumeration (consumer stopped reading) cancel the model turn instead of leaking it.
         using var producerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var scope = TurnScope.Begin(sessionId, turnId, request.Caller, start.Value.Id);
+        var scope = TurnScope.Begin(sessionId, turnId, request.Caller, start.Value.Id, request.MaxTotalTokens);
         var producer = ProduceTurnAsync(scope, start.Value, request, producerCts.Token); // never throws; disposes the scope
 
         // 3. drain until the producer completes the channel; the reader ignores ct so a cancelled turn still ends with its error event
@@ -365,6 +365,14 @@ public sealed partial class ThalosAgentRuntime(
         if (!validation.IsValid || string.IsNullOrWhiteSpace(request.Text))
         {
             return Result<AgentDefinition, AgentError>.Failure(AgentError.Validation("Text is required."));
+        }
+
+        // A ceiling of zero or less could never admit a round trip; reject it here, before the session is claimed,
+        // rather than claim the session only to fail the turn as over budget without a single model call.
+        if (request.MaxTotalTokens is <= 0)
+        {
+            return Result<AgentDefinition, AgentError>.Failure(
+                AgentError.Validation($"MaxTotalTokens must be positive when set; was {request.MaxTotalTokens}."));
         }
 
         var loaded = await LoadAuthorizedAsync(request.SessionId, request.Caller, ct).ConfigureAwait(false);

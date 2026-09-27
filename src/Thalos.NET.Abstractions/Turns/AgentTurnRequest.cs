@@ -29,4 +29,14 @@ public sealed record AgentTurnRequest(
     /// fails the turn rather than silently falling back to current.
     /// </summary>
     public string? AgentRevision { get; init; }
+
+    /// <summary>
+    /// The turn's token ceiling: input plus output tokens of every model round trip, as the provider reports them. The
+    /// runtime checks it before each round trip and fails the turn with
+    /// <see cref="AgentErrorCode.SubagentBudgetExceeded"/> instead of starting a round trip once the turn has already
+    /// used this many; a round trip already started is never cancelled, so the turn's total can end above it.
+    /// <see langword="null"/> (the default) means no ceiling, for a turn with no subagent budget, such as chat or a
+    /// scheduled turn (ruling R27). A value that is not positive fails the turn's validation before the session is claimed.
+    /// </summary>
+    public int? MaxTotalTokens { get; init; }
 }

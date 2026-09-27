@@ -11,8 +11,9 @@ using ZeroAlloc.Results;
 namespace Thalos.Runtime;
 
 /// <summary>
-/// Builds <c>provider → decorators (ascending Order) → ChatClientAgent</c>. MAF adds function invocation
-/// outermost, so every decorator (e.g. AI.Sentinel) sees each model round-trip including tool results.
+/// Builds <c>provider → TurnBudgetChatClient → decorators (ascending Order) → ChatClientAgent</c>. MAF adds function
+/// invocation outermost, so every decorator (e.g. AI.Sentinel) and the turn's token budget see each model round-trip
+/// including tool results.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -205,7 +206,9 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
                 return Result<Entry, AgentError>.Failure(tools.Error);
             }
 
-            client = _provider.CreateChatClient(definition);
+            // The budget check goes directly over the provider, below every decorator, so a decorator that answers or
+            // short-circuits a call can never skip it (see TurnBudgetChatClient).
+            client = new TurnBudgetChatClient(_provider.CreateChatClient(definition));
             foreach (var decorator in _decorators)
             {
                 client = decorator.Decorate(client, definition, _services);
