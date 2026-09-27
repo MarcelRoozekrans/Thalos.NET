@@ -92,6 +92,31 @@ public sealed class WorkflowReferenceResolverTests
         (await resolver.HostActionExistsAsync("Open-Pull-Request", CancellationToken.None)).Should().BeFalse();
     }
 
+    [Theory]
+    [InlineData("duplicate")]
+    [InlineData("blank")]
+    [InlineData("null")]
+    public void A_host_action_registration_that_cannot_be_resolved_unambiguously_is_refused_at_construction(string shape)
+    {
+        IWorkflowHostAction[] actions = shape switch
+        {
+            "duplicate" =>
+            [
+                RecordingAction.Returning("open-pull-request", new HostActionResult("published", new Dictionary<string, object?>(StringComparer.Ordinal))),
+                RecordingAction.Returning("open-pull-request", new HostActionResult("failed", new Dictionary<string, object?>(StringComparer.Ordinal))),
+            ],
+            "blank" => [RecordingAction.Returning("  ", new HostActionResult("published", new Dictionary<string, object?>(StringComparer.Ordinal)))],
+            _ => [null!],
+        };
+
+        var construct = () => new WorkflowReferenceResolver(new FakeAgentCatalog([]), new InMemorySkillStore(Clock), hostActions: actions);
+
+        // Red, per row, if the resolver stops indexing through HostActionIndex.Build, for example with a last-wins
+        // ToDictionary: a duplicate is kept with no throw, a blank name is indexed with no throw, and a null entry
+        // throws NullReferenceException instead of ArgumentException.
+        construct.Should().ThrowExactly<ArgumentException>().WithParameterName("hostActions");
+    }
+
     private static SkillDocument Skill(string name) => new()
     {
         Name = SkillName.Parse(name),

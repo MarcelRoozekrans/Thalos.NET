@@ -445,6 +445,9 @@ runs first (§4), and a run manifest is not consulted, because an action node ha
   synced.
 - A failed `Result` fails the run with the action's message, prefixed with the node:
   `node 'publish': push failed; worktree kept at C:/w`.
+- A successful `Result` whose `HostActionResult` or `Variables` is `null` fails the run instead of throwing, so
+  the outbox never re-runs the action for it:
+  `node 'publish': host action 'open-pull-request' returned a success with no variables; an action with none to report returns an empty dictionary.`
 - The returned outcome must be one of the node's declared `outcomes`. That holds when the node leaves by `next`
   too, not only when it branches. An undeclared outcome is a defect in the action, and it fails the run with the
   same message an agent's undeclared outcome gets:

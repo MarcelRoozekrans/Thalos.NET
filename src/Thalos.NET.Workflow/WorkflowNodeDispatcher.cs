@@ -234,7 +234,8 @@ public sealed partial class WorkflowNodeDispatcher(
     /// Runs an action node's <see cref="IWorkflowHostAction"/> and persists whatever
     /// <see cref="WorkflowInterpreter.Advance"/> decides from its result. Every expected failure goes through
     /// <see cref="IWorkflowStore.FailAsync"/>, never a throw: an action name nothing registered, a failed
-    /// <see cref="Result{T}"/> from the action, variables past the key caps a task node's report is held to, and an
+    /// <see cref="Result{T}"/> from the action, a success carrying a <see langword="null"/> result or variable bag,
+    /// variables past the key caps a task node's report is held to, and an
     /// outcome outside the node's declared set, which <c>Advance</c> refuses whether the node leaves by
     /// <c>branch</c> or by <c>next</c>. An exception out of <see cref="IWorkflowHostAction.RunAsync"/>, a cancelled
     /// <paramref name="ct"/> included, is not caught: it propagates for the outbox to retry, exactly as one out of
@@ -258,7 +259,15 @@ public sealed partial class WorkflowNodeDispatcher(
             return;
         }
 
-        var reported = result.Value;
+        // A null result or variable bag is a defect in the action, not a transient failure. Letting it surface as a
+        // NullReferenceException would hand it to the outbox, which would re-run a side-effecting action on every
+        // retry before dead-lettering the message and stranding the run. Failing the run records it once.
+        if (result.Value is not { Variables: not null } reported)
+        {
+            await _store.FailAsync(run.Id, $"node '{run.CurrentNode}': host action '{actionName}' returned a success with no {(result.Value is null ? "result" : "variables")}; an action with none to report returns an empty dictionary.", ct).ConfigureAwait(false);
+            return;
+        }
+
         if (reported.Variables.Count > 0 && CheckKeyLimits(run.CurrentNode, run.Variables, reported.Variables) is { } limitError)
         {
             await _store.FailAsync(run.Id, limitError, ct).ConfigureAwait(false);

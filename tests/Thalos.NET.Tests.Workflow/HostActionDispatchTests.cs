@@ -196,6 +196,30 @@ public sealed class HostActionDispatchTests
         run.LastError.Should().StartWith($"node 'publish' reported {WorkflowVariableBlock.MaxVariablesPerReport + 1} variables in one turn");
     }
 
+    [Theory]
+    [InlineData("result")]
+    [InlineData("variables")]
+    public async Task A_success_with_a_null_result_or_variable_bag_fails_the_run_instead_of_throwing(string missing)
+    {
+        var action = new RecordingAction(ActionName, _ => ValueTask.FromResult(Result<HostActionResult>.Success(
+            string.Equals(missing, "result", StringComparison.Ordinal) ? null! : new HostActionResult("published", null!))));
+        var (dispatcher, store, message) = await ArrangeAsync(BranchingActionYaml, [action]);
+
+        var dispatch = async () => await dispatcher.DispatchAsync(message, CancellationToken.None);
+
+        // Red, per row, if the null guard is removed: a NullReferenceException escapes for the outbox, which would
+        // re-run the action on every retry.
+        await dispatch.Should().NotThrowAsync();
+
+        var run = await store.FindAsync(message.RunId, CancellationToken.None);
+
+        // Red if the guard returns without calling FailAsync: the run stays Running.
+        run!.Status.Should().Be(WorkflowStatus.Failed);
+
+        // Red if the message stops naming the node, the action or which part was missing.
+        run.LastError.Should().Be($"node 'publish': host action 'open-pull-request' returned a success with no {missing}; an action with none to report returns an empty dictionary.");
+    }
+
     [Fact]
     public async Task No_dispatch_gate_runs_before_an_action_node()
     {
