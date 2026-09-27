@@ -248,10 +248,16 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
     public ValueTask<IReadOnlyList<WorkflowRun>> FindStrandedAsync(TimeSpan olderThan, CancellationToken ct) =>
         ValueTask.FromResult<IReadOnlyList<WorkflowRun>>([]);
 
-    // A Seed(WorkflowRun) affordance used to live here, letting a test place a run at an arbitrary node with an
-    // arbitrary visit count. It is gone deliberately: every run in these tests now starts through StartAsync and
-    // reaches its node by being dispatched, which is what makes the visit counts the cap test reads the store's
-    // own work rather than a value the test wrote down.
+    /// <summary>
+    /// Puts a run in the store as given, for tests that need a status or a <see cref="WorkflowRun.LastResume"/> that
+    /// no transition here produces — <see cref="RunWorkspaceSweeper"/>'s, which only read a run (ruling R12).
+    /// </summary>
+    /// <remarks>
+    /// Not for dispatcher tests. Those start every run through <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/>
+    /// and reach a node by being dispatched, which is what makes the visit counts the cap test reads the store's own
+    /// work rather than a value the test wrote down.
+    /// </remarks>
+    public void Seed(WorkflowRun run) => _runs[run.Id] = run;
 
     private static WorkflowRun Apply(WorkflowRun run, long seq, WorkflowTransition transition, IReadOnlyDictionary<string, object?>? variables)
     {

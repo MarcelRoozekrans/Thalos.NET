@@ -9,6 +9,15 @@ namespace Thalos.Workflow;
 /// it is pure and knows nothing about persistence, which is exactly what makes it exhaustively testable in
 /// memory.
 /// </summary>
+/// <remarks>
+/// <b>Terminal statuses are final.</b> No member moves a run out of <see cref="WorkflowStatus.Succeeded"/>,
+/// <see cref="WorkflowStatus.Failed"/> or <see cref="WorkflowStatus.Cancelled"/>: <see cref="CompleteNodeAsync"/>
+/// refuses a run that is not <see cref="WorkflowStatus.Running"/>, <see cref="ResumeAsync"/> refuses one that is not
+/// <see cref="WorkflowStatus.Awaiting"/> and so never records a <see cref="WorkflowRun.LastResume"/> on a terminal
+/// run, and <see cref="FailAsync"/>, <see cref="FailStrandedAsync"/> and <see cref="CancelAsync"/> are no-ops on one.
+/// <see cref="RunWorkspaceSweeper"/> relies on this: it reads a run's status and then removes its workspace, with no
+/// lock between the two, and that is safe only because a run it reads as terminal stays exactly as it read it.
+/// </remarks>
 public interface IWorkflowStore
 {
     /// <summary>

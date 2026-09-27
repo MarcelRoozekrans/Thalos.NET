@@ -77,6 +77,34 @@ public sealed class ResumedByTests(PostgresFixture pg) : IAsyncLifetime
     }
 
     /// <summary>
+    /// Task A14: a run failed or cancelled while parked at its gate can no longer be resumed, so it never gains a
+    /// <see cref="WorkflowRun.LastResume"/> after <c>RunWorkspaceSweeper</c> has read it as a pre-gate end and
+    /// decided to remove its workspace. This is what makes the sweeper's read-then-remove safe without a lock.
+    /// </summary>
+    [Theory]
+    [InlineData(WorkflowStatus.Failed)]
+    [InlineData(WorkflowStatus.Cancelled)]
+    public async Task A_run_ended_at_its_gate_cannot_be_resumed_afterwards(WorkflowStatus ended)
+    {
+        var id = await StartParkedAtGateAsync();
+        if (ended == WorkflowStatus.Failed)
+        {
+            await _store.FailAsync(id, "failed at the gate", CancellationToken.None);
+        }
+        else
+        {
+            await _store.CancelAsync(id, "cancelled at the gate", CancellationToken.None);
+        }
+
+        var result = await _store.ResumeAsync(id, new WorkflowResumeRequest { Signal = "go", ResumedBy = Approver }, CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        var run = await _store.FindAsync(id, CancellationToken.None);
+        run!.Status.Should().Be(ended);
+        run.LastResume.Should().BeNull();
+    }
+
+    /// <summary>
     /// Starts a run and drives it straight to the parked gate, mirroring <c>OrmWorkflowStoreTests</c>' own
     /// gate arrangement for its resume tests.
     /// </summary>
