@@ -4,6 +4,9 @@
     <PackageId>Thalos.NET.Abstractions</PackageId>
     <Description>Ports and models for Thalos.NET. Depends only on ZeroAlloc primitives and Microsoft.Extensions.AI.Abstractions.</Description>
     <PackageTags>agents;ai;llm;abstractions;zeroalloc</PackageTags>
+    <!-- WorkspacePath.Interop.cs P/Invokes the kernel's own path canonicalisation (realpath, GetFinalPathNameByHandle)
+         instead of hand-walking symlinks; the Windows buffer marshalling needs an unsafe char* pointer. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="ZeroAlloc.Results" />
@@ -16,6 +19,9 @@
     <PackageReference Include="Microsoft.Extensions.AI.Abstractions" />
   </ItemGroup>
   <ItemGroup>
+    <!-- WorkspacePath.FinalPathOfHandle is the internal seam Thalos.NET's workspace__* tools use to close the
+         check-to-use gap between WorkspacePath.Resolve and their own file open; see its doc comment. -->
+    <InternalsVisibleTo Include="Thalos.NET" />
     <InternalsVisibleTo Include="Thalos.NET.Tests.Unit" />
   </ItemGroup>
 </Project>

@@ -2,11 +2,8 @@ namespace Thalos.Workflow;
 
 /// <summary>
 /// Everything <see cref="IWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/> needs to start a
-/// run: the positional arguments the original <c>StartAsync</c> overload took, plus the optional
-/// <see cref="Manifest"/> that pins the run's agents, skills and documents at creation. Introduced so a caller
-/// that wants pinning has somewhere to put it without <c>StartAsync</c> growing a seventh positional parameter —
-/// the legacy positional overload becomes a default interface method that builds one of these and forwards, with
-/// <see cref="Manifest"/> left <see langword="null"/>.
+/// run, including the optional <see cref="Manifest"/> that pins the run's agents, skills and documents at
+/// creation.
 /// </summary>
 public sealed record WorkflowStartRequest
 {
@@ -25,9 +22,15 @@ public sealed record WorkflowStartRequest
     /// <summary>The run's opening <see cref="WorkflowRun.Variables"/> bag, or <see langword="null"/> for a run that starts with nothing.</summary>
     public IReadOnlyDictionary<string, object?>? InitialVariables { get; init; }
 
-    /// <summary>
-    /// The run's write-once pin, or <see langword="null"/> to start a run with no manifest — the same shape a run
-    /// started before manifests existed, or through the legacy positional overload, ends up with.
-    /// </summary>
+    /// <summary>The run's write-once pin, or <see langword="null"/> to start a run with no manifest.</summary>
     public RunManifest? Manifest { get; init; }
+
+    /// <summary>Who started the run. A host with no human behind the start passes its own system principal.</summary>
+    public required RunPrincipal StartedBy { get; init; }
+
+    /// <summary>
+    /// The id the run is created with. <see langword="null"/> = the store generates one: a supported
+    /// configuration for a host that prepares nothing under the run's id before its first dispatch.
+    /// </summary>
+    public Guid? RunId { get; init; }
 }

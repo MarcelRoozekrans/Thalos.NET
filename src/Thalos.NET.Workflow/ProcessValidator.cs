@@ -22,10 +22,11 @@ public static class ProcessValidator
     /// <c>maxVisits</c> also declares <c>onExceeded</c> and vice versa without naming itself, no <c>onExceeded</c>
     /// redirect can route back into the node it just capped, every declared <c>terminal</c> is <c>succeeded</c>
     /// or <c>failed</c>, no declared <c>outcome</c> is blank or repeated, every node is exactly one of task
-    /// (<c>agent</c> and <c>skill</c> both present), gate or terminal, a gate (<c>await</c> set) resolves via
-    /// <c>next</c> only — never <c>branch</c>/<c>outcomes</c> — a terminal declares no outgoing edge at all, and,
-    /// when <paramref name="resolver"/> is not <see langword="null"/>, that every declared agent and skill exists
-    /// in the host.
+    /// (<c>agent</c> and <c>skill</c> both present), gate, terminal or action (<c>action</c> set), a gate
+    /// (<c>await</c> set) resolves via <c>next</c> only — never <c>branch</c>/<c>outcomes</c> — a terminal declares
+    /// no outgoing edge at all, an action node names a non-blank action, no <c>agent</c> or <c>skill</c>, and
+    /// declares <c>outcomes</c>, and, when <paramref name="resolver"/> is not <see langword="null"/>, that every
+    /// declared agent, skill and host action exists in the host.
     /// </summary>
     public static async ValueTask<Result<ProcessDefinition>> ValidateAsync(
         ProcessDefinition process, IWorkflowReferenceResolver? resolver, CancellationToken ct)
@@ -49,12 +50,11 @@ public static class ProcessValidator
     /// <summary>
     /// The per-node shape rules that need no graph walk: every <c>next</c>/<c>branch</c> value/<c>onExceeded</c>
     /// target names a node that exists; every <c>branch</c> key is a declared outcome; a node declaring
-    /// <c>branch</c> also declares <c>outcomes</c>; <c>agent</c> and <c>skill</c> are both present or both
-    /// absent — a node cannot run an agent's default instructions with the skill unpinned;
-    /// <see cref="ValidateCapAndTerminal"/>'s <c>maxVisits</c>/<c>onExceeded</c>/<c>terminal</c> rules;
-    /// <see cref="ValidateCapRedirectEscapes"/>'s check that a cap's redirect cannot route back into the capped
-    /// node; <see cref="ValidateOutcomeSet"/>'s blank/duplicate <c>outcomes</c> rules; and a node is exactly one
-    /// of task, gate or terminal.
+    /// <c>branch</c> also declares <c>outcomes</c>; <see cref="ValidateCapAndTerminal"/>'s
+    /// <c>maxVisits</c>/<c>onExceeded</c>/<c>terminal</c> rules; <see cref="ValidateCapRedirectEscapes"/>'s check that a cap's redirect cannot route back into the capped
+    /// node; <see cref="ValidateOutcomeSet"/>'s blank/duplicate <c>outcomes</c> rules;
+    /// <see cref="ValidateActionNode"/>'s action-node rules; and <see cref="ValidateKind"/>'s agent/skill pairing,
+    /// exactly-one-kind and gate-resolves-via-next rules.
     /// </summary>
     private static void ValidateShape(ProcessDefinition process, List<string> errors)
     {
@@ -84,38 +84,50 @@ public static class ProcessValidator
             ValidateCapAndTerminal(name, node, errors);
             ValidateCapRedirectEscapes(process, name, node, errors);
             ValidateOutcomeSet(name, node, errors);
+            ValidateActionNode(name, node, errors);
+            ValidateKind(name, node, errors);
+        }
+    }
 
-            if (node.Agent is not null && node.Skill is null)
-            {
-                errors.Add($"node '{name}' has 'agent' but no 'skill'");
-            }
+    /// <summary>
+    /// The node-kind rules, split out of <see cref="ValidateShape"/> to keep that method under the analyzer's line
+    /// limit: <c>agent</c> and <c>skill</c> are both present or both absent — a node cannot run an agent's default
+    /// instructions with the skill unpinned; a node is exactly one of task, gate, terminal or action; and a gate
+    /// resolves via <c>next</c> only.
+    /// </summary>
+    private static void ValidateKind(string name, ProcessNode node, List<string> errors)
+    {
+        if (node.Agent is not null && node.Skill is null)
+        {
+            errors.Add($"node '{name}' has 'agent' but no 'skill'");
+        }
 
-            if (node.Skill is not null && node.Agent is null)
-            {
-                errors.Add($"node '{name}' has 'skill' but no 'agent'");
-            }
+        if (node.Skill is not null && node.Agent is null)
+        {
+            errors.Add($"node '{name}' has 'skill' but no 'agent'");
+        }
 
-            var isTask = node.Agent is not null && node.Skill is not null;
-            var isGate = node.Await is not null;
-            var isTerminal = node.Terminal is not null;
-            var kindCount = (isTask ? 1 : 0) + (isGate ? 1 : 0) + (isTerminal ? 1 : 0);
-            if (kindCount != 1)
-            {
-                errors.Add($"node '{name}' must be exactly one of task, gate or terminal");
-            }
+        var isTask = node.Agent is not null && node.Skill is not null;
+        var isGate = node.Await is not null;
+        var isTerminal = node.Terminal is not null;
+        var isAction = node.Action is not null;
+        var kindCount = (isTask ? 1 : 0) + (isGate ? 1 : 0) + (isTerminal ? 1 : 0) + (isAction ? 1 : 0);
+        if (kindCount != 1)
+        {
+            errors.Add($"node '{name}' must be exactly one of task, gate, terminal or action");
+        }
 
-            // A gate resolves via 'next' only, checked on Outcomes alone — not Branch too. A gate with 'branch'
-            // and no 'outcomes' is already caught above by "declares 'branch' without declaring 'outcomes'"; a
-            // gate with 'branch' AND 'outcomes' is caught by the Outcomes.Count > 0 check right here. No input
-            // exists where a Branch.Count > 0 disjunct would be the one that flips this verdict, so it is left
-            // out rather than kept as a guard that cannot fail by construction. Without this check at all, a
-            // gate could still declare 'outcomes' and validate cleanly, but the interpreter's resume path has no
-            // declared outcome to branch on (a signal's payload is not one of the node's Outcomes), leaving the
-            // signal-to-branch mapping an unstated convention. Forbidding the shape is simpler than inventing it.
-            if (isGate && node.Outcomes.Count > 0)
-            {
-                errors.Add($"node '{name}' is a gate ('await' set) and must resolve via 'next' only — 'branch'/'outcomes' are not allowed on a gate");
-            }
+        // A gate resolves via 'next' only, checked on Outcomes alone — not Branch too. A gate with 'branch'
+        // and no 'outcomes' is already caught in ValidateShape by "declares 'branch' without declaring
+        // 'outcomes'"; a gate with 'branch' AND 'outcomes' is caught by the Outcomes.Count > 0 check right here.
+        // No input exists where a Branch.Count > 0 disjunct would be the one that flips this verdict, so it is left
+        // out rather than kept as a guard that cannot fail by construction. Without this check at all, a
+        // gate could still declare 'outcomes' and validate cleanly, but the interpreter's resume path has no
+        // declared outcome to branch on (a signal's payload is not one of the node's Outcomes), leaving the
+        // signal-to-branch mapping an unstated convention. Forbidding the shape is simpler than inventing it.
+        if (isGate && node.Outcomes.Count > 0)
+        {
+            errors.Add($"node '{name}' is a gate ('await' set) and must resolve via 'next' only — 'branch'/'outcomes' are not allowed on a gate");
         }
     }
 
@@ -243,6 +255,40 @@ public static class ProcessValidator
     }
 
     /// <summary>
+    /// The action-node rules. A node is an action node when <see cref="ProcessNode.Action"/> is not
+    /// <see langword="null"/>; the "exactly one kind" rule in <see cref="ValidateShape"/> already rejects one that
+    /// also sets <c>await</c> or <c>terminal</c>. An action node names no <c>agent</c> or <c>skill</c>, not even one
+    /// of the two — the host action is what runs there, and an agent name on the node would only suggest a turn that
+    /// is never taken. It declares <c>outcomes</c>, because <see cref="IWorkflowHostAction.RunAsync"/> must report
+    /// one of them and an action node with none would have nothing it could legally report. And its name is not
+    /// blank, which could never match a registered action. Whether the named action exists is a resolver-backed
+    /// question, not a shape rule: <see cref="ValidateReferencesAsync"/> asks
+    /// <see cref="IWorkflowReferenceResolver.HostActionExistsAsync"/>.
+    /// </summary>
+    private static void ValidateActionNode(string name, ProcessNode node, List<string> errors)
+    {
+        if (node.Action is null)
+        {
+            return;
+        }
+
+        if (node.Agent is not null || node.Skill is not null)
+        {
+            errors.Add($"node '{name}' is an action node and must not name 'agent' or 'skill'");
+        }
+
+        if (node.Outcomes.Count == 0)
+        {
+            errors.Add($"node '{name}' is an action node and must declare 'outcomes'");
+        }
+
+        if (string.IsNullOrWhiteSpace(node.Action))
+        {
+            errors.Add($"node '{name}' has a blank 'action'");
+        }
+    }
+
+    /// <summary>
     /// Traversal 1: forward BFS from <see cref="ProcessDefinition.StartNode"/> following <c>next</c>,
     /// <c>branch</c> and <c>onExceeded</c> edges. Any node never reached this way can never run.
     /// </summary>
@@ -335,20 +381,38 @@ public static class ProcessValidator
         }
     }
 
-    /// <summary>Resolver-backed rule: every non-null <c>agent</c>/<c>skill</c> must exist in the host.</summary>
+    /// <summary>
+    /// Resolver-backed rule: every non-null <c>agent</c>, <c>skill</c> and <c>action</c> must exist in the host.
+    /// </summary>
+    /// <remarks>
+    /// A blank name is never passed to <paramref name="resolver"/>. The resolver contract lets an implementation
+    /// refuse one with <see cref="ArgumentException"/>, as <see cref="WorkflowReferenceResolver"/> does, and a
+    /// validator that threw on a malformed file would report nothing at all instead of the full error list. A blank
+    /// <c>agent</c> or <c>skill</c> names nothing that can exist, so it is reported as unknown here. A blank
+    /// <c>action</c> is already reported by <see cref="ValidateActionNode"/>'s shape rule and is skipped.
+    /// </remarks>
     private static async ValueTask ValidateReferencesAsync(
         ProcessDefinition process, IWorkflowReferenceResolver resolver, List<string> errors, CancellationToken ct)
     {
         foreach (var (name, node) in process.Nodes)
         {
-            if (node.Agent is not null && await resolver.ResolveAgentIdAsync(node.Agent, ct).ConfigureAwait(false) is null)
+            if (node.Agent is { } agent &&
+                (string.IsNullOrWhiteSpace(agent) || await resolver.ResolveAgentIdAsync(agent, ct).ConfigureAwait(false) is null))
             {
-                errors.Add($"node '{name}' references unknown agent '{node.Agent}'");
+                errors.Add($"node '{name}' references unknown agent '{agent}'");
             }
 
-            if (node.Skill is not null && !await resolver.SkillExistsAsync(node.Skill, ct).ConfigureAwait(false))
+            if (node.Skill is { } skill &&
+                (string.IsNullOrWhiteSpace(skill) || !await resolver.SkillExistsAsync(skill, ct).ConfigureAwait(false)))
             {
-                errors.Add($"node '{name}' references unknown skill '{node.Skill}'");
+                errors.Add($"node '{name}' references unknown skill '{skill}'");
+            }
+
+            if (node.Action is { } action &&
+                !string.IsNullOrWhiteSpace(action) &&
+                !await resolver.HostActionExistsAsync(action, ct).ConfigureAwait(false))
+            {
+                errors.Add($"node '{name}' references unknown host action '{action}'");
             }
         }
     }

@@ -97,10 +97,10 @@ public sealed partial class SubagentRunner : ISubagentRunner
     /// </summary>
     /// <remarks>
     /// <paramref name="turn"/>.Error.Code == <see cref="AgentErrorCode.Cancelled"/>, not merely <c>turn.IsFailure</c>,
-    /// is what may be relabelled here. <see cref="RunTurnAsync"/> can itself fail with
-    /// <see cref="AgentErrorCode.SubagentBudgetExceeded"/> once the turn has already completed, and the runtime can
-    /// fail with a genuine <see cref="AgentErrorCode.ProviderError"/> that happens to land after the deadline
-    /// elapsed; both are settled verdicts the runner produced or received on their own merits, and blindly
+    /// is what may be relabelled here. The runtime itself can fail the turn with
+    /// <see cref="AgentErrorCode.SubagentBudgetExceeded"/> — it stops before the model round trip that would start at
+    /// or above <see cref="AgentTurnRequest.MaxTotalTokens"/> — or with a genuine <see cref="AgentErrorCode.ProviderError"/>
+    /// that happens to land after the deadline elapsed; both are settled verdicts the runtime produced on their own merits, and blindly
     /// overwriting whichever failure happens to be sitting here because the wall clock also elapsed would discard
     /// the real reason the run failed (this used to be exactly that bug: a turn that finished over budget <em>and</em>
     /// over deadline reported <see cref="AgentErrorCode.SubagentDeadlineExceeded"/>, silently losing the budget
@@ -184,30 +184,17 @@ public sealed partial class SubagentRunner : ISubagentRunner
         // one turn only. Forwarding it here is the whole of what makes SubagentRunRequest.RequiredOutcome do
         // anything - drop this line and the tool is never offered, the model never calls it, and every constrained
         // node fails as "completed without reporting an outcome".
-        var turn = await _runtime
+        return await _runtime
             .RunTurnAsync(
-                new AgentTurnRequest(sessionId, request.Task, request.Caller) { RequiredOutcome = request.RequiredOutcome, AgentRevision = request.AgentRevision },
+                new AgentTurnRequest(sessionId, request.Task, request.Caller)
+                {
+                    RequiredOutcome = request.RequiredOutcome,
+                    AgentRevision = request.AgentRevision,
+                    MaxTotalTokens = budget.MaxTotalTokens,
+                },
                 ct)
             .ConfigureAwait(false);
-
-        // Post-hoc only: RunTurnAsync is buffered and returns after the whole turn has already run, so there is no
-        // seam here to stop a turn mid-flight. This cannot halt a runaway turn already in progress — it converts an
-        // overspend into a reported failure and bounds what a subsequent step is told it may spend. A cap that stops
-        // a turn mid-flight would need to be pushed into the runtime's own round-trip loop; that is a larger change
-        // and out of scope here.
-        if (turn.IsSuccess && TotalTokens(turn.Value.Usage) > budget.MaxTotalTokens)
-        {
-            return Result<AgentTurnResult, AgentError>.Failure(
-                AgentError.SubagentBudgetExceeded(budget.MaxTotalTokens));
-        }
-
-        return turn;
     }
-
-    // Cast the first operand so the addition itself happens in long, not int-then-widen: the long return type alone
-    // does not stop the operands from overflowing as int before the result is ever assigned. Not reachable with real
-    // token counts, but the previous form was misleading about where the widening actually occurred.
-    private static long TotalTokens(TurnUsage usage) => (long)usage.InputTokens + usage.OutputTokens;
 
     [LoggerMessage(EventId = 800, Level = LogLevel.Warning,
         Message = "Closing detached session {SessionId} (parent {ParentSessionId}) failed with {ErrorCode}; the run's own result is unaffected")]

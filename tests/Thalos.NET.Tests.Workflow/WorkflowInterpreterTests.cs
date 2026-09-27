@@ -199,6 +199,54 @@ public sealed class WorkflowInterpreterTests
         t.Error.Should().Contain("approved, with concerns").And.Contain("review");
     }
 
+    private static readonly ProcessDefinition NextWithOutcomesDef = ProcessLoader.Load("""
+        process: next-with-outcomes
+        version: 1
+        nodes:
+          review: { agent: reviewer, skill: code-review, outcomes: [approved, rejected], next: done }
+          done: { terminal: succeeded }
+        """).Value;
+
+    /// <summary>
+    /// A node's declared outcomes bind it whether it leaves by <c>branch</c> or by <c>next</c>. Red if the
+    /// declared-outcome check applies only to a node with a branch: <c>next</c> is taken and the undeclared
+    /// outcome is recorded as the node's.
+    /// </summary>
+    [Fact]
+    public void Advance_fails_when_a_node_leaving_by_next_reports_an_undeclared_outcome()
+    {
+        var run = RunAt("review") with { Process = "next-with-outcomes", ProcessVersion = 1 };
+
+        var t = WorkflowInterpreter.Advance(NextWithOutcomesDef, run, new NodeResult("merged", Empty));
+
+        t.IsFailure.Should().BeTrue();
+        t.Error.Should().Be("node 'review' produced outcome 'merged' which is not one of its declared outcomes (approved, rejected)");
+    }
+
+    /// <summary>
+    /// The accepted pair of the test above: a declared outcome on the same node takes <c>next</c>. Red if the
+    /// check refuses every outcome on a node without a branch, for example by testing <c>Branch</c> instead of
+    /// <c>Outcomes</c> for membership.
+    /// </summary>
+    [Fact]
+    public void Advance_takes_next_when_a_node_leaving_by_next_reports_a_declared_outcome()
+    {
+        var run = RunAt("review") with { Process = "next-with-outcomes", ProcessVersion = 1 };
+
+        var t = WorkflowInterpreter.Advance(NextWithOutcomesDef, run, new NodeResult("rejected", Empty));
+
+        t.IsSuccess.Should().BeTrue(t.IsFailure ? t.Error : "");
+        t.Value.NextNode.Should().Be("done");
+    }
+
+    [Fact]
+    public async Task NextWithOutcomesDef_satisfies_ProcessValidator_so_Advance_may_rely_on_its_guarantees()
+    {
+        var result = await ProcessValidator.ValidateAsync(NextWithOutcomesDef, resolver: null, CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error : "");
+    }
+
     private static readonly ProcessDefinition CapOnTargetDef = ProcessLoader.Load("""
         process: cap-on-target-not-source
         version: 1

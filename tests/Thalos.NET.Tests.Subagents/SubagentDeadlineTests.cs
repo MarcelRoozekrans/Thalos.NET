@@ -1,8 +1,8 @@
 using AwesomeAssertions;
 using Microsoft.Extensions.Logging;
 using NSubstitute;
-using Thalos.Tests.Subagents.Fakes;
 using Thalos.Testing;
+using Thalos.Tests.Subagents.Fakes;
 using ZeroAlloc.Authorization;
 using ZeroAlloc.Results;
 
@@ -165,14 +165,16 @@ public class SubagentDeadlineTests
     }
 
     [Fact]
-    public async Task A_turn_that_finishes_over_budget_after_the_deadline_elapsed_still_reports_the_budget_verdict()
+    public async Task A_turn_that_fails_over_budget_after_the_deadline_elapsed_still_reports_the_budget_verdict()
     {
-        // Regression: the deadline guard used to re-check turn.IsFailure after RunTurnAsync's own budget check may
-        // already have synthesised SubagentBudgetExceeded, so a turn that completed over budget *and* past its
-        // deadline reported SubagentDeadlineExceeded - silently overwriting the runner's own settlement. The turn
-        // here succeeds from the runtime's point of view (no cancellation observed) but reports more usage than the
-        // budget allows, and the wall clock has also elapsed by the time it comes back; the budget verdict must win
-        // because Code is SubagentBudgetExceeded, not Cancelled.
+        // Regression: the deadline guard used to re-check turn.IsFailure after the turn's own budget check may
+        // already have synthesised SubagentBudgetExceeded, so a turn that failed over budget *and* past its
+        // deadline reported SubagentDeadlineExceeded - silently overwriting the runtime's own settlement. Since A16,
+        // the runner no longer synthesises this error itself: TurnBudgetChatClient stops the turn before the round
+        // trip that would start at or above the ceiling and the runtime reports SubagentBudgetExceeded directly,
+        // which is what this harness's substituted IAgentRuntime stands in for here. The wall clock has also elapsed
+        // by the time it comes back; the budget verdict must win because Code is SubagentBudgetExceeded, not
+        // Cancelled.
         var harness = SubagentRunnerHarness.Create();
         var sessionId = SessionId.New();
 
@@ -184,8 +186,7 @@ public class SubagentDeadlineTests
                .Returns(call =>
                {
                    harness.Time.Advance(TimeSpan.FromMinutes(2));
-                   return Result<AgentTurnResult, AgentError>.Success(
-                       new AgentTurnResult(TurnId.New(), sessionId, "answer", new TurnUsage(6_000, 0, "test-model"), [], TimeSpan.Zero));
+                   return Result<AgentTurnResult, AgentError>.Failure(AgentError.SubagentBudgetExceeded(5_000, 3, 6_000));
                });
 
         var request = SubagentRunnerHarness.Request(budget: new SubagentBudget(5_000, TimeSpan.FromMinutes(1)));

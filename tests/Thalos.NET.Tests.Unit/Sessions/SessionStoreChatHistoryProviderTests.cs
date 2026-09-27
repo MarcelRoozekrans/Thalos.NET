@@ -1,6 +1,7 @@
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using NSubstitute;
+using Thalos.Caching;
 using Thalos.Sessions;
 using Thalos.Testing;
 using ZeroAlloc.Results;
@@ -57,6 +58,23 @@ public sealed class SessionStoreChatHistoryProviderTests
         stored.Select(m => m.Role).Should().Equal(ChatRole.User, ChatRole.Assistant, ChatRole.Tool, ChatRole.Assistant);
         stored[1].Contents.OfType<FunctionCallContent>().Should().ContainSingle();
         stored[2].Contents.OfType<FunctionResultContent>().Should().ContainSingle();
+    }
+
+    [Fact]
+    public async Task Transient_request_messages_reach_the_model_but_are_not_stored()
+    {
+        var client = new ScriptedChatClient().ThenText("done");
+        var (agent, store, provider) = Build(client);
+        var sessionId = (await store.CreateAsync(AgentId.New(), "o", default)).Value.Id;
+        var maf = await provider.CreateBoundSessionAsync(agent, sessionId, default);
+        ChatMessage transient = new(ChatRole.User, "per-turn context") { AdditionalProperties = new() { [PromptCacheHints.Transient] = true } };
+        ChatMessage cleared = new(ChatRole.User, "flag cleared") { AdditionalProperties = new() { [PromptCacheHints.Transient] = false } };
+
+        await agent.RunAsync([transient, cleared, new ChatMessage(ChatRole.User, "go")], maf);
+
+        client.Requests.Single().Messages.Select(m => m.Text).Should().Equal("per-turn context", "flag cleared", "go");
+        var stored = (await store.LoadMessagesAsync(sessionId, default)).Value;
+        stored.Select(m => m.Text).Should().Equal("flag cleared", "go", "done");
     }
 
     [Fact]

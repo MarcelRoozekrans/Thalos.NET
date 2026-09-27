@@ -13,7 +13,7 @@ public sealed class WorkflowReferenceResolverTests
     {
         var id = AgentId.New();
         var catalog = new FakeAgentCatalog([new AgentDefinition { Id = id, Name = "Builder", Instructions = "build things" }]);
-        var resolver = new WorkflowReferenceResolver(catalog, new InMemorySkillStore(Clock));
+        var resolver = new WorkflowReferenceResolver(catalog, new InMemorySkillStore(Clock), hostActions: []);
 
         var resolved = await resolver.ResolveAgentIdAsync("BUILDER", CancellationToken.None);
 
@@ -24,7 +24,7 @@ public sealed class WorkflowReferenceResolverTests
     public async Task ResolveAgentIdAsync_returns_null_for_an_unregistered_name()
     {
         var catalog = new FakeAgentCatalog([new AgentDefinition { Id = AgentId.New(), Name = "Builder", Instructions = "build things" }]);
-        var resolver = new WorkflowReferenceResolver(catalog, new InMemorySkillStore(Clock));
+        var resolver = new WorkflowReferenceResolver(catalog, new InMemorySkillStore(Clock), hostActions: []);
 
         var resolved = await resolver.ResolveAgentIdAsync("ghost-writer", CancellationToken.None);
 
@@ -36,7 +36,7 @@ public sealed class WorkflowReferenceResolverTests
     {
         var store = new InMemorySkillStore(Clock);
         await store.UpsertAsync(Skill("draft"), CancellationToken.None);
-        var resolver = new WorkflowReferenceResolver(new FakeAgentCatalog([]), store);
+        var resolver = new WorkflowReferenceResolver(new FakeAgentCatalog([]), store, hostActions: []);
 
         (await resolver.SkillExistsAsync("draft", CancellationToken.None)).Should().BeTrue();
     }
@@ -44,7 +44,7 @@ public sealed class WorkflowReferenceResolverTests
     [Fact]
     public async Task SkillExistsAsync_is_false_for_an_unregistered_name()
     {
-        var resolver = new WorkflowReferenceResolver(new FakeAgentCatalog([]), new InMemorySkillStore(Clock));
+        var resolver = new WorkflowReferenceResolver(new FakeAgentCatalog([]), new InMemorySkillStore(Clock), hostActions: []);
 
         (await resolver.SkillExistsAsync("ghost-skill", CancellationToken.None)).Should().BeFalse();
     }
@@ -55,7 +55,7 @@ public sealed class WorkflowReferenceResolverTests
         var store = new InMemorySkillStore(Clock);
         await store.UpsertAsync(Skill("draft"), CancellationToken.None);
         await store.DeactivateMissingAsync([], CancellationToken.None);
-        var resolver = new WorkflowReferenceResolver(new FakeAgentCatalog([]), store);
+        var resolver = new WorkflowReferenceResolver(new FakeAgentCatalog([]), store, hostActions: []);
 
         // The skill's file disappeared from the repository — ISkillStore.GetAsync still returns the row (its
         // own contract says an inactive skill is returned, callers decide), but a process referencing it should
@@ -66,9 +66,55 @@ public sealed class WorkflowReferenceResolverTests
     [Fact]
     public async Task SkillExistsAsync_is_false_for_a_name_that_is_not_a_valid_skill_name()
     {
-        var resolver = new WorkflowReferenceResolver(new FakeAgentCatalog([]), new InMemorySkillStore(Clock));
+        var resolver = new WorkflowReferenceResolver(new FakeAgentCatalog([]), new InMemorySkillStore(Clock), hostActions: []);
 
         (await resolver.SkillExistsAsync("Not A Valid Name!", CancellationToken.None)).Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task HostActionExistsAsync_is_true_for_a_registered_action()
+    {
+        var action = RecordingAction.Returning("open-pull-request", new HostActionResult("published", new Dictionary<string, object?>(StringComparer.Ordinal)));
+        var resolver = new WorkflowReferenceResolver(new FakeAgentCatalog([]), new InMemorySkillStore(Clock), hostActions: [action]);
+
+        // Red if HostActionExistsAsync returns false instead of looking the name up.
+        (await resolver.HostActionExistsAsync("open-pull-request", CancellationToken.None)).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task HostActionExistsAsync_compares_names_ordinally()
+    {
+        var action = RecordingAction.Returning("open-pull-request", new HostActionResult("published", new Dictionary<string, object?>(StringComparer.Ordinal)));
+        var resolver = new WorkflowReferenceResolver(new FakeAgentCatalog([]), new InMemorySkillStore(Clock), hostActions: [action]);
+
+        // Red if HostActionIndex compares names with OrdinalIgnoreCase. Unlike agent names, an action name must
+        // match exactly, because the dispatcher looks it up exactly.
+        (await resolver.HostActionExistsAsync("Open-Pull-Request", CancellationToken.None)).Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData("duplicate")]
+    [InlineData("blank")]
+    [InlineData("null")]
+    public void A_host_action_registration_that_cannot_be_resolved_unambiguously_is_refused_at_construction(string shape)
+    {
+        IWorkflowHostAction[] actions = shape switch
+        {
+            "duplicate" =>
+            [
+                RecordingAction.Returning("open-pull-request", new HostActionResult("published", new Dictionary<string, object?>(StringComparer.Ordinal))),
+                RecordingAction.Returning("open-pull-request", new HostActionResult("failed", new Dictionary<string, object?>(StringComparer.Ordinal))),
+            ],
+            "blank" => [RecordingAction.Returning("  ", new HostActionResult("published", new Dictionary<string, object?>(StringComparer.Ordinal)))],
+            _ => [null!],
+        };
+
+        var construct = () => new WorkflowReferenceResolver(new FakeAgentCatalog([]), new InMemorySkillStore(Clock), hostActions: actions);
+
+        // Red, per row, if the resolver stops indexing through HostActionIndex.Build, for example with a last-wins
+        // ToDictionary: a duplicate is kept with no throw, a blank name is indexed with no throw, and a null entry
+        // throws NullReferenceException instead of ArgumentException.
+        construct.Should().ThrowExactly<ArgumentException>().WithParameterName("hostActions");
     }
 
     private static SkillDocument Skill(string name) => new()

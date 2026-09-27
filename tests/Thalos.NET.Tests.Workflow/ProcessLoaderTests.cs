@@ -39,4 +39,37 @@ public sealed class ProcessLoaderTests
         p.Nodes["gate"].Await.Should().Be("human_approval");
         p.Nodes["done"].Terminal.Should().Be("succeeded");
     }
+
+    [Fact]
+    public void An_action_node_parses_with_outcomes_and_branch()
+    {
+        var p = ProcessLoader.Load("""
+            process: p
+            version: 1
+            nodes:
+              publish:
+                action: open-pull-request
+                outcomes: [published, failed]
+                branch: { published: done, failed: stop }
+              done: { terminal: succeeded }
+              stop: { terminal: failed }
+            """).Value;
+
+        p.Nodes["publish"].Action.Should().Be("open-pull-request");
+        p.Nodes["publish"].Agent.Should().BeNull();
+    }
+
+    [Fact]
+    public void A_task_node_has_no_action()
+    {
+        var p = ProcessLoader.Load("""
+            process: p
+            version: 1
+            nodes:
+              work: { agent: backend, skill: tdd, next: done }
+              done: { terminal: succeeded }
+            """).Value;
+
+        p.Nodes["work"].Action.Should().BeNull();
+    }
 }

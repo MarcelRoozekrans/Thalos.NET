@@ -37,6 +37,15 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
     public IReadOnlyList<WorkflowStartRequest> StartedRuns => _startedRuns;
 
     /// <summary>
+    /// Every <see cref="NodeResult"/> this store has been asked to complete a node with, in call order — exactly
+    /// as <see cref="WorkflowNodeDispatcher"/> built it, including <see cref="NodeResult.Usage"/>. Exists so a
+    /// test can assert on what the dispatcher handed the store without hand-constructing a result itself.
+    /// </summary>
+    public IReadOnlyList<NodeResult> CompletedResults => _completedResults;
+
+    private readonly List<NodeResult> _completedResults = [];
+
+    /// <summary>
     /// Takes the oldest queued dispatch message for <paramref name="runId"/>, or <see langword="null"/> when that
     /// run has none waiting. One store holds every test's runs, so taking is filtered by run rather than strictly
     /// FIFO across all of them — a real outbox consumer sees one shared table too, and the run id is exactly what
@@ -57,35 +66,15 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
         return null;
     }
 
-    /// <summary>
-    /// The legacy positional overload, kept as a plain member on this concrete type — not only inherited as
-    /// <see cref="IWorkflowStore"/>'s default interface method — because every existing caller in this test
-    /// project holds its store through a <see cref="FakeWorkflowStore"/>-typed field, not an
-    /// <see cref="IWorkflowStore"/>-typed one, and a default interface method is only reachable through a
-    /// reference typed as the interface that declares it. Forwards exactly as the interface's own default
-    /// implementation does, so the two are indistinguishable in behaviour.
-    /// </summary>
-    public ValueTask<Guid> StartAsync(
-        string process,
-        int version,
-        string correlationKey,
-        string startNode,
-        IReadOnlyDictionary<string, object?>? initialVariables,
-        CancellationToken ct) =>
-        StartAsync(
-            new WorkflowStartRequest
-            {
-                Process = process,
-                Version = version,
-                CorrelationKey = correlationKey,
-                StartNode = startNode,
-                InitialVariables = initialVariables,
-            },
-            ct);
-
-    public ValueTask<Guid> StartAsync(WorkflowStartRequest request, CancellationToken ct)
+    public ValueTask<Result<Guid>> StartAsync(WorkflowStartRequest request, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(request);
+        // Every start names its starter (ruling R26): mirrors OrmWorkflowStore.StartAsync's own guard, checked
+        // before this call records anything. No explicit paramName: CallerArgumentExpression supplies
+        // "request.StartedBy" itself. A missing starter is a programming error and stays a throw, mirroring
+        // OrmWorkflowStore.ValidateStartRequest — not the caller-triggerable failures below, which return a
+        // Result instead.
+        ArgumentNullException.ThrowIfNull(request.StartedBy);
         _startedRuns.Add(request);
 
         var process = request.Process;
@@ -93,10 +82,25 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
         var startNode = request.StartNode;
         var initialVariables = request.InitialVariables;
 
-        // Mirrors OrmWorkflowStore.StartAsync, which calls the same one guard.
-        WorkflowVariableBlock.ThrowIfOverKeyLimit(initialVariables, nameof(initialVariables));
+        // Mirrors OrmWorkflowStore.StartAsync, which calls the same one check, now on the Result channel
+        // instead of throwing.
+        var overCapError = WorkflowVariableBlock.OverKeyLimitError(initialVariables);
+        if (overCapError is not null)
+        {
+            return ValueTask.FromResult(Result<Guid>.Failure(overCapError));
+        }
 
-        var id = Guid.NewGuid();
+        // The host's own id when it supplied one, mirroring OrmWorkflowStore.StartAsync — otherwise this mints
+        // one, exactly as it always has.
+        var id = request.RunId ?? Guid.NewGuid();
+        if (_runs.ContainsKey(id))
+        {
+            // Mirrors OrmWorkflowStore.StartAsync's workflow_run_pkey mapping: a caller-supplied RunId
+            // colliding with a different, existing run is reported by name, and the existing run under that id
+            // is left untouched — nothing above this point mutated _runs.
+            return ValueTask.FromResult(Result<Guid>.Failure($"a run with id '{id}' already exists"));
+        }
+
         _runs[id] = new WorkflowRun
         {
             Id = id,
@@ -113,18 +117,27 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
                 ? new Dictionary<string, object?>(StringComparer.Ordinal)
                 : new Dictionary<string, object?>(initialVariables, StringComparer.Ordinal),
             // Written once, here, mirroring OrmWorkflowStore's InsertRunAsync — nothing below ever assigns
-            // Manifest again, so FindAsync always returns exactly what this call was given.
+            // Manifest or StartedBy again, so FindAsync always returns exactly what this call was given.
             Manifest = request.Manifest,
+            StartedBy = request.StartedBy,
         };
 
         // The start node's own dispatch, exactly as OrmWorkflowStore.StartAsync enqueues it. A fake that skipped
         // this would put these tests back to supplying a message production never produced.
         _outbox.Add(new WorkflowDispatchMessage(id, 1, startNode));
-        return ValueTask.FromResult(id);
+        return ValueTask.FromResult(Result<Guid>.Success(id));
     }
 
+    /// <summary>
+    /// <see cref="FindAsync"/> throws for this run id, the way a store whose database is unreachable does, so a
+    /// caller's handling of a failed read can be tested.
+    /// </summary>
+    public Guid? ThrowOnFindFor { get; set; }
+
     public ValueTask<WorkflowRun?> FindAsync(Guid runId, CancellationToken ct) =>
-        ValueTask.FromResult(_runs.GetValueOrDefault(runId));
+        runId == ThrowOnFindFor
+            ? throw new InvalidOperationException($"the fake store could not read run '{runId}'")
+            : ValueTask.FromResult(_runs.GetValueOrDefault(runId));
 
     public ValueTask CompleteNodeAsync(Guid runId, long seq, WorkflowTransition transition, NodeResult result, CancellationToken ct)
     {
@@ -143,13 +156,25 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
             throw new WorkflowConcurrencyException($"Workflow run '{runId}' expected seq {run.CurrentSeq} but completion reported seq {seq}.");
         }
 
+        _completedResults.Add(result);
         _runs[runId] = Apply(run, seq, transition, result.Variables);
         EnqueueIfRunning(_runs[runId], transition);
         return ValueTask.CompletedTask;
     }
 
-    public async ValueTask<Result> ResumeAsync(Guid runId, string signal, string? payload, CancellationToken ct)
+    public async ValueTask<Result> ResumeAsync(Guid runId, WorkflowResumeRequest request, CancellationToken ct)
     {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Signal);
+        // Every resume names its approver (ruling R20): mirrors OrmWorkflowStore.ResumeAsync's own guard,
+        // checked before this call records anything. No explicit paramName: CallerArgumentExpression supplies
+        // "request.ResumedBy" itself. A missing approver is a programming error and stays a throw, mirroring
+        // OrmWorkflowStore — not the caller-triggerable failures below, which return a Result instead.
+        ArgumentNullException.ThrowIfNull(request.ResumedBy);
+
+        var signal = request.Signal;
+        var payload = request.Payload;
+
         if (!_runs.TryGetValue(runId, out var run))
         {
             return Result.Failure($"Workflow run '{runId}' was not found.");
@@ -180,7 +205,10 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
             return Result.Failure(transition.Error);
         }
 
-        _runs[runId] = Apply(run, run.CurrentSeq, transition.Value, variables);
+        var updated = Apply(run, run.CurrentSeq, transition.Value, variables);
+        // Mirrors OrmWorkflowStore.RecordResumeAsync: recorded only once the transition itself has succeeded, so
+        // a refused resume — signal mismatch or a failing Advance — leaves LastResume untouched.
+        _runs[runId] = updated with { LastResume = new RunResume(request.ResumedBy, DateTimeOffset.UtcNow, signal) };
         EnqueueIfRunning(_runs[runId], transition.Value);
         return Result.Success();
     }
@@ -207,7 +235,7 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
             return ValueTask.CompletedTask;
         }
 
-        _runs[runId] = run with { Status = WorkflowStatus.Failed, LastError = errorMessage };
+        _runs[runId] = run with { Status = WorkflowStatus.Failed, AwaitingSignal = null, LastError = errorMessage };
         return ValueTask.CompletedTask;
     }
 
@@ -219,7 +247,7 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
             return ValueTask.FromResult(false);
         }
 
-        _runs[runId] = run with { Status = WorkflowStatus.Failed, LastError = errorMessage };
+        _runs[runId] = run with { Status = WorkflowStatus.Failed, AwaitingSignal = null, LastError = errorMessage };
         return ValueTask.FromResult(true);
     }
 
@@ -231,17 +259,23 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
             return ValueTask.CompletedTask;
         }
 
-        _runs[runId] = run with { Status = WorkflowStatus.Cancelled, LastError = reason };
+        _runs[runId] = run with { Status = WorkflowStatus.Cancelled, AwaitingSignal = null, LastError = reason };
         return ValueTask.CompletedTask;
     }
 
     public ValueTask<IReadOnlyList<WorkflowRun>> FindStrandedAsync(TimeSpan olderThan, CancellationToken ct) =>
         ValueTask.FromResult<IReadOnlyList<WorkflowRun>>([]);
 
-    // A Seed(WorkflowRun) affordance used to live here, letting a test place a run at an arbitrary node with an
-    // arbitrary visit count. It is gone deliberately: every run in these tests now starts through StartAsync and
-    // reaches its node by being dispatched, which is what makes the visit counts the cap test reads the store's
-    // own work rather than a value the test wrote down.
+    /// <summary>
+    /// Puts a run in the store as given, for tests that need a status or a <see cref="WorkflowRun.LastResume"/> that
+    /// no transition here produces — <see cref="RunWorkspaceSweeper"/>'s, which only read a run (ruling R12).
+    /// </summary>
+    /// <remarks>
+    /// Not for dispatcher tests. Those start every run through <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/>
+    /// and reach a node by being dispatched, which is what makes the visit counts the cap test reads the store's own
+    /// work rather than a value the test wrote down.
+    /// </remarks>
+    public void Seed(WorkflowRun run) => _runs[run.Id] = run;
 
     private static WorkflowRun Apply(WorkflowRun run, long seq, WorkflowTransition transition, IReadOnlyDictionary<string, object?>? variables)
     {

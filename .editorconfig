@@ -146,6 +146,11 @@ dotnet_analyzer_diagnostic.category-Performance.severity = warning
 dotnet_analyzer_diagnostic.category-Security.severity = error
 dotnet_analyzer_diagnostic.category-Reliability.severity = warning
 
+# MA0015: ArgumentNullException.ThrowIfNull(request.StartedBy) names the property path it guards, not just a
+# bare parameter, so the exception's ParamName says exactly which nested field was missing — accept a
+# member-access expression as valid when the root of the expression is itself a parameter.
+MA0015.consider_member_access_as_parameter = true
+
 # Generated code
 [**/obj/**.cs]
 generated_code = true

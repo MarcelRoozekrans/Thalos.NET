@@ -28,12 +28,14 @@ namespace Thalos.Workflow;
 /// unreachable — a one-way door into a state nothing ever routes out of.
 /// </item>
 /// <item>
-/// <b>Resolve the edge.</b> A non-empty <see cref="ProcessNode.Branch"/> requires <see cref="NodeResult.Outcome"/>
-/// to be one of the node's declared <see cref="ProcessNode.Outcomes"/>, then looks up that outcome's branch
-/// target. <see cref="ProcessValidator"/> guarantees every declared branch key is a declared outcome, but it
-/// cannot know at load time what an agent will actually report at run time — this is the one guard
-/// <c>Advance</c> supplies that validation cannot, and the reason an unconstrained model reply can never
-/// silently pick a branch. A node with no branch instead takes its unconditional <c>next</c>.
+/// <b>Resolve the edge.</b> A node that declares <see cref="ProcessNode.Outcomes"/> requires
+/// <see cref="NodeResult.Outcome"/> to be one of them, whether it leaves by <c>branch</c> or by <c>next</c>. A
+/// non-empty <see cref="ProcessNode.Branch"/> then looks up that outcome's branch target.
+/// <see cref="ProcessValidator"/> guarantees every declared branch key is a declared outcome, but it cannot know
+/// at load time what an agent or a host action will actually report at run time — this is the one guard
+/// <c>Advance</c> supplies that validation cannot, and the reason an unconstrained model reply can never silently
+/// pick a branch, or be recorded as a node's outcome when the node never declared it. A node with no branch
+/// instead takes its unconditional <c>next</c>.
 /// </item>
 /// <item>
 /// <b>Cap-check the resolved target, not the node reporting the result.</b> <c>maxVisits</c> bounds how many
@@ -79,12 +81,24 @@ public static class WorkflowInterpreter
                 new WorkflowTransition(run.CurrentNode, WorkflowStatus.Awaiting, node.Await, WorkflowEventKind.Awaiting));
         }
 
+        // Checked for every node that declares outcomes, not only one that branches on them: a node whose declared
+        // outcomes are informational and which leaves by 'next' still promised to finish with one of them, and an
+        // agent or host action reporting anything else is a defect this refuses rather than records as history.
+        // Branch is in the condition too, for a hand-built definition that branches without declaring outcomes:
+        // no outcome can be declared there, so every one is refused, as ProcessValidator would have at load time.
+        if ((node.Outcomes.Count > 0 || node.Branch.Count > 0) &&
+            (result.Outcome is null || !node.Outcomes.Contains(result.Outcome, StringComparer.Ordinal)))
+        {
+            return Result<WorkflowTransition>.Failure(
+                $"node '{run.CurrentNode}' produced outcome '{result.Outcome}' which is not one of its declared outcomes ({string.Join(", ", node.Outcomes)})");
+        }
+
         string target;
         WorkflowEventKind kind;
 
         if (node.Branch.Count > 0)
         {
-            var branchTarget = ResolveBranch(node, run.CurrentNode, result.Outcome);
+            var branchTarget = ResolveBranch(node, run.CurrentNode, result.Outcome!);
             if (branchTarget.IsFailure)
             {
                 return Result<WorkflowTransition>.Failure(branchTarget.Error);
@@ -111,14 +125,8 @@ public static class WorkflowInterpreter
         return ApplyCap(process, run, target, kind);
     }
 
-    private static Result<string> ResolveBranch(ProcessNode node, string nodeName, string? outcome)
+    private static Result<string> ResolveBranch(ProcessNode node, string nodeName, string outcome)
     {
-        if (outcome is null || !node.Outcomes.Contains(outcome, StringComparer.Ordinal))
-        {
-            return Result<string>.Failure(
-                $"node '{nodeName}' produced outcome '{outcome}' which is not one of its declared outcomes ({string.Join(", ", node.Outcomes)})");
-        }
-
         if (!node.Branch.TryGetValue(outcome, out var branchTarget))
         {
             return Result<string>.Failure(

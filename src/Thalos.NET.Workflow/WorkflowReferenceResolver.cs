@@ -1,10 +1,12 @@
+using System.Collections.Frozen;
 using Thalos.Skills;
 
 namespace Thalos.Workflow;
 
 /// <summary>
 /// The default <see cref="IWorkflowReferenceResolver"/>: agent and skill existence resolved over Thalos's own
-/// <see cref="IAgentCatalog"/> and <see cref="ISkillStore"/>. Both are Thalos contracts, so this needs no host —
+/// <see cref="IAgentCatalog"/> and <see cref="ISkillStore"/>, and host action existence over the
+/// <see cref="IWorkflowHostAction"/> registrations it is given. All three are Thalos contracts, so this needs no host —
 /// unlike <see cref="IProcessDefinitionSource"/>, where the definitions themselves come from a host-supplied,
 /// git-backed implementation.
 /// </summary>
@@ -14,11 +16,35 @@ namespace Thalos.Workflow;
 /// <see cref="IAgentCatalog.Agents"/>. A stricter comparison here would mean a process file that validates
 /// cleanly at load time under that looser match could still fail every node once a run went live, at the cost of
 /// the agent turns already spent reaching it.
+/// <para>
+/// Host action names, by contrast, are matched ordinally, as <see cref="IWorkflowHostAction.Name"/> documents, and
+/// through the same index <see cref="WorkflowNodeDispatcher"/> builds from its own <c>hostActions</c>, so a host
+/// that passes both the same registrations gets the same answer at load time and at dispatch time.
+/// </para>
 /// </remarks>
-public sealed class WorkflowReferenceResolver(IAgentCatalog agentCatalog, ISkillStore skillStore) : IWorkflowReferenceResolver
+/// <param name="agentCatalog">Resolves <c>agent:</c> names.</param>
+/// <param name="skillStore">Answers whether a <c>skill:</c> name exists and is active.</param>
+/// <param name="hostActions">
+/// Every <see cref="IWorkflowHostAction"/> the host registers. Required: a host with none passes an empty sequence,
+/// so one that forgot to wire its actions fails to compile instead of rejecting every action node. A null entry, a
+/// blank name or two actions under one name throws <see cref="ArgumentException"/>.
+/// </param>
+public sealed class WorkflowReferenceResolver(
+    IAgentCatalog agentCatalog,
+    ISkillStore skillStore,
+    IEnumerable<IWorkflowHostAction> hostActions) : IWorkflowReferenceResolver
 {
     private readonly IAgentCatalog _agentCatalog = agentCatalog ?? throw new ArgumentNullException(nameof(agentCatalog));
     private readonly ISkillStore _skillStore = skillStore ?? throw new ArgumentNullException(nameof(skillStore));
+    private readonly FrozenDictionary<string, IWorkflowHostAction> _hostActions = HostActionIndex.Build(hostActions, nameof(hostActions));
+
+    /// <inheritdoc/>
+    public ValueTask<bool> HostActionExistsAsync(string name, CancellationToken ct)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(name);
+
+        return ValueTask.FromResult(_hostActions.ContainsKey(name));
+    }
 
     /// <inheritdoc/>
     public ValueTask<AgentId?> ResolveAgentIdAsync(string name, CancellationToken ct)

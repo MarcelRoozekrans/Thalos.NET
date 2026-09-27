@@ -34,4 +34,14 @@ public sealed class NodeResult
     /// declares nothing. A consumer driving its own dispatch loop can of course supply values directly.
     /// </remarks>
     public IReadOnlyDictionary<string, object?> Variables { get; }
+
+    /// <summary>
+    /// The token usage of the agent turn this result came from, or <see langword="null"/> for a result that never
+    /// read a turn at all — an <see cref="IWorkflowHostAction"/>'s result, which <see cref="WorkflowNodeDispatcher.DispatchActionNodeAsync"/>
+    /// builds without ever calling <see cref="ISubagentRunner"/>. Set by <see cref="WorkflowNodeDispatcher"/>'s
+    /// <c>BuildNodeResult</c> on both of its success paths — the outcome path and the outcome-less one a node
+    /// with no declared <c>outcomes</c> takes — from <see cref="AgentTurnResult.Usage"/> of the turn that
+    /// produced this result.
+    /// </summary>
+    public TurnUsage? Usage { get; init; }
 }

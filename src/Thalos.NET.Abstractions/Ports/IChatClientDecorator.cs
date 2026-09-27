@@ -3,7 +3,8 @@ using Microsoft.Extensions.AI;
 namespace Thalos;
 
 /// <summary>
-/// Wraps the provider client. Lower <see cref="Order"/> = closer to the provider (innermost).
+/// Wraps the provider client. Lower <see cref="Order"/> = closer to the provider (innermost). The runtime's token-budget
+/// check always sits between the provider client and the innermost decorator, so no decorator can skip it.
 /// AI.Sentinel registers here. Function invocation is added by MAF outside all decorators.
 /// </summary>
 public interface IChatClientDecorator

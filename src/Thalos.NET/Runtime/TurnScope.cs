@@ -26,6 +26,12 @@ namespace Thalos.Runtime;
 /// the first yield. The runtime therefore runs the model loop in a producer <see cref="Task"/> that owns the scope and
 /// drains <see cref="Events"/> from the consuming iterator.
 /// </para>
+/// <para>
+/// A scope also carries the turn's token ceiling and its running count, read and fed by the chat-client pipeline's
+/// budget check before and after every model round trip. The count belongs to the scope, not to the async flow: a
+/// nested scope, such as a subagent's turn begun from inside a tool call of this one, starts at zero with its own
+/// ceiling and never adds to the scope it nests in.
+/// </para>
 /// </remarks>
 public sealed class TurnScope : IDisposable
 {
@@ -33,13 +39,16 @@ public sealed class TurnScope : IDisposable
     private readonly TurnScope? _previous;
     private readonly ConcurrentQueue<ToolCallSummary> _toolCalls = new();
     private readonly Channel<AgentEvent> _events;
+    private int _roundTrips;
+    private long _tokens;
 
-    private TurnScope(SessionId sessionId, TurnId turnId, AgentId agentId, ISecurityContext caller, TurnScope? previous)
+    private TurnScope(SessionId sessionId, TurnId turnId, AgentId agentId, ISecurityContext caller, int? maxTotalTokens, TurnScope? previous)
     {
         SessionId = sessionId;
         TurnId = turnId;
         AgentId = agentId;
         Caller = caller;
+        MaxTotalTokens = maxTotalTokens;
         _previous = previous;
         _events = Channel.CreateUnbounded<AgentEvent>(new UnboundedChannelOptions { SingleReader = true });
     }
@@ -68,13 +77,39 @@ public sealed class TurnScope : IDisposable
     /// <summary>Summaries recorded with <see cref="RecordToolCall"/> so far, in completion order.</summary>
     public IReadOnlyCollection<ToolCallSummary> ToolCalls => _toolCalls;
 
-    /// <summary>Begins a scope on the current async flow and makes it <see cref="Current"/>; dispose to restore the previous scope.</summary>
-    internal static TurnScope Begin(SessionId sessionId, TurnId turnId, ISecurityContext caller, AgentId agentId = default)
+    /// <summary>
+    /// The turn's token ceiling: no model round trip starts once <see cref="TokensSoFar"/> is at or above it. Null
+    /// when the turn has no ceiling.
+    /// </summary>
+    internal int? MaxTotalTokens { get; }
+
+    /// <summary>Input plus output tokens the turn's completed model round trips reported so far.</summary>
+    internal long TokensSoFar => Interlocked.Read(ref _tokens);
+
+    /// <summary>
+    /// Begins a scope on the current async flow and makes it <see cref="Current"/>; dispose to restore the previous scope.
+    /// </summary>
+    /// <param name="sessionId">The session the turn belongs to.</param>
+    /// <param name="turnId">The turn being executed.</param>
+    /// <param name="caller">The principal on whose behalf the turn runs.</param>
+    /// <param name="agentId">The agent running the turn; default when the scope has none.</param>
+    /// <param name="maxTotalTokens">
+    /// The turn's token ceiling. Null means the turn has no token ceiling. That is a supported configuration: a chat or
+    /// scheduled turn carries no subagent budget, and <see cref="AgentTurnRequest.MaxTotalTokens"/> is null for it
+    /// (ruling R27). The new scope's count starts at zero whatever the enclosing scope has spent.
+    /// </param>
+    internal static TurnScope Begin(SessionId sessionId, TurnId turnId, ISecurityContext caller, AgentId agentId = default, int? maxTotalTokens = null)
     {
-        var scope = new TurnScope(sessionId, turnId, agentId, caller, _current.Value);
+        var scope = new TurnScope(sessionId, turnId, agentId, caller, maxTotalTokens, _current.Value);
         _current.Value = scope;
         return scope;
     }
+
+    /// <summary>Numbers the next model round trip of the turn, starting at 1. Safe to call from concurrent round trips.</summary>
+    internal int NextRoundTrip() => Interlocked.Increment(ref _roundTrips);
+
+    /// <summary>Adds the tokens one model round trip reported to <see cref="TokensSoFar"/>. Safe to call from concurrent round trips.</summary>
+    internal void AddTokens(long n) => Interlocked.Add(ref _tokens, n);
 
     /// <summary>
     /// Queues an event for the runtime (streamed to the caller and fanned out to <see cref="AgentEventHub"/>). Extensions such as

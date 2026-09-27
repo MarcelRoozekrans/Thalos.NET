@@ -1,3 +1,4 @@
+using Thalos.Skills;
 using Thalos.Workflow;
 using ZeroAlloc.Results;
 
@@ -75,6 +76,53 @@ public sealed class ProcessDefinitionSyncTests
         result.Value.Should().Be(2);
     }
 
+    /// <summary>A process whose only non-terminal node is an action node, so no agent or skill needs resolving.</summary>
+    private const string ActionProcessYaml = """
+        process: publishing
+        version: 1
+        nodes:
+          publish:
+            action: open-pull-request
+            outcomes: [published, failed]
+            branch: { published: done, failed: stop }
+          done: { terminal: succeeded }
+          stop: { terminal: failed }
+        """;
+
+    [Fact]
+    public async Task Sync_rejects_a_process_naming_an_unregistered_action()
+    {
+        var store = new InMemoryProcessDefinitionStore();
+        var sync = SyncWith(ActionProcessYaml, store, new WorkflowReferenceResolver(Catalog(), Skills(), hostActions: []));
+
+        var result = await sync.SyncAsync(CancellationToken.None);
+
+        // Red if ValidateReferencesAsync drops the host-action rule: the process validates and is activated.
+        result.IsFailure.Should().BeTrue();
+        result.Error.Should().Contain("node 'publish' references unknown host action 'open-pull-request'");
+    }
+
+    [Fact]
+    public async Task Sync_accepts_it_once_the_action_is_registered()
+    {
+        var store = new InMemoryProcessDefinitionStore();
+        var action = RecordingAction.Returning("open-pull-request", new HostActionResult("published", new Dictionary<string, object?>(StringComparer.Ordinal)));
+        var sync = SyncWith(ActionProcessYaml, store, new WorkflowReferenceResolver(Catalog(), Skills(), hostActions: [action]));
+
+        var result = await sync.SyncAsync(CancellationToken.None);
+
+        // Red if WorkflowReferenceResolver.HostActionExistsAsync returns false instead of looking the name up.
+        result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error : "");
+        store.Activated.Should().ContainSingle(d => d.Name == "publishing" && d.Version == 1);
+    }
+
+    private static ProcessDefinitionSync SyncWith(string yaml, InMemoryProcessDefinitionStore store, IWorkflowReferenceResolver resolver) =>
+        new(new FakeSource([new ProcessDocument("publishing.process.yaml", yaml)]), store, resolver);
+
+    private static FakeAgentCatalog Catalog() => new([]);
+
+    private static InMemorySkillStore Skills() => new(TimeProvider.System);
+
     private sealed class FakeSource(IReadOnlyList<ProcessDocument> documents) : IProcessDefinitionSource
     {
         public ValueTask<IReadOnlyList<ProcessDocument>> ReadAllAsync(CancellationToken ct) => ValueTask.FromResult(documents);
@@ -85,5 +133,7 @@ public sealed class ProcessDefinitionSyncTests
         public ValueTask<AgentId?> ResolveAgentIdAsync(string name, CancellationToken ct) => ValueTask.FromResult<AgentId?>(AgentId.New());
 
         public ValueTask<bool> SkillExistsAsync(string name, CancellationToken ct) => ValueTask.FromResult(true);
+
+        public ValueTask<bool> HostActionExistsAsync(string name, CancellationToken ct) => ValueTask.FromResult(true);
     }
 }

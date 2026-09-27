@@ -72,9 +72,18 @@ static async Task<int> WriteAsync(string connectionString, CancellationToken ct)
 
     var store = NewStore(connectionString);
 
-    var runId = await store.StartAsync(
-        new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = Guid.NewGuid().ToString(), StartNode = "implement" },
-        ct).ConfigureAwait(false);
+    var runId = (await store.StartAsync(
+        new WorkflowStartRequest
+        {
+            Process = "manufacture",
+            Version = 1,
+            CorrelationKey = Guid.NewGuid().ToString(),
+            StartNode = "implement",
+            // A host with no human behind this start — a durability probe, not an interactive caller — passes its
+            // own system principal rather than any of the human identities a real workflow start would carry.
+            StartedBy = new RunPrincipal("system:orm-test-host", []),
+        },
+        ct).ConfigureAwait(false)).Value;
 
     await store.CompleteNodeAsync(
         runId,

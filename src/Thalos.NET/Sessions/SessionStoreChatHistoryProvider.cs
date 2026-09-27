@@ -1,6 +1,7 @@
 using System.Diagnostics.CodeAnalysis;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
+using Thalos.Caching;
 using ZeroAlloc.Inject;
 
 namespace Thalos.Sessions;
@@ -21,6 +22,10 @@ namespace Thalos.Sessions;
 /// A MAF session without <see cref="StateKey"/> is <em>unbound</em>: history is empty and nothing is stored (stateless
 /// one-shot run). A session whose <see cref="StateKey"/> value is present but not a valid <see cref="SessionId"/> is treated
 /// as a corrupt binding and fails the turn with <see cref="AgentTurnException"/> (<see cref="AgentErrorCode.StoreError"/>).
+/// </para>
+/// <para>
+/// Request messages marked <see cref="PromptCacheHints.Transient"/> are not stored: they belong to one turn's model calls
+/// only, like the recalled-memories message a context provider inserts.
 /// </para>
 /// </remarks>
 [Singleton(As = typeof(SessionStoreChatHistoryProvider))] // registered as itself: the runtime and AgentFactory depend on the concrete type
@@ -85,7 +90,9 @@ public sealed class SessionStoreChatHistoryProvider(IAgentSessionStore store) : 
             return; // failed turn (runtime discards it) or unbound session: store nothing
         }
 
-        var batch = context.RequestMessages.Concat(context.ResponseMessages ?? []).ToList();
+        // a transient request message (the per-turn memories block) was built for this model call only; storing it would
+        // replay stale recall on every later turn and grow the history the prompt cache keys on
+        var batch = context.RequestMessages.Where(static m => !IsTransient(m)).Concat(context.ResponseMessages ?? []).ToList();
         if (batch.Count == 0)
         {
             return;
@@ -97,4 +104,7 @@ public sealed class SessionStoreChatHistoryProvider(IAgentSessionStore store) : 
             throw new AgentTurnException(stored.Error);
         }
     }
+
+    private static bool IsTransient(ChatMessage message) =>
+        message.AdditionalProperties?.TryGetValue(PromptCacheHints.Transient, out var value) == true && value is true;
 }

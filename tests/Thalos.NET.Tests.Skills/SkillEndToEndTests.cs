@@ -204,11 +204,12 @@ public sealed class SkillEndToEndTests
 
     /// <summary>
     /// The genuine both-packages composition fact Task 17 could only stand in for. Memory and skills are independent packages
-    /// that meet only in <see cref="ChatOptions.Instructions"/>; both blocks must arrive whole, in context-provider
-    /// registration order, with the agent's own instructions still first.
+    /// that meet in one request: the catalogue is stable per agent, so it joins the agent's own instructions, while the recall
+    /// block is per turn, so it arrives as a message directly before the latest user message and stays out of the cached
+    /// instructions. Both must arrive whole.
     /// </summary>
     [Fact]
-    public async Task Memory_and_skills_both_reach_the_instructions_and_neither_clobbers_the_other()
+    public async Task Memory_and_skills_both_reach_the_request_and_only_the_catalogue_joins_the_instructions()
     {
         using var folder = new SkillFolder();
         folder.WriteFolderSkill("release", "How we cut and publish a release.");
@@ -223,16 +224,15 @@ public sealed class SkillEndToEndTests
         var result = await RunAsync(host, agent, new TestCaller("alice"), "xUnit or NUnit when we cut a release?");
 
         result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error.ToString() : "");
-        var instructions = AllInstructions(client.Requests.Single());
+        var request = client.Requests.Single();
+        var instructions = AllInstructions(request);
         instructions.Should()
             .Contain("You are helpful.")
             .And.Contain("<skills note=").And.Contain("- release: How we cut and publish a release.")
-            .And.Contain("<memories note=").And.Contain("The user prefers xUnit over NUnit.");
-        var own = instructions.IndexOf("You are helpful.", StringComparison.Ordinal);
-        var skills = instructions.IndexOf("<skills note=", StringComparison.Ordinal);
-        var memories = instructions.IndexOf("<memories note=", StringComparison.Ordinal);
-        own.Should().BeLessThan(skills).And.BeLessThan(memories);
-        skills.Should().BeLessThan(memories, "context providers contribute in registration order: UseSkills ran before UseMemory");
+            .And.NotContain("<memories", "the per-turn block must not sit inside the cached instructions");
+        request.Messages.Should().HaveCount(2, "a new session sends the memories message and the user's message");
+        request.Messages[0].Text.Should().StartWith("<memories note=").And.Contain("The user prefers xUnit over NUnit.");
+        request.Messages[1].Text.Should().Be("xUnit or NUnit when we cut a release?");
         client.Requests.Single().Options!.Tools.Should().Contain(t => t.Name == "skills__load").And.Contain(t => t.Name == "memory__recall");
     }
 }

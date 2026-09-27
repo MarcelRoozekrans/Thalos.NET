@@ -23,4 +23,14 @@ public sealed class AnthropicOptions
 
     /// <summary>SDK retry count; null → SDK default.</summary>
     public int? MaxRetries { get; set; }
+
+    /// <summary>Prompt caching, bound from <c>Thalos:Anthropic:PromptCaching</c>. On by default with a five-minute time-to-live.</summary>
+    public AnthropicPromptCachingOptions PromptCaching { get; } = new();
+
+    /// <summary>The first violation as text, or null when the options are valid.</summary>
+    public static string? Describe(AnthropicOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(options);
+        return AnthropicPromptCachingOptions.Describe(options.PromptCaching);
+    }
 }

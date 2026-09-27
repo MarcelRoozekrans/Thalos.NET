@@ -68,9 +68,10 @@ public sealed class ConstrainedOutcomeTests : IAsyncLifetime
     /// <summary>
     /// The loop-back primitive as an executable graph: <c>work</c> is capped at three entries and always branches
     /// to <c>relay</c>, which routes straight back to <c>work</c>. Two task nodes, not one task node and a bare
-    /// relay, because <see cref="ProcessValidator"/> requires every node to be exactly one of task, gate or
-    /// terminal — there is no pass-through node kind, so the cheapest possible loop still pays for a second
-    /// agent turn per lap. <c>relay</c> declares no outcomes, so its turn reports nothing and its unconditional
+    /// relay, because <see cref="ProcessValidator"/> requires every node to be exactly one of task, gate,
+    /// terminal or action — there is no pass-through node kind a process can declare on its own (an action node
+    /// runs whatever host code is registered under its name), so a loop made only of agent turns still pays for a
+    /// second agent turn per lap. <c>relay</c> declares no outcomes, so its turn reports nothing and its unconditional
     /// <c>next</c> is what re-enters the capped node and triggers the cap check.
     /// </summary>
     private const string CappedLoopDefYaml = """
@@ -117,7 +118,7 @@ public sealed class ConstrainedOutcomeTests : IAsyncLifetime
         _runner = new FakeSubagentRunner();
         // No run here is started with a manifest, so this dispatcher's ISkillStore is never actually read from —
         // an empty InMemorySkillStore stands in purely to satisfy the constructor.
-        _dispatcher = new WorkflowNodeDispatcher(_store, _runner, resolver, _definitions, new InMemorySkillStore(TimeProvider.System), _ => new FakeSecurityContext("workflow-engine"));
+        _dispatcher = new WorkflowNodeDispatcher(_store, _runner, resolver, _definitions, new InMemorySkillStore(TimeProvider.System), _ => new FakeSecurityContext("workflow-engine"), gates: [], hostActions: []);
     }
 
     /// <summary>
@@ -127,7 +128,7 @@ public sealed class ConstrainedOutcomeTests : IAsyncLifetime
     /// that stopped enqueuing would make these tests visibly do nothing.
     /// </summary>
     public async Task InitializeAsync() =>
-        _runId = await _store.StartAsync("gate-check", 1, "c-review", "review", initialVariables: null, CancellationToken.None);
+        _runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "gate-check", Version = 1, CorrelationKey = "c-review", StartNode = "review", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
     public Task DisposeAsync() => Task.CompletedTask;
 
@@ -239,8 +240,8 @@ public sealed class ConstrainedOutcomeTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// Critical fix: an approval gate has no agent — <see cref="ProcessValidator"/>'s "exactly one of task, gate
-    /// or terminal" rule guarantees it — so arriving at one must park the run at <see cref="WorkflowStatus.Awaiting"/>
+    /// Critical fix: an approval gate has no agent — <see cref="ProcessValidator"/>'s "exactly one of task, gate,
+    /// terminal or action" rule guarantees it — so arriving at one must park the run at <see cref="WorkflowStatus.Awaiting"/>
     /// via <see cref="WorkflowInterpreter.Advance"/>, exactly like the terminal-node case, rather than trying
     /// (and failing) to resolve an agent that was never going to be there. Before the fix,
     /// <see cref="WorkflowNodeDispatcher"/> special-cased only <c>Terminal</c> and fell through to agent
@@ -250,7 +251,7 @@ public sealed class ConstrainedOutcomeTests : IAsyncLifetime
     public async Task A_gate_arrival_parks_the_run_at_awaiting_instead_of_failing()
     {
         GivenAgentReturns("anything");  // 'start' declares no outcomes, so the reported value is ignored
-        var gateRunId = await _store.StartAsync("approval-flow", 1, "c-gate", "start", initialVariables: null, CancellationToken.None);
+        var gateRunId = (await _store.StartAsync(new WorkflowStartRequest { Process = "approval-flow", Version = 1, CorrelationKey = "c-gate", StartNode = "start", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         // Two messages, both produced by the store: StartAsync's dispatch for 'start', and the one completing
         // 'start' enqueues for 'gate'. The drain stops on its own once the gate parks, because a transition to
@@ -269,7 +270,7 @@ public sealed class ConstrainedOutcomeTests : IAsyncLifetime
     [Fact]
     public async Task An_unresolvable_agent_name_fails_the_node_instead_of_throwing()
     {
-        var badRunId = await _store.StartAsync("bad-agent", 1, "c-bad-agent", "only", initialVariables: null, CancellationToken.None);
+        var badRunId = (await _store.StartAsync(new WorkflowStartRequest { Process = "bad-agent", Version = 1, CorrelationKey = "c-bad-agent", StartNode = "only", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         (await DispatchNextAsync(badRunId)).Should().BeTrue("StartAsync must enqueue the start node's dispatch");
 
@@ -378,7 +379,7 @@ public sealed class ConstrainedOutcomeTests : IAsyncLifetime
             return Result<AgentTurnResult, AgentError>.Success(TurnResultReporting("again"));
         };
 
-        var loopRunId = await _store.StartAsync("capped-loop", 1, "c-loop", "work", initialVariables: null, CancellationToken.None);
+        var loopRunId = (await _store.StartAsync(new WorkflowStartRequest { Process = "capped-loop", Version = 1, CorrelationKey = "c-loop", StartNode = "work", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         await DrainAsync(loopRunId);
 

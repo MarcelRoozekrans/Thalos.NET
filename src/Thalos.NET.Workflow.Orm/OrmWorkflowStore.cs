@@ -2,7 +2,6 @@ using System.Data.Async.Adapters;
 using System.Text.Json;
 using Npgsql;
 using ZeroAlloc.Outbox;
-using ZeroAlloc.Outbox.Orm;
 using ZeroAlloc.Results;
 
 namespace Thalos.Workflow.Orm;
@@ -25,20 +24,21 @@ namespace Thalos.Workflow.Orm;
 /// additionally checks the caller-supplied <c>seq</c> against the run's persisted <see cref="WorkflowRun.CurrentSeq"/>
 /// before touching anything, so a stale or redelivered completion is rejected the same way.
 /// </remarks>
-public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinitionStore definitions) : IWorkflowStore
+public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinitionStore definitions) : IWorkflowStore, IWorkflowRunHistory
 {
     private const string SelectRunSql = """
-        SELECT id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, manifest, xmin::text::bigint AS xmin
+        SELECT id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, manifest, started_by, last_resumed_by, last_resumed_at, xmin::text::bigint AS xmin
         FROM workflow_run
         """;
 
     /// <summary>
-    /// <see cref="RunManifest"/>'s JSON shape on the wire and in the <c>manifest</c> column: web defaults
-    /// (camelCase property names), matching <c>Thalos.Mcp.McpConfigFile</c>'s convention for the same
-    /// <see cref="JsonSerializerDefaults.Web"/> preset elsewhere in this repository. <see cref="AgentId"/>
-    /// carries its own generated <see cref="System.Text.Json.Serialization.JsonConverterAttribute"/>, so it
-    /// round-trips through its 26-character ULID form without this options instance needing to say anything
-    /// about it.
+    /// <see cref="RunManifest"/>'s JSON shape on the wire and in the <c>manifest</c> column,
+    /// <see cref="RunPrincipal"/>'s in the <c>started_by</c> column, and <c>LastResumeEnvelope</c>'s in
+    /// <c>last_resumed_by</c>, and <see cref="TurnUsage"/>'s in <c>workflow_run_event.usage</c>: web defaults (camelCase property names), matching <c>Thalos.Mcp.McpConfigFile</c>'s
+    /// convention for the same <see cref="JsonSerializerDefaults.Web"/> preset elsewhere in this repository.
+    /// <see cref="AgentId"/> carries its own generated
+    /// <see cref="System.Text.Json.Serialization.JsonConverterAttribute"/>, so it round-trips through its
+    /// 26-character ULID form without this options instance needing to say anything about it.
     /// </summary>
     private static readonly JsonSerializerOptions ManifestJsonOptions = new(JsonSerializerDefaults.Web);
 
@@ -88,89 +88,56 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     /// </remarks>
     private readonly IProcessDefinitionStore _definitions = definitions ?? throw new ArgumentNullException(nameof(definitions));
 
-    /// <summary>
-    /// The legacy positional overload, kept as a plain member on this concrete type — not only inherited as
-    /// <see cref="IWorkflowStore"/>'s default interface method — because this project's own test suite holds its
-    /// store through an <see cref="OrmWorkflowStore"/>-typed field, not an <see cref="IWorkflowStore"/>-typed
-    /// one, and a default interface method is only reachable through a reference typed as the interface that
-    /// declares it. Forwards exactly as the interface's own default implementation does, so the two are
-    /// indistinguishable in behaviour — including the <see cref="ArgumentException.ParamName"/> a blank
-    /// argument throws with: validated here, against this overload's own parameter names, before the
-    /// <see cref="WorkflowStartRequest"/> is even built, so a caller of this overload still sees "process",
-    /// "correlationKey" or "startNode" — not "request" — exactly as it did before this overload existed.
-    /// </summary>
-    public ValueTask<Guid> StartAsync(
-        string process,
-        int version,
-        string correlationKey,
-        string startNode,
-        IReadOnlyDictionary<string, object?>? initialVariables,
-        CancellationToken ct)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(process);
-        ArgumentException.ThrowIfNullOrWhiteSpace(correlationKey);
-        ArgumentException.ThrowIfNullOrWhiteSpace(startNode);
-
-        return StartAsync(
-            new WorkflowStartRequest
-            {
-                Process = process,
-                Version = version,
-                CorrelationKey = correlationKey,
-                StartNode = startNode,
-                InitialVariables = initialVariables,
-            },
-            ct);
-    }
-
     /// <inheritdoc/>
-    public async ValueTask<Guid> StartAsync(WorkflowStartRequest request, CancellationToken ct)
+    public async ValueTask<Result<Guid>> StartAsync(WorkflowStartRequest request, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.Process, nameof(request));
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.CorrelationKey, nameof(request));
-        ArgumentException.ThrowIfNullOrWhiteSpace(request.StartNode, nameof(request));
-        // Literal, not nameof(request.InitialVariables): the caller-facing parameter this cap validates is the
-        // legacy positional overload's initialVariables — OrmWorkflowStoreTests.StartAsync_refuses_a_seed_over_the_key_cap_and_writes_nothing
-        // asserts on that exact name, and it must stay stable across the request/positional split.
-        WorkflowVariableBlock.ThrowIfOverKeyLimit(request.InitialVariables, "initialVariables");
+        ValidateStartRequest(request);
 
-        var process = request.Process;
-        var version = request.Version;
         var correlationKey = request.CorrelationKey;
         var startNode = request.StartNode;
         var initialVariables = request.InitialVariables;
-        var manifest = request.Manifest;
+
+        // An over-cap InitialVariables bag is a caller mistake a well-behaved host can legitimately make at
+        // runtime — reported here, before any connection is opened, so nothing is written for it.
+        if (WorkflowVariableBlock.OverKeyLimitError(initialVariables) is { } overCapError)
+        {
+            return Result<Guid>.Failure(overCapError);
+        }
 
         await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
         await using var tx = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
 
-        var id = Guid.NewGuid();
+        // The host's own id when it supplied one (ruling R27) — this is what lets a caller create the run's git
+        // worktree, or any other resource keyed by run id, before the first node is ever dispatched. Otherwise
+        // this method mints one, exactly as it always has.
+        var id = request.RunId ?? Guid.NewGuid();
         // Null and an empty bag are the same thing to the column: both store '{}', never SQL NULL, so a run's
         // variables read back as an empty dictionary rather than something a consumer has to null-check.
         var seeded = initialVariables ?? EmptyVariables;
-        var inserted = await InsertRunAsync(connection, tx, id, process, version, correlationKey, startNode, seeded, manifest, ct).ConfigureAwait(false);
 
+        var insertResult = await TryInsertRunAsync(connection, tx, id, request.Process, request.Version, correlationKey, startNode, seeded, request.Manifest, request.StartedBy, ct).ConfigureAwait(false);
+        if (insertResult.IsFailure)
+        {
+            return Result<Guid>.Failure(insertResult.Error);
+        }
+
+        var inserted = insertResult.Value;
         if (inserted == 0)
         {
             // Idempotent lookup: a run for this correlation key already exists. Return its id rather than
             // create a duplicate — no event is appended, because no new run was entered, and no dispatch is
             // enqueued either: the run this returns is at whatever seq its own progress has reached, so a
             // message minted here would be a second delivery for a node something else already scheduled.
-            await using var select = connection.CreateCommand();
-            select.Transaction = tx;
-            select.CommandText = "SELECT id FROM workflow_run WHERE correlation_key = @correlationKey";
-            select.Parameters.AddWithValue("correlationKey", correlationKey);
-            var existing = (Guid)(await select.ExecuteScalarAsync(ct).ConfigureAwait(false))!;
+            var existing = await LookupExistingRunIdAsync(connection, tx, correlationKey, ct).ConfigureAwait(false);
             await tx.CommitAsync(ct).ConfigureAwait(false);
-            return existing;
+            return Result<Guid>.Success(existing);
         }
 
         await InsertEventAsync(
             connection, tx, id, seq: SeedEventSeq,
             fromNode: null, toNode: startNode,
             status: WorkflowStatus.Running, awaitingSignal: null,
-            outcome: null, variables: seeded.Count == 0 ? null : seeded, error: null,
+            outcome: null, variables: seeded.Count == 0 ? null : seeded, error: null, usage: null,
             kind: nameof(WorkflowEventKind.Entered), ct).ConfigureAwait(false);
 
         // The start node's own dispatch, on this same transaction. Without it a run created through this API
@@ -182,7 +149,87 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         await EnqueueDispatchAsync(connection, tx, id, InitialCurrentSeq, startNode, ct).ConfigureAwait(false);
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
-        return id;
+        return Result<Guid>.Success(id);
+    }
+
+    /// <summary>
+    /// <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/>'s idempotent-path lookup, split out only
+    /// to keep that method inside the analyzer's length limit. <paramref name="correlationKey"/> is already
+    /// known to belong to an existing run — <c>InsertRunAsync</c>'s <c>ON CONFLICT DO NOTHING</c> reported zero
+    /// rows inserted — so this is a plain, non-failing read, not a second guess at whether the run exists.
+    /// </summary>
+    private static async Task<Guid> LookupExistingRunIdAsync(NpgsqlConnection connection, NpgsqlTransaction tx, string correlationKey, CancellationToken ct)
+    {
+        await using var select = connection.CreateCommand();
+        select.Transaction = tx;
+        select.CommandText = "SELECT id FROM workflow_run WHERE correlation_key = @correlationKey";
+        select.Parameters.AddWithValue("correlationKey", correlationKey);
+        return (Guid)(await select.ExecuteScalarAsync(ct).ConfigureAwait(false))!;
+    }
+
+    /// <summary>
+    /// <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/>'s argument guards, split out only to keep
+    /// that method inside the analyzer's length limit. Every guard here throws: each one names a request that is
+    /// structurally broken — a null request, a missing starter, a blank process/correlation key/start node — a
+    /// programming error, not a condition a well-behaved caller can trigger at runtime. Expected, caller-
+    /// triggerable failures (an over-cap variables bag, a colliding <see cref="WorkflowStartRequest.RunId"/>) are
+    /// handled separately, inside <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/> itself, and
+    /// return a <see cref="Result{T}"/> failure instead.
+    /// </summary>
+    private static void ValidateStartRequest(WorkflowStartRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Process, nameof(request));
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.CorrelationKey, nameof(request));
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.StartNode, nameof(request));
+        // Every start names its starter (ruling R26): required does not stop StartedBy = null! at the language
+        // boundary, so this guard is the runtime half of the rule — checked before anything is written. No
+        // explicit paramName: CallerArgumentExpression supplies "request.StartedBy" itself.
+        ArgumentNullException.ThrowIfNull(request.StartedBy);
+    }
+
+    /// <summary>
+    /// <see cref="ResumeAsync"/>'s argument guards, split out only to keep that method inside the analyzer's
+    /// length limit. Both guards throw: a null request or a missing approver is a programming error, not a
+    /// condition a well-behaved caller can trigger at runtime — checked before the transaction even opens, so
+    /// nothing is written first. Expected, caller-triggerable failures (signal mismatch, unresolvable
+    /// definition, lost concurrency race) are handled inside <see cref="ResumeAsync"/> itself and return a
+    /// <see cref="Result"/> failure instead.
+    /// </summary>
+    private static void ValidateResumeRequest(WorkflowResumeRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentException.ThrowIfNullOrWhiteSpace(request.Signal, nameof(request));
+        // Every resume names its approver (ruling R20): required does not stop ResumedBy = null! at the language
+        // boundary, so this guard is the runtime half of the rule. No explicit paramName: CallerArgumentExpression
+        // supplies "request.ResumedBy" itself.
+        ArgumentNullException.ThrowIfNull(request.ResumedBy);
+    }
+
+    /// <summary>
+    /// <see cref="InsertRunAsync"/>, mapping a caller-supplied <see cref="WorkflowStartRequest.RunId"/> that
+    /// collides with a different, existing run's id to a named <see cref="Result{T}"/> failure instead of the
+    /// raw <see cref="PostgresException"/> that constraint violation would otherwise surface as — split out
+    /// only to keep <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/> inside the analyzer's
+    /// length limit. This is distinct from the <c>correlation_key</c> collision <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/>
+    /// handles itself as the idempotent path: a duplicate id is an expected condition a caller can legitimately
+    /// trigger — a reused id, a retried request with a stale one — not an infrastructure fault, and the
+    /// transaction rolling back on disposal leaves the existing run under that id completely untouched.
+    /// </summary>
+    private static async Task<Result<int>> TryInsertRunAsync(
+        NpgsqlConnection connection, NpgsqlTransaction tx, Guid id,
+        string process, int version, string correlationKey, string startNode,
+        IReadOnlyDictionary<string, object?> initialVariables, RunManifest? manifest, RunPrincipal startedBy, CancellationToken ct)
+    {
+        try
+        {
+            var inserted = await InsertRunAsync(connection, tx, id, process, version, correlationKey, startNode, initialVariables, manifest, startedBy, ct).ConfigureAwait(false);
+            return Result<int>.Success(inserted);
+        }
+        catch (PostgresException ex) when (string.Equals(ex.SqlState, PostgresErrorCodes.UniqueViolation, StringComparison.Ordinal) && string.Equals(ex.ConstraintName, "workflow_run_pkey", StringComparison.Ordinal))
+        {
+            return Result<int>.Failure($"a run with id '{id}' already exists");
+        }
     }
 
     /// <summary>
@@ -197,13 +244,13 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     private static async Task<int> InsertRunAsync(
         NpgsqlConnection connection, NpgsqlTransaction tx, Guid id,
         string process, int version, string correlationKey, string startNode,
-        IReadOnlyDictionary<string, object?> initialVariables, RunManifest? manifest, CancellationToken ct)
+        IReadOnlyDictionary<string, object?> initialVariables, RunManifest? manifest, RunPrincipal startedBy, CancellationToken ct)
     {
         await using var insert = connection.CreateCommand();
         insert.Transaction = tx;
         insert.CommandText = """
-            INSERT INTO workflow_run (id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, manifest)
-            VALUES (@id, @process, @version, @correlationKey, @currentNode, @currentSeq, @status, NULL, @visits::jsonb, @variables::jsonb, NULL, @manifest::jsonb)
+            INSERT INTO workflow_run (id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, manifest, started_by)
+            VALUES (@id, @process, @version, @correlationKey, @currentNode, @currentSeq, @status, NULL, @visits::jsonb, @variables::jsonb, NULL, @manifest::jsonb, @startedBy::jsonb)
             ON CONFLICT (correlation_key) DO NOTHING
             """;
         insert.Parameters.AddWithValue("id", id);
@@ -217,8 +264,12 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         insert.Parameters.AddWithValue("variables", JsonSerializer.Serialize(initialVariables));
         // Written once, here, and never touched again — ApplyTransitionAsync's UPDATE (CompleteNodeAsync,
         // ResumeAsync) and the FailAsync/CancelAsync UPDATEs all name every column they change explicitly and
-        // none of them lists manifest, so this INSERT is the only statement in this class that ever writes it.
+        // none of them lists manifest or started_by, so this INSERT is the only statement in this class that
+        // ever writes either.
         insert.Parameters.AddWithValue("manifest", manifest is null ? DBNull.Value : JsonSerializer.Serialize(manifest, ManifestJsonOptions));
+        // startedBy is required on WorkflowStartRequest and guarded non-null above — unlike manifest, this is
+        // never DBNull.Value on the path that actually inserts a row (ruling R26).
+        insert.Parameters.AddWithValue("startedBy", JsonSerializer.Serialize(startedBy, ManifestJsonOptions));
 
         return await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
@@ -259,15 +310,18 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
                 $"Workflow run '{runId}' expected seq {row.CurrentSeq} but completion reported seq {seq} — stale or redelivered completion.");
         }
 
-        await ApplyTransitionAsync(connection, tx, runId, seq, row, transition, result.Outcome, result.Variables, ct).ConfigureAwait(false);
+        await ApplyTransitionAsync(connection, tx, runId, seq, row, transition, result.Outcome, result.Variables, result.Usage, ct).ConfigureAwait(false);
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
     }
 
     /// <inheritdoc/>
-    public async ValueTask<Result> ResumeAsync(Guid runId, string signal, string? payload, CancellationToken ct)
+    public async ValueTask<Result> ResumeAsync(Guid runId, WorkflowResumeRequest request, CancellationToken ct)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(signal);
+        ValidateResumeRequest(request);
+
+        var signal = request.Signal;
+        var payload = request.Payload;
 
         await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
         await using var tx = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
@@ -308,20 +362,40 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             return Result.Failure(transitionResult.Error);
         }
 
-        // A concurrency loss here surfaces as Result.Failure, not a thrown WorkflowConcurrencyException, so a
-        // caller matching on this method's Result return does not need a second, exception-based error channel
-        // to also handle — every failure mode ResumeAsync can hit arrives the same way.
+        var applied = await ApplyResumeAsync(connection, tx, runId, row, transitionResult.Value, variables, request.ResumedBy, signal, ct).ConfigureAwait(false);
+        if (applied.IsFailure)
+        {
+            return applied;
+        }
+
+        await tx.CommitAsync(ct).ConfigureAwait(false);
+        return Result.Success();
+    }
+
+    /// <summary>
+    /// <see cref="ResumeAsync"/>'s transition-and-record step, split out only to keep that method inside the
+    /// analyzer's length limit. A concurrency loss here surfaces as <see cref="Result.Failure"/>, not a thrown
+    /// <see cref="WorkflowConcurrencyException"/>, so a caller matching on <see cref="ResumeAsync"/>'s
+    /// <see cref="Result"/> return does not need a second, exception-based error channel to also handle — every
+    /// failure mode <see cref="ResumeAsync"/> can hit arrives the same way. <see cref="RecordResumeAsync"/> runs
+    /// only once <see cref="ApplyTransitionAsync"/> has succeeded, on the same row lock its own xmin check
+    /// already took, and carries no check of its own — there is no writer it could lose a race against between
+    /// the two statements, both inside <paramref name="tx"/>.
+    /// </summary>
+    private async Task<Result> ApplyResumeAsync(
+        NpgsqlConnection connection, NpgsqlTransaction tx, Guid runId, RunRow row, WorkflowTransition transition,
+        IReadOnlyDictionary<string, object?> variables, RunPrincipal resumedBy, string signal, CancellationToken ct)
+    {
         try
         {
-            await ApplyTransitionAsync(connection, tx, runId, row.CurrentSeq, row, transitionResult.Value, outcome: null, variables, ct).ConfigureAwait(false);
+            await ApplyTransitionAsync(connection, tx, runId, row.CurrentSeq, row, transition, outcome: null, variables, usage: null, ct).ConfigureAwait(false);
+            await RecordResumeAsync(connection, tx, runId, resumedBy, signal, ct).ConfigureAwait(false);
+            return Result.Success();
         }
         catch (WorkflowConcurrencyException ex)
         {
             return Result.Failure(ex.Message);
         }
-
-        await tx.CommitAsync(ct).ConfigureAwait(false);
-        return Result.Success();
     }
 
     /// <inheritdoc/>
@@ -407,7 +481,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             update.Transaction = tx;
             update.CommandText = """
                 UPDATE workflow_run
-                SET status = @status, last_error = @error, updated_at = now()
+                SET status = @status, awaiting_signal = NULL, last_error = @error, updated_at = now()
                 WHERE id = @id AND xmin::text::bigint = @expectedXmin
                 """;
             update.Parameters.AddWithValue("status", nameof(WorkflowStatus.Failed));
@@ -425,7 +499,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             connection, tx, runId, row.CurrentSeq,
             fromNode: row.CurrentNode, toNode: row.CurrentNode,
             status: WorkflowStatus.Failed, awaitingSignal: null,
-            outcome: null, variables: null, error: errorMessage,
+            outcome: null, variables: null, error: errorMessage, usage: null,
             kind: nameof(WorkflowEventKind.Failed), ct).ConfigureAwait(false);
 
         return true;
@@ -465,7 +539,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             update.Transaction = tx;
             update.CommandText = """
                 UPDATE workflow_run
-                SET status = @status, last_error = @reason, updated_at = now()
+                SET status = @status, awaiting_signal = NULL, last_error = @reason, updated_at = now()
                 WHERE id = @id AND xmin::text::bigint = @expectedXmin
                 """;
             update.Parameters.AddWithValue("status", nameof(WorkflowStatus.Cancelled));
@@ -487,7 +561,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             connection, tx, runId, row.CurrentSeq,
             fromNode: row.CurrentNode, toNode: row.CurrentNode,
             status: WorkflowStatus.Cancelled, awaitingSignal: null,
-            outcome: null, variables: null, error: reason,
+            outcome: null, variables: null, error: reason, usage: null,
             kind: "Cancelled", ct).ConfigureAwait(false);
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
@@ -540,6 +614,48 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         return results;
     }
 
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Unbounded on purpose: this is one run's log, not a fleet query, and a history reader that silently dropped
+    /// the tail would under-report the run's usage. A run appends one event per start, node completion, resume and
+    /// termination, so the log grows with the run's own work: a loop capped by <c>maxVisits</c> is bounded by its
+    /// cap, and an uncapped branch loop by how often it loops — each iteration of which already cost an agent
+    /// turn, which dwarfs the row. <c>ix_workflow_run_event_run_id_seq</c> (migration 1001) covers both the filter
+    /// and the <c>ORDER BY</c>, so the read is one index range scan.
+    /// </remarks>
+    public async ValueTask<IReadOnlyList<WorkflowRunEvent>> ListEventsAsync(Guid runId, CancellationToken ct)
+    {
+        await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT seq, kind, from_node, to_node, status, outcome, error, usage, created_at
+            FROM workflow_run_event
+            WHERE run_id = @runId
+            ORDER BY seq ASC
+            """;
+        cmd.Parameters.AddWithValue("runId", runId);
+
+        var events = new List<WorkflowRunEvent>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            events.Add(ReadEvent(reader));
+        }
+
+        return events;
+    }
+
+    private static WorkflowRunEvent ReadEvent(NpgsqlDataReader reader) => new(
+        Seq: reader.GetInt64(0),
+        Kind: reader.GetString(1),
+        FromNode: reader.IsDBNull(2) ? null : reader.GetString(2),
+        ToNode: reader.GetString(3),
+        Status: reader.GetString(4),
+        Outcome: reader.IsDBNull(5) ? null : reader.GetString(5),
+        Error: reader.IsDBNull(6) ? null : reader.GetString(6),
+        Usage: reader.IsDBNull(7) ? null : JsonSerializer.Deserialize<TurnUsage>(reader.GetString(7), ManifestJsonOptions),
+        CreatedAt: reader.GetFieldValue<DateTimeOffset>(8));
+
     private async Task<NpgsqlConnection> OpenConnectionAsync(CancellationToken ct)
     {
         var connection = new NpgsqlConnection(_options.ConnectionString);
@@ -547,11 +663,8 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         return connection;
     }
 
-    private IOutboxStore CreateOutboxStore(NpgsqlConnection connection)
-    {
-        var asyncConnection = connection.AsAsync();
-        return _options.OutboxStoreFactory?.Invoke(asyncConnection) ?? new OrmOutboxStore(asyncConnection);
-    }
+    private IOutboxStore CreateOutboxStore(NpgsqlConnection connection) =>
+        _options.OutboxStoreFactory(connection.AsAsync());
 
     /// <summary>
     /// The run-update + event-append + conditional-dispatch-enqueue sequence shared by <see cref="CompleteNodeAsync"/>
@@ -577,7 +690,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     /// </remarks>
     private async Task ApplyTransitionAsync(
         NpgsqlConnection connection, NpgsqlTransaction tx, Guid runId, long seq, RunRow row,
-        WorkflowTransition transition, string? outcome, IReadOnlyDictionary<string, object?>? variables, CancellationToken ct)
+        WorkflowTransition transition, string? outcome, IReadOnlyDictionary<string, object?>? variables, TurnUsage? usage, CancellationToken ct)
     {
         var visits = new Dictionary<string, int>(row.Visits, StringComparer.Ordinal);
         if (!string.Equals(transition.NextNode, row.CurrentNode, StringComparison.Ordinal))
@@ -602,7 +715,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             connection, tx, runId, seq,
             fromNode: row.CurrentNode, toNode: transition.NextNode,
             status: transition.NextStatus, awaitingSignal: transition.AwaitingSignal,
-            outcome: outcome, variables: variables, error: null,
+            outcome: outcome, variables: variables, error: null, usage: usage,
             kind: transition.Kind.ToString(), ct).ConfigureAwait(false);
 
         if (transition.NextStatus == WorkflowStatus.Running)
@@ -650,17 +763,39 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         }
     }
 
+    /// <summary>
+    /// Writes <see cref="WorkflowRun.LastResume"/>'s two backing columns. Called only from
+    /// <see cref="ResumeAsync"/>, only after <see cref="ApplyTransitionAsync"/> has already applied the gate's
+    /// transition on <paramref name="tx"/> — this statement carries no <c>xmin</c> check of its own because it
+    /// runs on the row lock that <c>UPDATE</c> already holds inside the same transaction; there is no writer this
+    /// one could lose a race against between the two statements.
+    /// </summary>
+    private static async Task RecordResumeAsync(NpgsqlConnection connection, NpgsqlTransaction tx, Guid runId, RunPrincipal resumedBy, string signal, CancellationToken ct)
+    {
+        await using var update = connection.CreateCommand();
+        update.Transaction = tx;
+        update.CommandText = """
+            UPDATE workflow_run
+            SET last_resumed_by = @by::jsonb, last_resumed_at = now()
+            WHERE id = @id
+            """;
+        update.Parameters.AddWithValue("by", JsonSerializer.Serialize(new LastResumeEnvelope(resumedBy, signal), ManifestJsonOptions));
+        update.Parameters.AddWithValue("id", runId);
+
+        await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+    }
+
     private static async Task InsertEventAsync(
         NpgsqlConnection connection, NpgsqlTransaction tx, Guid runId, long seq,
         string? fromNode, string toNode, WorkflowStatus status, string? awaitingSignal,
-        string? outcome, IReadOnlyDictionary<string, object?>? variables, string? error,
+        string? outcome, IReadOnlyDictionary<string, object?>? variables, string? error, TurnUsage? usage,
         string kind, CancellationToken ct)
     {
         await using var cmd = connection.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
-            INSERT INTO workflow_run_event (run_id, seq, kind, from_node, to_node, status, awaiting_signal, outcome, variables, error)
-            VALUES (@runId, @seq, @kind, @fromNode, @toNode, @status, @awaitingSignal, @outcome, @variables::jsonb, @error)
+            INSERT INTO workflow_run_event (run_id, seq, kind, from_node, to_node, status, awaiting_signal, outcome, variables, error, usage)
+            VALUES (@runId, @seq, @kind, @fromNode, @toNode, @status, @awaitingSignal, @outcome, @variables::jsonb, @error, @usage::jsonb)
             """;
         cmd.Parameters.AddWithValue("runId", runId);
         cmd.Parameters.AddWithValue("seq", seq);
@@ -672,6 +807,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         cmd.Parameters.AddWithValue("outcome", (object?)outcome ?? DBNull.Value);
         cmd.Parameters.AddWithValue("variables", variables is null ? DBNull.Value : JsonSerializer.Serialize(variables));
         cmd.Parameters.AddWithValue("error", (object?)error ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("usage", usage is null ? DBNull.Value : JsonSerializer.Serialize(usage.Value, ManifestJsonOptions));
         try
         {
             await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
@@ -715,7 +851,10 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         Variables: DeserializeVariables(reader.GetString(9)),
         LastError: reader.IsDBNull(10) ? null : reader.GetString(10),
         Manifest: reader.IsDBNull(11) ? null : JsonSerializer.Deserialize<RunManifest>(reader.GetString(11), ManifestJsonOptions),
-        Xmin: reader.GetInt64(12));
+        StartedBy: reader.IsDBNull(12) ? null : JsonSerializer.Deserialize<RunPrincipal>(reader.GetString(12), ManifestJsonOptions),
+        LastResumedBy: reader.IsDBNull(13) ? null : reader.GetString(13),
+        LastResumedAt: reader.IsDBNull(14) ? null : reader.GetFieldValue<DateTimeOffset>(14),
+        Xmin: reader.GetInt64(15));
 
     /// <summary>
     /// Deserializing straight to <c>Dictionary&lt;string, object?&gt;</c> leaves every value a boxed
@@ -756,7 +895,33 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         Variables = row.Variables,
         LastError = row.LastError,
         Manifest = row.Manifest,
+        StartedBy = row.StartedBy,
+        LastResume = ToLastResume(row.LastResumedBy, row.LastResumedAt),
     };
+
+    /// <summary>
+    /// Rebuilds <see cref="WorkflowRun.LastResume"/> from the two columns <see cref="ReadRow"/> pulled off the
+    /// row. <paramref name="lastResumedAt"/> null is the ground truth for "never resumed" — <see cref="RecordResumeAsync"/>
+    /// writes both columns in the same statement, so the two are never null independently outside a hand-edited
+    /// row.
+    /// </summary>
+    private static RunResume? ToLastResume(string? lastResumedBy, DateTimeOffset? lastResumedAt)
+    {
+        if (lastResumedAt is null || lastResumedBy is null)
+        {
+            return null;
+        }
+
+        var envelope = JsonSerializer.Deserialize<LastResumeEnvelope>(lastResumedBy, ManifestJsonOptions)
+            ?? throw new InvalidOperationException("last_resumed_by held a JSON null; ResumeAsync never writes one.");
+        return new RunResume(envelope.Principal, lastResumedAt.Value, envelope.Signal);
+    }
+
+    /// <summary>
+    /// <c>last_resumed_by</c>'s JSON shape: the principal and the signal it resumed, packed into one column so a
+    /// third dedicated column is not needed just to carry the signal alongside the approver.
+    /// </summary>
+    private sealed record LastResumeEnvelope(RunPrincipal Principal, string Signal);
 
     private sealed record RunRow(
         Guid Id,
@@ -771,5 +936,8 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         Dictionary<string, object?> Variables,
         string? LastError,
         RunManifest? Manifest,
+        RunPrincipal? StartedBy,
+        string? LastResumedBy,
+        DateTimeOffset? LastResumedAt,
         long Xmin);
 }

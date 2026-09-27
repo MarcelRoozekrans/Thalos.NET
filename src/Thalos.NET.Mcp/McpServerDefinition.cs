@@ -28,12 +28,23 @@ public sealed class McpServerDefinition
     public TimeSpan Timeout { get; set; } = TimeSpan.FromSeconds(30);
 
     /// <summary>
-    /// stdio only: how long to wait for the child process to exit after its stdin is closed on dispose before it is killed.
-    /// Default 2 seconds (the SDK default is 5 s): well-behaved servers exit as soon as stdin closes, and the MCP SDK waits the
-    /// <em>full</em> timeout on dispose either way, so a long value only slows host shutdown. In <c>.mcp.json</c> this is the
-    /// <c>shutdownTimeout</c> property as a <c>hh:mm:ss</c> string (e.g. <c>"00:00:01"</c>).
+    /// stdio only: how long disposing the source waits before the server's process tree is killed. ModelContextProtocol
+    /// 2.2.0 does not close the server's stdin on dispose; it waits this long and then kills the whole process tree, so every
+    /// dispose of a stdio server takes the full timeout. On Windows it waits only for the <c>cmd.exe</c> it started the server
+    /// under, so for a run-scoped server <see cref="RunMcpServerRegistry"/> then kills the rest of the server's process tree
+    /// and waits for it to finish exiting; that wait is not this grace period but a fixed bound of its own,
+    /// <c>ServerProcessTree.TerminationWait</c>. Default 2 seconds (the SDK default is 5 s): a long value only slows host
+    /// shutdown and run removal. In <c>.mcp.json</c> this is the <c>shutdownTimeout</c> property as a <c>hh:mm:ss</c>
+    /// string (e.g. <c>"00:00:01"</c>).
     /// </summary>
     public TimeSpan ShutdownTimeout { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// stdio only: when set, each workflow run also gets its own copy of this server, started against the run's
+    /// workspace by <see cref="RunMcpServerRegistry"/>. In <c>.mcp.json</c> this is the <c>runScoped</c> object.
+    /// <see langword="null"/> means the server is host-wide only.
+    /// </summary>
+    public RunScopedMcpDefinition? RunScoped { get; set; }
 
     /// <summary><see cref="Type"/> lower-cased, or the default inferred from <see cref="Command"/>.</summary>
     public string EffectiveType => (Type ?? (Command is not null ? "stdio" : "http")).ToLowerInvariant();

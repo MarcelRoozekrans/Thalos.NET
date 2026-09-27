@@ -10,7 +10,8 @@ public sealed record AgentDefinition
     public required AgentId Id { get; init; }
 
     /// <summary>Display name (1–64 chars) shown in logs, telemetry and to the model as the agent's name.</summary>
-    [NotEmpty] [MaxLength(64)]
+    [NotEmpty]
+    [MaxLength(64)]
     public required string Name { get; init; }
 
     /// <summary>Optional human-readable description; forwarded to the Agent Framework agent (not part of the prompt).</summary>

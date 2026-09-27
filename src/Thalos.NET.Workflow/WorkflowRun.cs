@@ -80,11 +80,25 @@ public sealed record WorkflowRun
 
     /// <summary>
     /// The write-once pin <see cref="IWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/> gave
-    /// this run at creation, or <see langword="null"/> when the run has none — started before manifests existed,
-    /// or through the legacy positional <c>StartAsync</c> overload, which always leaves this
-    /// <see langword="null"/>. Nothing ever updates this property after the run is created: not
+    /// this run at creation, or <see langword="null"/> when the run has none — started before manifests existed.
+    /// Nothing ever updates this property after the run is created: not
     /// <see cref="IWorkflowStore.CompleteNodeAsync"/>, not <see cref="IWorkflowStore.ResumeAsync"/>, not any
     /// other member of <see cref="IWorkflowStore"/>.
     /// </summary>
     public RunManifest? Manifest { get; init; }
+
+    /// <summary>
+    /// Write-once, like <see cref="Manifest"/>. <see langword="null"/> only for a run started before 0.11.0;
+    /// every 0.11.0 start records one.
+    /// </summary>
+    public RunPrincipal? StartedBy { get; init; }
+
+    /// <summary>
+    /// The most recent successful resume, or <see langword="null"/> when the run was never resumed — or when it
+    /// was resumed before migration 1007, the one that added <c>last_resumed_by</c>; that resume left no record.
+    /// A run with a non-null <see cref="LastResume"/> has passed a gate: <c>RunWorkspaceSweeper</c> keeps its
+    /// workspace if the run then fails or is cancelled, and removes it once the run is
+    /// <see cref="WorkflowStatus.Succeeded"/>.
+    /// </summary>
+    public RunResume? LastResume { get; init; }
 }

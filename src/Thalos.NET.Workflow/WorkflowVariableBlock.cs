@@ -262,25 +262,24 @@ internal static partial class WorkflowVariableBlock
     }
 
     /// <summary>
-    /// Rejects an initial-variables bag over <see cref="MaxVariableKeys"/>, for every
+    /// Checks an initial-variables bag against <see cref="MaxVariableKeys"/>, for every
     /// <see cref="IWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/> implementation to call.
+    /// Returns the error message when <paramref name="variables"/> is over the cap, or <see langword="null"/>
+    /// when it is within it.
     /// </summary>
     /// <remarks>
     /// One implementation rather than one per store: the cap is what makes the omitted-key list provably
     /// complete, and a store that enforced a different number would quietly break that guarantee for runs it
-    /// started. A seed is host-supplied rather than agent-supplied, so this is a caller mistake and throws, the
-    /// same way <see cref="IWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/> already throws for a blank process name — unlike a node's
-    /// report, which is untrusted input and fails the run instead.
+    /// started. A seed is host-supplied rather than agent-supplied — a caller mistake, but an <em>expected</em>
+    /// one a caller can legitimately make by passing too large a work item, so this returns a message for the
+    /// Result channel rather than throwing: unlike a node's report, which is untrusted input and fails the run
+    /// instead, this is checked and reported before any write, in the same call that will otherwise start the
+    /// run.
     /// </remarks>
-    internal static void ThrowIfOverKeyLimit(IReadOnlyDictionary<string, object?>? variables, string paramName)
-    {
-        if (variables is { Count: > MaxVariableKeys })
-        {
-            throw new ArgumentException(
-                $"A run may start with at most {MaxVariableKeys} variables; {variables.Count} were supplied. The cap is what lets the engine name every variable it has to leave out of a node's task text.",
-                paramName);
-        }
-    }
+    internal static string? OverKeyLimitError(IReadOnlyDictionary<string, object?>? variables) =>
+        variables is { Count: > MaxVariableKeys }
+            ? $"A run may start with at most {MaxVariableKeys} variables; {variables.Count} were supplied. The cap is what lets the engine name every variable it has to leave out of a node's task text."
+            : null;
 
     /// <summary>
     /// Reads a reported <see cref="OutcomeToolSchema.VariablesArgumentName"/> object into the plain CLR values a

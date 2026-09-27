@@ -19,6 +19,9 @@ namespace Thalos.Tests.Workflow.Orm;
 [Trait("Category", "Docker")]
 public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsyncLifetime
 {
+    /// <summary>A resumer fixture for tests that need one but are not testing who it is.</summary>
+    private static readonly RunPrincipal TestApprover = new("test-approver", ["admin"]);
+
     /// <summary>A two-node sequence: one task node run by an agent, then a terminal.</summary>
     private const string PipelineV1 = """
         process: pipeline
@@ -73,7 +76,7 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
         var synced = await _sync.SyncAsync(CancellationToken.None);
         synced.IsSuccess.Should().BeTrue(synced.IsFailure ? synced.Error : "");
 
-        var runId = await _store.StartAsync("pipeline", 1, "c-reach", "implement", initialVariables: null, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "pipeline", Version = 1, CorrelationKey = "c-reach", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         // No message is constructed here: StartAsync enqueued 'implement''s own dispatch, and the drain takes it
         // off the table exactly as a host's outbox consumer would.
@@ -100,7 +103,7 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
         _source.Write(PipelineV1);
         (await _sync.SyncAsync(CancellationToken.None)).IsSuccess.Should().BeTrue();
 
-        var runId = await _store.StartAsync("pipeline", 1, "c-pinned", "implement", initialVariables: null, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "pipeline", Version = 1, CorrelationKey = "c-pinned", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         // The hot reload a live run must survive untouched.
         _source.Write(PipelineV2);
@@ -125,7 +128,7 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
     {
         // Started without ever syncing anything: StartAsync stamps the pin independently of this store, so a run
         // can legitimately exist pointing at a version no row backs.
-        var runId = await _store.StartAsync("pipeline", 7, "c-missing", "implement", initialVariables: null, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "pipeline", Version = 7, CorrelationKey = "c-missing", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
         var dispatcher = NewDispatcher();
 
         var dispatch = async () => await OutboxDrain.DispatchNextAsync(pg.ConnectionString, dispatcher);
@@ -157,7 +160,7 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
         _source.Write(gated);
         (await _sync.SyncAsync(CancellationToken.None)).IsSuccess.Should().BeTrue();
 
-        var runId = await _store.StartAsync("gated", 1, "c-gate-resume", "start", initialVariables: null, CancellationToken.None);
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "gated", Version = 1, CorrelationKey = "c-gate-resume", StartNode = "start", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
         // Two dispatches park the gate: the first completes 'start' and moves the run to 'gate'; the second,
         // enqueued by that very transition, is what Advance parks at Awaiting. Both come off the outbox — the
@@ -168,7 +171,7 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
         var parked = await _store.FindAsync(runId, CancellationToken.None);
         parked!.Status.Should().Be(WorkflowStatus.Awaiting, "the run must be parked before resume is meaningful. Error: {0}", parked.LastError ?? "<none>");
 
-        var resumed = await _store.ResumeAsync(runId, "human_approval", "approved", CancellationToken.None);
+        var resumed = await _store.ResumeAsync(runId, new WorkflowResumeRequest { Signal = "human_approval", Payload = "approved", ResumedBy = TestApprover }, CancellationToken.None);
 
         resumed.IsSuccess.Should().BeTrue(resumed.IsFailure ? resumed.Error : "");
         (await _store.FindAsync(runId, CancellationToken.None))!.CurrentNode.Should().Be("done");
@@ -181,8 +184,9 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
     /// </summary>
     private WorkflowNodeDispatcher NewDispatcher() =>
         // No run started by these tests carries a manifest, so this ISkillStore is never actually read from —
-        // an empty InMemorySkillStore stands in purely to satisfy the constructor.
-        new(_store, new AlwaysSucceedsRunner(), new AlwaysResolves(), _definitions, new InMemorySkillStore(TimeProvider.System), _ => new StubSecurityContext());
+        // an empty InMemorySkillStore stands in purely to satisfy the constructor. gates: [] and hostActions: [] - this
+        // suite is about neither dispatch gates nor action nodes.
+        new(_store, new AlwaysSucceedsRunner(), new AlwaysResolves(), _definitions, new InMemorySkillStore(TimeProvider.System), _ => new StubSecurityContext(), gates: [], hostActions: []);
 
     private sealed class FakeSource : IProcessDefinitionSource
     {
@@ -197,12 +201,14 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
         }
     }
 
-    /// <summary>Resolves every agent and skill name: these tests are about definition resolution, not reference resolution.</summary>
+    /// <summary>Resolves every agent, skill and host action name: these tests are about definition resolution, not reference resolution.</summary>
     private sealed class AlwaysResolves : IWorkflowReferenceResolver
     {
         public ValueTask<AgentId?> ResolveAgentIdAsync(string name, CancellationToken ct) => ValueTask.FromResult<AgentId?>(AgentId.New());
 
         public ValueTask<bool> SkillExistsAsync(string name, CancellationToken ct) => ValueTask.FromResult(true);
+
+        public ValueTask<bool> HostActionExistsAsync(string name, CancellationToken ct) => ValueTask.FromResult(true);
     }
 
     /// <summary>A turn that completes cleanly and reports no outcome — valid for a node with no declared outcomes.</summary>

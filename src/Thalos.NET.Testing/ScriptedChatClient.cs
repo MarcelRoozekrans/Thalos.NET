@@ -16,8 +16,8 @@ namespace Thalos.Testing;
 public sealed class ScriptedChatClient : IChatClient
 {
     private abstract record Step;
-    private sealed record TextStep(string Text, int Input, int Output) : Step;
-    private sealed record ToolCallStep(string Name, IDictionary<string, object?> Args, string CallId, int Input, int Output, string? PrecedingText) : Step;
+    private sealed record TextStep(string Text, int Input, int Output, int CacheRead, int CacheWrite) : Step;
+    private sealed record ToolCallStep(string Name, IDictionary<string, object?> Args, string CallId, int Input, int Output, string? PrecedingText, int CacheRead, int CacheWrite) : Step;
     private sealed record ThrowStep(Exception Exception) : Step;
 
     private readonly Queue<Step> _script = new();
@@ -30,9 +30,13 @@ public sealed class ScriptedChatClient : IChatClient
     /// <summary>Every request received, in order (message lists are snapshotted; instances are shared).</summary>
     public IReadOnlyList<(IReadOnlyList<ChatMessage> Messages, ChatOptions? Options)> Requests => _requests;
 
-    /// <summary>Appends a step that replies with assistant <paramref name="text"/> and the given usage.</summary>
-    public ScriptedChatClient ThenText(string text, int input = 1, int output = 1)
-    { _script.Enqueue(new TextStep(text, input, output)); return this; }
+    /// <summary>
+    /// Appends a step that replies with assistant <paramref name="text"/> and the given usage. <paramref name="cacheRead"/>
+    /// and <paramref name="cacheWrite"/> default to <c>0</c> — omitting them scripts a provider that reports no
+    /// prompt-cache counts, the behaviour of every provider without caching.
+    /// </summary>
+    public ScriptedChatClient ThenText(string text, int input = 1, int output = 1, int cacheRead = 0, int cacheWrite = 0)
+    { _script.Enqueue(new TextStep(text, input, output, cacheRead, cacheWrite)); return this; }
 
     /// <summary>
     /// Appends a step that requests a tool call. <paramref name="args"/> is serialized with
@@ -40,8 +44,10 @@ public sealed class ScriptedChatClient : IChatClient
     /// arrays stay <see cref="JsonElement"/>s. <paramref name="callId"/> defaults to <c>call-1</c>, <c>call-2</c>, …
     /// When <paramref name="precedingText"/> is set, the assistant message contains that text <em>before</em> the tool call
     /// (as real providers do) and the streaming path yields the text deltas first, then the tool-call update.
+    /// <paramref name="cacheRead"/> and <paramref name="cacheWrite"/> default to <c>0</c> — omitting them scripts a
+    /// provider that reports no prompt-cache counts, the behaviour of every provider without caching.
     /// </summary>
-    public ScriptedChatClient ThenToolCall(string name, object args, string? callId = null, int input = 1, int output = 1, string? precedingText = null)
+    public ScriptedChatClient ThenToolCall(string name, object args, string? callId = null, int input = 1, int output = 1, string? precedingText = null, int cacheRead = 0, int cacheWrite = 0)
     {
         var json = JsonSerializer.Serialize(args, AIJsonUtilities.DefaultOptions);
         var dict = JsonSerializer.Deserialize<Dictionary<string, object?>>(json, AIJsonUtilities.DefaultOptions) ?? [];
@@ -62,7 +68,7 @@ public sealed class ScriptedChatClient : IChatClient
                 };
             }
         }
-        _script.Enqueue(new ToolCallStep(name, dict, callId ?? $"call-{++_nextCallId}", input, output, precedingText));
+        _script.Enqueue(new ToolCallStep(name, dict, callId ?? $"call-{++_nextCallId}", input, output, precedingText, cacheRead, cacheWrite));
         return this;
     }
 
@@ -85,8 +91,8 @@ public sealed class ScriptedChatClient : IChatClient
         var step = _script.Dequeue();
         return Task.FromResult(step switch
         {
-            TextStep t => Build(new ChatMessage(ChatRole.Assistant, t.Text), t.Input, t.Output),
-            ToolCallStep c => Build(new ChatMessage(ChatRole.Assistant, ToolCallContents(c)), c.Input, c.Output),
+            TextStep t => Build(new ChatMessage(ChatRole.Assistant, t.Text), t.Input, t.Output, t.CacheRead, t.CacheWrite),
+            ToolCallStep c => Build(new ChatMessage(ChatRole.Assistant, ToolCallContents(c)), c.Input, c.Output, c.CacheRead, c.CacheWrite),
             ThrowStep e => throw e.Exception,
             _ => throw new InvalidOperationException("unknown step"),
         });
@@ -134,14 +140,25 @@ public sealed class ScriptedChatClient : IChatClient
         return contents;
     }
 
-    private ChatResponse Build(ChatMessage message, int input, int output)
+    private ChatResponse Build(ChatMessage message, int input, int output, int cacheRead, int cacheWrite)
     {
         message.MessageId = Guid.NewGuid().ToString("N");
+        var usage = new UsageDetails { InputTokenCount = input, OutputTokenCount = output, TotalTokenCount = input + output };
+        if (cacheRead != 0)
+        {
+            usage.CachedInputTokenCount = cacheRead;
+        }
+
+        if (cacheWrite != 0)
+        {
+            usage.AdditionalCounts = new() { [TurnUsage.CacheWriteCountKey] = cacheWrite };
+        }
+
         return new ChatResponse(message)
         {
             ResponseId = Guid.NewGuid().ToString("N"),
             ModelId = ModelId,
-            Usage = new UsageDetails { InputTokenCount = input, OutputTokenCount = output, TotalTokenCount = input + output },
+            Usage = usage,
             FinishReason = message.Contents.Any(c => c is FunctionCallContent) ? ChatFinishReason.ToolCalls : ChatFinishReason.Stop,
         };
     }
