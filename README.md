@@ -221,8 +221,9 @@ before the tool runs — not by inspecting the chat stream afterwards.
 so MAF's function-invocation loop passes through it on every model round trip. On each round trip it places
 provider-neutral hints (`PromptCacheHints` keys in `AdditionalProperties`) on up to four boundaries: the last tool,
 when it is an `AIFunction`; the end of the instructions; the latest message; and, when a `PromptCacheHints.Transient`
-message such as the recalled-memories block is present, the message just before it, which ends the stored history. It never reorders messages and never mutates
-the caller's messages or options, so hints do not pile up in stored history. A provider translates the hints into its
+message such as the recalled-memories block is present, the message just before it, which ends the stored
+history. It never reorders messages and never mutates the caller's messages or options, so hints do not pile up
+in stored history. A provider translates the hints into its
 own cache controls; a provider with no translator ignores them. Outside Thalos, plain Microsoft.Extensions.AI
 pipelines get the same client from `ChatClientBuilder.UsePromptCaching()`, placed inside `UseFunctionInvocation()`
 (i.e. registered after it) so it runs on every round trip:
