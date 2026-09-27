@@ -482,7 +482,7 @@ public sealed partial class WorkflowNodeDispatcher(
         var nodeName = run.CurrentNode;
         if (outcomeTool is null)
         {
-            return Result<NodeResult>.Success(new NodeResult(null, EmptyVariables));
+            return Result<NodeResult>.Success(new NodeResult(null, EmptyVariables) { Usage = turn.Usage });
         }
 
         var extraction = ExtractReport(turn, outcomeTool.ToolName);
@@ -502,7 +502,7 @@ public sealed partial class WorkflowNodeDispatcher(
             return Result<NodeResult>.Failure(limitError);
         }
 
-        return Result<NodeResult>.Success(new NodeResult(report.Outcome, report.Variables ?? EmptyVariables));
+        return Result<NodeResult>.Success(new NodeResult(report.Outcome, report.Variables ?? EmptyVariables) { Usage = turn.Usage });
     }
 
     /// <summary>

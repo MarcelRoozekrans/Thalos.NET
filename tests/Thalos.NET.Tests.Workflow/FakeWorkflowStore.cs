@@ -37,6 +37,15 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
     public IReadOnlyList<WorkflowStartRequest> StartedRuns => _startedRuns;
 
     /// <summary>
+    /// Every <see cref="NodeResult"/> this store has been asked to complete a node with, in call order — exactly
+    /// as <see cref="WorkflowNodeDispatcher"/> built it, including <see cref="NodeResult.Usage"/>. Exists so a
+    /// test can assert on what the dispatcher handed the store without hand-constructing a result itself.
+    /// </summary>
+    public IReadOnlyList<NodeResult> CompletedResults => _completedResults;
+
+    private readonly List<NodeResult> _completedResults = [];
+
+    /// <summary>
     /// Takes the oldest queued dispatch message for <paramref name="runId"/>, or <see langword="null"/> when that
     /// run has none waiting. One store holds every test's runs, so taking is filtered by run rather than strictly
     /// FIFO across all of them — a real outbox consumer sees one shared table too, and the run id is exactly what
@@ -147,6 +156,7 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
             throw new WorkflowConcurrencyException($"Workflow run '{runId}' expected seq {run.CurrentSeq} but completion reported seq {seq}.");
         }
 
+        _completedResults.Add(result);
         _runs[runId] = Apply(run, seq, transition, result.Variables);
         EnqueueIfRunning(_runs[runId], transition);
         return ValueTask.CompletedTask;
