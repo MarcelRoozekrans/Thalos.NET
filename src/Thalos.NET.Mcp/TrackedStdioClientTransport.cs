@@ -11,10 +11,13 @@ namespace Thalos.Mcp;
 /// whose handshake fails closes the session too.
 /// </summary>
 /// <remarks>
-/// The close is stamped when it happens, not when the registry asks: the registry may ask much later, at the next call
-/// to a server that died or at the run's removal, and by then the wrapper's process id may have been reused by a process
-/// that started children of its own. Those children were created after the close, so the close time keeps them out of
-/// the tree; the time of asking would not.
+/// The close is stamped when the SDK completes the session, not when the registry asks: the registry may ask much later,
+/// at the next call to a server that died or at the run's removal, and by then the wrapper's process id may have been
+/// reused by a process that started children of its own. Those children were created after the close, so the close
+/// time keeps them out of the tree; the time of asking would not. The SDK completes the session only after its own
+/// wait for the wrapper to exit, which can take up to about twice the server's shutdown timeout, and the stamp then
+/// runs on a thread-pool thread. So the stamp can lag the wrapper's exit by seconds, and a process that reuses the id
+/// in that window is not kept out. Thalos.NET#192 tracks the root fix, a job object that needs no timestamps.
 /// </remarks>
 /// <param name="inner">The SDK transport that starts the process.</param>
 internal sealed class TrackedStdioClientTransport(StdioClientTransport inner) : IClientTransport
@@ -45,7 +48,10 @@ internal sealed class TrackedStdioClientTransport(StdioClientTransport inner) : 
         return session;
     }
 
-    /// <summary>The time, from <see cref="ServerProcessTree.Now"/>, read as <paramref name="session"/> completes, on the thread that completes it.</summary>
+    /// <summary>
+    /// The time, from <see cref="ServerProcessTree.Now"/>, read once <paramref name="session"/> completes. The SDK's
+    /// channel runs continuations asynchronously, so this runs on a thread-pool thread shortly after completion.
+    /// </summary>
     [SupportedOSPlatform("windows")]
     private static Task<long> StampClose(ITransport session) =>
         session.MessageReader.Completion.ContinueWith(
@@ -53,7 +59,7 @@ internal sealed class TrackedStdioClientTransport(StdioClientTransport inner) : 
 
     /// <summary>
     /// The id of the process the SDK started, as its closed session reports it, and when the session closed, from
-    /// <see cref="ServerProcessTree.Now"/>, stamped as it closed; or <see langword="null"/> when no session was
+    /// <see cref="ServerProcessTree.Now"/>, stamped once the SDK completed it; or <see langword="null"/> when no session was
     /// connected, it has not closed within <paramref name="wait"/>, or it closed without a process id. Windows only.
     /// </summary>
     [SupportedOSPlatform("windows")]
