@@ -2,22 +2,22 @@
   <ItemGroup>
     <!-- ZeroAlloc ecosystem -->
     <PackageVersion Include="ZeroAlloc.Results" Version="1.2.3" />
-    <PackageVersion Include="ZeroAlloc.ValueObjects" Version="2.0.9" />
+    <PackageVersion Include="ZeroAlloc.ValueObjects" Version="2.0.10" />
     <PackageVersion Include="ZeroAlloc.Mediator" Version="5.1.5" />
     <PackageVersion Include="ZeroAlloc.Authorization" Version="2.1.3" />
     <PackageVersion Include="ZeroAlloc.AsyncEvents" Version="1.1.4" />
     <PackageVersion Include="ZeroAlloc.StateMachine" Version="1.5.4" />
-    <PackageVersion Include="ZeroAlloc.Telemetry" Version="1.6.3" />
-    <PackageVersion Include="ZeroAlloc.Validation" Version="1.7.5" />
-    <PackageVersion Include="ZeroAlloc.Validation.Generator" Version="1.7.5" />
-    <PackageVersion Include="ZeroAlloc.Inject" Version="1.7.6" />
-    <PackageVersion Include="ZeroAlloc.Inject.Generator" Version="1.7.6" />
-    <PackageVersion Include="ZeroAlloc.Analyzers" Version="1.5.3" />
+    <PackageVersion Include="ZeroAlloc.Telemetry" Version="1.6.4" />
+    <PackageVersion Include="ZeroAlloc.Validation" Version="1.7.8" />
+    <PackageVersion Include="ZeroAlloc.Validation.Generator" Version="1.7.8" />
+    <PackageVersion Include="ZeroAlloc.Inject" Version="1.8.0" />
+    <PackageVersion Include="ZeroAlloc.Inject.Generator" Version="1.8.0" />
+    <PackageVersion Include="ZeroAlloc.Analyzers" Version="1.5.4" />
 
     <!-- Agent framework + AI abstractions -->
     <PackageVersion Include="Microsoft.Agents.AI" Version="1.22.0" />
     <PackageVersion Include="Microsoft.Extensions.AI" Version="10.10.0" />
-    <PackageVersion Include="Microsoft.Extensions.AI.Abstractions" Version="10.10.0" />
+    <PackageVersion Include="Microsoft.Extensions.AI.Abstractions" Version="10.10.1" />
     <PackageVersion Include="ModelContextProtocol" Version="2.2.0" />
     <PackageVersion Include="Anthropic" Version="12.50.0" />
     <PackageVersion Include="AI.Sentinel" Version="2.3.0" />
