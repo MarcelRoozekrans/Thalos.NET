@@ -186,6 +186,16 @@ Editing a process file **without bumping its `version`** is now a sync *error* r
 Authors who relied on re-syncing a version in place must bump the version instead. The error names the process
 and version and says so.
 
+### Outbox migration 2 — `add_outbox_lease`
+
+ZeroAlloc.Outbox 3.0 adds migration 2 to `OutboxOrmMigrations.Postgres`: nullable `LockedBy` and `LockedUntil`
+columns on `outboxmessages`, which the 3.0 outbox claims and marks through. `EnsureSchemaOnStartup` applies it with
+the rest. It is additive, and 2.x consumers ignore the columns, so it is safe to apply ahead of the rollout.
+
+Apply it **before** any 3.0 outbox consumer starts, because a 3.0 claim fails against a table without the columns.
+Then replace every consumer promptly: a 2.x consumer ignores leases, so while 2.x and 3.0 consumers run side by
+side they can dispatch the same message twice.
+
 ## Process-file keys that are parsed but not yet honoured
 
 `ProcessNode` carries three properties the loader populates from the YAML and nothing in the engine reads:

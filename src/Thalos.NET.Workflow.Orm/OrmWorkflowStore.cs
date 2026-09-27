@@ -2,7 +2,6 @@ using System.Data.Async.Adapters;
 using System.Text.Json;
 using Npgsql;
 using ZeroAlloc.Outbox;
-using ZeroAlloc.Outbox.Orm;
 using ZeroAlloc.Results;
 
 namespace Thalos.Workflow.Orm;
@@ -664,11 +663,8 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         return connection;
     }
 
-    private IOutboxStore CreateOutboxStore(NpgsqlConnection connection)
-    {
-        var asyncConnection = connection.AsAsync();
-        return _options.OutboxStoreFactory?.Invoke(asyncConnection) ?? new OrmOutboxStore(asyncConnection);
-    }
+    private IOutboxStore CreateOutboxStore(NpgsqlConnection connection) =>
+        _options.OutboxStoreFactory(connection.AsAsync());
 
     /// <summary>
     /// The run-update + event-append + conditional-dispatch-enqueue sequence shared by <see cref="CompleteNodeAsync"/>

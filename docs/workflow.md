@@ -141,13 +141,25 @@ services.AddOutbox(o =>
         o.BatchSize = 20;
         o.MaxAttempts = 8;
         o.RetryBaseDelay = TimeSpan.FromSeconds(2);
+        o.LeaseDuration = TimeSpan.FromMinutes(15);
     })
-    .WithOrm();
+    .WithOrm(OutboxOrmDialect.Postgres);
 ```
 
-`.WithOrm()` registers `OrmOutboxStore`, whose only constructor parameter is an `IAsyncDbConnection` resolved from
-DI. Nothing registers one for you, and the type arrives transitively from `AdoNet.Async.Adapters` rather than from
-a package you added by name, so here it is in full — same database `AddWorkflowOrm` was given:
+Pass `OutboxOrmDialect.Postgres` (namespace `ZeroAlloc.Outbox.Orm`). Plain `.WithOrm()` selects the SQLite dialect,
+whose batch claim has no `FOR UPDATE SKIP LOCKED`: against PostgreSQL, a worker then waits on rows another worker's
+claim has locked instead of passing over them.
+
+`LeaseDuration` is how long a worker's claim on a message lasts. ZeroAlloc.Outbox 3.0 renews it once per message,
+just before the dispatch, never during it, so it must outlast the slowest single dispatch, which here is an agent
+turn. The 5-minute default does not: a turn that runs longer loses its lease, and another worker claims the same
+message and runs the same turn again. It is also the least a message waits before another worker picks it up after
+its worker died mid-turn, and `updated_at` does not move during that wait, so the stranded-run sweep's threshold
+(§5) has to cover the lease plus one more turn: 15 minutes here, against the sweep's 30.
+
+`.WithOrm(...)` registers `OrmOutboxStore` over an `IAsyncDbConnection` resolved from DI. Nothing registers one for
+you, and the type arrives transitively from `AdoNet.Async.Adapters` rather than from a package you added by name,
+so here it is in full — same database `AddWorkflowOrm` was given:
 
 ```csharp
 using System.Data.Async;            // IAsyncDbConnection

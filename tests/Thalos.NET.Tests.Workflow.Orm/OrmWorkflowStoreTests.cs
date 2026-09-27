@@ -655,7 +655,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     /// </summary>
     private sealed class ThrowingOutboxStore(IAsyncDbConnection connection) : IOutboxStore
     {
-        private readonly OrmOutboxStore _inner = new(connection);
+        private readonly OrmOutboxStore _inner = new(connection, OutboxOrmDialect.Postgres);
 
         public async ValueTask EnqueueAsync(string typeName, ReadOnlyMemory<byte> payload, DbTransaction? transaction, CancellationToken ct)
         {
@@ -666,16 +666,22 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         public ValueTask EnqueueDeferredAsync(string typeName, ReadOnlyMemory<byte> payload, CancellationToken ct) =>
             throw new NotSupportedException();
 
-        public ValueTask<IReadOnlyList<OutboxEntry>> FetchPendingAsync(int batchSize, CancellationToken ct) =>
+        public ValueTask<IReadOnlyList<OutboxEntry>> ClaimPendingAsync(int batchSize, OutboxLease lease, CancellationToken ct) =>
             throw new NotSupportedException();
 
-        public ValueTask MarkSucceededAsync(OutboxMessageId id, CancellationToken ct) =>
+        public ValueTask<bool> RenewLeaseAsync(OutboxMessageId id, OutboxLease lease, CancellationToken ct) =>
             throw new NotSupportedException();
 
-        public ValueTask MarkFailedAsync(OutboxMessageId id, int retryCount, DateTimeOffset nextRetryAt, CancellationToken ct) =>
+        public ValueTask<int> ReleaseLeasesAsync(IReadOnlyList<OutboxMessageId> ids, OutboxLease lease, CancellationToken ct) =>
             throw new NotSupportedException();
 
-        public ValueTask DeadLetterAsync(OutboxMessageId id, string error, CancellationToken ct) =>
+        public ValueTask<bool> MarkSucceededAsync(OutboxMessageId id, OutboxLease lease, CancellationToken ct) =>
+            throw new NotSupportedException();
+
+        public ValueTask<bool> MarkFailedAsync(OutboxMessageId id, int retryCount, DateTimeOffset nextRetryAt, OutboxLease lease, CancellationToken ct) =>
+            throw new NotSupportedException();
+
+        public ValueTask<bool> DeadLetterAsync(OutboxMessageId id, string error, OutboxLease lease, CancellationToken ct) =>
             throw new NotSupportedException();
     }
 }

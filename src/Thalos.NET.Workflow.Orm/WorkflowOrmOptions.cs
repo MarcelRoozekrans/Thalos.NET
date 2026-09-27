@@ -1,5 +1,6 @@
 using System.Data.Async;
 using ZeroAlloc.Outbox;
+using ZeroAlloc.Outbox.Orm;
 
 namespace Thalos.Workflow.Orm;
 
@@ -34,9 +35,19 @@ public sealed class WorkflowOrmOptions
     public bool EnsureSchemaOnStartup { get; set; } = true;
 
     /// <summary>
-    /// Test-only seam: overrides how <see cref="OrmWorkflowStore"/> obtains the <c>IOutboxStore</c> it enqueues the
-    /// post-transition dispatch message through. <see langword="null"/> (the default) uses
-    /// <c>ZeroAlloc.Outbox.Orm.OrmOutboxStore</c> against the same connection as the rest of the transaction.
+    /// How <see cref="OrmWorkflowStore"/> obtains the <c>IOutboxStore</c> it enqueues the post-transition dispatch
+    /// message through, over the same connection as the rest of the transaction. The default is
+    /// <see cref="CreatePostgresOutboxStore"/>; replacing it is a test-only seam.
     /// </summary>
-    internal Func<IAsyncDbConnection, IOutboxStore>? OutboxStoreFactory { get; set; }
+    internal Func<IAsyncDbConnection, IOutboxStore> OutboxStoreFactory { get; set; } = CreatePostgresOutboxStore;
+
+    /// <summary>
+    /// <c>ZeroAlloc.Outbox.Orm.OrmOutboxStore</c> with <see cref="OutboxOrmDialect.Postgres"/>. The store's
+    /// one-argument constructor selects <see cref="OutboxOrmDialect.Sqlite"/>, whose batch claim takes no
+    /// <c>FOR UPDATE SKIP LOCKED</c>, so against PostgreSQL a claimer blocks on rows another claimer holds instead
+    /// of passing over them. This package only enqueues through the store, which no dialect changes, but the store
+    /// it builds should never carry a claim spelled for a different database.
+    /// </summary>
+    private static OrmOutboxStore CreatePostgresOutboxStore(IAsyncDbConnection connection) =>
+        new(connection, OutboxOrmDialect.Postgres);
 }

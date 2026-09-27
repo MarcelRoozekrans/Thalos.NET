@@ -14,9 +14,11 @@ namespace Thalos.Workflow.Orm;
 /// The migrations embedded here start at version 1000 deliberately: <c>MigrationRunner</c>'s history table
 /// (<c>__zaorm_migrations</c>) is a single sequence shared by every migration source applied against the same
 /// database, keyed on <c>version</c> alone with no per-source namespace. <c>ZeroAlloc.Outbox.Orm</c>'s own
-/// migration claims version 1. A version collision is not rejected — it is silently treated as "already
-/// applied" and the colliding migration's SQL never runs — so this package reserves the 1000+ range to stay
-/// clear of the outbox's low numbers and of whatever range a future migration source picks next.
+/// migrations claim versions 1 (<c>create_outbox_messages</c>) and 2 (<c>add_outbox_lease</c>, since Outbox 3.0).
+/// Since ZeroAlloc.ORM 2.0 a version already applied under a different name throws
+/// <c>ZeroAllocOrmMigrationConflictException</c> instead of being skipped, so a collision now stops startup rather
+/// than silently never running the colliding SQL. This package reserves the 1000+ range to stay clear of the
+/// outbox's low numbers and of whatever range a future migration source picks next.
 /// <para>
 /// <b>Rolling deploys: migration 1004 is not backward compatible with pre-1004 code.</b> It adds
 /// <c>process_definition.content_hash</c> as <c>NOT NULL</c> with no default. PostgreSQL validates <c>NOT NULL</c>
