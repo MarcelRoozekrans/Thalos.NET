@@ -9,7 +9,7 @@ and `AddWorkflowOrm` registers two of them — this page is the other five.
 
 | Piece | Registered by `AddWorkflowOrm`? | What it does |
 | --- | --- | --- |
-| `IWorkflowStore` (`OrmWorkflowStore`) | yes | Writes the run, the event log and the next dispatch in one transaction |
+| `IWorkflowStore` and `IWorkflowRunHistory` (one `OrmWorkflowStore`) | yes | Writes the run, the event log and the next dispatch in one transaction; reads the event log back, with each completed node's token usage |
 | `IProcessDefinitionStore` (`OrmProcessDefinitionStore`, cached) | yes | The one answer to "what is this process, at this version" |
 | `IWorkflowReferenceResolver` | **no** | Turns an `agent:`/`skill:`/`action:` name in the YAML into something that exists |
 | `WorkflowNodeDispatcher` | **no** | Runs one node's agent turn and persists the transition |
@@ -42,7 +42,7 @@ services.AddThalos(thalos => thalos
     .AddWorkflowOrm(o => o.ConnectionString = configuration.GetConnectionString("workflow")!));
 ```
 
-`AddWorkflowOrm` registers `IWorkflowStore`, `IProcessDefinitionStore` (an `OrmProcessDefinitionStore` behind
+`AddWorkflowOrm` registers `IWorkflowStore` and `IWorkflowRunHistory` (one `OrmWorkflowStore` singleton behind both), `IProcessDefinitionStore` (an `OrmProcessDefinitionStore` behind
 `CachingProcessDefinitionStore`), the options object, and — while `WorkflowOrmOptions.EnsureSchemaOnStartup` is
 left on, which it is by default — a hosted service that applies the outbox and workflow migrations before the host
 accepts work. Read [`release.md`](release.md#schema-migrations-and-rolling-deploys) before leaving that on across a

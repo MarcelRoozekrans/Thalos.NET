@@ -25,7 +25,7 @@ namespace Thalos.Workflow.Orm;
 /// additionally checks the caller-supplied <c>seq</c> against the run's persisted <see cref="WorkflowRun.CurrentSeq"/>
 /// before touching anything, so a stale or redelivered completion is rejected the same way.
 /// </remarks>
-public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinitionStore definitions) : IWorkflowStore
+public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinitionStore definitions) : IWorkflowStore, IWorkflowRunHistory
 {
     private const string SelectRunSql = """
         SELECT id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, manifest, started_by, last_resumed_by, last_resumed_at, xmin::text::bigint AS xmin
@@ -35,7 +35,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     /// <summary>
     /// <see cref="RunManifest"/>'s JSON shape on the wire and in the <c>manifest</c> column,
     /// <see cref="RunPrincipal"/>'s in the <c>started_by</c> column, and <c>LastResumeEnvelope</c>'s in
-    /// <c>last_resumed_by</c>: web defaults (camelCase property names), matching <c>Thalos.Mcp.McpConfigFile</c>'s
+    /// <c>last_resumed_by</c>, and <see cref="TurnUsage"/>'s in <c>workflow_run_event.usage</c>: web defaults (camelCase property names), matching <c>Thalos.Mcp.McpConfigFile</c>'s
     /// convention for the same <see cref="JsonSerializerDefaults.Web"/> preset elsewhere in this repository.
     /// <see cref="AgentId"/> carries its own generated
     /// <see cref="System.Text.Json.Serialization.JsonConverterAttribute"/>, so it round-trips through its
@@ -138,7 +138,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             connection, tx, id, seq: SeedEventSeq,
             fromNode: null, toNode: startNode,
             status: WorkflowStatus.Running, awaitingSignal: null,
-            outcome: null, variables: seeded.Count == 0 ? null : seeded, error: null,
+            outcome: null, variables: seeded.Count == 0 ? null : seeded, error: null, usage: null,
             kind: nameof(WorkflowEventKind.Entered), ct).ConfigureAwait(false);
 
         // The start node's own dispatch, on this same transaction. Without it a run created through this API
@@ -311,7 +311,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
                 $"Workflow run '{runId}' expected seq {row.CurrentSeq} but completion reported seq {seq} — stale or redelivered completion.");
         }
 
-        await ApplyTransitionAsync(connection, tx, runId, seq, row, transition, result.Outcome, result.Variables, ct).ConfigureAwait(false);
+        await ApplyTransitionAsync(connection, tx, runId, seq, row, transition, result.Outcome, result.Variables, result.Usage, ct).ConfigureAwait(false);
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
     }
@@ -389,7 +389,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     {
         try
         {
-            await ApplyTransitionAsync(connection, tx, runId, row.CurrentSeq, row, transition, outcome: null, variables, ct).ConfigureAwait(false);
+            await ApplyTransitionAsync(connection, tx, runId, row.CurrentSeq, row, transition, outcome: null, variables, usage: null, ct).ConfigureAwait(false);
             await RecordResumeAsync(connection, tx, runId, resumedBy, signal, ct).ConfigureAwait(false);
             return Result.Success();
         }
@@ -500,7 +500,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             connection, tx, runId, row.CurrentSeq,
             fromNode: row.CurrentNode, toNode: row.CurrentNode,
             status: WorkflowStatus.Failed, awaitingSignal: null,
-            outcome: null, variables: null, error: errorMessage,
+            outcome: null, variables: null, error: errorMessage, usage: null,
             kind: nameof(WorkflowEventKind.Failed), ct).ConfigureAwait(false);
 
         return true;
@@ -562,7 +562,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             connection, tx, runId, row.CurrentSeq,
             fromNode: row.CurrentNode, toNode: row.CurrentNode,
             status: WorkflowStatus.Cancelled, awaitingSignal: null,
-            outcome: null, variables: null, error: reason,
+            outcome: null, variables: null, error: reason, usage: null,
             kind: "Cancelled", ct).ConfigureAwait(false);
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
@@ -615,6 +615,48 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         return results;
     }
 
+    /// <inheritdoc/>
+    /// <remarks>
+    /// Unbounded on purpose: this is one run's log, not a fleet query, and a history reader that silently dropped
+    /// the tail would under-report the run's usage. A run appends one event per start, node completion, resume and
+    /// termination, so the log grows with the run's own work: a loop capped by <c>maxVisits</c> is bounded by its
+    /// cap, and an uncapped branch loop by how often it loops — each iteration of which already cost an agent
+    /// turn, which dwarfs the row. <c>ix_workflow_run_event_run_id_seq</c> (migration 1001) covers both the filter
+    /// and the <c>ORDER BY</c>, so the read is one index range scan.
+    /// </remarks>
+    public async ValueTask<IReadOnlyList<WorkflowRunEvent>> ListEventsAsync(Guid runId, CancellationToken ct)
+    {
+        await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = """
+            SELECT seq, kind, from_node, to_node, status, outcome, error, usage, created_at
+            FROM workflow_run_event
+            WHERE run_id = @runId
+            ORDER BY seq ASC
+            """;
+        cmd.Parameters.AddWithValue("runId", runId);
+
+        var events = new List<WorkflowRunEvent>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            events.Add(ReadEvent(reader));
+        }
+
+        return events;
+    }
+
+    private static WorkflowRunEvent ReadEvent(NpgsqlDataReader reader) => new(
+        Seq: reader.GetInt64(0),
+        Kind: reader.GetString(1),
+        FromNode: reader.IsDBNull(2) ? null : reader.GetString(2),
+        ToNode: reader.GetString(3),
+        Status: reader.GetString(4),
+        Outcome: reader.IsDBNull(5) ? null : reader.GetString(5),
+        Error: reader.IsDBNull(6) ? null : reader.GetString(6),
+        Usage: reader.IsDBNull(7) ? null : JsonSerializer.Deserialize<TurnUsage>(reader.GetString(7), ManifestJsonOptions),
+        CreatedAt: reader.GetFieldValue<DateTimeOffset>(8));
+
     private async Task<NpgsqlConnection> OpenConnectionAsync(CancellationToken ct)
     {
         var connection = new NpgsqlConnection(_options.ConnectionString);
@@ -652,7 +694,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     /// </remarks>
     private async Task ApplyTransitionAsync(
         NpgsqlConnection connection, NpgsqlTransaction tx, Guid runId, long seq, RunRow row,
-        WorkflowTransition transition, string? outcome, IReadOnlyDictionary<string, object?>? variables, CancellationToken ct)
+        WorkflowTransition transition, string? outcome, IReadOnlyDictionary<string, object?>? variables, TurnUsage? usage, CancellationToken ct)
     {
         var visits = new Dictionary<string, int>(row.Visits, StringComparer.Ordinal);
         if (!string.Equals(transition.NextNode, row.CurrentNode, StringComparison.Ordinal))
@@ -677,7 +719,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             connection, tx, runId, seq,
             fromNode: row.CurrentNode, toNode: transition.NextNode,
             status: transition.NextStatus, awaitingSignal: transition.AwaitingSignal,
-            outcome: outcome, variables: variables, error: null,
+            outcome: outcome, variables: variables, error: null, usage: usage,
             kind: transition.Kind.ToString(), ct).ConfigureAwait(false);
 
         if (transition.NextStatus == WorkflowStatus.Running)
@@ -750,14 +792,14 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     private static async Task InsertEventAsync(
         NpgsqlConnection connection, NpgsqlTransaction tx, Guid runId, long seq,
         string? fromNode, string toNode, WorkflowStatus status, string? awaitingSignal,
-        string? outcome, IReadOnlyDictionary<string, object?>? variables, string? error,
+        string? outcome, IReadOnlyDictionary<string, object?>? variables, string? error, TurnUsage? usage,
         string kind, CancellationToken ct)
     {
         await using var cmd = connection.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
-            INSERT INTO workflow_run_event (run_id, seq, kind, from_node, to_node, status, awaiting_signal, outcome, variables, error)
-            VALUES (@runId, @seq, @kind, @fromNode, @toNode, @status, @awaitingSignal, @outcome, @variables::jsonb, @error)
+            INSERT INTO workflow_run_event (run_id, seq, kind, from_node, to_node, status, awaiting_signal, outcome, variables, error, usage)
+            VALUES (@runId, @seq, @kind, @fromNode, @toNode, @status, @awaitingSignal, @outcome, @variables::jsonb, @error, @usage::jsonb)
             """;
         cmd.Parameters.AddWithValue("runId", runId);
         cmd.Parameters.AddWithValue("seq", seq);
@@ -769,6 +811,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         cmd.Parameters.AddWithValue("outcome", (object?)outcome ?? DBNull.Value);
         cmd.Parameters.AddWithValue("variables", variables is null ? DBNull.Value : JsonSerializer.Serialize(variables));
         cmd.Parameters.AddWithValue("error", (object?)error ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("usage", usage is null ? DBNull.Value : JsonSerializer.Serialize(usage.Value, ManifestJsonOptions));
         try
         {
             await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);

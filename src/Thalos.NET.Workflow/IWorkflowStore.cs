@@ -97,7 +97,8 @@ public interface IWorkflowStore
     /// <see cref="WorkflowInterpreter.Advance"/> computed <paramref name="transition"/> assuming this is the
     /// increment that happens; a store that increments a different node's count, increments the same node
     /// twice, or increments on a self-transition, breaks the cap check on <paramref name="transition"/>'s next
-    /// call.
+    /// call. The appended event carries <paramref name="result"/>'s <see cref="NodeResult.Usage"/>, which
+    /// <see cref="IWorkflowRunHistory.ListEventsAsync"/> reads back as <see cref="WorkflowRunEvent.Usage"/>.
     /// </summary>
     ValueTask CompleteNodeAsync(Guid runId, long seq, WorkflowTransition transition, NodeResult result, CancellationToken ct);
 
