@@ -107,8 +107,12 @@ public sealed partial class ThalosAgentRuntime(
         {
             switch (evt)
             {
-                case TurnCompletedEvent done: result = done.Result; break;
-                case TurnFailedEvent failed: error = failed.Error; break;
+                case TurnCompletedEvent done:
+                    result = done.Result;
+                    break;
+                case TurnFailedEvent failed:
+                    error = failed.Error;
+                    break;
             }
         }
 
@@ -314,7 +318,12 @@ public sealed partial class ThalosAgentRuntime(
                         await scope.PublishAsync(new TextDeltaEvent(scope.SessionId, scope.TurnId, tc.Text), CancellationToken.None).ConfigureAwait(false);
                         break;
                     case UsageContent uc:
-                        usage.Value += new TurnUsage((int)(uc.Details.InputTokenCount ?? 0), (int)(uc.Details.OutputTokenCount ?? 0), usage.Value.ModelId);
+                        var cacheWrite = uc.Details.AdditionalCounts?.TryGetValue(TurnUsage.CacheWriteCountKey, out var w) == true ? w : 0;
+                        usage.Value += new TurnUsage((int)(uc.Details.InputTokenCount ?? 0), (int)(uc.Details.OutputTokenCount ?? 0), usage.Value.ModelId)
+                        {
+                            CacheReadTokens = (int)(uc.Details.CachedInputTokenCount ?? 0),
+                            CacheWriteTokens = (int)cacheWrite,
+                        };
                         break;
                 }
             }
