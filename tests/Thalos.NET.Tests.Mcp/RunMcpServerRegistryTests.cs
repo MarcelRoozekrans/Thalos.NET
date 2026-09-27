@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.Versioning;
 using AwesomeAssertions.Execution;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -617,6 +618,49 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         running.Should().BeFalse("the removal ends a server whose client never connected, not only the wrapper the SDK started it under");
         workspaceFree.Should().BeTrue("once the removal returns, no process has the run's workspace as its working directory");
     }
+
+    [SkippableFact]
+    [SupportedOSPlatform("windows")]
+    public async Task A_stop_waits_past_the_shutdown_timeout_for_its_killed_server_to_finish_exiting()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "Only on Windows does the registry end the server's process tree itself.");
+        var events = new RecordingLoggerProvider();
+        using var loggerFactory = LoggerFactory.Create(b => b.SetMinimumLevel(LogLevel.Trace).AddProvider(events));
+        var definition = McpServerFixture.Definition("--host");
+        definition.ShutdownTimeout = TimeSpan.FromSeconds(1);
+        definition.RunScoped = new() { Args = [.. ServerArgs, "--shutdown-delay-ms", "60000"] }; // only a kill ends it
+        var registry = new RunMcpServerRegistry(Servers(definition), () => new FakeProvider(null), loggerFactory, TimeProvider.System);
+        _registries.Add(registry);
+
+        // Each killed process's exit signal arrives 2.5 s after the wait for it begins: a teardown that lags past the
+        // 1 s shutdown timeout, as one can under load.
+        var signalDelay = TimeSpan.FromSeconds(2.5);
+        var delayedSignals = 0;
+        registry.WaitForProcessExit = async (process, wait) =>
+        {
+            if (wait < signalDelay)
+            {
+                await Task.Delay(wait);
+                return false;
+            }
+
+            await Task.Delay(signalDelay);
+            Interlocked.Increment(ref delayedSignals);
+            return await ServerProcessTree.WaitForExitAsync(process, wait - signalDelay);
+        };
+
+        await registry.OnReadyAsync(Workspace(), CancellationToken.None);
+        var pid = await PidAsync(registry);
+        await KillWrapperOnlyAsync(pid); // the server outlives the SDK's dispose, so the registry's own kill ends it
+        await registry.OnRemovingAsync(Workspace(), CancellationToken.None);
+
+        using var _scope = new AssertionScope();
+        delayedSignals.Should().BeGreaterThan(0, "the server's process was killed and its delayed exit was waited for");
+        events.Count(ProcessTreeNotEndedEvent).Should().Be(0, "the wait for a killed process to finish exiting is not cut short by the shutdown timeout");
+        IsRunning(pid).Should().BeFalse();
+    }
+
+    private static readonly EventId ProcessTreeNotEndedEvent = new(322);
 
     [Fact]
     public async Task Disposing_the_registry_while_a_server_is_starting_stops_it_promptly_and_leaves_no_process()

@@ -40,6 +40,17 @@ internal static partial class ServerProcessTree
     private const int ErrorNoMoreFiles = 18;
 
     /// <summary>
+    /// How long to wait, after terminating them, for the server's processes to finish exiting and closing their handles.
+    /// Termination is asynchronous: a killed process holds its handles, the working directory among them, until the
+    /// kernel has torn it down, which usually takes milliseconds but can lag by seconds under load. The registry's
+    /// contract is that no process holds the workspace as its working directory when a stop returns, so this waits for
+    /// the teardown itself. It is not <see cref="McpServerDefinition.ShutdownTimeout"/>, the grace period a server gets to
+    /// exit on its own, which the SDK has already spent before it kills; it only keeps a process that never finishes
+    /// exiting from holding a stop forever.
+    /// </summary>
+    public static readonly TimeSpan TerminationWait = TimeSpan.FromSeconds(30);
+
+    /// <summary>
     /// The system time, as a <c>FILETIME</c>, at full precision. Process creation times are stamped at full precision;
     /// the coarse system time lags them by up to a clock tick, so a process created just before a coarse reading could
     /// look created after it.
@@ -52,19 +63,22 @@ internal static partial class ServerProcessTree
 
     /// <summary>
     /// Kills every process that descends from <paramref name="wrapperPid"/>, and the wrapper itself if it is still
-    /// terminating, then waits until each has exited and closed its handles, for at most <paramref name="timeout"/>.
+    /// terminating, then waits until each has exited and closed its handles, for at most <see cref="TerminationWait"/>.
     /// </summary>
     /// <param name="wrapperPid">The process the SDK started, <c>cmd.exe</c>.</param>
     /// <param name="startedAt">From <see cref="Now"/>, taken before the start; a process created before it is not the server's.</param>
     /// <param name="closedAt">From <see cref="Now"/>, taken once the session's close was observed; the wrapper's own children were all created before it.</param>
-    /// <param name="timeout">How long to wait for the killed processes to exit.</param>
-    /// <returns>How many processes of the tree were found, and how many of them had not exited when the wait ended.</returns>
+    /// <returns>How many processes of the tree were found, and the ids of those that had not exited when the wait ended.</returns>
     /// <exception cref="Win32Exception">The processes could not be listed.</exception>
-    public static Task<(int Found, int StillRunning)> EndAsync(int wrapperPid, long startedAt, long closedAt, TimeSpan timeout) =>
-        EndAsync(wrapperPid, startedAt, closedAt, timeout, Snapshot);
+    public static Task<(int Found, IReadOnlyList<int> StillRunning)> EndAsync(int wrapperPid, long startedAt, long closedAt) =>
+        EndAsync(wrapperPid, startedAt, closedAt, Snapshot, WaitForExitAsync);
 
-    /// <summary><see cref="EndAsync(int, long, long, TimeSpan)"/> over the process list <paramref name="snapshot"/> takes; a seam for tests.</summary>
-    internal static async Task<(int Found, int StillRunning)> EndAsync(int wrapperPid, long startedAt, long closedAt, TimeSpan timeout, Func<ProcessSnapshot> snapshot)
+    /// <summary>
+    /// <see cref="EndAsync(int, long, long)"/> over the process list <paramref name="snapshot"/> takes, waiting for each
+    /// process's exit signal through <paramref name="waitForExit"/>; a seam for tests.
+    /// </summary>
+    internal static async Task<(int Found, IReadOnlyList<int> StillRunning)> EndAsync(
+        int wrapperPid, long startedAt, long closedAt, Func<ProcessSnapshot> snapshot, Func<WaitHandle, TimeSpan, Task<bool>> waitForExit)
     {
         var tree = Collect(wrapperPid, startedAt, closedAt, snapshot());
         try
@@ -74,14 +88,14 @@ internal static partial class ServerProcessTree
                 _ = TerminateProcess(process.SafeWaitHandle, 1); // fails for one already terminating, which the wait covers
             }
 
-            var deadline = DateTime.UtcNow + timeout;
-            var stillRunning = 0;
+            var deadline = DateTime.UtcNow + TerminationWait;
+            var stillRunning = new List<int>();
             foreach (var process in tree)
             {
                 var left = deadline - DateTime.UtcNow;
-                if (!await ExitedAsync(process, left > TimeSpan.Zero ? left : TimeSpan.Zero).ConfigureAwait(false))
+                if (!await waitForExit(process, left > TimeSpan.Zero ? left : TimeSpan.Zero).ConfigureAwait(false))
                 {
-                    stillRunning++;
+                    stillRunning.Add(process.Pid);
                 }
             }
 
@@ -152,8 +166,11 @@ internal static partial class ServerProcessTree
         return tree;
     }
 
-    /// <summary>Waits, without blocking a thread, until <paramref name="process"/>'s handle is signalled or <paramref name="timeout"/> passes.</summary>
-    private static async Task<bool> ExitedAsync(OpenedProcess process, TimeSpan timeout)
+    /// <summary>
+    /// Waits, without blocking a thread, until <paramref name="process"/> is signalled, which for a process handle means
+    /// it has exited and closed its handles, or until <paramref name="timeout"/> passes. Whether it was signalled.
+    /// </summary>
+    internal static async Task<bool> WaitForExitAsync(WaitHandle process, TimeSpan timeout)
     {
         var exited = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         var registration = ThreadPool.RegisterWaitForSingleObject(
@@ -170,7 +187,7 @@ internal static partial class ServerProcessTree
 
     /// <summary>Every running process's children by parent id, and every running process id, from one Toolhelp snapshot.</summary>
     /// <exception cref="Win32Exception">The snapshot could not be taken or read to its end.</exception>
-    private static ProcessSnapshot Snapshot()
+    internal static ProcessSnapshot Snapshot()
     {
         var children = new Dictionary<int, List<int>>();
         var running = new HashSet<int>();
@@ -246,12 +263,16 @@ internal static partial class ServerProcessTree
     /// </summary>
     private sealed class OpenedProcess : WaitHandle
     {
-        private OpenedProcess(SafeWaitHandle handle, long created, bool terminating)
+        private OpenedProcess(SafeWaitHandle handle, int pid, long created, bool terminating)
         {
             SafeWaitHandle = handle;
+            Pid = pid;
             Created = created;
             Terminating = terminating;
         }
+
+        /// <summary>The process id.</summary>
+        public int Pid { get; }
 
         /// <summary>The creation time, as a <c>FILETIME</c>.</summary>
         public long Created { get; }
@@ -269,7 +290,7 @@ internal static partial class ServerProcessTree
                 return null;
             }
 
-            return new OpenedProcess(handle, created, exitCode != StillActive);
+            return new OpenedProcess(handle, pid, created, exitCode != StillActive);
         }
     }
 

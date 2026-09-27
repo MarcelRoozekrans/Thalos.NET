@@ -25,7 +25,7 @@ public sealed class ServerProcessTreeTests
         using var victim = StartVictim(); // took a listed descendant's id after the listing
         var closedAt = Later(ServerProcessTree.Now()); // strictly after the victim, so only the listing's time refuses it
 
-        var (found, _) = await ServerProcessTree.EndAsync(WrapperPid, startedAt, closedAt, TimeSpan.FromSeconds(5), () => Listing(victim.Id, snapshotAt));
+        var (found, _) = await ServerProcessTree.EndAsync(WrapperPid, startedAt, closedAt, () => Listing(victim.Id, snapshotAt), ServerProcessTree.WaitForExitAsync);
 
         using var _scope = new AssertionScope();
         found.Should().Be(0, "a process created after the listing cannot be the one the listing named");
@@ -42,7 +42,7 @@ public sealed class ServerProcessTreeTests
         using var victim = StartVictim(); // created after the wrapper had exited, so it cannot be the wrapper's child
         var snapshotAt = NextTick(ServerProcessTree.Now());
 
-        var (found, _) = await ServerProcessTree.EndAsync(WrapperPid, startedAt, closedAt, TimeSpan.FromSeconds(5), () => Listing(victim.Id, snapshotAt));
+        var (found, _) = await ServerProcessTree.EndAsync(WrapperPid, startedAt, closedAt, () => Listing(victim.Id, snapshotAt), ServerProcessTree.WaitForExitAsync);
 
         using var _scope = new AssertionScope();
         found.Should().Be(0, "the wrapper's own children were all created before its session closed");
@@ -59,11 +59,11 @@ public sealed class ServerProcessTreeTests
         var snapshotAt = ServerProcessTree.Now();
         var closedAt = Later(snapshotAt);
 
-        var (found, stillRunning) = await ServerProcessTree.EndAsync(WrapperPid, startedAt, closedAt, TimeSpan.FromSeconds(15), () => Listing(victim.Id, snapshotAt));
+        var (found, stillRunning) = await ServerProcessTree.EndAsync(WrapperPid, startedAt, closedAt, () => Listing(victim.Id, snapshotAt), ServerProcessTree.WaitForExitAsync);
 
         using var _scope = new AssertionScope();
         found.Should().Be(1, "the seam's listing is honoured, so the two tests above are refused by their bounds, not by the seam");
-        stillRunning.Should().Be(0);
+        stillRunning.Should().BeEmpty();
         victim.HasExited.Should().BeTrue("a process within every bound is the server's, and is ended");
     }
 

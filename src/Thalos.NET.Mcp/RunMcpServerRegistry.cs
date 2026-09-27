@@ -28,8 +28,11 @@ namespace Thalos.Mcp;
 /// <b>The whole process tree.</b> On Windows the MCP SDK starts a stdio server as <c>cmd.exe /c</c> and, when its
 /// client is disposed, waits for that wrapper alone: the server may still be terminating, or, if the wrapper exited
 /// first, still running. So every time the registry lets go of a server, stopped, found dead, restarted or failed while
-/// connecting, it also ends what is left of that server's tree and waits for it, bounded by the server's
-/// <see cref="McpServerDefinition.ShutdownTimeout"/>; see <see cref="ServerProcessTree"/>.
+/// connecting, it also ends what is left of that server's tree and waits until those processes have closed their handles.
+/// That wait is bounded by <see cref="ServerProcessTree.TerminationWait"/>, not by
+/// <see cref="McpServerDefinition.ShutdownTimeout"/>: the shutdown timeout is the grace period before the kill, which the
+/// SDK has already spent, and a killed process's teardown can lag well past it under load; see
+/// <see cref="ServerProcessTree"/>.
 /// </para>
 /// <para>
 /// <b>A removed run's server is never started again.</b> <c>GitWorktreeWorkspaceProvider</c> marks the workspace
@@ -94,7 +97,8 @@ namespace Thalos.Mcp;
 /// <param name="runScopedServers">
 /// The <c>.mcp.json</c> entries that declare <see cref="McpServerDefinition.RunScoped"/>, keyed by source name. Each
 /// must be a stdio server with a command, a valid <see cref="RunScopedMcpDefinition.Reload"/> and valid timeouts,
-/// including a <see cref="McpServerDefinition.ShutdownTimeout"/> that is positive and at most <see cref="int.MaxValue"/> ms.
+/// including a <see cref="McpServerDefinition.ShutdownTimeout"/> that is positive and at most <see cref="int.MaxValue"/> ms,
+/// since it also bounds the wait for a closing session to report its process.
 /// </param>
 /// <param name="workspaces">
 /// Returns the provider that finds a run's workspace after a host restart, or <see langword="null"/> when the host has no
@@ -930,9 +934,17 @@ public sealed partial class RunMcpServerRegistry(
     }
 
     /// <summary>
+    /// A test seam: replaces how <see cref="EndProcessTreeAsync"/> waits for one killed process's exit signal, given the
+    /// wait that is left. <see langword="null"/>, the default, waits on the process handle itself.
+    /// </summary>
+    internal Func<WaitHandle, TimeSpan, Task<bool>>? WaitForProcessExit { get; set; }
+
+    /// <summary>
     /// On Windows, kills what is left of the process tree that <paramref name="transport"/>'s closed session started and
-    /// waits for it, bounded by the server's shutdown timeout; see <see cref="ServerProcessTree"/>. Elsewhere the SDK has
-    /// already waited for the server itself.
+    /// waits until those processes have exited and closed their handles, for at most
+    /// <see cref="ServerProcessTree.TerminationWait"/>; see <see cref="ServerProcessTree"/>. The server's shutdown timeout
+    /// bounds only the wait for the session to report its close, which the SDK has done by the time it returns from a
+    /// dispose. Elsewhere the SDK has already waited for the server itself.
     /// </summary>
     private async Task EndProcessTreeAsync(Entry entry, TrackedStdioClientTransport transport)
     {
@@ -941,18 +953,19 @@ public sealed partial class RunMcpServerRegistry(
             return;
         }
 
-        var timeout = entry.Spec.Definition.ShutdownTimeout;
-        if (await transport.ClosedProcessAsync(timeout).ConfigureAwait(false) is not var (wrapperPid, closedAt))
+        if (await transport.ClosedProcessAsync(entry.Spec.Definition.ShutdownTimeout).ConfigureAwait(false) is not var (wrapperPid, closedAt))
         {
             return;
         }
 
         try
         {
-            var (found, stillRunning) = await ServerProcessTree.EndAsync(wrapperPid, transport.StartedAt, closedAt, timeout).ConfigureAwait(false);
-            if (stillRunning > 0)
+            var (found, stillRunning) = WaitForProcessExit is { } waitForExit
+                ? await ServerProcessTree.EndAsync(wrapperPid, transport.StartedAt, closedAt, ServerProcessTree.Snapshot, waitForExit).ConfigureAwait(false)
+                : await ServerProcessTree.EndAsync(wrapperPid, transport.StartedAt, closedAt).ConfigureAwait(false);
+            if (stillRunning.Count > 0)
             {
-                LogProcessTreeNotEnded(_logger, entry.Spec.Name, entry.Workspace.RunId, stillRunning, timeout);
+                LogProcessTreeNotEnded(_logger, entry.Spec.Name, entry.Workspace.RunId, string.Join(", ", stillRunning.Select(pid => pid.ToString(CultureInfo.InvariantCulture))), ServerProcessTree.TerminationWait);
             }
             else if (found > 0)
             {
@@ -1055,7 +1068,7 @@ public sealed partial class RunMcpServerRegistry(
             ThrowIfInvalidTimeouts(name, runScoped, nameof(servers));
             if (definition.ShutdownTimeout <= TimeSpan.Zero || definition.ShutdownTimeout > MaxTimeout)
             {
-                // It also bounds the wait for the rest of the server's process tree, which a timer cannot time past MaxTimeout.
+                // It also bounds the wait for a closing session to report its process, which a timer cannot time past MaxTimeout.
                 throw new ArgumentException(
                     $"Run-scoped MCP server '{name}' has shutdownTimeout {definition.ShutdownTimeout}; it must be positive and at most {MaxTimeout}.", nameof(servers));
             }
@@ -1223,8 +1236,8 @@ public sealed partial class RunMcpServerRegistry(
     [LoggerMessage(EventId = 321, Level = LogLevel.Debug, Message = "Ended {Count} leftover processes of run-scoped MCP server '{Server}' for run {RunId}")]
     private static partial void LogProcessTreeEnded(ILogger logger, string server, Guid runId, int count);
 
-    [LoggerMessage(EventId = 322, Level = LogLevel.Warning, Message = "Run-scoped MCP server '{Server}' for run {RunId} left {Count} processes running {Timeout} after they were killed")]
-    private static partial void LogProcessTreeNotEnded(ILogger logger, string server, Guid runId, int count, TimeSpan timeout);
+    [LoggerMessage(EventId = 322, Level = LogLevel.Warning, Message = "Run-scoped MCP server '{Server}' for run {RunId} left processes {Pids} not exited {Timeout} after they were killed; its workspace may still be in use")]
+    private static partial void LogProcessTreeNotEnded(ILogger logger, string server, Guid runId, string pids, TimeSpan timeout);
 
     [LoggerMessage(EventId = 323, Level = LogLevel.Warning, Message = "The processes of run-scoped MCP server '{Server}' for run {RunId} could not be listed, so any left running were not ended")]
     private static partial void LogProcessTreeNotListed(ILogger logger, Exception exception, string server, Guid runId);
