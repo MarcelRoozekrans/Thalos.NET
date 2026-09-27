@@ -264,7 +264,8 @@ hosting platform.
 Nothing removes a workspace on its own. Register `RunWorkspaceSweeper` (`Thalos.NET.Workflow`) and call its
 `SweepAsync` on a timer: it removes the workspaces of succeeded runs, of failed or cancelled runs that were never
 resumed, and of runs that never got a run row after a 10-minute grace, and keeps those of running, awaiting and
-resumed-then-failed runs. Without it, worktrees and each run's MCP server processes stay until the host shuts down.
+resumed-then-failed or resumed-then-cancelled runs. Without it, worktrees and each run's MCP server processes
+stay until the host shuts down.
 An `.mcp.json` entry with a `runScoped` object starts one private copy of that server per run, against the run's
 workspace, with `${run.id}`, `${run.workspace.root}` and `${run.workspace.solution}` substituted; wait for those
 servers with `IRunToolServerReadiness.WaitAllReadyAsync` from an `IWorkflowDispatchGate` before each turn. See

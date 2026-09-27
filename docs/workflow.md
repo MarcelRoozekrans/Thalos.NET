@@ -614,8 +614,9 @@ internal sealed class RunToolServersGate(IRunToolServerReadiness servers) : IWor
 services.AddSingleton<IWorkflowDispatchGate, RunToolServersGate>();
 ```
 
-`WaitAllReadyAsync` succeeds at once when no `runScoped` entry is configured, fails naming the server when one is
-not ready within the timeout, and fails for a run that has no recorded workspace, so a host whose runs do not all
+Register this gate only when at least one `runScoped` entry exists: `IRunToolServerReadiness` is registered by the
+first such entry, so without one the gate cannot be resolved. `WaitAllReadyAsync` fails naming the server when one
+is not ready within the timeout, and fails for a run that has no recorded workspace, so a host whose runs do not all
 have one skips the wait for those. Its own timeout is a failed result, and it throws `OperationCanceledException`
 only when `ct` is cancelled, which is what the gate contract in §4 asks for.
 
@@ -636,8 +637,15 @@ internal sealed class RunWorkspaceSweepService(RunWorkspaceSweeper sweeper) : Ba
         using var timer = new PeriodicTimer(TimeSpan.FromMinutes(5));
         while (await timer.WaitForNextTickAsync(ct))
         {
-            var removed = await sweeper.SweepAsync(ct);
-            // log removed when non-zero
+            try
+            {
+                var removed = await sweeper.SweepAsync(ct);
+                // log removed when non-zero
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+            {
+                // log and keep sweeping: an unhandled exception here would stop the host
+            }
         }
     }
 }
@@ -653,7 +661,8 @@ The sweeper decides from the run row, read just before each removal:
   workspace and starting its run.
 
 Removing a workspace stops the run's `runScoped` servers first. A removal that fails or is refused is logged and
-retried by the next sweep; `SweepAsync` returns how many it removed and throws only when `ct` is cancelled.
+retried by the next sweep, never thrown. `SweepAsync` returns how many it removed; it throws when `ct` is cancelled
+and when listing the workspaces itself fails, which is why the service above catches and logs.
 
 ## Limits worth knowing before you author a process
 
