@@ -36,8 +36,9 @@ public sealed record RunWorkspace(Guid RunId, string Repository, string Remote, 
     /// sweeper removes a workspace with no run row only once it is older than a grace period, because a run's
     /// workspace exists before its run row does. Stamped as the ready record is published, after the clone or fetch
     /// and the worktree checkout, so a slow create does not use up the grace; the ready observers run after it, so
-    /// the time they take still counts against the grace. A provider may stamp a provisional record too, but its
-    /// liveness is the provider's business, not this value's.
+    /// the time they take still counts against the grace. A provider may also stamp a record it lists before it is
+    /// ready; there this value only decides when a sweeper first tries to remove it, and the provider's
+    /// <see cref="IRunWorkspaceProvider.RemoveAsync"/> decides whether that removal goes ahead.
     /// </summary>
     public DateTimeOffset CreatedAt { get; init; }
 }

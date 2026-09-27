@@ -341,8 +341,9 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
         // CreatedAt is stamped again here, as the record turns Ready, not left at the claim instant: the orphan grace
         // a sweeper applies to a workspace with no run row must start once the host can start the run, not before a
-        // first clone or a queued mirror lock that may itself take longer than the grace (ruling R9). The claim's own
-        // age has no use: a provisional record's liveness is its run lock.
+        // first clone or a queued mirror lock that may itself take longer than the grace (ruling R9). The claim-time
+        // stamp still matters for a provisional record, which ListAsync reports: it only decides when a sweeper first
+        // tries to remove the record, and the run lock decides whether that removal goes ahead.
         var workspace = provisional with { SolutionPath = solution.Value, CreatedAt = clock.GetUtcNow() };
         var published = await PublishSidecarAsync(new WorkspaceSidecar(WorkspaceSidecarState.Ready, workspace), ct).ConfigureAwait(false);
         if (published.IsFailure)

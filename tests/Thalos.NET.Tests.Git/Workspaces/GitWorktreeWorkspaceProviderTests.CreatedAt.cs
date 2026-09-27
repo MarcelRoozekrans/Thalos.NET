@@ -28,6 +28,10 @@ public sealed partial class GitWorktreeWorkspaceProviderTests
         {
             create = provider.CreateAsync(Request(remote, runId), CancellationToken.None).AsTask();
             await WaitForAsync(() => File.Exists(SidecarPath(runId)), "the create never published its claim");
+
+            // Proves the create is parked, not merely slower than the poll above: unparked, a whole create against a
+            // local remote finishes well inside this bound, so a lock that no longer parks it turns this red.
+            (await Task.WhenAny(create, Task.Delay(TimeSpan.FromSeconds(5)))).Should().NotBeSameAs(create, "the held mirror lock must park the create");
             clock.Advance(TimeSpan.FromMinutes(30));
         }
 
