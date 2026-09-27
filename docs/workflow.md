@@ -134,14 +134,18 @@ internal sealed class WorkflowDispatchOutboxDispatcher(WorkflowNodeDispatcher di
 ```
 
 ```csharp
+// The two budgets every outbox and sweep timing below is derived from. Take both from your own configuration.
+TimeSpan gateWait = TimeSpan.FromMinutes(10);     // the longest any IWorkflowDispatchGate waits before it answers
+TimeSpan turnDeadline = TimeSpan.FromMinutes(10); // SubagentBudget.Deadline, the agent turn's wall-clock cap
+
 services.AddScoped<IOutboxTypeDispatcher, WorkflowDispatchOutboxDispatcher>();
 services.AddOutbox(o =>
     {
         o.PollingInterval = TimeSpan.FromSeconds(5);
-        o.BatchSize = 20;
+        o.BatchSize = 1;
         o.MaxAttempts = 8;
         o.RetryBaseDelay = TimeSpan.FromSeconds(2);
-        o.LeaseDuration = TimeSpan.FromMinutes(15);
+        o.LeaseDuration = gateWait + turnDeadline + TimeSpan.FromMinutes(5); // 25 minutes
     })
     .WithOrm(OutboxOrmDialect.Postgres);
 ```
@@ -151,11 +155,17 @@ whose batch claim has no `FOR UPDATE SKIP LOCKED`: against PostgreSQL, a worker 
 claim has locked instead of passing over them.
 
 `LeaseDuration` is how long a worker's claim on a message lasts. ZeroAlloc.Outbox 3.0 renews it once per message,
-just before the dispatch, never during it, so it must outlast the slowest single dispatch, which here is an agent
-turn. The 5-minute default does not: a turn that runs longer loses its lease, and another worker claims the same
-message and runs the same turn again. It is also the least a message waits before another worker picks it up after
-its worker died mid-turn, and `updated_at` does not move during that wait, so the stranded-run sweep's threshold
-(§5) has to cover the lease plus one more turn: 15 minutes here, against the sweep's 30.
+just before `DispatchAsync`, never during it, so **`LeaseDuration` must be longer than the longest gate wait plus the
+turn deadline**: a dispatch runs the dispatch gates first and the agent turn after them, and both count. (An
+`action:` node's dispatch is its host action instead; if one of those can run longer, size against that.) A
+dispatch that outlives its lease is claimed by another worker, which runs the same gate and the same agent turn
+again. The 5-minute default is too short for any agent turn worth the name. The margin on top matters too: a lease
+exactly as long as the worst case has none.
+
+`BatchSize = 1` because every message here is a multi-minute agent turn. A worker dispatches its claimed batch one
+message after another, and every message in the batch was leased at the claim, so with a batch of 20 the later
+messages wait behind the earlier turns while their leases run out, and other replicas sit idle with nothing to
+claim. One message per claim leaves the rest on the table for whichever worker is free.
 
 `.WithOrm(...)` registers `OrmOutboxStore` over an `IAsyncDbConnection` resolved from DI. Nothing registers one for
 you, and the type arrives transitively from `AdoNet.Async.Adapters` rather than from a package you added by name,
@@ -188,7 +198,8 @@ further gate. Wire none with `gates: []` — a required argument, not an optiona
 omission. A run can sit inside a gate for as long as its own wait allows — up to ten minutes for the tool-server
 case above — and that whole time counts against the reconciler's `olderThan` budget (§5): `updated_at` does not
 move while a gate is running any more than it moves during the agent turn itself, so a gate's own wait has to fit
-comfortably inside `StrandedAfter`, the same constraint the turn length already has to satisfy.
+comfortably inside `StrandedAfter`, the same constraint the turn length already has to satisfy, and inside the
+outbox's `LeaseDuration` (§4) together with the turn.
 
 **A gate's own `OperationCanceledException` means `ct` was cancelled, and nothing else.** Both
 `OutboxWorkerService` (ZeroAlloc.Outbox) and Daedalus's own outbox loop catch a dispatch failure
@@ -220,7 +231,8 @@ services.AddHostedService<WorkflowSweepService>();
 ```csharp
 internal sealed class WorkflowSweepService(WorkflowRunReconciler reconciler) : BackgroundService
 {
-    private static readonly TimeSpan StrandedAfter = TimeSpan.FromMinutes(30);
+    // Longer than LeaseDuration (25) + gate wait (10) + turn deadline (10) + retry backoff (about 4), all from §4.
+    private static readonly TimeSpan StrandedAfter = TimeSpan.FromMinutes(60);
 
     protected override async Task ExecuteAsync(CancellationToken ct)
     {
@@ -238,11 +250,15 @@ internal sealed class WorkflowSweepService(WorkflowRunReconciler reconciler) : B
 query saw, so a run a concurrent dispatch completes in between is left alone. Runs in `Awaiting` are excluded
 outright — a gate has nothing in flight by design and may legitimately sit for days.
 
-**Choosing the threshold is the whole risk.** It must comfortably exceed both the longest a healthy node's agent
-turn runs — minutes, routinely — and the outbox's own retry-and-backoff window, because `updated_at` does not
-advance while a message is still retrying. Sized only against turn length, this sweep terminates runs whose next
-delivery attempt would have succeeded. With `MaxAttempts = 8` and `RetryBaseDelay = 2s` the backoff alone reaches
-roughly four minutes; 30 minutes leaves room for both. `SweepAsync` rejects a zero or negative threshold rather
+**Choosing the threshold is the whole risk.** `updated_at` moves only when a run transitions, so it stands still
+through everything that can legitimately happen to one dispatch before the run moves on: the gate wait and the
+agent turn, the lease left to run out when a worker dies mid-turn before another worker may claim the message, a
+second gate wait and turn on that next attempt, and the outbox's retry backoff between failed attempts. So
+**`StrandedAfter` must be longer than `LeaseDuration` + the longest gate wait + the turn deadline + the retry
+backoff.** Sized against less, this sweep terminates runs whose next delivery attempt would have succeeded. With
+`MaxAttempts = 8` and `RetryBaseDelay = 2s` the backoff alone reaches roughly four minutes, so §4's budgets come to
+about 49 minutes, and 60 leaves a margin. Derive it from the same `gateWait` and `turnDeadline` as the lease, so
+raising one raises the other. `SweepAsync` rejects a zero or negative threshold rather
 than let a config binding that resolved to a default take the fleet down.
 
 The reason it records against a run is deliberately hedged: from the run row alone, a dead-lettered dispatch and a

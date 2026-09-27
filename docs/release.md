@@ -196,6 +196,13 @@ Apply it **before** any 3.0 outbox consumer starts, because a 3.0 claim fails ag
 Then replace every consumer promptly: a 2.x consumer ignores leases, so while 2.x and 3.0 consumers run side by
 side they can dispatch the same message twice.
 
+Versions 1 (`create_outbox_messages`) and 2 (`add_outbox_lease`) belong to the outbox. Every migration source run
+against the database shares one history table, `__zaorm_migrations`, keyed on version alone, which is why
+`WorkflowOrmMigrations` starts at 1001. A host's own migration at version 1 or 2, already applied or not, now stops startup: since
+ZeroAlloc.ORM 2.0, `MigrationRunner` throws `ZeroAllocOrmMigrationConflictException` for a version already applied
+under a different name, where 1.x silently skipped the colliding migration and never ran its SQL. Move such a
+migration out of the outbox's range before upgrading.
+
 ## Process-file keys that are parsed but not yet honoured
 
 `ProcessNode` carries three properties the loader populates from the YAML and nothing in the engine reads:
