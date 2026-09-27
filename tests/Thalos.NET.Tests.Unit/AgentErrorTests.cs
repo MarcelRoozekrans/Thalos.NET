@@ -5,12 +5,12 @@ namespace Thalos.Tests.Unit;
 public class SubagentAgentErrorTests
 {
     [Fact]
-    public void SubagentBudgetExceeded_carries_its_code_and_the_cap()
+    public void SubagentBudgetExceeded_carries_its_code_and_the_ceiling()
     {
-        var error = AgentError.SubagentBudgetExceeded(5000);
+        var error = AgentError.SubagentBudgetExceeded(maxTokens: 5000, roundTrip: 3, tokensSoFar: 4800);
 
         error.Code.Should().Be(AgentErrorCode.SubagentBudgetExceeded);
-        error.Message.Should().Contain("5000");
+        error.Message.Should().Contain("5000").And.Contain("3").And.Contain("4800");
     }
 
     [Fact]

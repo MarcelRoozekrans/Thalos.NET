@@ -181,10 +181,6 @@ public readonly record struct AgentError(AgentErrorCode Code, string Message, st
     /// <summary><see cref="AgentErrorCode.SkillSearchUnavailable"/>; <paramref name="detail"/> is a diagnostic such as the exception type name.</summary>
     public static AgentError SkillSearchUnavailable(string message, string? detail = null) => new(AgentErrorCode.SkillSearchUnavailable, message, detail);
 
-    /// <summary><see cref="AgentErrorCode.SubagentBudgetExceeded"/>: the run exceeded <paramref name="maxTokens"/>.</summary>
-    public static AgentError SubagentBudgetExceeded(int maxTokens) =>
-        new(AgentErrorCode.SubagentBudgetExceeded, $"The subagent run exceeded its budget of {maxTokens} tokens.");
-
     /// <summary>
     /// <see cref="AgentErrorCode.SubagentBudgetExceeded"/>: the turn was stopped before model round trip
     /// <paramref name="roundTrip"/>, because it had already used <paramref name="tokensSoFar"/> of its
