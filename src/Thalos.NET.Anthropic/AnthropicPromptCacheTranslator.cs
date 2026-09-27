@@ -9,7 +9,8 @@ namespace Thalos.Anthropic;
 /// Turns the provider-neutral <see cref="PromptCacheHints"/> into Anthropic <c>cache_control</c> breakpoints, at most the
 /// four Anthropic accepts, and adds the cache-write count Thalos reads to the reported usage. Sits innermost, directly
 /// over the SDK's <see cref="IChatClient"/>, whose supported seams it uses: <c>WithCacheControl</c> on content and
-/// <c>AdditionalProperties["CacheControl"]</c> on a tool.
+/// <c>AdditionalProperties["CacheControl"]</c> on a tool. Constructed with no cache control, it translates no hints and
+/// only adds the cache-write count, so a provider with caching disabled still reports cache writes.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -18,17 +19,21 @@ namespace Thalos.Anthropic;
 /// (<see cref="PromptCacheHints.InstructionsBreakpoint"/>) move out of <see cref="ChatOptions.Instructions"/> into a
 /// system message whose text carries the cache control, inserted after any leading system messages: that is where the
 /// SDK would have appended the instructions, so the system prompt keeps its order. A hinted message
-/// (<see cref="PromptCacheHints.Breakpoint"/>) is copied, and its last non-blank <see cref="TextContent"/>,
-/// <see cref="FunctionCallContent"/> or <see cref="FunctionResultContent"/> is replaced in the copy by a marked clone.
-/// Content that carries an SDK request block as its raw representation is sent as that block, which the SDK does not
-/// mark, and blank text is dropped by the SDK, so neither is chosen. A message with no markable content gets no
-/// breakpoint and uses none of the four.
+/// (<see cref="PromptCacheHints.Breakpoint"/>) is copied, and the last content the SDK would send as a block it marks
+/// is replaced in the copy by a marked clone: in a system message the last text, blank or not; in any other message
+/// the last non-blank <see cref="TextContent"/>, <see cref="FunctionCallContent"/> or
+/// <see cref="FunctionResultContent"/>. Content the SDK sends verbatim from its raw representation is never chosen
+/// (see <see cref="AnthropicCacheMarkers"/>). A message with no markable content gets no breakpoint and uses none of
+/// the four.
 /// </para>
 /// <para>
 /// <b>Cap.</b> When more than four hints are markable, the four with the highest priority win: the last hinted tool,
 /// the instructions, the latest message, the message just before the first <see cref="PromptCacheHints.Transient"/>
 /// message, then every other hinted message in list order, then every other hinted tool in list order. Markers the
-/// caller set itself through the SDK's own seams already count toward Anthropic's limit, so they reduce the four.
+/// caller set itself already count toward Anthropic's limit, so they reduce the four: those set through
+/// <c>WithCacheControl</c> or a function's <c>CacheControl</c> property, and those inside raw SDK objects the SDK sends
+/// verbatim, which are counted by serialising them with the SDK's converters. Counting calls the options'
+/// <see cref="ChatOptions.RawRepresentationFactory"/> once more, with the SDK client, as the SDK itself does.
 /// </para>
 /// <para>
 /// <b>Nothing the caller passed is mutated.</b> The messages and options the SDK sees are new objects wherever a marker
@@ -44,19 +49,13 @@ namespace Thalos.Anthropic;
 /// and changes nothing else.
 /// </para>
 /// </remarks>
-internal sealed class AnthropicPromptCacheTranslator(IChatClient inner, CacheControlEphemeral cacheControl) : DelegatingChatClient(inner)
+internal sealed class AnthropicPromptCacheTranslator(IChatClient inner, CacheControlEphemeral? cacheControl) : DelegatingChatClient(inner)
 {
     /// <summary>Anthropic's limit on <c>cache_control</c> blocks in one request.</summary>
     internal const int MaxBreakpoints = 4;
 
     /// <summary>The SDK 12.50.0 additional-count key for cache-write input tokens.</summary>
     internal const string SdkCacheWriteCountKey = "CacheCreationInputTokens";
-
-    /// <summary>The SDK 12.50.0 content additional-property key <c>WithCacheControl</c> writes; read to count markers the caller set itself.</summary>
-    internal const string SdkContentCacheControlKey = "anthropic:cache_control";
-
-    /// <summary>The tool additional-property key the SDK reads a tool's cache control from.</summary>
-    private const string ToolCacheControlKey = nameof(Tool.CacheControl);
 
     /// <inheritdoc />
     public override async Task<ChatResponse> GetResponseAsync(
@@ -100,8 +99,13 @@ internal sealed class AnthropicPromptCacheTranslator(IChatClient inner, CacheCon
 
     private (IEnumerable<ChatMessage> Messages, ChatOptions? Options) Translate(IEnumerable<ChatMessage> messages, ChatOptions? options)
     {
+        if (cacheControl is not { } control)
+        {
+            return (messages, options);
+        }
+
         var list = messages as IList<ChatMessage> ?? messages.ToList();
-        var plan = new Plan(list, options?.Tools, MaxBreakpoints - CountCallerMarkers(list, options?.Tools));
+        var plan = new Plan(list, options?.Tools, MaxBreakpoints - AnthropicCacheMarkers.CountCallerMarkers(list, options, InnerClient));
 
         // Candidates in priority order; the first ones that can be marked, up to the budget, win.
         var hintedTools = HintedToolIndices(options?.Tools);
@@ -124,27 +128,27 @@ internal sealed class AnthropicPromptCacheTranslator(IChatClient inner, CacheCon
             return (messages, options);
         }
 
-        return (MarkMessages(list, plan.Messages, plan.Instructions ? options!.Instructions : null), MarkOptions(options, plan.Tools, plan.Instructions));
+        return (MarkMessages(list, plan.Messages, plan.Instructions ? options!.Instructions : null, control), MarkOptions(options, plan.Tools, plan.Instructions, control));
     }
 
-    private List<ChatMessage> MarkMessages(IList<ChatMessage> messages, Dictionary<int, int> marks, string? instructions)
+    private static List<ChatMessage> MarkMessages(IList<ChatMessage> messages, Dictionary<int, int> marks, string? instructions, CacheControlEphemeral control)
     {
         var result = new List<ChatMessage>(messages.Count + 1);
         for (var i = 0; i < messages.Count; i++)
         {
-            result.Add(marks.TryGetValue(i, out var content) ? Marked(messages[i], content) : messages[i]);
+            result.Add(marks.TryGetValue(i, out var content) ? Marked(messages[i], content, control) : messages[i]);
         }
 
         if (instructions is not null)
         {
             var leadingSystem = result.FindIndex(static m => m.Role != ChatRole.System);
-            result.Insert(leadingSystem < 0 ? result.Count : leadingSystem, new ChatMessage(ChatRole.System, [new TextContent(instructions).WithCacheControl(cacheControl)]));
+            result.Insert(leadingSystem < 0 ? result.Count : leadingSystem, new ChatMessage(ChatRole.System, [new TextContent(instructions).WithCacheControl(control)]));
         }
 
         return result;
     }
 
-    private ChatOptions? MarkOptions(ChatOptions? options, List<int> toolIndices, bool movedInstructions)
+    private static ChatOptions? MarkOptions(ChatOptions? options, List<int> toolIndices, bool movedInstructions, CacheControlEphemeral control)
     {
         if (options is null || (toolIndices.Count == 0 && !movedInstructions))
         {
@@ -159,18 +163,18 @@ internal sealed class AnthropicPromptCacheTranslator(IChatClient inner, CacheCon
 
         foreach (var index in toolIndices)
         {
-            clone.Tools![index] = new CacheControlledFunction((AIFunction)clone.Tools[index], cacheControl);
+            clone.Tools![index] = new CacheControlledFunction((AIFunction)clone.Tools[index], control);
         }
 
         return clone;
     }
 
     /// <summary>A shallow copy of <paramref name="message"/> whose content at <paramref name="contentIndex"/> is a marked clone.</summary>
-    private ChatMessage Marked(ChatMessage message, int contentIndex)
+    private static ChatMessage Marked(ChatMessage message, int contentIndex, CacheControlEphemeral control)
     {
         var copy = message.Clone();
         var contents = new List<AIContent>(message.Contents);
-        contents[contentIndex] = CloneContent(contents[contentIndex]).WithCacheControl(cacheControl);
+        contents[contentIndex] = CloneContent(contents[contentIndex]).WithCacheControl(control);
         copy.Contents = contents;
         return copy;
     }
@@ -192,55 +196,6 @@ internal sealed class AnthropicPromptCacheTranslator(IChatClient inner, CacheCon
         clone.RawRepresentation = content.RawRepresentation;
         clone.AdditionalProperties = content.AdditionalProperties?.Clone();
         return clone;
-    }
-
-    /// <summary>The index of the last content the SDK would send as a markable block, or -1.</summary>
-    private static int MarkableContentIndex(ChatMessage message)
-    {
-        for (var i = message.Contents.Count - 1; i >= 0; i--)
-        {
-            var content = message.Contents[i];
-            if (content.RawRepresentation is ContentBlockParam or TextBlockParam)
-            {
-                continue;
-            }
-
-            if (content is TextContent text ? !string.IsNullOrWhiteSpace(text.Text) : content is FunctionCallContent or FunctionResultContent)
-            {
-                return i;
-            }
-        }
-
-        return -1;
-    }
-
-    /// <summary>Cache-control markers the caller set itself through the SDK's seams, which count toward the limit.</summary>
-    private static int CountCallerMarkers(IList<ChatMessage> messages, IList<AITool>? tools)
-    {
-        var count = 0;
-        foreach (var message in messages)
-        {
-            foreach (var content in message.Contents)
-            {
-                if (content.AdditionalProperties?.TryGetValue(SdkContentCacheControlKey, out var value) == true && value is CacheControlEphemeral)
-                {
-                    count++;
-                }
-            }
-        }
-
-        if (tools is not null)
-        {
-            foreach (var tool in tools)
-            {
-                if (tool.AdditionalProperties.TryGetValue(ToolCacheControlKey, out var value) && value is CacheControlEphemeral)
-                {
-                    count++;
-                }
-            }
-        }
-
-        return count;
     }
 
     private static List<int> HintedToolIndices(IList<AITool>? tools)
@@ -309,7 +264,7 @@ internal sealed class AnthropicPromptCacheTranslator(IChatClient inner, CacheCon
         {
             if (_budget > 0 && index >= 0 && !Messages.ContainsKey(index)
                 && IsTrue(messages[index].AdditionalProperties, PromptCacheHints.Breakpoint)
-                && MarkableContentIndex(messages[index]) is var content and >= 0)
+                && AnthropicCacheMarkers.MarkableContentIndex(messages[index]) is var content and >= 0)
             {
                 Messages[index] = content;
                 _budget--;
@@ -323,7 +278,7 @@ internal sealed class AnthropicPromptCacheTranslator(IChatClient inner, CacheCon
         public override IReadOnlyDictionary<string, object?> AdditionalProperties { get; } =
             new Dictionary<string, object?>(innerFunction.AdditionalProperties, StringComparer.Ordinal)
             {
-                [ToolCacheControlKey] = cacheControl,
+                [AnthropicCacheMarkers.ToolKey] = cacheControl,
             };
     }
 }

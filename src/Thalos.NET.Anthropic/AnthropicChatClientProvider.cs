@@ -10,7 +10,8 @@ namespace Thalos.Anthropic;
 /// <remarks>
 /// The provider owns one lazily-created <see cref="AnthropicClient"/> (the HTTP transport), shared by every agent, and disposes it
 /// with itself. Each <see cref="CreateChatClient"/> call returns a thin <see cref="IChatClient"/> over that shared client, wrapped in
-/// the prompt-cache translator when <see cref="AnthropicPromptCachingOptions.Enabled"/> is set; per the
+/// the prompt-cache translator, which translates cache hints only when <see cref="AnthropicPromptCachingOptions.Enabled"/> is set
+/// and always reports cache writes; per the
 /// <see cref="IChatClientProvider"/> contract the returned client is owned and disposed by the caller, and disposing it does
 /// <em>not</em> tear the shared transport down.
 /// </remarks>
@@ -75,7 +76,7 @@ public sealed class AnthropicChatClientProvider : IChatClientProvider, IDisposab
     {
         ArgumentNullException.ThrowIfNull(agent);
         var client = _client.Value.AsIChatClient(agent.Model ?? _options.DefaultModel, agent.MaxOutputTokens ?? _options.DefaultMaxOutputTokens);
-        return _options.PromptCaching.Enabled ? new AnthropicPromptCacheTranslator(client, _cacheControl) : client;
+        return new AnthropicPromptCacheTranslator(client, _options.PromptCaching.Enabled ? _cacheControl : null);
     }
 
     /// <summary>Disposes the shared <see cref="AnthropicClient"/> if it was created.</summary>

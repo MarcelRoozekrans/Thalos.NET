@@ -3,7 +3,7 @@ namespace Thalos.Anthropic;
 /// <summary>
 /// Prompt caching for <see cref="AnthropicChatClientProvider"/>, bound from <c>Thalos:Anthropic:PromptCaching</c>. When
 /// enabled, each chat client translates the provider-neutral <c>Thalos.Caching.PromptCacheHints</c> into Anthropic
-/// <c>cache_control</c> breakpoints and reports cache writes under <see cref="TurnUsage.CacheWriteCountKey"/>.
+/// <c>cache_control</c> breakpoints. Cache writes are reported under <see cref="TurnUsage.CacheWriteCountKey"/> either way.
 /// </summary>
 /// <remarks>
 /// Enabling this places no breakpoint by itself: a request carries markers only where something hinted one, normally
@@ -17,7 +17,7 @@ public sealed class AnthropicPromptCachingOptions
     /// <summary>The extended time-to-live: one hour. Cache writes cost more than with <see cref="FiveMinutes"/>.</summary>
     public const string OneHour = "1h";
 
-    /// <summary>Whether cache hints are translated into <c>cache_control</c> breakpoints. On by default.</summary>
+    /// <summary>Whether cache hints are translated into <c>cache_control</c> breakpoints. On by default; usage is reported the same either way.</summary>
     public bool Enabled { get; set; } = true;
 
     /// <summary>

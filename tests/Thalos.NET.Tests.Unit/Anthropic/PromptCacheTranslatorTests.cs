@@ -179,6 +179,121 @@ public sealed class PromptCacheTranslatorTests
         MarkedMessages(body).Should().Equal(0, 3);
     }
 
+    /// <summary>A history whose standard hints are four: tool, instructions, latest message and the one before the transient message.</summary>
+    private static List<ChatMessage> FourHintHistory(ChatMessage first) =>
+        [first, new(ChatRole.Assistant, "a1"), Transient(new(ChatRole.User, "memories")), new(ChatRole.User, "q")];
+
+    [Fact]
+    public async Task A_marker_inside_a_raw_content_block_counts_toward_the_limit()
+    {
+        var (client, handler) = Provider(enabled: true);
+        var raw = new TextContent("raw") { RawRepresentation = (ContentBlockParam)new TextBlockParam { Text = "raw", CacheControl = new CacheControlEphemeral() } };
+
+        await client.GetResponseAsync(FourHintHistory(new(ChatRole.User, [raw])), HintedOptions(), CancellationToken.None);
+
+        var body = Body(handler);
+        using var scope = new AssertionScope();
+        CountCacheControl(body).Should().Be(4);
+        MarkedMessages(body).Should().Equal(0, 3);
+    }
+
+    [Fact]
+    public async Task A_marker_inside_a_raw_system_text_block_counts_toward_the_limit()
+    {
+        var (client, handler) = Provider(enabled: true);
+        var raw = new TextContent("s") { RawRepresentation = new TextBlockParam { Text = "s", CacheControl = new CacheControlEphemeral() } };
+        List<ChatMessage> messages = [new(ChatRole.System, [raw]), .. FourHintHistory(new(ChatRole.User, "q1"))];
+
+        await client.GetResponseAsync(messages, HintedOptions(), CancellationToken.None);
+
+        var body = Body(handler);
+        using var scope = new AssertionScope();
+        CountCacheControl(body).Should().Be(4);
+        MarkedMessages(body).Should().Equal(3);
+    }
+
+    [Fact]
+    public async Task A_marker_on_a_raw_sdk_tool_counts_toward_the_limit()
+    {
+        var (client, handler) = Provider(enabled: true);
+        var schema = new InputSchema(new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["type"] = JsonSerializer.SerializeToElement("object") });
+        var rawTool = ((ToolUnion)new Tool { Name = "raw", InputSchema = schema, CacheControl = new CacheControlEphemeral() }).AsAITool();
+        var options = HintedOptions();
+        options.Tools!.Insert(0, rawTool);
+
+        await client.GetResponseAsync(FourHintHistory(new(ChatRole.User, "q1")), options, CancellationToken.None);
+
+        var body = Body(handler);
+        using var scope = new AssertionScope();
+        CountCacheControl(body).Should().Be(4);
+        MarkedMessages(body).Should().Equal(3);
+    }
+
+    [Fact]
+    public async Task Markers_in_the_raw_request_from_the_representation_factory_count_toward_the_limit()
+    {
+        var (client, handler) = Provider(enabled: true);
+        var options = HintedOptions();
+        options.RawRepresentationFactory = _ => new MessageCreateParams
+        {
+            MaxTokens = 100,
+            Model = "claude-test",
+            Messages = [],
+            System = new List<TextBlockParam> { new() { Text = "raw system", CacheControl = new CacheControlEphemeral() } },
+            CacheControl = new CacheControlEphemeral(),
+        };
+
+        await client.GetResponseAsync(FourHintHistory(new(ChatRole.User, "q1")), options, CancellationToken.None);
+
+        var body = Body(handler);
+        using var scope = new AssertionScope();
+        CountCacheControl(body).Should().Be(4);
+        MarkedMessages(body).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_raw_text_block_in_a_user_message_is_mapped_and_so_can_carry_the_marker()
+    {
+        var (client, handler) = Provider(enabled: true);
+        var mapped = new TextContent("b") { RawRepresentation = new TextBlockParam { Text = "b" } };
+
+        await client.GetResponseAsync([new(ChatRole.User, [new TextContent("a"), mapped])], HintedOptions(), CancellationToken.None);
+
+        var content = Body(handler).GetProperty("messages")[0].GetProperty("content");
+        using var scope = new AssertionScope();
+        HasCacheControl(content[0]).Should().BeFalse();
+        HasCacheControl(content[1]).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Blank_text_in_a_hinted_system_message_is_sent_and_so_carries_the_marker()
+    {
+        var (client, handler) = Provider(enabled: true);
+        List<ChatMessage> messages = [Hinted(new(ChatRole.System, [new TextContent("s1"), new TextContent(" ")])), new(ChatRole.User, "q")];
+
+        await client.GetResponseAsync(messages, HintedOptions(), CancellationToken.None);
+
+        var system = Body(handler).GetProperty("system");
+        using var scope = new AssertionScope();
+        HasCacheControl(system[0]).Should().BeFalse();
+        HasCacheControl(system[1]).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_raw_text_block_in_a_hinted_system_message_is_sent_verbatim_and_so_is_skipped()
+    {
+        var (client, handler) = Provider(enabled: true);
+        var verbatim = new TextContent("s2") { RawRepresentation = new TextBlockParam { Text = "s2" } };
+        List<ChatMessage> messages = [Hinted(new(ChatRole.System, [new TextContent("s1"), verbatim])), new(ChatRole.User, "q")];
+
+        await client.GetResponseAsync(messages, HintedOptions(), CancellationToken.None);
+
+        var system = Body(handler).GetProperty("system");
+        using var scope = new AssertionScope();
+        HasCacheControl(system[0]).Should().BeTrue();
+        HasCacheControl(system[1]).Should().BeFalse();
+    }
+
     [Fact]
     public async Task A_tool_result_as_the_latest_message_is_marked_on_its_tool_result_block()
     {
@@ -323,6 +438,14 @@ public sealed class PromptCacheTranslatorTests
         using var scope = new AssertionScope();
         usage.InputTokenCount.Should().Be(60);
         usage.CachedInputTokenCount.Should().Be(30);
+        usage.AdditionalCounts.Should().ContainKey(TurnUsage.CacheWriteCountKey).WhoseValue.Should().Be(20);
+    }
+
+    [Fact]
+    public async Task Usage_reports_cache_writes_when_caching_is_off()
+    {
+        var (client, _) = Provider(enabled: false);
+        var usage = (await client.GetResponseAsync([new(ChatRole.User, "q")], cancellationToken: CancellationToken.None)).Usage!;
         usage.AdditionalCounts.Should().ContainKey(TurnUsage.CacheWriteCountKey).WhoseValue.Should().Be(20);
     }
 
