@@ -119,8 +119,16 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
         return ValueTask.FromResult(Result<Guid>.Success(id));
     }
 
+    /// <summary>
+    /// <see cref="FindAsync"/> throws for this run id, the way a store whose database is unreachable does, so a
+    /// caller's handling of a failed read can be tested.
+    /// </summary>
+    public Guid? ThrowOnFindFor { get; set; }
+
     public ValueTask<WorkflowRun?> FindAsync(Guid runId, CancellationToken ct) =>
-        ValueTask.FromResult(_runs.GetValueOrDefault(runId));
+        runId == ThrowOnFindFor
+            ? throw new InvalidOperationException($"the fake store could not read run '{runId}'")
+            : ValueTask.FromResult(_runs.GetValueOrDefault(runId));
 
     public ValueTask CompleteNodeAsync(Guid runId, long seq, WorkflowTransition transition, NodeResult result, CancellationToken ct)
     {
@@ -217,7 +225,7 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
             return ValueTask.CompletedTask;
         }
 
-        _runs[runId] = run with { Status = WorkflowStatus.Failed, LastError = errorMessage };
+        _runs[runId] = run with { Status = WorkflowStatus.Failed, AwaitingSignal = null, LastError = errorMessage };
         return ValueTask.CompletedTask;
     }
 
@@ -229,7 +237,7 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
             return ValueTask.FromResult(false);
         }
 
-        _runs[runId] = run with { Status = WorkflowStatus.Failed, LastError = errorMessage };
+        _runs[runId] = run with { Status = WorkflowStatus.Failed, AwaitingSignal = null, LastError = errorMessage };
         return ValueTask.FromResult(true);
     }
 
@@ -241,7 +249,7 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
             return ValueTask.CompletedTask;
         }
 
-        _runs[runId] = run with { Status = WorkflowStatus.Cancelled, LastError = reason };
+        _runs[runId] = run with { Status = WorkflowStatus.Cancelled, AwaitingSignal = null, LastError = reason };
         return ValueTask.CompletedTask;
     }
 

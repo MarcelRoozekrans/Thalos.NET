@@ -482,7 +482,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             update.Transaction = tx;
             update.CommandText = """
                 UPDATE workflow_run
-                SET status = @status, last_error = @error, updated_at = now()
+                SET status = @status, awaiting_signal = NULL, last_error = @error, updated_at = now()
                 WHERE id = @id AND xmin::text::bigint = @expectedXmin
                 """;
             update.Parameters.AddWithValue("status", nameof(WorkflowStatus.Failed));
@@ -540,7 +540,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             update.Transaction = tx;
             update.CommandText = """
                 UPDATE workflow_run
-                SET status = @status, last_error = @reason, updated_at = now()
+                SET status = @status, awaiting_signal = NULL, last_error = @reason, updated_at = now()
                 WHERE id = @id AND xmin::text::bigint = @expectedXmin
                 """;
             update.Parameters.AddWithValue("status", nameof(WorkflowStatus.Cancelled));

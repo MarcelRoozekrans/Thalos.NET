@@ -15,6 +15,8 @@ namespace Thalos.Workflow;
 /// refuses a run that is not <see cref="WorkflowStatus.Running"/>, <see cref="ResumeAsync"/> refuses one that is not
 /// <see cref="WorkflowStatus.Awaiting"/> and so never records a <see cref="WorkflowRun.LastResume"/> on a terminal
 /// run, and <see cref="FailAsync"/>, <see cref="FailStrandedAsync"/> and <see cref="CancelAsync"/> are no-ops on one.
+/// A run those three end, parked at a gate or not, is left with a <see langword="null"/>
+/// <see cref="WorkflowRun.AwaitingSignal"/>, since it awaits nothing any more.
 /// <see cref="RunWorkspaceSweeper"/> relies on this: it reads a run's status and then removes its workspace, with no
 /// lock between the two, and that is safe only because a run it reads as terminal stays exactly as it read it.
 /// </remarks>

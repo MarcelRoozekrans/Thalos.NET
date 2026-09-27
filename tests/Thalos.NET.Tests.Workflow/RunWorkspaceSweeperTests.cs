@@ -98,6 +98,20 @@ public sealed class RunWorkspaceSweeperTests
     }
 
     [Fact]
+    public async Task A_run_that_cannot_be_read_is_logged_skipped_and_the_sweep_goes_on()
+    {
+        var (sweeper, provider) = TwoEndedPreGateRuns(failRemovalForFirst: false);
+        _store.ThrowOnFindFor = RunId;
+
+        var sweep = async () => await sweeper.SweepAsync(CancellationToken.None);
+
+        (await sweep.Should().NotThrowAsync()).Subject.Should().Be(1);
+        provider.Removed.Should().Contain(OtherRunId);
+        _log.Entries.Should().ContainSingle(e => e.Level == LogLevel.Warning)
+            .Which.Exception.Should().BeOfType<InvalidOperationException>();
+    }
+
+    [Fact]
     public async Task Cancelling_the_sweep_propagates()
     {
         using var cts = new CancellationTokenSource();

@@ -96,6 +96,9 @@ public sealed class ResumedByTests(PostgresFixture pg) : IAsyncLifetime
             await _store.CancelAsync(id, "cancelled at the gate", CancellationToken.None);
         }
 
+        var endedRun = await _store.FindAsync(id, CancellationToken.None);
+        endedRun!.AwaitingSignal.Should().BeNull("a run that is not Awaiting awaits no signal");
+
         var result = await _store.ResumeAsync(id, new WorkflowResumeRequest { Signal = "go", ResumedBy = Approver }, CancellationToken.None);
 
         result.IsFailure.Should().BeTrue();

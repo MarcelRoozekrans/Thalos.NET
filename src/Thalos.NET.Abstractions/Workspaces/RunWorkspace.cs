@@ -32,9 +32,12 @@ public sealed record RunWorkspace(Guid RunId, string Repository, string Remote, 
     public string BaseRef => $"origin/{DefaultBranch}";
 
     /// <summary>
-    /// When the provider created the workspace, from its <c>TimeProvider</c>; persisted in the sidecar record. The
+    /// When the workspace became ready, from the provider's <c>TimeProvider</c>; persisted in the sidecar record. The
     /// sweeper removes a workspace with no run row only once it is older than a grace period, because a run's
-    /// workspace exists before its run row does.
+    /// workspace exists before its run row does. Stamped as the ready record is published, after the clone or fetch
+    /// and the worktree checkout, so a slow create does not use up the grace; the ready observers run after it, so
+    /// the time they take still counts against the grace. A provider may stamp a provisional record too, but its
+    /// liveness is the provider's business, not this value's.
     /// </summary>
     public DateTimeOffset CreatedAt { get; init; }
 }

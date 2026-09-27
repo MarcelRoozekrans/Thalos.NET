@@ -129,7 +129,9 @@ namespace Thalos.Git.Workspaces;
 /// <param name="options">Where mirrors, worktrees and sidecar records live, and how the git child process is run.</param>
 /// <param name="observers">Notified after a create and before a remove; an observer that throws is logged and does not fail the call.</param>
 /// <param name="logger">Required: every host has one.</param>
-/// <param name="clock">Required: every host has one. Stamps <see cref="RunWorkspace.CreatedAt"/> (ruling R9).</param>
+/// <param name="clock">
+/// Required: every host has one. Stamps <see cref="RunWorkspace.CreatedAt"/> when the record turns ready (ruling R9).
+/// </param>
 /// <param name="credentials">
 /// Supplies HTTP(S) credentials per remote. <see langword="null"/> means every remote is fetched anonymously — a
 /// supported configuration for a public or local remote (ruling R27).
@@ -337,7 +339,11 @@ public sealed partial class GitWorktreeWorkspaceProvider(
             return Result<RunWorkspace, AgentError>.Failure(solution.Error);
         }
 
-        var workspace = provisional with { SolutionPath = solution.Value };
+        // CreatedAt is stamped again here, as the record turns Ready, not left at the claim instant: the orphan grace
+        // a sweeper applies to a workspace with no run row must start once the host can start the run, not before a
+        // first clone or a queued mirror lock that may itself take longer than the grace (ruling R9). The claim's own
+        // age has no use: a provisional record's liveness is its run lock.
+        var workspace = provisional with { SolutionPath = solution.Value, CreatedAt = clock.GetUtcNow() };
         var published = await PublishSidecarAsync(new WorkspaceSidecar(WorkspaceSidecarState.Ready, workspace), ct).ConfigureAwait(false);
         if (published.IsFailure)
         {
