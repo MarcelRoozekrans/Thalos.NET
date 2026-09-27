@@ -14,7 +14,14 @@ namespace Thalos.Caching;
 /// are the clone's own, and a new message list whose last entry is a shallow copy of the caller's last message: every
 /// member is kept, its <see cref="ChatMessage.Contents"/> list and <see cref="ChatMessage.AdditionalProperties"/> are
 /// new collections holding the same items, and the hint is added to the copy only. Because nothing is written back,
-/// history never accumulates breakpoints across round trips.
+/// history never accumulates the breakpoints this client places.
+/// </para>
+/// <para>
+/// <b>Caller-placed hints pass through unchanged.</b> A <see cref="PromptCacheHints"/> key the caller already set on a
+/// message, a tool or the options is neither removed nor deduplicated, and this client adds its own three on top. Each
+/// caller-placed hint therefore counts toward the provider's breakpoint limit, and one on a message the caller keeps in
+/// its history is sent again on every round trip, so a caller-hinted history can exceed that limit. Capping markers is
+/// the provider translator's job.
 /// </para>
 /// <para>
 /// <b>Tool:</b> the last tool, when it is an <see cref="AIFunction"/>, is replaced in the cloned list by a wrapper that

@@ -176,18 +176,22 @@ by the reusable `SessionStoreContractTests` in `Thalos.NET.Testing`) for anythin
 
 ### Everything at once
 
-The full builder surface — provider, security scanning, memory, RAG-backed memory, skills, MCP tools, tool-policy
-authorization — chained on one agent:
+The full builder surface — provider, security scanning, prompt caching, memory, RAG-backed memory, skills, MCP
+tools, run workspaces, git actions, tool-policy authorization — chained on one agent:
 
 ```csharp
 services.AddThalos(thalos => thalos
     .UseAnthropic(configuration)                       // Thalos:Anthropic section; ApiKey falls back to ANTHROPIC_API_KEY
     .UseAISentinel(o => o.EmbeddingGenerator = myEmbeddings)   // see the security note below
+    .UsePromptCaching()                                // cache-breakpoint hints on every round trip (see below)
     .UseInMemorySessionStore()
     .UseMemory(o => o.SharedOwnerId = "myapp")         // long-term memory: auto-recall + memory__* tools (see below)
     .UseRagNetMemory(connectionString, 768)            // pgvector index; needs an IEmbeddingGenerator<string, Embedding<float>> in DI
     .UseSkills(o => o.Roots.Add(Path.Combine(AppContext.BaseDirectory, "skills")))   // SKILL.md procedures (see below)
     .AddMcpServersFromFile(Path.Combine(AppContext.BaseDirectory, ".mcp.json"))
+    .UseGitWorktreeWorkspaces(o => o.DataRoot = "/var/lib/myapp/git")  // Thalos.NET.Git: one git worktree per workflow run
+    .UseRunWorkspaceTools(new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cs", ".md" })   // workspace__* file tools
+    .UseLibGit2SharpGit()                              // Thalos.NET.Git.LibGit2Sharp: the IGitWriteService behind git__* tools
     .RequireToolPolicy("roslyn__apply_*", "developer")
     .AddPolicy<DeveloperPolicy>()                      // any ZeroAlloc.Authorization [Policy("developer")]
     .AddAgent(new AgentDefinition
@@ -212,6 +216,31 @@ await foreach (var evt in runtime.RunTurnStreamingAsync(new AgentTurnRequest(ses
 Tool names exposed to the model are `{source}__{tool}` (e.g. `roslyn__find_callers`); `AgentDefinition.Tools` and
 `RequireToolPolicy` take globs over that qualified name. Authorization is enforced by Thalos at the function boundary —
 before the tool runs — not by inspecting the chat stream afterwards.
+
+**Prompt caching.** `UsePromptCaching()` registers `PromptCachingChatClient` as the outermost chat-client decorator,
+so MAF's function-invocation loop passes through it on every model round trip. On each round trip it places
+provider-neutral hints (`PromptCacheHints` keys in `AdditionalProperties`) on three boundaries: the last tool, when it
+is an `AIFunction`; the end of the instructions; and the latest message. It never reorders messages and never mutates
+the caller's messages or options, so hints do not pile up in stored history. A provider translates the hints into its
+own cache controls; a provider with no translator ignores them. Outside Thalos, plain Microsoft.Extensions.AI
+pipelines get the same client from `ChatClientBuilder.UsePromptCaching()`, placed inside `UseFunctionInvocation()`
+(i.e. registered after it) so it runs on every round trip:
+`new ChatClientBuilder(providerClient).UseFunctionInvocation().UsePromptCaching().Build()`.
+
+**Run workspaces and git.** `UseGitWorktreeWorkspaces` (`Thalos.NET.Git`) makes a git worktree per workflow run the
+`IRunWorkspaceProvider`, and `git`-CLI commits and pushes from it the `IRunWorkspaceGit`, replacing any earlier
+registration of either. `DataRoot` is required and must be absolute — mirrors, worktrees and their sidecar records
+live under it — and `GitExecutable` and `CommandTimeout` default to `git` and 5 minutes. `UseRunWorkspaceTools` adds
+the `workspace__read_file`, `workspace__list_files`, `workspace__write_file` and `workspace__edit_file` tools, confined
+to the calling run's workspace: a caller without the `RunWorkspaceClaims.RunId` claim is refused. Its required first
+argument is the host-wide set of writable extensions — a path with no extension is refused, an empty set refuses every
+write, and a caller's `RunWorkspaceClaims.WriteExtensions` grant can only narrow it; reads are not gated. The
+optional `configure` sets protected paths, the read and listing caps and the contention timeout. It does no grant
+check itself: bind `workspace__write_*` and `workspace__edit_*` to a policy with `RequireToolPolicy`.
+`UseLibGit2SharpGit()` (`Thalos.NET.Git.LibGit2Sharp`) registers the LibGit2Sharp `IGitWriteService` that
+`GitActionTools` (`git__create_branch`, `git__commit`, `git__push`, `git__open_pull_request`) writes through; add
+those tools with `AddLocalTools("git", typeof(GitActionTools))` and register an `IPullRequestPublisher` for your
+hosting platform.
 
 A runnable REPL lives in [`samples/Thalos.Sample.Console`](samples/Thalos.Sample.Console/README.md).
 
