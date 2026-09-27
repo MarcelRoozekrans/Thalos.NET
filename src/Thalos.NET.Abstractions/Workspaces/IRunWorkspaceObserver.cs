@@ -7,7 +7,16 @@ namespace Thalos.Workspaces;
 /// </remarks>
 public interface IRunWorkspaceObserver
 {
-    /// <summary>Called after <see cref="IRunWorkspaceProvider.CreateAsync"/>, and after a restart finds an existing workspace.</summary>
+    /// <summary>
+    /// Called after <see cref="IRunWorkspaceProvider.CreateAsync"/> has made a workspace ready, and at no other time.
+    /// </summary>
+    /// <remarks>
+    /// A host restart does not call it again for workspaces that already exist: nothing enumerates them at startup.
+    /// An observer that keeps per-run state must rebuild it lazily, the first time the run needs it, through
+    /// <see cref="IRunWorkspaceProvider.FindAsync"/>. <c>Thalos.NET.Mcp</c>'s <c>RunMcpServerRegistry</c> works this
+    /// way: after a restart, its <c>WaitAllReadyAsync</c> looks the run's workspace up and starts the run's servers
+    /// then, rather than waiting for a notification that never comes.
+    /// </remarks>
     /// <param name="workspace">The workspace that is ready.</param>
     /// <param name="ct">Cancellation token.</param>
     ValueTask OnReadyAsync(RunWorkspace workspace, CancellationToken ct);

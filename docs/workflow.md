@@ -17,6 +17,7 @@ and `AddWorkflowOrm` registers two of them — this page is the other five.
 | `WorkflowRunReconciler` on a timer | **no** | Terminates runs nothing is advancing any more |
 | `IProcessDefinitionSource` + `ProcessDefinitionSync` | **no** | Gets your `.process.yaml` files into the table |
 | `IWorkflowHostAction`s, only if a process uses `action:` | **no** | The host code an action node runs instead of an agent turn (§10) |
+| `RunWorkspaceSweeper` on a timer, only if runs have workspaces | **no** | Removes a run's worktree, and stops its run-scoped MCP servers, once the run no longer needs them (§11) |
 
 Nothing in either package is a hosted service except the schema initializer. That is deliberate — a library that
 starts its own timers and pollers fights whatever hosting model you already have — but it does mean a host that
@@ -101,6 +102,9 @@ sealed class WorkflowCaller(WorkflowRun run) : ISecurityContext
     public IReadOnlyDictionary<string, string> Claims { get; } = new Dictionary<string, string>(StringComparer.Ordinal);
 }
 ```
+
+A host whose runs have workspaces also sets the run's `RunWorkspaceClaims.RunId` claim here; §11 shows how, and why
+it must come from the run row only.
 
 ## 4. The outbox consumer — the piece with no default
 
@@ -192,8 +196,8 @@ host-supplied check run immediately before a task node's agent turn, and only be
 one with `await:` (an unrelated use of the word "gate", inherited from the process YAML), a `terminal:` node and an
 `action:` node are never gated, because none of them spends a turn. The motivating case is a run's own tool servers: a gate can start
 them, or restart them after a host crash, and refuse the turn outright when they never come up, rather than
-dispatching an agent into a turn that would fail on its first tool call. A gate that refuses returns a failed
-`Result`; the dispatcher fails the run with that message, the same way a rejected outcome does, and calls no
+dispatching an agent into a turn that would fail on its first tool call; §11 has that gate. A gate that refuses
+returns a failed `Result`; the dispatcher fails the run with that message, the same way a rejected outcome does, and calls no
 further gate. Wire none with `gates: []` — a required argument, not an optional one, so a host cannot forget it by
 omission. A run can sit inside a gate for as long as its own wait allows — up to ten minutes for the tool-server
 case above — and that whole time counts against the reconciler's `olderThan` budget (§5): `updated_at` does not
@@ -201,14 +205,16 @@ move while a gate is running any more than it moves during the agent turn itself
 comfortably inside `StrandedAfter`, the same constraint the turn length already has to satisfy, and inside the
 outbox's `LeaseDuration` (§4) together with the turn.
 
-**A gate's own `OperationCanceledException` means `ct` was cancelled, and nothing else.** Both
-`OutboxWorkerService` (ZeroAlloc.Outbox) and Daedalus's own outbox loop catch a dispatch failure
-`when (ex is not OperationCanceledException)` — they treat cancellation as the loop's own shutdown signal, never
-as "this message failed, retry it" — so an `OperationCanceledException` a gate throws for any other reason, for
-example an HTTP client's own request timeout surfacing as `TaskCanceledException`, escapes both loops uncaught and
-can stop the worker outright, not merely get this one message redelivered. A gate's own timeout must return a
-failed `Result`, never throw. Fixing the host loops themselves is out of scope here: Daedalus's is fixed in task
-B9, and ZeroAlloc.Outbox's is filed upstream as ZeroAlloc-Net/ZeroAlloc.Outbox#204.
+**A gate's own `OperationCanceledException` means `ct` was cancelled, and nothing else.** ZeroAlloc.Outbox
+3.0.1's `OutboxWorkerService` treats an `OperationCanceledException` as its own shutdown only while its stopping
+token is cancelled; it then releases the message's lease without counting an attempt. Any other
+`OperationCanceledException` — for example an HTTP client's own request timeout surfacing as
+`TaskCanceledException` — is recorded as a failed attempt and retried with backoff, like any other exception. A
+gate that lets its own timeout escape that way therefore refuses nothing: it silently uses up the `MaxAttempts`
+that end in the message being dead-lettered, and the run sits stranded until the sweep in §5 terminates it, with
+no gate message in its error. A gate's own timeout must return a failed `Result`, never throw. A host running its
+own outbox loop instead of `OutboxWorkerService` should make the same distinction: treat an
+`OperationCanceledException` as shutdown only when its own stopping token is cancelled.
 
 Two things about the retry budget, because they decide what a failure costs. The dispatcher deliberately does
 **not** throw for a node-level failure — a turn that failed, an unresolvable agent name, an outcome outside the
@@ -216,8 +222,9 @@ node's declared set, a gate that refused, an unregistered or failing host action
 and returns, so the outbox has nothing to retry and you never pay for the same losing agent turn `MaxAttempts`
 times. What does propagate, and therefore does get retried, is an unexpected exception out of `ISubagentRunner`, a
 gate's or a host action's own non-cancellation exception, and a `WorkflowConcurrencyException` from the store: all
-of them are transient by nature and are caught and retried by the outbox exactly alike. An
-`OperationCanceledException` from a gate or a host action is the one exception to that: see above. And
+of them are transient by nature and are caught and retried by the outbox exactly alike. A gate's or a host
+action's own `OperationCanceledException` is retried the same way, which is exactly why it must not be thrown for a
+timeout: see above. And
 `MaxAttempts` is what eventually dead-letters a message that never succeeds — which is what leaves a run stranded,
 and why step 5 exists.
 
@@ -311,7 +318,7 @@ content is refused, so editing a process file means bumping its `version`.
 ## 7. Starting a run
 
 ```csharp
-var runId = await store.StartAsync(
+var started = await store.StartAsync(
     new WorkflowStartRequest
     {
         Process = "pipeline",
@@ -328,11 +335,24 @@ var runId = await store.StartAsync(
         StartedBy = new RunPrincipal(currentUser.Id, currentUser.Roles),
     },
     ct);
+if (started.IsFailure)
+{
+    // A seed over the variable cap, or a caller-supplied RunId that another run already has. Nothing was written.
+    logger.LogError("Could not start pipeline: {Error}", started.Error);
+    return;
+}
+
+var runId = started.Value;
 ```
 
 That is the whole start. `StartAsync` writes the run, seeds its `Entered` event, and enqueues the start node's own
 dispatch — all in one transaction, so a run never exists without the work behind its first node already scheduled.
 You do not construct a `WorkflowDispatchMessage` yourself; step 4's consumer picks it up on the next poll.
+
+`StartAsync` returns a `Result<Guid>`, not a bare id. It fails, before writing anything, for the two mistakes a
+caller can legitimately make: an `InitialVariables` bag over the 16-key cap (see the limits below), and a
+caller-supplied `RunId` that a different run already has, which leaves that run untouched. A reused
+`CorrelationKey` is not a failure: it succeeds with the earlier run's id.
 
 `InitialVariables` is the run's opening `Variables` bag: the work item the first node is meant to act on. Pass
 `null` for a run that starts with nothing — the bag is then empty, never null. It is seeded only on the path that
@@ -436,8 +456,10 @@ run and the node, and returns either a `HostActionResult` carrying one of the no
 variables to merge, or a failed `Result`, which fails the run with its message. It must not throw for a failure it
 expected: an exception is left to propagate so the outbox retries the delivery, and a retry calls the action again
 for the same node, so an action must be idempotent. An `OperationCanceledException` must mean only that the `ct`
-it was given was cancelled: an action's own timeout returns a failed `Result`, because both outbox loops treat any
-`OperationCanceledException` as their own shutdown. `IWorkflowDispatchGate` carries the same contract.
+it was given was cancelled: an action's own timeout returns a failed `Result`. The outbox records any other
+`OperationCanceledException` as a failed attempt and retries it, so a timeout thrown that way silently uses up the
+attempts that lead to dead-lettering instead of failing the run with a message (§4). `IWorkflowDispatchGate`
+carries the same contract.
 
 The validator treats a node as an action node whenever `action:` is set, and rejects:
 
@@ -485,6 +507,154 @@ runs first (§4), and a run manifest is not consulted, because an action node ha
 - An exception propagates, and so does an `OperationCanceledException` when the dispatch `ct` was cancelled, so the
   outbox retries the delivery. Nothing is recorded, and the run stays at the node.
 
+## 11. Run workspaces
+
+A run can have a workspace of its own: a git worktree that its nodes read and write through the `workspace__*`
+tools, and that its own copies of MCP servers such as Roslyn run against. `UseGitWorktreeWorkspaces`
+(`Thalos.NET.Git`) registers the `IRunWorkspaceProvider`, and `UseRunWorkspaceTools` (`Thalos.NET`) adds the
+tools; the README's "Run workspaces and git" covers both. This section covers what a host has to run around them.
+
+**Creating one.** The host creates the workspace, then starts the run under the same id. Mint the run id yourself
+and pass it as `WorkflowStartRequest.RunId` (§7):
+
+```csharp
+var runId = Guid.NewGuid();
+var workspace = await workspaces.CreateAsync(
+    new RunWorkspaceRequest(runId, Repository: repoPath, Remote: remoteUrl, DefaultBranch: "main",
+        Branch: "fix/null-guard", Solution: "App.sln"),
+    ct);
+if (workspace.IsFailure)
+{
+    return;   // nothing to clean up, and no run to start
+}
+
+// then: await store.StartAsync(new WorkflowStartRequest { RunId = runId, ... }, ct);
+```
+
+**Tying a turn to its run.** The `workspace__*` tools and every `runScoped` MCP server pick the workspace from the
+caller's `RunWorkspaceClaims.RunId` claim (`"thalos.run_id"`), and nothing else. Set it in `resolveCaller` (§3),
+from the run row:
+
+```csharp
+sealed class WorkflowCaller(WorkflowRun run) : ISecurityContext
+{
+    public string Id => $"workflow:{run.Process}:{run.Id}";
+    public IReadOnlySet<string> Roles { get; } = new HashSet<string>(StringComparer.Ordinal) { "workflow" };
+    public IReadOnlyDictionary<string, string> Claims { get; } = new Dictionary<string, string>(StringComparer.Ordinal)
+    {
+        [RunWorkspaceClaims.RunId] = run.Id.ToString(),
+    };
+}
+```
+
+Set `thalos.*` claims only from the run row and reviewed config. Never copy them from an inbound identity such as
+a JWT, and never from a run variable: whoever controls `thalos.run_id` chooses which run's workspace and servers a
+call reaches. A caller with no run claim is refused by the `workspace__*` tools and is served by the host-wide
+MCP server, not a run's.
+
+**Run-scoped MCP servers.** An `.mcp.json` stdio entry with a `runScoped` object gets one private copy of the
+server per run, started against that run's workspace. The host entry keeps serving callers with no run claim, and
+its `command`, `timeout` and `shutdownTimeout` are reused for the run's copies:
+
+```jsonc
+{
+  "mcpServers": {
+    "roslyn": {
+      "command": "dnx",
+      "args": ["RoslynCodeLens.Mcp", "--", "C:/host/App.sln"],
+      "runScoped": {
+        "args": ["RoslynCodeLens.Mcp", "--", "${run.workspace.solution}"],
+        "env": { "RUN_ID": "${run.id}" },
+        "cwd": "${run.workspace.root}",
+        "readyTool": "list_solutions",
+        "reload": "tool:rebuild_solution",
+        "readyWaitTimeout": "00:10:00",
+        "callTimeout": "00:02:00"
+      }
+    }
+  }
+}
+```
+
+- `${run.id}`, `${run.workspace.root}` and `${run.workspace.solution}` are replaced in `args`, `env` values and
+  `cwd`; any other `${...}` is left as it is. `${run.workspace.solution}` fails the run's server start when the
+  workspace was created with no `Solution`.
+- `args` replaces the host entry's arguments; left out, the host entry's are used, also substituted. `env` is
+  layered over the host entry's, a key set here winning. `cwd` defaults to `${run.workspace.root}`.
+- `readyTool` is called with no arguments every two seconds after the server lists its tools, until a call does
+  not return an error; only then is the server ready. Left out, the server is ready as soon as its tool list
+  returns.
+- `reload` decides what happens before the next call once files in the workspace have changed through the
+  `workspace__*` tools: `"none"` (the default), `"tool:<name>"` to call that tool with no arguments, or
+  `"restart"`. A reload re-evaluates the workspace's build files, and MSBuild runs code from them, so use one only
+  while the run's writable extensions exclude `.csproj`, `.props`, `.targets` and the like.
+- `readyWaitTimeout` bounds how long one call waits for a start or reload still in progress; `callTimeout` bounds
+  how long one call may run. Both are `hh:mm:ss` strings and default to two minutes.
+
+**Waiting for them before a turn.** A run's servers start in the background when its workspace is created, and a
+host restart loses them. `IRunToolServerReadiness.WaitAllReadyAsync`, registered by the first `runScoped` entry,
+starts whatever is not running — after a restart it finds the workspace through the provider and starts the
+servers then — and waits until every one is ready. Call it from a dispatch gate (§4), so a turn is refused, not
+wasted, when a server never comes up:
+
+```csharp
+internal sealed class RunToolServersGate(IRunToolServerReadiness servers) : IWorkflowDispatchGate
+{
+    private static readonly TimeSpan Wait = TimeSpan.FromMinutes(10);   // the gateWait budget in §4
+
+    public async ValueTask<Result> BeforeTaskNodeAsync(WorkflowRun run, string node, CancellationToken ct)
+    {
+        var ready = await servers.WaitAllReadyAsync(run.Id, Wait, ct);
+        return ready.IsSuccess ? Result.Success() : Result.Failure(ready.Error.Message);
+    }
+}
+```
+
+```csharp
+services.AddSingleton<IWorkflowDispatchGate, RunToolServersGate>();
+```
+
+`WaitAllReadyAsync` succeeds at once when no `runScoped` entry is configured, fails naming the server when one is
+not ready within the timeout, and fails for a run that has no recorded workspace, so a host whose runs do not all
+have one skips the wait for those. Its own timeout is a failed result, and it throws `OperationCanceledException`
+only when `ct` is cancelled, which is what the gate contract in §4 asks for.
+
+**Removing them.** Nothing removes a workspace on its own. `RunWorkspaceSweeper` (`Thalos.NET.Workflow`) does,
+and, like the reconciler in §5, it has no timer: host `SweepAsync` on a schedule, or worktrees and each run's
+server processes stay until the host shuts down.
+
+```csharp
+services.AddSingleton<RunWorkspaceSweeper>();
+services.AddHostedService<RunWorkspaceSweepService>();
+```
+
+```csharp
+internal sealed class RunWorkspaceSweepService(RunWorkspaceSweeper sweeper) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken ct)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromMinutes(5));
+        while (await timer.WaitForNextTickAsync(ct))
+        {
+            var removed = await sweeper.SweepAsync(ct);
+            // log removed when non-zero
+        }
+    }
+}
+```
+
+The sweeper decides from the run row, read just before each removal:
+
+- **Kept:** `Running` and `Awaiting` runs, and `Failed` or `Cancelled` runs that were resumed at least once
+  (`LastResume` is set). A run that failed after approval keeps its worktree for a human to look at; remove it
+  with `IRunWorkspaceProvider.RemoveAsync` once they are done.
+- **Removed:** `Succeeded` runs, `Failed` or `Cancelled` runs never resumed, and workspaces whose run row does not
+  exist once they are older than `RunWorkspaceSweeper.OrphanGrace` (10 minutes), the window between creating a
+  workspace and starting its run.
+
+Removing a workspace stops the run's `runScoped` servers first. A removal that fails or is refused is logged and
+retried by the next sweep; `SweepAsync` returns how many it removed and throws only when `ct` is cancelled.
+
 ## Limits worth knowing before you author a process
 
 - **The variable block put in front of a node has three caps, and the value cap is the one that bites.** The
@@ -509,8 +679,8 @@ runs first (§4), and a run manifest is not consulted, because an action node ha
   **fails the node**, with an error naming the cap — a rejected report is a contract you can see in the run's
   error and event log, where a silently trimmed one is indistinguishable from a node that chose to report less.
   Overwriting a key the run already holds is always allowed and never counts against the total, so a capped loop
-  can overwrite the same few keys lap after lap for as long as it runs. `StartAsync` throws `ArgumentException`
-  for a seed over the same cap.
+  can overwrite the same few keys lap after lap for as long as it runs. `StartAsync` returns a failed `Result`,
+  before writing anything, for a seed over the same cap.
 
   The caps are not arbitrary and not a size optimisation. Because the number of keys that can exist is bounded,
   the omission notice is sized to name **every** key it leaves out — so a node cannot flood the bag with

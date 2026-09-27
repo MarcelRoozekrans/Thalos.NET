@@ -4,7 +4,8 @@ namespace Thalos.Workspaces;
 
 /// <summary>
 /// Creates, finds, lists, and removes the git worktree backing each run. Implemented by <c>Thalos.NET.Git</c>;
-/// consumed by <c>Thalos.NET.Mcp</c>'s <c>workspace__*</c> tools and by the host that dispatches run nodes.
+/// consumed by <c>Thalos.NET</c>'s <c>workspace__*</c> tools, by <c>Thalos.NET.Mcp</c>'s run-scoped servers, by
+/// <c>Thalos.NET.Workflow</c>'s <c>RunWorkspaceSweeper</c>, and by the host that dispatches run nodes.
 /// </summary>
 public interface IRunWorkspaceProvider
 {

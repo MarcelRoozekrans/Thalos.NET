@@ -27,15 +27,17 @@ namespace Thalos.Workflow;
 /// <para>
 /// <b>An <see cref="OperationCanceledException"/> out of this method means <c>ct</c> was cancelled — nothing
 /// else.</b> It is not converted into a failed run: it propagates uncaught, exactly as an unexpected exception
-/// does. That propagation is <em>not</em> the same as "the outbox will politely redeliver it": both the
-/// ZeroAlloc.Outbox <c>OutboxWorkerService</c> and Daedalus's own outbox loop catch a dispatch failure
-/// <c>when (ex is not OperationCanceledException)</c> — they treat cancellation as the loop's own shutdown signal,
-/// never as "this message failed, retry it" — so an <see cref="OperationCanceledException"/> an action throws for
-/// any other reason, for example an HTTP client's own request timeout surfacing as
-/// <see cref="TaskCanceledException"/>, escapes both loops uncaught and can stop the worker outright, not merely get
-/// this one message redelivered. An action must therefore never let its own timeout surface as
-/// <see cref="OperationCanceledException"/>: only cancelling <c>ct</c> may produce one here. An action's own
-/// timeout returns a failed <see cref="Result{T}"/> instead, the same as any other failure.
+/// does. What the outbox then does depends on whose token was cancelled. ZeroAlloc.Outbox 3.0.1's
+/// <c>OutboxWorkerService</c> treats an <see cref="OperationCanceledException"/> as its own shutdown only while its
+/// stopping token is cancelled: it then releases the message's lease without counting an attempt. Any other
+/// <see cref="OperationCanceledException"/> — for example an HTTP client's own request timeout surfacing as
+/// <see cref="TaskCanceledException"/> — is recorded as a failed attempt and retried with backoff, like any other
+/// exception. So an action that lets its own timeout escape as <see cref="OperationCanceledException"/> does not
+/// fail the run: it silently uses up the attempts that end in the message being dead-lettered, and the run is left
+/// stranded until <see cref="WorkflowRunReconciler"/> terminates it, with no action message recorded. An action
+/// must therefore never let its own timeout surface as <see cref="OperationCanceledException"/>: only cancelling
+/// <c>ct</c> may produce one here. An action's own timeout returns a failed <see cref="Result{T}"/> instead, the
+/// same as any other failure.
 /// </para>
 /// <para>
 /// This is the same contract <see cref="IWorkflowDispatchGate"/> states for a gate, and for the same reasons; the

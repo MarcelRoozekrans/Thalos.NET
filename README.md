@@ -193,6 +193,8 @@ services.AddThalos(thalos => thalos
     .UseRunWorkspaceTools(new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cs", ".md" })   // workspace__* file tools
     .UseLibGit2SharpGit()                              // Thalos.NET.Git.LibGit2Sharp: the IGitWriteService behind git__* tools
     .RequireToolPolicy("roslyn__apply_*", "developer")
+    .RequireToolPolicy("workspace__write_*", "developer")   // UseRunWorkspaceTools checks no grant itself
+    .RequireToolPolicy("workspace__edit_*", "developer")
     .AddPolicy<DeveloperPolicy>()                      // any ZeroAlloc.Authorization [Policy("developer")]
     .AddAgent(new AgentDefinition
     {
@@ -250,11 +252,23 @@ to the calling run's workspace: a caller without the `RunWorkspaceClaims.RunId` 
 argument is the host-wide set of writable extensions — a path with no extension is refused, an empty set refuses every
 write, and a caller's `RunWorkspaceClaims.WriteExtensions` grant can only narrow it; reads are not gated. The
 optional `configure` sets protected paths, the read and listing caps and the contention timeout. It does no grant
-check itself: bind `workspace__write_*` and `workspace__edit_*` to a policy with `RequireToolPolicy`.
+check itself: bind `workspace__write_*` and `workspace__edit_*` to a policy with `RequireToolPolicy`, as the
+example above does. Set the `RunWorkspaceClaims` claims only from the run row and reviewed config, never from an
+inbound identity such as a JWT: the run claim decides which run's workspace and run-scoped MCP servers a call
+reaches.
 `UseLibGit2SharpGit()` (`Thalos.NET.Git.LibGit2Sharp`) registers the LibGit2Sharp `IGitWriteService` that
 `GitActionTools` (`git__create_branch`, `git__commit`, `git__push`, `git__open_pull_request`) writes through; add
 those tools with `AddLocalTools("git", typeof(GitActionTools))` and register an `IPullRequestPublisher` for your
 hosting platform.
+
+Nothing removes a workspace on its own. Register `RunWorkspaceSweeper` (`Thalos.NET.Workflow`) and call its
+`SweepAsync` on a timer: it removes the workspaces of succeeded runs, of failed or cancelled runs that were never
+resumed, and of runs that never got a run row after a 10-minute grace, and keeps those of running, awaiting and
+resumed-then-failed runs. Without it, worktrees and each run's MCP server processes stay until the host shuts down.
+An `.mcp.json` entry with a `runScoped` object starts one private copy of that server per run, against the run's
+workspace, with `${run.id}`, `${run.workspace.root}` and `${run.workspace.solution}` substituted; wait for those
+servers with `IRunToolServerReadiness.WaitAllReadyAsync` from an `IWorkflowDispatchGate` before each turn. See
+[`docs/workflow.md` §11](docs/workflow.md#11-run-workspaces) for the sweeper, the `runScoped` keys and the gate.
 
 A runnable REPL lives in [`samples/Thalos.Sample.Console`](samples/Thalos.Sample.Console/README.md).
 
