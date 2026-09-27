@@ -171,8 +171,8 @@ public sealed class SkillContextProviderTests
 
     /// <summary>
     /// MAF composes provider instructions with the agent's own; the catalogue must be appended, never a replacement — and an
-    /// agent with no skills must not leave a blank line behind. A second provider stands in for Thalos.NET.Memory, which this
-    /// test project cannot reference (Skills and Memory are independent packages).
+    /// agent with no skills must not leave a blank line behind. A second provider stands in for any other package that
+    /// contributes instructions.
     /// </summary>
     [Fact]
     public async Task The_catalogue_composes_with_the_agents_own_instructions_and_another_provider()
@@ -181,14 +181,14 @@ public sealed class SkillContextProviderTests
         var agent = new ChatClientAgent(client, new ChatClientAgentOptions
         {
             Name = "a",
-            AIContextProviders = [new MemoryLikeProvider(), new SkillContextProvider(Loaded(), ["*"], new AgentEventHub())],
+            AIContextProviders = [new OtherInstructionsProvider(), new SkillContextProvider(Loaded(), ["*"], new AgentEventHub())],
             ChatOptions = new ChatOptions { Instructions = "You are helpful." },
         });
 
         await agent.RunAsync("how do we release?");
 
         AllInstructions(client.Requests[0]).Should()
-            .Contain("You are helpful.").And.Contain("<memories>recalled</memories>").And.Contain("- release: How we cut a release.");
+            .Contain("You are helpful.").And.Contain("<other>per-agent context</other>").And.Contain("- release: How we cut a release.");
 
         var bare = new ChatClientAgent(client, new ChatClientAgentOptions
         {
@@ -206,10 +206,11 @@ public sealed class SkillContextProviderTests
     private static string AllInstructions((IReadOnlyList<ChatMessage> Messages, ChatOptions? Options) request) =>
         (request.Options?.Instructions ?? "") + "\n" + string.Join('\n', request.Messages.Where(m => m.Role == ChatRole.System).Select(m => m.Text));
 
-    private sealed class MemoryLikeProvider : AIContextProvider
+    /// <summary>Another provider that contributes instructions, so the catalogue is seen composing with it.</summary>
+    private sealed class OtherInstructionsProvider : AIContextProvider
     {
         protected override ValueTask<AIContext> ProvideAIContextAsync(InvokingContext context, CancellationToken cancellationToken = default) =>
-            new(new AIContext { Instructions = "<memories>recalled</memories>" });
+            new(new AIContext { Instructions = "<other>per-agent context</other>" });
     }
 
     /// <summary>A catalogue whose render throws, standing in for a store failure the sync could not repair.</summary>

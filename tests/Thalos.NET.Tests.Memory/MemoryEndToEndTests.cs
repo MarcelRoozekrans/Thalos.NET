@@ -45,8 +45,10 @@ public sealed class MemoryEndToEndTests
 
         events.OfType<TurnCompletedEvent>().Should().ContainSingle();
         events.OfType<MemoryRecalledEvent>().Should().ContainSingle().Which.Count.Should().Be(1);
-        var instructions = AllInstructions(client.Requests.Single());
-        instructions.Should().Contain("<memories").And.Contain("[preference · just now] The user prefers xUnit over NUnit.").And.NotContain("Bob prefers");
+        var request = client.Requests.Single();
+        AllInstructions(request).Should().NotContain("<memories", "recall is a per-turn message, not part of the instructions");
+        request.Messages.Should().HaveCount(2, "a new session sends the memories message and the user's message");
+        request.Messages[0].Text.Should().Contain("<memories").And.Contain("[preference · just now] The user prefers xUnit over NUnit.").And.NotContain("Bob prefers");
     }
 
     [Fact]
@@ -80,7 +82,7 @@ public sealed class MemoryEndToEndTests
 
         await runtime.RunTurnAsync(new AgentTurnRequest(s, "secret sauce?", caller), default);
 
-        AllInstructions(client.Requests.Single()).Should().NotContain("<memories");
+        client.Requests.Single().Messages.Should().ContainSingle().Which.Text.Should().Be("secret sauce?", "no memories message is inserted");
         client.Requests.Single().Options!.Tools.Should().Contain(t => t.Name == "memory__recall");
     }
 }

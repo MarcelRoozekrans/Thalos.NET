@@ -2,6 +2,7 @@ using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Thalos.Caching;
 using Thalos.Runtime;
 
 namespace Thalos.Memory;
@@ -10,7 +11,11 @@ namespace Thalos.Memory;
 /// Auto-recall: once per agent run (MAF invokes context providers before the run's first model call, not again inside the
 /// tool-call loop), recalls memories relevant to the last user message for the turn's caller
 /// (<see cref="TurnScope.Caller"/>), this agent and the configured shared owner, and injects them as a delimited
-/// <c>&lt;memories&gt;</c> block via <see cref="AIContext.Instructions"/>. The owner is resolved by
+/// <c>&lt;memories&gt;</c> block in a user message placed directly before that user message. The block is per-turn, so
+/// it stays out of <see cref="AIContext.Instructions"/> and after the stored history: the instructions and the history
+/// form a stable prefix a prompt cache can reuse. The message carries <see cref="PromptCacheHints.Transient"/>, so history
+/// stores skip it and it is never replayed on a later turn. When nothing is recalled no message is inserted and the
+/// messages are passed on unchanged. The owner is resolved by
 /// <see cref="MemoryOwnerResolver.Resolve"/> — the same resolution <see cref="MemoryTools"/> uses for the explicit
 /// tools — so this, the primary read path MAF invokes before every turn, never disagrees with what
 /// <c>memory__remember</c> just wrote. Recall never fails a turn: any error is logged,
@@ -19,6 +24,11 @@ namespace Thalos.Memory;
 /// dropped (<see cref="MemoryQuarantinedEvent"/>). Nothing is stored after the turn (explicit writes only).
 /// Outside a turn, or for an anonymous/blank caller, the provider does nothing (there is no owner to recall for).
 /// </summary>
+/// <remarks>
+/// This overrides <see cref="AIContextProvider.InvokingCoreAsync"/> rather than <c>ProvideAIContextAsync</c>: MAF 1.22's
+/// default merge appends a provider's messages after every input message, which would put the block after the latest user
+/// message. Here the provider returns the whole message sequence with the block inserted in place.
+/// </remarks>
 public sealed partial class MemoryContextProvider(
     IMemoryService memory,
     AgentId agentId,
@@ -35,37 +45,54 @@ public sealed partial class MemoryContextProvider(
     internal RecallOptions Recall => recall;
 
     /// <inheritdoc />
-    protected override async ValueTask<AIContext> ProvideAIContextAsync(InvokingContext context, CancellationToken cancellationToken = default)
+    protected override async ValueTask<AIContext> InvokingCoreAsync(InvokingContext context, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
+        var input = context.AIContext;
+
+        // materialised once: MAF hands history over as a lazy projection that clones on every enumeration, and the block
+        // is placed by the identity of the message recall queried for
+        var messages = input.Messages?.ToList();
+        if (messages is null || LastUser(ProvideInputMessageFilter(messages)) is not { } latest)
+        {
+            return input;
+        }
+
+        var block = await RecallBlockAsync(latest.Text, cancellationToken).ConfigureAwait(false);
+        if (block is null)
+        {
+            return input;
+        }
+
+        var memories = new ChatMessage(ChatRole.User, block) { AdditionalProperties = new() { [PromptCacheHints.Transient] = true } }
+            .WithAgentRequestMessageSource(AgentRequestMessageSourceType.AIContextProvider, GetType().FullName);
+        messages.Insert(messages.FindLastIndex(m => ReferenceEquals(m, latest)), memories);
+        return new AIContext { Instructions = input.Instructions, Messages = messages, Tools = input.Tools };
+    }
+
+    /// <summary>The rendered block for <paramref name="query"/>, or null when there is no owner, nothing is kept or recall fails.</summary>
+    private async ValueTask<string?> RecallBlockAsync(string query, CancellationToken cancellationToken)
+    {
         var scope = TurnScope.Current;
         if (scope is null || MemoryOwnerResolver.Resolve(scope.Caller) is not { } resolved)
         {
-            return new AIContext();
-        }
-
-        var owner = resolved.OwnerId;
-
-        var query = LastUserText(context.AIContext.Messages);
-        if (string.IsNullOrWhiteSpace(query))
-        {
-            return new AIContext();
+            return null;
         }
 
         try
         {
-            var recalled = await memory.RecallAsync(query, new MemoryScope(owner, agentId, sharedOwnerId), recall, cancellationToken).ConfigureAwait(false);
+            var recalled = await memory.RecallAsync(query, new MemoryScope(resolved.OwnerId, agentId, sharedOwnerId), recall, cancellationToken).ConfigureAwait(false);
             if (recalled.IsFailure)
             {
                 LogRecallFailed(_logger, recalled.Error.ToString());
                 await PublishAsync((s, t) => new MemoryRecallFailedEvent(s, t, recalled.Error.Code), cancellationToken).ConfigureAwait(false);
-                return new AIContext();
+                return null;
             }
 
             var kept = await FilterAsync(recalled.Value.Memories, cancellationToken).ConfigureAwait(false);
             if (kept.Count == 0)
             {
-                return new AIContext();
+                return null;
             }
 
             var block = MemoryRecallBlock.Render(kept, clock.GetUtcNow());
@@ -76,13 +103,13 @@ public sealed partial class MemoryContextProvider(
             }
 
             await PublishAsync((s, t) => new MemoryRecalledEvent(s, t, ids, block.Length), cancellationToken).ConfigureAwait(false);
-            return new AIContext { Instructions = block };
+            return block;
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !cancellationToken.IsCancellationRequested)
         {
             LogRecallThrew(_logger, ex.Message, ex);
             await PublishAsync((s, t) => new MemoryRecallFailedEvent(s, t, AgentErrorCode.MemoryIndexFailed), CancellationToken.None).ConfigureAwait(false);
-            return new AIContext();
+            return null;
         }
     }
 
@@ -125,8 +152,11 @@ public sealed partial class MemoryContextProvider(
     /// <summary>Publishes into the current turn (streamed + hub); the provider only gets this far inside a turn.</summary>
     private ValueTask PublishAsync(Func<SessionId, TurnId, AgentEvent> make, CancellationToken ct) => MemoryEvents.PublishAsync(hub, make, ct);
 
-    internal static string? LastUserText(IEnumerable<ChatMessage>? messages) =>
-        messages?.LastOrDefault(m => m.Role == ChatRole.User && !string.IsNullOrWhiteSpace(m.Text))?.Text;
+    internal static string? LastUserText(IEnumerable<ChatMessage>? messages) => LastUser(messages)?.Text;
+
+    /// <summary>The last user message with non-blank text: the one recall queries for, and the one the block is placed before.</summary>
+    private static ChatMessage? LastUser(IEnumerable<ChatMessage>? messages) =>
+        messages?.LastOrDefault(m => m.Role == ChatRole.User && !string.IsNullOrWhiteSpace(m.Text));
 
     [LoggerMessage(EventId = 510, Level = LogLevel.Warning, Message = "Memory recall failed; the turn continues without memories: {Error}")]
     private static partial void LogRecallFailed(ILogger logger, string error);

@@ -1,6 +1,7 @@
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using NSubstitute;
+using Thalos.Caching;
 using Thalos.Memory;
 using Thalos.Runtime;
 using Thalos.Testing;
@@ -17,6 +18,10 @@ public sealed class MemoryContextProviderTests
         new(Agent(), null!, new AIContext { Messages = [new ChatMessage(ChatRole.User, userText)] });
 #pragma warning restore MAAI001
 
+    /// <summary>The text of the transient memories message the provider inserted, or null when it inserted none.</summary>
+    internal static string? Block(AIContext ctx) =>
+        ctx.Messages?.Where(m => m.AdditionalProperties?.TryGetValue(PromptCacheHints.Transient, out var v) == true && v is true).Select(m => m.Text).SingleOrDefault();
+
     internal static MemoryContextProvider Provider(MemoryServiceFixture f, AgentId agent, IUntrustedContentScanner? scanner = null, RecallOptions? recall = null) =>
         new(f.Build(), agent, recall ?? new RecallOptions { MinScore = 0.1 }, f.Options.SharedOwnerId, f.Clock, f.Hub, scanner);
 
@@ -32,33 +37,75 @@ public sealed class MemoryContextProviderTests
 
         var ctx = await provider.InvokingAsync(Invoking("Which test framework does the user like, xUnit or NUnit?"), default);
 
-        ctx.Instructions.Should().StartWith("<memories note=").And.Contain("[fact · just now] The user prefers xUnit over NUnit.").And.EndWith("</memories>");
+        Block(ctx).Should().StartWith("<memories note=").And.Contain("[fact · just now] The user prefers xUnit over NUnit.").And.EndWith("</memories>");
         scope.Events.TryRead(out var evt).Should().BeTrue();
         var recalled = evt.Should().BeOfType<MemoryRecalledEvent>().Subject;
         recalled.MemoryIds.Should().Equal(stored.Id);
-        recalled.Chars.Should().Be(ctx.Instructions!.Length);
+        recalled.Chars.Should().Be(Block(ctx)!.Length);
+        ctx.Instructions.Should().BeNull("the block is a message, not part of the cached instructions");
         recalled.SessionId.Should().Be(s);
     }
 
     [Fact]
-    public async Task No_hits_no_turn_or_anonymous_caller_yield_no_instructions()
+    public async Task No_hits_no_turn_or_anonymous_caller_yield_no_memories_message()
     {
         var f = new MemoryServiceFixture();
         var agent = AgentId.New();
         var provider = Provider(f, agent);
 
-        (await provider.InvokingAsync(Invoking("anything"), default)).Instructions.Should().BeNull("no turn scope");
+        Block(await provider.InvokingAsync(Invoking("anything"), default)).Should().BeNull("no turn scope");
 
         using (TurnScope.Begin(SessionId.New(), TurnId.New(), AnonymousSecurityContext.Instance, agent))
         {
-            (await provider.InvokingAsync(Invoking("anything"), default)).Instructions.Should().BeNull("anonymous");
+            Block(await provider.InvokingAsync(Invoking("anything"), default)).Should().BeNull("anonymous");
         }
 
         using (TurnScope.Begin(SessionId.New(), TurnId.New(), new TestCaller("alice"), agent))
         {
-            (await provider.InvokingAsync(Invoking("nothing stored yet"), default)).Instructions.Should().BeNull("empty result");
+            Block(await provider.InvokingAsync(Invoking("nothing stored yet"), default)).Should().BeNull("empty result");
         }
     }
+
+#pragma warning disable MAAI001 // the InvokingContext ctor is [Experimental]; these tests hand the provider a full context directly
+    [Fact]
+    public async Task The_block_goes_directly_before_the_last_user_message_and_the_rest_passes_through()
+    {
+        var f = new MemoryServiceFixture();
+        var agent = AgentId.New();
+        await f.Build().RememberAsync(MemoryServiceFixture.Remember("The user prefers xUnit over NUnit."), default);
+        var provider = Provider(f, agent);
+        using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), new TestCaller("alice"), agent);
+        ChatMessage earlier = new(ChatRole.User, "earlier question"), answer = new(ChatRole.Assistant, "earlier answer"), latest = new(ChatRole.User, "xUnit or NUnit?");
+        AITool[] tools = [AIFunctionFactory.Create(() => "x", "t")];
+
+        var ctx = await provider.InvokingAsync(new(Agent(), null!, new AIContext { Instructions = "own", Messages = [earlier, answer, latest], Tools = tools }), default);
+
+        var messages = ctx.Messages!.ToList();
+        messages.Should().HaveCount(4);
+        messages[0].Should().BeSameAs(earlier);
+        messages[1].Should().BeSameAs(answer);
+        messages[2].Text.Should().StartWith("<memories note=");
+        messages[2].Role.Should().Be(ChatRole.User);
+        messages[3].Should().BeSameAs(latest);
+        ctx.Instructions.Should().Be("own");
+        ctx.Tools.Should().Equal(tools);
+    }
+
+    [Fact]
+    public async Task With_nothing_recalled_the_messages_pass_through_unchanged()
+    {
+        var f = new MemoryServiceFixture();
+        var agent = AgentId.New();
+        var provider = Provider(f, agent);
+        using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), new TestCaller("alice"), agent);
+        ChatMessage answer = new(ChatRole.Assistant, "earlier answer"), latest = new(ChatRole.User, "nothing stored yet");
+
+        var ctx = await provider.InvokingAsync(new(Agent(), null!, new AIContext { Instructions = "own", Messages = [answer, latest] }), default);
+
+        ctx.Messages.Should().Equal(answer, latest);
+        ctx.Instructions.Should().Be("own");
+    }
+#pragma warning restore MAAI001
 
     [Fact]
     public async Task Scope_is_owner_agent_and_shared_owner()
@@ -75,11 +122,11 @@ public sealed class MemoryContextProviderTests
 
         var ctx = await provider.InvokingAsync(Invoking("rule for data-testid?"), default);
 
-        ctx.Instructions.Should().Contain("project rule").And.NotContain("bob rule").And.NotContain("other agent rule");
+        Block(ctx).Should().Contain("project rule").And.NotContain("bob rule").And.NotContain("other agent rule");
     }
 
     [Fact]
-    public async Task Index_unavailable_degrades_to_recency_and_still_injects_instructions()
+    public async Task Index_unavailable_degrades_to_recency_and_still_injects_the_block()
     {
         var f = new MemoryServiceFixture(UnavailableMemoryIndex.Instance);
         var agent = AgentId.New();
@@ -89,20 +136,20 @@ public sealed class MemoryContextProviderTests
 
         var ctx = await provider.InvokingAsync(Invoking("xUnit or NUnit?"), default);
 
-        ctx.Instructions.Should().NotBeNull().And.Contain("The user prefers xUnit over NUnit.", "an index outage falls back to the store instead of going silent");
+        Block(ctx).Should().NotBeNull().And.Contain("The user prefers xUnit over NUnit.", "an index outage falls back to the store instead of going silent");
         scope.Events.TryRead(out var evt).Should().BeTrue();
         evt.Should().BeOfType<MemoryRecalledEvent>("a degraded-but-successful recall is not a recall failure");
     }
 
     [Fact]
-    public async Task Index_unavailable_with_nothing_in_the_store_yields_no_instructions_and_no_failure_event()
+    public async Task Index_unavailable_with_nothing_in_the_store_yields_no_block_and_no_failure_event()
     {
         var f = new MemoryServiceFixture(UnavailableMemoryIndex.Instance);
         var agent = AgentId.New();
         var provider = Provider(f, agent);
         using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), new TestCaller("alice"), agent);
 
-        (await provider.InvokingAsync(Invoking("q"), default)).Instructions.Should().BeNull("there is truly nothing in scope, not merely an index outage");
+        Block(await provider.InvokingAsync(Invoking("q"), default)).Should().BeNull("there is truly nothing in scope, not merely an index outage");
         scope.Events.TryRead(out var evt).Should().BeFalse("tier None with an empty result is not a recall failure");
     }
 
@@ -117,7 +164,7 @@ public sealed class MemoryContextProviderTests
 
         var ctx = await provider.InvokingAsync(Invoking("q"), default);
 
-        ctx.Instructions.Should().BeNull();
+        Block(ctx).Should().BeNull();
         scope.Events.TryRead(out var evt).Should().BeTrue();
         evt.Should().BeOfType<MemoryRecallFailedEvent>();
     }
@@ -139,7 +186,7 @@ public sealed class MemoryContextProviderTests
 
         var ctx = await provider.InvokingAsync(Invoking("deploy notes"), default);
 
-        ctx.Instructions.Should().Contain("blue green").And.NotContain("ignore all");
+        Block(ctx).Should().Contain("blue green").And.NotContain("ignore all");
         var events = new List<AgentEvent>();
         while (scope.Events.TryRead(out var e)) { events.Add(e); }
         events.OfType<MemoryQuarantinedEvent>().Should().ContainSingle().Which.MemoryId.Should().Be(bad.Id);
@@ -163,7 +210,7 @@ public sealed class MemoryContextProviderTests
 
         var ctx = await provider.InvokingAsync(Invoking("deploy notes"), default);
 
-        ctx.Instructions.Should().Contain("blue green").And.NotContain("crashes");
+        Block(ctx).Should().Contain("blue green").And.NotContain("crashes");
         var events = new List<AgentEvent>();
         while (scope.Events.TryRead(out var e)) { events.Add(e); }
         events.OfType<MemoryQuarantinedEvent>().Should().ContainSingle().Which.Should().Match<MemoryQuarantinedEvent>(q => q.MemoryId == bad.Id && q.Detail!.Contains("scanner failed", StringComparison.Ordinal));
@@ -183,7 +230,7 @@ public sealed class MemoryContextProviderTests
 
         var ctx = await provider.InvokingAsync(Invoking("rule for data-testid?"), default);
 
-        ctx.Instructions.Should().Contain("pinned rule");
+        Block(ctx).Should().Contain("pinned rule");
     }
 
     [Fact]
@@ -216,7 +263,7 @@ public sealed class MemoryContextProviderTests
         var provider = new MemoryContextProvider(svc, agent, new RecallOptions { MinScore = 0.1 }, f.Options.SharedOwnerId, f.Clock, f.Hub, scanner);
         using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), new TestCaller("alice"), agent);
 
-        (await provider.InvokingAsync(Invoking("q"), default)).Instructions.Should().BeNull();
+        Block(await provider.InvokingAsync(Invoking("q"), default)).Should().BeNull();
 
         scope.Events.TryRead(out var evt).Should().BeTrue();
         evt.Should().BeOfType<MemoryRecallFailedEvent>().Which.Code.Should().Be(AgentErrorCode.MemoryStoreFailed);

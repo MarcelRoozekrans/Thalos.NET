@@ -32,7 +32,8 @@ internal static partial class SkillBlock
     // Escapes the '<' of every opening or closing spelling of <skill> / <skills> / <memories> (any casing, whitespace
     // around the slash), keeping the rest verbatim. Same shape and same case-insensitivity as MemoryRecallBlock's tag
     // guard, and it covers the memory tags for the same reason that one covers these: both blocks land in the same
-    // ChatOptions.Instructions, so text neutralised for one of them could otherwise forge the other.
+    // request (the catalogue in the instructions, the recall block in a message before the latest user message, and
+    // loaded skill bodies in tool results), so text neutralised for one of them could otherwise forge the other.
     // The word boundary keeps the escape to real tags: "<skillset" and "<memoriesX" are ordinary words.
     [GeneratedRegex(@"<\s*/?\s*(?:memories|skills?)\b", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 1000)] // MA0009: timeout (bodies are ≤ 64 Ki chars; the pattern is linear)
     private static partial Regex SkillTag();

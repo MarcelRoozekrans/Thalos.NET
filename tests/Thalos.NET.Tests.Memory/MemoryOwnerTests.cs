@@ -61,7 +61,7 @@ public sealed class MemoryOwnerTests
 
         var ctx = await provider.InvokingAsync(MemoryContextProviderTests.Invoking("deploy notes"), default);
 
-        ctx.Instructions.Should().NotBeNull().And.Contain("blue green");
+        MemoryContextProviderTests.Block(ctx).Should().NotBeNull().And.Contain("blue green");
     }
 
     [Fact]
