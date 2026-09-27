@@ -1,3 +1,4 @@
+using System.Runtime.Versioning;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 
@@ -33,10 +34,12 @@ internal sealed class TrackedStdioClientTransport(StdioClientTransport inner) : 
     }
 
     /// <summary>
-    /// The id of the process the SDK started, as its closed session reports it, or <see langword="null"/> when no session
-    /// was connected or it has not closed within <paramref name="wait"/>.
+    /// The id of the process the SDK started, as its closed session reports it, and when the close was observed, from
+    /// <see cref="ServerProcessTree.Now"/>; or <see langword="null"/> when no session was connected, it has not closed
+    /// within <paramref name="wait"/>, or it closed without a process id. Windows only.
     /// </summary>
-    public async Task<int?> ClosedProcessIdAsync(TimeSpan wait)
+    [SupportedOSPlatform("windows")]
+    public async Task<(int Pid, long ClosedAt)?> ClosedProcessAsync(TimeSpan wait)
     {
         if (Volatile.Read(ref _session) is not { } session)
         {
@@ -47,9 +50,9 @@ internal sealed class TrackedStdioClientTransport(StdioClientTransport inner) : 
         {
             await session.MessageReader.Completion.WaitAsync(wait).ConfigureAwait(false);
         }
-        catch (ClientTransportClosedException ex) when (ex.Details is StdioClientCompletionDetails details)
+        catch (ClientTransportClosedException ex) when (ex.Details is StdioClientCompletionDetails { ProcessId: { } pid })
         {
-            return details.ProcessId; // a stdio session always closes this way, carrying the process id
+            return (pid, ServerProcessTree.Now()); // a stdio session always closes this way, carrying the process id
         }
         catch (Exception ex) when (ex is TimeoutException or ClientTransportClosedException)
         {

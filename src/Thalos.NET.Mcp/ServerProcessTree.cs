@@ -18,9 +18,16 @@ namespace Thalos.Mcp;
 /// Only Windows needs this: elsewhere the SDK starts the server itself, with no wrapper, and waits for it. The tree is
 /// found by parent process id, which Windows keeps after the parent exits, and each process is opened by id, not
 /// through <see cref="System.Diagnostics.Process"/>, which refuses a process that has an exit code but is still
-/// terminating. Process ids are recycled, so a process counts as the server's only if it was created at or after the
-/// start, and a child of the wrapper's id only if it was created before whatever live process holds that id now.
-/// Creation times and the start are both read from the system clock the kernel stamps processes with, so they compare.
+/// terminating.
+/// <para>
+/// Process ids are recycled, and a process listed in the snapshot may exit and give its id to a new one before it is
+/// opened. So a process is taken as the server's only if it was created at or after the start and no later than the
+/// snapshot, and a child of the wrapper's id only if it was also created before the session's close was observed and
+/// before any live process that holds that id now. Creation times, the start, the snapshot and the close are all read
+/// from the system clock the kernel stamps processes with, so they compare. What these bounds cannot rule out is an id
+/// recycled, within that window, into a process whose recorded parent is itself a member of the tree; a job object
+/// holding the whole tree would, and is tracked as Thalos.NET issue 192.
+/// </para>
 /// </remarks>
 [SupportedOSPlatform("windows")]
 internal static partial class ServerProcessTree
@@ -30,11 +37,16 @@ internal static partial class ServerProcessTree
     private const uint ProcessQueryLimitedInformation = 0x1000;
     private const uint StillActive = 259;
     private const uint SnapProcess = 0x2;
+    private const int ErrorNoMoreFiles = 18;
 
-    /// <summary>The system time, as a <c>FILETIME</c>, from the clock process creation times are read from.</summary>
+    /// <summary>
+    /// The system time, as a <c>FILETIME</c>, at full precision. Process creation times are stamped at full precision;
+    /// the coarse system time lags them by up to a clock tick, so a process created just before a coarse reading could
+    /// look created after it.
+    /// </summary>
     public static long Now()
     {
-        GetSystemTimeAsFileTime(out var now);
+        GetSystemTimePreciseAsFileTime(out var now);
         return now;
     }
 
@@ -44,12 +56,17 @@ internal static partial class ServerProcessTree
     /// </summary>
     /// <param name="wrapperPid">The process the SDK started, <c>cmd.exe</c>.</param>
     /// <param name="startedAt">From <see cref="Now"/>, taken before the start; a process created before it is not the server's.</param>
+    /// <param name="closedAt">From <see cref="Now"/>, taken once the session's close was observed; the wrapper's own children were all created before it.</param>
     /// <param name="timeout">How long to wait for the killed processes to exit.</param>
     /// <returns>How many processes of the tree were found, and how many of them had not exited when the wait ended.</returns>
     /// <exception cref="Win32Exception">The processes could not be listed.</exception>
-    public static async Task<(int Found, int StillRunning)> EndAsync(int wrapperPid, long startedAt, TimeSpan timeout)
+    public static Task<(int Found, int StillRunning)> EndAsync(int wrapperPid, long startedAt, long closedAt, TimeSpan timeout) =>
+        EndAsync(wrapperPid, startedAt, closedAt, timeout, Snapshot);
+
+    /// <summary><see cref="EndAsync(int, long, long, TimeSpan)"/> over the process list <paramref name="snapshot"/> takes; a seam for tests.</summary>
+    internal static async Task<(int Found, int StillRunning)> EndAsync(int wrapperPid, long startedAt, long closedAt, TimeSpan timeout, Func<ProcessSnapshot> snapshot)
     {
-        var tree = Collect(wrapperPid, startedAt);
+        var tree = Collect(wrapperPid, startedAt, closedAt, snapshot());
         try
         {
             foreach (var process in tree)
@@ -80,19 +97,24 @@ internal static partial class ServerProcessTree
     }
 
     /// <summary>The server's processes under <paramref name="wrapperPid"/>, each opened, which keeps its id from being reused while it is ended.</summary>
-    private static List<OpenedProcess> Collect(int wrapperPid, long startedAt)
+    private static List<OpenedProcess> Collect(int wrapperPid, long startedAt, long closedAt, ProcessSnapshot snapshot)
     {
-        var (children, running) = Snapshot();
+        var (children, running, snapshotAt) = snapshot;
         var tree = new List<OpenedProcess>();
 
-        // A live process holding the wrapper's id is a later one that reused it, and the wrapper's own children were all
-        // created before it. A holder that is terminating and was created after the start is the wrapper itself.
-        var childrenBefore = long.MaxValue;
+        // The wrapper's own children were created before its session's close was observed. A live process holding the
+        // wrapper's id, created at or after the start and no later than the snapshot, and already terminating, is the
+        // wrapper itself; any other holder reused the id, and the wrapper's children were all created before it. A holder
+        // created after the snapshot says nothing about who held the id when the snapshot was taken, so none of that id's
+        // children is taken.
+        var childrenBefore = closedAt;
         if (running.Contains(wrapperPid))
         {
-            if (OpenedProcess.TryOpen(wrapperPid) is not { } holder)
+            var holder = OpenedProcess.TryOpen(wrapperPid);
+            if (holder is null || holder.Created > snapshotAt)
             {
-                childrenBefore = long.MinValue; // cannot tell whose it is: take none of its children
+                holder?.Dispose();
+                childrenBefore = long.MinValue;
             }
             else if (holder.Created >= startedAt && holder.Terminating)
             {
@@ -100,7 +122,7 @@ internal static partial class ServerProcessTree
             }
             else
             {
-                childrenBefore = holder.Created;
+                childrenBefore = Math.Min(childrenBefore, holder.Created);
                 holder.Dispose();
             }
         }
@@ -116,9 +138,9 @@ internal static partial class ServerProcessTree
                     continue;
                 }
 
-                if (child.Created < startedAt || (parent == wrapperPid && child.Created >= childrenBefore))
+                if (child.Created < startedAt || child.Created > snapshotAt || (parent == wrapperPid && child.Created >= childrenBefore))
                 {
-                    child.Dispose(); // not the server's: its parent id was recycled
+                    child.Dispose(); // not the server's: its id, or its parent's, was recycled
                     continue;
                 }
 
@@ -147,10 +169,12 @@ internal static partial class ServerProcessTree
     }
 
     /// <summary>Every running process's children by parent id, and every running process id, from one Toolhelp snapshot.</summary>
-    private static (Dictionary<int, List<int>> Children, HashSet<int> Running) Snapshot()
+    /// <exception cref="Win32Exception">The snapshot could not be taken or read to its end.</exception>
+    private static ProcessSnapshot Snapshot()
     {
         var children = new Dictionary<int, List<int>>();
         var running = new HashSet<int>();
+        var takenAt = Now(); // before the snapshot: every process in it was created no later than this
         using var snapshot = CreateToolhelp32Snapshot(SnapProcess, 0);
         if (snapshot.IsInvalid)
         {
@@ -172,11 +196,19 @@ internal static partial class ServerProcessTree
             siblings.Add(pid);
         }
 
-        return (children, running);
+        // The loop ends on any failure, not only at the end of the list: a listing cut short must not pass for a tree
+        // with no processes left in it.
+        var error = Marshal.GetLastPInvokeError();
+        if (error != ErrorNoMoreFiles)
+        {
+            throw new Win32Exception(error);
+        }
+
+        return new ProcessSnapshot(children, running, takenAt);
     }
 
     [LibraryImport("kernel32.dll")]
-    private static partial void GetSystemTimeAsFileTime(out long systemTime);
+    private static partial void GetSystemTimePreciseAsFileTime(out long systemTime);
 
     [LibraryImport("kernel32.dll", SetLastError = true)]
     private static partial SnapshotHandle CreateToolhelp32Snapshot(uint flags, uint processId);
@@ -263,6 +295,12 @@ internal static partial class ServerProcessTree
     {
         public ushort First;
     }
+
+    /// <summary>
+    /// A process listing: each parent id's children, every listed id, and the time, from <see cref="Now"/>, taken just
+    /// before the listing, so no process in it was created after that time.
+    /// </summary>
+    internal sealed record ProcessSnapshot(Dictionary<int, List<int>> Children, HashSet<int> Running, long TakenAt);
 
     private sealed class SnapshotHandle() : SafeHandleZeroOrMinusOneIsInvalid(ownsHandle: true)
     {

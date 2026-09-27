@@ -262,8 +262,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         hook.Ran.Should().BeTrue("the hook began the removal inside the routed call");
         probe.IsCompleted.Should().BeTrue("the removal had cancelled the client's pending requests before the call was sent");
         windowOpen.Should().BeTrue("the call was sent while the server's stdin was still open, so it was written but never answered");
-        // Stopped or exited: as the session closes, the call cannot tell a removal from a crash, and either is a cut-off call.
-        outcome.Should().MatchRegex(@"^error: run tool server 'roslyn' (stopped during 'args' for this run; the call did not complete\.|is not available for this run: its server exited during 'args'\.)$");
+        outcome.Should().Be("error: run tool server 'roslyn' stopped during 'args' for this run; the call did not complete.", "a server the removal stopped is reported as stopped, not as exited");
         elapsed.Should().BeLessThan(TimeSpan.FromSeconds(15), "the call ends with its server's session, not at the call timeout");
     }
 
@@ -368,9 +367,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         var result = await inFlight.WaitAsync(TimeSpan.FromSeconds(15));
 
         using var _scope = new AssertionScope();
-        result.Should().StartWith("error: run tool server 'roslyn' ", "the dead server's call is refused with the error text");
-        result.Should().NotStartWith("threw");
-        result.Should().NotContain("--host");
+        result.Should().Be("error: run tool server 'roslyn' is not available for this run: its server exited during 'slow'.", "a server that died is refused, not reported as stopped");
     }
 
     [Fact]

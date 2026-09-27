@@ -220,6 +220,19 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         act.Should().Throw<ArgumentException>().WithMessage($"*{property}*");
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)] // Timeout.InfiniteTimeSpan
+    [InlineData(2_147_483_648)] // past int.MaxValue milliseconds, the longest a timer takes
+    public void A_shutdown_timeout_that_is_not_positive_or_too_long_for_a_timer_is_rejected_at_construction(long milliseconds)
+    {
+        var definition = McpServerFixture.Definition("--host");
+        definition.ShutdownTimeout = TimeSpan.FromMilliseconds(milliseconds);
+        definition.RunScoped = new() { Args = ServerArgs };
+        var act = () => new RunMcpServerRegistry(Servers(definition), () => null, NullLoggerFactory.Instance, TimeProvider.System);
+        act.Should().Throw<ArgumentException>().WithParameterName("servers").WithMessage("*shutdownTimeout*");
+    }
+
     [Fact]
     public void The_workspace_provider_is_not_looked_up_while_the_registry_is_built()
     {

@@ -28,9 +28,11 @@ namespace Thalos.Mcp;
 /// <see cref="RunMcpServerRegistry"/> requires. The call is bounded by <see cref="RunScopedMcpDefinition.CallTimeout"/>,
 /// because a held lease holds back that server's reloads. A removal does not wait for leases: a call whose run's server
 /// is stopped under it gets an error result, not a cancellation it never asked for, as soon as the server's session ends,
-/// even when its request was sent while the SDK was already closing the session and so is never answered. Only the caller's own token
-/// cancelling makes a routed call throw <see cref="OperationCanceledException"/>. A server that dies under a call, or
-/// before it, gets the call refused with the same error text as a server that is not running.
+/// even when its request was sent while the SDK was already closing the session and so is never answered. Only the
+/// caller's own token cancelling makes a routed call throw <see cref="OperationCanceledException"/>. A server that dies
+/// under a call, or before it, gets the call refused with the same error text as a server that is not running. A stop and
+/// a death are told apart by whether the registry had begun stopping the server, not by the SDK's completion details,
+/// which do not always record an exception for a server that died.
 /// </para>
 /// <para>
 /// <b>Ownership.</b> The source owns <paramref name="host"/> and disposes it; the registry is shared and owned by the
@@ -124,18 +126,16 @@ public sealed partial class RunScopedMcpToolSource(
             }
             catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
             {
-                // Neither the caller nor the timeout: the call's session closed, which is how a removal, which does not
-                // wait for leases, stops the run's server under it. Reported, not thrown as a cancellation the caller never
-                // asked for.
+                // Neither the caller nor the timeout: the call's session closed. Reported, not thrown as a cancellation the
+                // caller never asked for.
                 LogCallCutOff(_logger, ex, Name, tool.Name, runId);
-                return $"error: run tool server '{Name}' stopped during '{tool.Name}' for this run; the call did not complete.";
+                return lease.Value.ServerStopped ? StoppedDuring(tool) : ExitedDuring(runId, tool);
             }
             catch (Exception ex) when (ex is not OperationCanceledException && (ex is IOException || lease.Value.Client.Completion.IsCompleted))
             {
-                // The server died under the call: its transport closed. The registry finds it dead on the next call and
-                // refuses the run until readiness starts it again, so this call is refused the same way, not thrown.
+                // The call's transport closed under it.
                 LogCallCutOff(_logger, ex, Name, tool.Name, runId);
-                return Refuse(runId, $"its server exited during '{tool.Name}'.");
+                return lease.Value.ServerStopped ? StoppedDuring(tool) : ExitedDuring(runId, tool);
             }
         }
     }
@@ -158,6 +158,19 @@ public sealed partial class RunScopedMcpToolSource(
 
         return await invocation.ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// A call whose server was stopped under it, which is how a removal, which does not wait for leases, stops the run's
+    /// server.
+    /// </summary>
+    private string StoppedDuring(McpClientTool tool) =>
+        $"error: run tool server '{Name}' stopped during '{tool.Name}' for this run; the call did not complete.";
+
+    /// <summary>
+    /// A call whose server died under it. The registry finds it dead on the next call and refuses the run until readiness
+    /// starts it again, so this call is refused the same way, not thrown.
+    /// </summary>
+    private string ExitedDuring(Guid runId, McpClientTool tool) => Refuse(runId, $"its server exited during '{tool.Name}'.");
 
     private string Refuse(Guid? runId, string reason)
     {

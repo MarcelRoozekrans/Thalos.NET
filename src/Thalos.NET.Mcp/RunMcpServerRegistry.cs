@@ -93,7 +93,8 @@ namespace Thalos.Mcp;
 /// </remarks>
 /// <param name="runScopedServers">
 /// The <c>.mcp.json</c> entries that declare <see cref="McpServerDefinition.RunScoped"/>, keyed by source name. Each
-/// must be a stdio server with a command, a valid <see cref="RunScopedMcpDefinition.Reload"/> and valid timeouts.
+/// must be a stdio server with a command, a valid <see cref="RunScopedMcpDefinition.Reload"/> and valid timeouts,
+/// including a <see cref="McpServerDefinition.ShutdownTimeout"/> that is positive and at most <see cref="int.MaxValue"/> ms.
 /// </param>
 /// <param name="workspaces">
 /// Returns the provider that finds a run's workspace after a host restart, or <see langword="null"/> when the host has no
@@ -342,7 +343,7 @@ public sealed partial class RunMcpServerRegistry(
 
             // Taken under the lock, with no reload in flight: a reload begins only under the lock, and then waits for the count to reach zero.
             Interlocked.Increment(ref entry.Leases);
-            return Result<RunMcpClientLease, AgentError>.Success(new RunMcpClientLease(ready.Value, entry.ReleaseLease));
+            return Result<RunMcpClientLease, AgentError>.Success(new RunMcpClientLease(ready.Value, entry.ReleaseLease, entry.Stopping.Token));
         }
         finally
         {
@@ -941,14 +942,14 @@ public sealed partial class RunMcpServerRegistry(
         }
 
         var timeout = entry.Spec.Definition.ShutdownTimeout;
-        if (await transport.ClosedProcessIdAsync(timeout).ConfigureAwait(false) is not { } wrapperPid)
+        if (await transport.ClosedProcessAsync(timeout).ConfigureAwait(false) is not var (wrapperPid, closedAt))
         {
             return;
         }
 
         try
         {
-            var (found, stillRunning) = await ServerProcessTree.EndAsync(wrapperPid, transport.StartedAt, timeout).ConfigureAwait(false);
+            var (found, stillRunning) = await ServerProcessTree.EndAsync(wrapperPid, transport.StartedAt, closedAt, timeout).ConfigureAwait(false);
             if (stillRunning > 0)
             {
                 LogProcessTreeNotEnded(_logger, entry.Spec.Name, entry.Workspace.RunId, stillRunning, timeout);
@@ -1052,6 +1053,12 @@ public sealed partial class RunMcpServerRegistry(
             }
 
             ThrowIfInvalidTimeouts(name, runScoped, nameof(servers));
+            if (definition.ShutdownTimeout <= TimeSpan.Zero || definition.ShutdownTimeout > MaxTimeout)
+            {
+                // It also bounds the wait for the rest of the server's process tree, which a timer cannot time past MaxTimeout.
+                throw new ArgumentException(
+                    $"Run-scoped MCP server '{name}' has shutdownTimeout {definition.ShutdownTimeout}; it must be positive and at most {MaxTimeout}.", nameof(servers));
+            }
 
             specs.Add(new ServerSpec(name, definition, reload, reloadTool));
         }

@@ -11,16 +11,24 @@ namespace Thalos.Mcp;
 /// </summary>
 public sealed class RunMcpClientLease : IAsyncDisposable
 {
+    private readonly CancellationToken _stopping;
     private Action? _release;
 
-    internal RunMcpClientLease(McpClient client, Action release)
+    internal RunMcpClientLease(McpClient client, Action release, CancellationToken stopping)
     {
         Client = client;
+        _stopping = stopping;
         _release = release;
     }
 
     /// <summary>The run's server client; valid until the lease is disposed, or until the run is removed.</summary>
     public McpClient Client { get; }
+
+    /// <summary>
+    /// Whether the registry has begun stopping the server, for a removal or a dispose. Set before it disposes the client,
+    /// so a call cut off by that dispose sees it; a server that died on its own never sets it.
+    /// </summary>
+    internal bool ServerStopped => _stopping.IsCancellationRequested;
 
     /// <summary>Releases the hold, letting a pending reload of the server proceed once no other lease is held.</summary>
     public ValueTask DisposeAsync()
