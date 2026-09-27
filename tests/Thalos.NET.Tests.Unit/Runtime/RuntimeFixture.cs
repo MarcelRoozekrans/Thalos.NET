@@ -35,6 +35,9 @@ internal sealed class RuntimeFixture
     /// <summary>What the provider returns from <c>CreateChatClient</c>; defaults to <see cref="Client"/>. May throw.</summary>
     public Func<AgentDefinition, IChatClient>? ChatClientFactory { get; set; }
 
+    /// <summary>Chat-client decorators the agent factory applies, as <c>AddChatClientDecorator</c> would register them; none by default.</summary>
+    public List<IChatClientDecorator> Decorators { get; } = [];
+
     /// <summary>Replaces the default single-agent <see cref="StaticAgentCatalog"/>; set before <see cref="Build"/> to test revision resolution.</summary>
     public IAgentCatalog? CatalogOverride { get; set; }
 
@@ -64,7 +67,7 @@ internal sealed class RuntimeFixture
         var catalog = new ToolCatalog([source], Authorizer, publisher, TimeProvider.System);
         var history = new SessionStoreChatHistoryProvider(store);
         var services = new ServiceCollection().BuildServiceProvider();
-        var factory = new AgentFactory(provider, [], catalog, history, services, null);
+        var factory = new AgentFactory(provider, Decorators, catalog, history, services, null);
         var agents = CatalogOverride ?? new StaticAgentCatalog([Agent]);
         // The real factory, over the same authorizer the catalog uses: an outcome tool is authorized exactly like any other.
         OutcomeTools = new OutcomeToolFactory(Authorizer, publisher, TimeProvider.System);
