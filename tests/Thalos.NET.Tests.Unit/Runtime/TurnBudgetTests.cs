@@ -211,6 +211,32 @@ public sealed class TurnBudgetTests
         scope.TokensSoFar.Should().Be(0);
     }
 
+    [Fact]
+    public async Task A_usage_report_with_one_count_missing_counts_the_other_and_does_not_fail_the_call()
+    {
+        using var client = new TurnBudgetChatClient(new ShapedUsageChatClient(new UsageDetails { InputTokenCount = null, OutputTokenCount = 5 }));
+        using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), Caller, maxTotalTokens: int.MaxValue);
+
+        var call = () => client.GetResponseAsync([new ChatMessage(ChatRole.User, "q")]);
+
+        await call.Should().NotThrowAsync();
+        scope.TokensSoFar.Should().Be(5);
+    }
+
+    [Fact]
+    public async Task Usage_split_across_several_updates_of_one_stream_is_all_counted()
+    {
+        using var client = new TurnBudgetChatClient(new ShapedUsageChatClient(
+            new UsageDetails(),
+            new UsageDetails { InputTokenCount = 30 },
+            new UsageDetails { OutputTokenCount = 12 }));
+        using var scope = TurnScope.Begin(SessionId.New(), TurnId.New(), Caller, maxTotalTokens: int.MaxValue);
+
+        await client.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, "q")]).ToListAsync();
+
+        scope.TokensSoFar.Should().Be(42);
+    }
+
     /// <summary>
     /// Round trips of one turn issued from as many threads as the machine has, each thread looping over calls that
     /// complete synchronously, so the count and the round-trip number are updated with as little time between
@@ -250,6 +276,30 @@ public sealed class TurnBudgetTests
 
         public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default) =>
             throw new NotSupportedException();
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+        public void Dispose() { }
+    }
+
+    /// <summary>
+    /// Client that answers with <paramref name="response"/> as the non-streaming usage, and streams one text update
+    /// followed by one <see cref="UsageContent"/> update per entry of <paramref name="streamed"/>.
+    /// </summary>
+    private sealed class ShapedUsageChatClient(UsageDetails response, params UsageDetails[] streamed) : IChatClient
+    {
+        public Task<ChatResponse> GetResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, CancellationToken cancellationToken = default) =>
+            Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, "ok")) { Usage = response });
+
+        public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(IEnumerable<ChatMessage> messages, ChatOptions? options = null, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            await Task.Yield();
+            yield return new ChatResponseUpdate(ChatRole.Assistant, "ok");
+            foreach (var usage in streamed)
+            {
+                yield return new ChatResponseUpdate(ChatRole.Assistant, [new UsageContent(usage)]);
+            }
+        }
 
         public object? GetService(Type serviceType, object? serviceKey = null) => null;
 

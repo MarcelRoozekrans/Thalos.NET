@@ -23,7 +23,8 @@ namespace Thalos.Runtime;
 /// <b>What counts.</b> Every input token, cached or not, as the provider reports it in
 /// <see cref="UsageDetails.InputTokenCount"/>, plus <see cref="UsageDetails.OutputTokenCount"/>. A count the provider
 /// does not report is counted as zero: no estimate is made. On the streaming path usage arrives as
-/// <see cref="UsageContent"/> updates, each counted as it passes through.
+/// <see cref="UsageContent"/> updates, each counted as it passes through. A stream that ends early, because the
+/// consumer abandoned it or it threw, counts only the usage already seen, and the turn ends either way.
 /// </para>
 /// <para>
 /// <b>Concurrency.</b> Round trips of one turn may run concurrently. The count and the round-trip number are updated
