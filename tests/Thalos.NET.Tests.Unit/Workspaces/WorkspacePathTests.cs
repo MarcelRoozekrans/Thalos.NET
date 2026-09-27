@@ -194,6 +194,50 @@ public sealed class WorkspacePathTests : IDisposable
     }
 
     [SkippableFact]
+#pragma warning disable CA1305, MA0089, MA0006, CA1031
+    public void DIAG_dot_dot_link_targets()
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"DIAGSTART os={System.Runtime.InteropServices.RuntimeInformation.OSDescription} ws={_workspace}");
+        foreach (var (name, form) in new[] { ("reldd", "rel"), ("absdd", "abs") })
+        {
+            var deep = Path.Combine(_outside, "deep-" + form);
+            Directory.CreateDirectory(Path.Combine(deep, "leaf"));
+            var sub = "sub-" + form;
+            CreateRealSymlinkOrSkip(Path.Combine(_workspace, sub), Path.Combine(deep, "leaf"));
+            var target = form == "rel" ? Path.Combine(sub, "..") : Path.Combine(_workspace, sub, "..");
+            var link = Path.Combine(_workspace, name);
+            CreateRealSymlinkOrSkip(link, target);
+            sb.AppendLine($"[{form}] requested target={target}");
+            sb.AppendLine($"[{form}] recorded LinkTarget={new DirectoryInfo(link).LinkTarget}");
+            try { sb.AppendLine($"[{form}] ResolveLinkTarget(final)={new DirectoryInfo(link).ResolveLinkTarget(true)?.FullName}"); }
+            catch (Exception ex) { sb.AppendLine($"[{form}] ResolveLinkTarget threw {ex.GetType().Name}: {ex.Message}"); }
+            var file = Path.Combine(link, "rd.txt");
+            try
+            {
+                File.WriteAllText(file, "x");
+                using var h = File.OpenHandle(file);
+                sb.AppendLine($"[{form}] write OK; FinalPathOfHandle(file)={WorkspacePath.FinalPathOfHandle(h)}");
+            }
+            catch (Exception ex) { sb.AppendLine($"[{form}] write threw {ex.GetType().Name}: {ex.Message}"); }
+            sb.AppendLine($"[{form}] exists ws/rd.txt={File.Exists(Path.Combine(_workspace, "rd.txt"))} "
+                + $"outside/deep-{form}/rd.txt={File.Exists(Path.Combine(deep, "rd.txt"))} "
+                + $"outside/deep-{form}/leaf/rd.txt={File.Exists(Path.Combine(deep, "leaf", "rd.txt"))}");
+            sb.AppendLine($"[{form}] entries under link: {string.Join(",", Directory.EnumerateFileSystemEntries(link).Select(Path.GetFileName))}");
+            var r = WorkspacePath.Resolve(_workspace, name + "/rd.txt");
+            sb.AppendLine($"[{form}] Resolve => {(r.IsSuccess ? "SUCCESS " + r.Value : "FAILURE " + r.Error)}");
+            var d = WorkspacePath.Resolve(_workspace, name);
+            sb.AppendLine($"[{form}] Resolve(link dir) => {(d.IsSuccess ? "SUCCESS " + d.Value : "FAILURE " + d.Error)}");
+            foreach (var f in new[] { Path.Combine(_workspace, "rd.txt"), Path.Combine(deep, "rd.txt") })
+                if (File.Exists(f)) File.Delete(f);
+        }
+
+        sb.AppendLine("DIAGEND");
+        Assert.Fail(sb.ToString());
+#pragma warning restore CA1305, MA0089, MA0006, CA1031
+    }
+
+    [SkippableFact]
     public void Refuses_a_link_target_containing_dot_dot_in_relative_form()
     {
         // ws/sublink -> _outside/deep/leaf (absolute target); ws/reldd -> "sublink/.." (a *relative* target,
