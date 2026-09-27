@@ -223,7 +223,14 @@ public sealed class WorkspacePathTests : IDisposable
             sb.AppendLine($"[{form}] exists ws/rd.txt={File.Exists(Path.Combine(_workspace, "rd.txt"))} "
                 + $"outside/deep-{form}/rd.txt={File.Exists(Path.Combine(deep, "rd.txt"))} "
                 + $"outside/deep-{form}/leaf/rd.txt={File.Exists(Path.Combine(deep, "leaf", "rd.txt"))}");
-            sb.AppendLine($"[{form}] entries under link: {string.Join(",", Directory.EnumerateFileSystemEntries(link).Select(Path.GetFileName))}");
+            try { sb.AppendLine($"[{form}] entries under link: {string.Join(",", Directory.EnumerateFileSystemEntries(link).Select(Path.GetFileName))}"); }
+            catch (Exception ex) { sb.AppendLine($"[{form}] enumerate threw {ex.GetType().Name}: {ex.Message}"); }
+            try
+            {
+                using var dh = File.OpenHandle(link, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, FileOptions.None);
+                sb.AppendLine($"[{form}] FinalPathOfHandle(link dir)={WorkspacePath.FinalPathOfHandle(dh)}");
+            }
+            catch (Exception ex) { sb.AppendLine($"[{form}] open link dir threw {ex.GetType().Name}: {ex.Message}"); }
             var r = WorkspacePath.Resolve(_workspace, name + "/rd.txt");
             sb.AppendLine($"[{form}] Resolve => {(r.IsSuccess ? "SUCCESS " + r.Value : "FAILURE " + r.Error)}");
             var d = WorkspacePath.Resolve(_workspace, name);
