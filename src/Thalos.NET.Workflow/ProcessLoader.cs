@@ -129,6 +129,7 @@ public static class ProcessLoader
     {
         public string? Agent { get; set; }
         public string? Skill { get; set; }
+        public string? Action { get; set; }
         public string? Next { get; set; }
         public Dictionary<string, string>? Branch { get; set; }
         public List<string>? Outcomes { get; set; }
@@ -144,6 +145,7 @@ public static class ProcessLoader
         {
             Agent = Agent,
             Skill = Skill,
+            Action = Action,
             Next = Next,
             Branch = Branch ?? new Dictionary<string, string>(StringComparer.Ordinal),
             Outcomes = Outcomes ?? [],

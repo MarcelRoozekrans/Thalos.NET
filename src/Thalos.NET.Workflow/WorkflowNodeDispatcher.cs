@@ -147,7 +147,7 @@ public sealed partial class WorkflowNodeDispatcher(
         }
 
         // A terminal node and a gate both declare no agent or skill - ProcessValidator's "exactly one of task,
-        // gate or terminal" rule guarantees a node with Await or Terminal set has Agent null. Reaching either
+        // gate, terminal or action" rule guarantees a node with Await or Terminal set has Agent null. Reaching either
         // always takes two Advance calls: the first, on the branch/next edge that led here, reports NextStatus
         // Running (ApplyCap does not special-case either kind of target), which is exactly why a dispatch was
         // enqueued for it at all; this second call, made directly against an empty result with nothing to run,

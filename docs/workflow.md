@@ -382,6 +382,38 @@ signal they satisfied. `LastResume` is `null` for a run never resumed, and a ref
 an unresolvable definition, a lost concurrency race — leaves it exactly as it was; nothing is recorded until the
 gate's own transition has already succeeded.
 
+## 10. Host action nodes
+
+A node can run a piece of host code instead of an agent turn. It names that code with `action:` and declares the
+outcomes it can finish with, exactly like a task node that branches:
+
+```yaml
+nodes:
+  publish:
+    action: open-pull-request
+    outcomes: [published, failed]
+    branch: { published: done, failed: stop }
+  done: { terminal: succeeded }
+  stop: { terminal: failed }
+```
+
+The code behind the name is an `IWorkflowHostAction` whose `Name` is `open-pull-request`. Its `RunAsync` gets the
+run and the node, and returns either a `HostActionResult` carrying one of the node's declared outcomes and the
+variables to merge, or a failed `Result`, which fails the run with its message. It must not throw for a failure it
+expected: an exception is left to propagate so the outbox retries the delivery, and a retry calls the action again
+for the same node, so an action must be idempotent. An `OperationCanceledException` must mean only that the `ct`
+it was given was cancelled: an action's own timeout returns a failed `Result`, because both outbox loops treat any
+`OperationCanceledException` as their own shutdown. `IWorkflowDispatchGate` carries the same contract.
+
+The validator treats a node as an action node whenever `action:` is set, and rejects:
+
+- an action node that also names `agent:` or `skill:`, even one of the two:
+  `node 'publish' is an action node and must not name 'agent' or 'skill'`;
+- an action node with no `outcomes:`: `node 'publish' is an action node and must declare 'outcomes'`;
+- a blank name, such as `action: ''`: `node 'publish' has a blank 'action'`;
+- an action node that also sets `await:` or `terminal:`, through the rule that every node is exactly one of task,
+  gate, terminal or action.
+
 ## Limits worth knowing before you author a process
 
 - **The variable block put in front of a node has three caps, and the value cap is the one that bites.** The
@@ -416,8 +448,10 @@ gate's own transition has already succeeded.
 - **`models:`, `lenses:` and `quorum:` are parsed and ignored.** A node declaring `models: [sonnet, opus]` runs
   once, against whatever single model the resolved agent is configured with, silently. See
   [`release.md`](release.md#process-file-keys-that-are-parsed-but-not-yet-honoured).
-- **There is no unattended zero-cost relay.** The validator requires each node to be exactly one of task, gate or
-  terminal, so a loop back to a capped node must pass through one of two things, and neither is free. Another
+- **There is no unattended zero-cost relay a process can declare on its own.** The validator requires each node to
+  be exactly one of task, gate, terminal or action. An action node runs whatever host code is registered under its
+  name, so whether one is a free relay is the host's decision, not the process author's. Without one, a loop back to
+  a capped node must pass through one of two things, and neither is free. Another
   **task** node costs one more paid agent turn per lap — budget that loop at two turns, not one. A **gate** costs
   no turn at all: `gate: { await: sig, next: work }` is a legal, validating pass-through that the dispatcher parks
   at `Awaiting` without running anything, and `ResumeAsync` then resolves its `next` edge back into the capped

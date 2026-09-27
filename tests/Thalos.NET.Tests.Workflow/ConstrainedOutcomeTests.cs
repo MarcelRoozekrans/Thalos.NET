@@ -68,9 +68,10 @@ public sealed class ConstrainedOutcomeTests : IAsyncLifetime
     /// <summary>
     /// The loop-back primitive as an executable graph: <c>work</c> is capped at three entries and always branches
     /// to <c>relay</c>, which routes straight back to <c>work</c>. Two task nodes, not one task node and a bare
-    /// relay, because <see cref="ProcessValidator"/> requires every node to be exactly one of task, gate or
-    /// terminal — there is no pass-through node kind, so the cheapest possible loop still pays for a second
-    /// agent turn per lap. <c>relay</c> declares no outcomes, so its turn reports nothing and its unconditional
+    /// relay, because <see cref="ProcessValidator"/> requires every node to be exactly one of task, gate,
+    /// terminal or action — there is no pass-through node kind a process can declare on its own (an action node
+    /// runs whatever host code is registered under its name), so a loop made only of agent turns still pays for a
+    /// second agent turn per lap. <c>relay</c> declares no outcomes, so its turn reports nothing and its unconditional
     /// <c>next</c> is what re-enters the capped node and triggers the cap check.
     /// </summary>
     private const string CappedLoopDefYaml = """
@@ -239,8 +240,8 @@ public sealed class ConstrainedOutcomeTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// Critical fix: an approval gate has no agent — <see cref="ProcessValidator"/>'s "exactly one of task, gate
-    /// or terminal" rule guarantees it — so arriving at one must park the run at <see cref="WorkflowStatus.Awaiting"/>
+    /// Critical fix: an approval gate has no agent — <see cref="ProcessValidator"/>'s "exactly one of task, gate,
+    /// terminal or action" rule guarantees it — so arriving at one must park the run at <see cref="WorkflowStatus.Awaiting"/>
     /// via <see cref="WorkflowInterpreter.Advance"/>, exactly like the terminal-node case, rather than trying
     /// (and failing) to resolve an agent that was never going to be there. Before the fix,
     /// <see cref="WorkflowNodeDispatcher"/> special-cased only <c>Terminal</c> and fell through to agent

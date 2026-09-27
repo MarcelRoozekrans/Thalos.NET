@@ -45,7 +45,7 @@ public sealed class ProcessValidatorTests
         { "a: { agent: x, skill: s, outcomes: [ok], branch: { ok: a }, maxVisits: 3, onExceeded: b }\n  b: { terminal: succeeded }", "", true },
         { "a: { agent: x, skill: s, outcomes: [ok], branch: { ok: a }, maxVisits: 3, onExceeded: zz }\n  b: { terminal: succeeded }", "unknown node 'zz'", false },
         { "a: { agent: x, skill: s, branch: { ok: b } }\n  b: { terminal: succeeded }", "declares 'branch' without declaring 'outcomes'", false },
-        { "a: { agent: x, skill: s, terminal: succeeded, next: b }\n  b: { terminal: succeeded }", "must be exactly one of task, gate or terminal", false },
+        { "a: { agent: x, skill: s, terminal: succeeded, next: b }\n  b: { terminal: succeeded }", "must be exactly one of task, gate, terminal or action", false },
         { "a: { agent: x, next: b }\n  b: { terminal: succeeded }", "has 'agent' but no 'skill'", false },
         { "a: { skill: s, next: b }\n  b: { terminal: succeeded }", "has 'skill' but no 'agent'", false },
         { "a: { agent: x, skill: s, next: b, maxVisits: 3, onExceeded: b }\n  b: { terminal: succeeded }", "", true },
@@ -120,4 +120,70 @@ public sealed class ProcessValidatorTests
 
         result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error : "");
     }
+
+    private const string WellFormedActionYaml = """
+        process: p
+        version: 1
+        nodes:
+          publish:
+            action: open-pull-request
+            outcomes: [published, failed]
+            branch: { published: done, failed: stop }
+          done: { terminal: succeeded }
+          stop: { terminal: failed }
+        """;
+
+    // Action-node body for node 'n', expected message fragment. Each row is WithNode's well-formed action node,
+    // "action: a, outcomes: [ok], branch: { ok: done }", changed by the one edit named in its comment, so
+    // A_well_formed_action_node_passes_shape_validation and the WellFormed row below are every row's accepted pair.
+    public static TheoryData<string, string> ActionCases => new()
+    {
+        // add 'agent' and 'skill', a task node's full pair
+        { "action: a\n    agent: x\n    skill: s\n    outcomes: [ok]\n    branch: { ok: done }", "node 'n' is an action node and must not name 'agent' or 'skill'" },
+        // add 'agent' alone
+        { "action: a\n    agent: x\n    outcomes: [ok]\n    branch: { ok: done }", "node 'n' is an action node and must not name 'agent' or 'skill'" },
+        // add 'skill' alone
+        { "action: a\n    skill: s\n    outcomes: [ok]\n    branch: { ok: done }", "node 'n' is an action node and must not name 'agent' or 'skill'" },
+        // replace 'outcomes' and 'branch' with a plain 'next'
+        { "action: a\n    next: done", "node 'n' is an action node and must declare 'outcomes'" },
+        // add 'await', replacing 'outcomes' and 'branch' with 'next' as a gate requires
+        { "action: a\n    await: sig\n    next: done", "node 'n' must be exactly one of task, gate, terminal or action" },
+        // add 'terminal', dropping the outgoing edge as a terminal requires
+        { "action: a\n    terminal: succeeded", "node 'n' must be exactly one of task, gate, terminal or action" },
+        // blank the action name
+        { "action: ''\n    outcomes: [ok]\n    branch: { ok: done }", "node 'n' has a blank 'action'" },
+        // whitespace-only action name
+        { "action: '  '\n    outcomes: [ok]\n    branch: { ok: done }", "node 'n' has a blank 'action'" },
+    };
+
+    [Theory, MemberData(nameof(ActionCases))]
+    public async Task Mixed_and_outcome_less_action_nodes_are_rejected(string body, string expected)
+    {
+        var result = await ProcessValidator.ValidateAsync(Load(WithNode("n", body)), resolver: null, CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Should().Contain(expected);
+    }
+
+    [Fact]
+    public async Task A_well_formed_action_node_passes_shape_validation()
+    {
+        var result = await ProcessValidator.ValidateAsync(Load(WellFormedActionYaml), resolver: null, CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error : "");
+    }
+
+    [Fact]
+    public async Task The_unedited_action_node_every_rejected_row_starts_from_passes_shape_validation()
+    {
+        var result = await ProcessValidator.ValidateAsync(
+            Load(WithNode("n", "action: a\n    outcomes: [ok]\n    branch: { ok: done }")), resolver: null, CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error : "");
+    }
+
+    private static ProcessDefinition Load(string yaml) => ProcessLoader.Load(yaml).Value;
+
+    private static string WithNode(string name, string body) =>
+        $"process: p\nversion: 1\nnodes:\n  {name}:\n    {body}\n  done: {{ terminal: succeeded }}\n";
 }
