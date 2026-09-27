@@ -194,81 +194,106 @@ public sealed class WorkspacePathTests : IDisposable
     }
 
     [SkippableFact]
-#pragma warning disable CA1305, MA0089, MA0006, CA1031
-    public void DIAG_dot_dot_link_targets()
-    {
-        var sb = new System.Text.StringBuilder();
-        sb.AppendLine($"DIAGSTART os={System.Runtime.InteropServices.RuntimeInformation.OSDescription} ws={_workspace}");
-        foreach (var (name, form) in new[] { ("reldd", "rel"), ("absdd", "abs") })
-        {
-            var deep = Path.Combine(_outside, "deep-" + form);
-            Directory.CreateDirectory(Path.Combine(deep, "leaf"));
-            var sub = "sub-" + form;
-            CreateRealSymlinkOrSkip(Path.Combine(_workspace, sub), Path.Combine(deep, "leaf"));
-            var target = form == "rel" ? Path.Combine(sub, "..") : Path.Combine(_workspace, sub, "..");
-            var link = Path.Combine(_workspace, name);
-            CreateRealSymlinkOrSkip(link, target);
-            sb.AppendLine($"[{form}] requested target={target}");
-            sb.AppendLine($"[{form}] recorded LinkTarget={new DirectoryInfo(link).LinkTarget}");
-            try { sb.AppendLine($"[{form}] ResolveLinkTarget(final)={new DirectoryInfo(link).ResolveLinkTarget(true)?.FullName}"); }
-            catch (Exception ex) { sb.AppendLine($"[{form}] ResolveLinkTarget threw {ex.GetType().Name}: {ex.Message}"); }
-            var file = Path.Combine(link, "rd.txt");
-            try
-            {
-                File.WriteAllText(file, "x");
-                using var h = File.OpenHandle(file);
-                sb.AppendLine($"[{form}] write OK; FinalPathOfHandle(file)={WorkspacePath.FinalPathOfHandle(h)}");
-            }
-            catch (Exception ex) { sb.AppendLine($"[{form}] write threw {ex.GetType().Name}: {ex.Message}"); }
-            sb.AppendLine($"[{form}] exists ws/rd.txt={File.Exists(Path.Combine(_workspace, "rd.txt"))} "
-                + $"outside/deep-{form}/rd.txt={File.Exists(Path.Combine(deep, "rd.txt"))} "
-                + $"outside/deep-{form}/leaf/rd.txt={File.Exists(Path.Combine(deep, "leaf", "rd.txt"))}");
-            try { sb.AppendLine($"[{form}] entries under link: {string.Join(",", Directory.EnumerateFileSystemEntries(link).Select(Path.GetFileName))}"); }
-            catch (Exception ex) { sb.AppendLine($"[{form}] enumerate threw {ex.GetType().Name}: {ex.Message}"); }
-            try
-            {
-                using var dh = File.OpenHandle(link, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, FileOptions.None);
-                sb.AppendLine($"[{form}] FinalPathOfHandle(link dir)={WorkspacePath.FinalPathOfHandle(dh)}");
-            }
-            catch (Exception ex) { sb.AppendLine($"[{form}] open link dir threw {ex.GetType().Name}: {ex.Message}"); }
-            var r = WorkspacePath.Resolve(_workspace, name + "/rd.txt");
-            sb.AppendLine($"[{form}] Resolve => {(r.IsSuccess ? "SUCCESS " + r.Value : "FAILURE " + r.Error)}");
-            var d = WorkspacePath.Resolve(_workspace, name);
-            sb.AppendLine($"[{form}] Resolve(link dir) => {(d.IsSuccess ? "SUCCESS " + d.Value : "FAILURE " + d.Error)}");
-            foreach (var f in new[] { Path.Combine(_workspace, "rd.txt"), Path.Combine(deep, "rd.txt") })
-                if (File.Exists(f)) File.Delete(f);
-        }
-
-        sb.AppendLine("DIAGEND");
-        Assert.Fail(sb.ToString());
-#pragma warning restore CA1305, MA0089, MA0006, CA1031
-    }
-
-    [SkippableFact]
-    public void Refuses_a_link_target_containing_dot_dot_in_relative_form()
+    public void Resolves_a_relative_dot_dot_link_target_exactly_where_the_os_opens_it()
     {
         // ws/sublink -> _outside/deep/leaf (absolute target); ws/reldd -> "sublink/.." (a *relative* target,
-        // relative to reldd's own directory, i.e. ws/). A hand-rolled resolver that normalises ".." as text before
-        // following "sublink" collapses this back to ws itself; the kernel applies ".." only after following
-        // "sublink", landing at _outside/deep — outside the workspace. Needs a real symlink: a junction cannot
-        // record a relative target.
+        // relative to reldd's own directory, i.e. ws/). The security property is not "refuse" but "agree with the
+        // kernel": Resolve may succeed only when the OS itself would open a location inside the workspace.
+        //
+        // The two kernels disagree about where this link goes:
+        // - Linux (and POSIX generally) follows "sublink" first and then applies "..", so reldd/rd.txt lands in
+        //   _outside/deep, outside the workspace. Resolve must refuse it.
+        // - Windows collapses ".." in a relative link target lexically, before following anything: the link's
+        //   name is replaced by its target and each ".." then removes the component before it, so
+        //   ws\reldd\rd.txt becomes ws\sublink\..\rd.txt and then ws\rd.txt, inside the workspace. This is the
+        //   documented algorithm in Microsoft's "Creating Symbolic Links", section "Example of a Relative Symbolic
+        //   Link": "Any dots (..) in this new path replace components that appear before the dots (..)". Resolve,
+        //   which canonicalises through GetFinalPathNameByHandleW, must then succeed with ws\rd.txt.
+        //
+        // A hand-rolled resolver that normalises ".." as text would be right on Windows and wrong on Linux; one
+        // that follows POSIX order would be right on Linux and over-refuse on Windows. Only the kernel agrees with
+        // the kernel on both, so this writes through the link and asserts Resolve against where the file landed.
         Directory.CreateDirectory(Path.Combine(_outside, "deep", "leaf"));
         CreateRealSymlinkOrSkip(Path.Combine(_workspace, "sublink"), Path.Combine(_outside, "deep", "leaf"));
         CreateRealSymlinkOrSkip(Path.Combine(_workspace, "reldd"), Path.Combine("sublink", ".."));
 
-        WorkspacePath.Resolve(_workspace, "reldd/rd.txt").IsFailure.Should().BeTrue();
+        var landing = WriteThroughAndLocate("reldd");
+
+        // Pin the platform semantics, so a changed kernel or a broken fixture cannot quietly turn this into a test
+        // of something else, for instance a link that no longer escapes on Linux.
+        landing.Should().Be(OperatingSystem.IsWindows() ? Landing.Inside : Landing.Outside);
+        AssertResolveAgreesWithTheOs("reldd", landing);
     }
 
     [SkippableFact]
-    public void Refuses_a_link_target_containing_dot_dot_in_absolute_form()
+    public void Resolves_an_absolute_dot_dot_link_target_exactly_where_the_os_opens_it()
     {
-        // Same escape, but the link's recorded target is itself an absolute path ending in "sublink/..", not a
-        // relative one — both forms must be resolved by the kernel, not normalised as text.
+        // Same shape, but the link's recorded target is an absolute path ending in "sublink/..", not a relative
+        // one.
+        // - Linux follows "sublink" and then applies "..", landing in _outside/deep: Resolve must refuse it.
+        // - Windows cannot open through this link at all. File.CreateSymbolicLink records the absolute target
+        //   verbatim, ".." included, as an NT path, and ".." is collapsed lexically only in a *relative* target,
+        //   so the kernel rejects the reparsed path with ERROR_INVALID_NAME ("The filename, directory name, or
+        //   volume label syntax is incorrect"). Nothing is written anywhere, and Resolve, whose own
+        //   GetFinalPathNameByHandleW open fails the same way, must refuse it: it fails closed.
         Directory.CreateDirectory(Path.Combine(_outside, "deep", "leaf"));
         CreateRealSymlinkOrSkip(Path.Combine(_workspace, "sublink"), Path.Combine(_outside, "deep", "leaf"));
         CreateRealSymlinkOrSkip(Path.Combine(_workspace, "absdd"), Path.Combine(_workspace, "sublink", ".."));
 
-        WorkspacePath.Resolve(_workspace, "absdd/rd.txt").IsFailure.Should().BeTrue();
+        var landing = WriteThroughAndLocate("absdd");
+
+        landing.Should().Be(OperatingSystem.IsWindows() ? Landing.Unreachable : Landing.Outside);
+        AssertResolveAgreesWithTheOs("absdd", landing);
+    }
+
+    private enum Landing
+    {
+        Inside,
+        Outside,
+        Unreachable,
+    }
+
+    /// <summary>
+    /// Writes <c>rd.txt</c> through <paramref name="link"/> with an ordinary OS file open, then reports where the
+    /// kernel actually put it: directly in the workspace (where the lexical collapse of <c>"sublink/.."</c> lands),
+    /// in <c>_outside/deep</c> (where following <c>sublink</c> first lands), or nowhere, when the open itself
+    /// failed. Anything else is a broken fixture and fails the test.
+    /// </summary>
+    private Landing WriteThroughAndLocate(string link)
+    {
+        try
+        {
+            File.WriteAllText(Path.Combine(_workspace, link, "rd.txt"), "x");
+        }
+        catch (IOException)
+        {
+            return Landing.Unreachable;
+        }
+
+        var inside = File.Exists(Path.Combine(_workspace, "rd.txt"));
+        var outside = File.Exists(Path.Combine(_outside, "deep", "rd.txt"));
+        (inside ^ outside).Should().BeTrue($"the write through {link} must land in exactly one known place");
+        return inside ? Landing.Inside : Landing.Outside;
+    }
+
+    /// <summary>
+    /// The security property itself: <see cref="WorkspacePath.Resolve"/> succeeds exactly when the OS opened a
+    /// location inside the workspace, and then names that same location; it fails when the OS opened a location
+    /// outside, or could not open the path at all.
+    /// </summary>
+    private void AssertResolveAgreesWithTheOs(string link, Landing landing)
+    {
+        var result = WorkspacePath.Resolve(_workspace, link + "/rd.txt");
+
+        if (landing == Landing.Inside)
+        {
+            result.IsSuccess.Should().BeTrue("the OS itself wrote inside the workspace");
+            result.Value.Should().Be(Path.Combine(WorkspacePath.CanonicalizeRoot(_workspace)!, "rd.txt"));
+        }
+        else
+        {
+            result.IsFailure.Should().BeTrue($"the OS wrote {landing}, not inside the workspace");
+        }
     }
 
     [SkippableFact]
