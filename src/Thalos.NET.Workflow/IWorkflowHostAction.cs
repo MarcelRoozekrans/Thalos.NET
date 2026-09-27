@@ -39,7 +39,14 @@ namespace Thalos.Workflow;
 /// </para>
 /// <para>
 /// This is the same contract <see cref="IWorkflowDispatchGate"/> states for a gate, and for the same reasons; the
-/// two are kept worded alike on purpose.
+/// two are kept worded alike on purpose. No dispatch gate runs before an action: gates guard an agent turn, and an
+/// action node spends none.
+/// </para>
+/// <para>
+/// <b>Registration.</b> A host passes every action to both <see cref="WorkflowReferenceResolver"/> (or answers
+/// <see cref="IWorkflowReferenceResolver.HostActionExistsAsync"/> from the same set in its own resolver) and
+/// <c>WorkflowNodeDispatcher</c>. The first makes a process naming an unregistered action fail validation at load
+/// time; the second fails a run that reaches such a node anyway with "not registered".
 /// </para>
 /// </remarks>
 public interface IWorkflowHostAction

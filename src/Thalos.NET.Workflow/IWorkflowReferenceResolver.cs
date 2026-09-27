@@ -1,8 +1,9 @@
 namespace Thalos.Workflow;
 
 /// <summary>
-/// Resolves whether a skill name referenced by a <see cref="ProcessDefinition"/> is actually registered with the
-/// host running the workflow engine, and resolves an agent name to the <see cref="AgentId"/> it identifies.
+/// Resolves whether a skill or host action name referenced by a <see cref="ProcessDefinition"/> is actually
+/// registered with the host running the workflow engine, and resolves an agent name to the <see cref="AgentId"/>
+/// it identifies.
 /// <see cref="ProcessValidator.ValidateAsync"/> accepts <see langword="null"/> for this interface to run
 /// shape-only validation — the graph-structure rules that hold regardless of which host is running the process —
 /// which keeps the validator unit-testable without spinning up a host.
@@ -25,4 +26,19 @@ public interface IWorkflowReferenceResolver
     /// unrepresentable instead of merely documented.
     /// </summary>
     ValueTask<AgentId?> ResolveAgentIdAsync(string name, CancellationToken ct);
+
+    /// <summary>
+    /// Whether an <see cref="IWorkflowHostAction"/> named <paramref name="name"/> is registered with the host,
+    /// compared ordinally as <see cref="IWorkflowHostAction.Name"/> documents. <see cref="ProcessValidator"/> asks
+    /// this for every action node's <see cref="ProcessNode.Action"/>, so a process naming an action the host never
+    /// registered is rejected at load time instead of failing its run once it reaches that node. Answer from the
+    /// same registrations <c>WorkflowNodeDispatcher</c> is given, or the two can disagree: a process that validates
+    /// here would still fail at dispatch with "not registered".
+    /// </summary>
+    /// <remarks>
+    /// Deliberately abstract, with no default body. A default answering <see langword="false"/> would fail closed,
+    /// but it would also hide that a resolver was never taught about actions; without a default, that is a
+    /// compile error in the resolver instead.
+    /// </remarks>
+    ValueTask<bool> HostActionExistsAsync(string name, CancellationToken ct);
 }

@@ -77,7 +77,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
         _runner = new FakeSubagentRunner();
         // No run here is started with a manifest, so this dispatcher's ISkillStore is never actually read from —
         // an empty InMemorySkillStore stands in purely to satisfy the constructor.
-        _dispatcher = new WorkflowNodeDispatcher(_store, _runner, resolver, _definitions, new InMemorySkillStore(TimeProvider.System), _ => new FakeSecurityContext("workflow-engine"), gates: []);
+        _dispatcher = new WorkflowNodeDispatcher(_store, _runner, resolver, _definitions, new InMemorySkillStore(TimeProvider.System), _ => new FakeSecurityContext("workflow-engine"), gates: [], hostActions: []);
     }
 
     public async Task InitializeAsync() =>
@@ -103,7 +103,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
     private WorkflowNodeDispatcher DispatcherWith(ILogger<WorkflowNodeDispatcher> log) => new(
         _store, _runner,
         new FakeWorkflowReferenceResolver(new Dictionary<string, AgentId>(StringComparer.Ordinal) { ["implementer"] = ImplementerId }),
-        _definitions, new InMemorySkillStore(TimeProvider.System), _ => new FakeSecurityContext("workflow-engine"), gates: [], log);
+        _definitions, new InMemorySkillStore(TimeProvider.System), _ => new FakeSecurityContext("workflow-engine"), gates: [], hostActions: [], log);
 
     /// <summary>Dispatches the next message the store enqueued for <paramref name="runId"/>; false when it has none.</summary>
     private async Task<bool> DispatchNextAsync(Guid? runId = null)

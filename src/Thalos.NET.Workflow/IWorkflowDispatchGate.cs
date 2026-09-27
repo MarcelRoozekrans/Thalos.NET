@@ -13,8 +13,11 @@ namespace Thalos.Workflow;
 /// <para>
 /// <b>Only task nodes are gated.</b> <see cref="WorkflowNodeDispatcher.DispatchAsync"/> reaches
 /// <see cref="BeforeTaskNodeAsync"/> only on the branch that is about to build a <see cref="SubagentRunRequest"/> —
-/// never for a gate node (<see cref="ProcessNode.Await"/>) parking on an external signal, and never for a terminal
-/// node. Neither spends a turn, so neither has anything for a gate to protect.
+/// never for a gate node (<see cref="ProcessNode.Await"/>) parking on an external signal, never for a terminal
+/// node, and never for an action node (<see cref="ProcessNode.Action"/>), which runs an
+/// <see cref="IWorkflowHostAction"/> instead. None of the three spends a turn, so none has anything for a gate to
+/// protect; an action that needs something in place before it runs checks for it itself and returns a failed
+/// <see cref="Result{T}"/> when it is missing.
 /// </para>
 /// <para>
 /// <b>A failure fails the run, the same way a rejected outcome does.</b> <see cref="WorkflowNodeDispatcher"/> never

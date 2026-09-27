@@ -118,7 +118,7 @@ public sealed class ConstrainedOutcomeTests : IAsyncLifetime
         _runner = new FakeSubagentRunner();
         // No run here is started with a manifest, so this dispatcher's ISkillStore is never actually read from —
         // an empty InMemorySkillStore stands in purely to satisfy the constructor.
-        _dispatcher = new WorkflowNodeDispatcher(_store, _runner, resolver, _definitions, new InMemorySkillStore(TimeProvider.System), _ => new FakeSecurityContext("workflow-engine"), gates: []);
+        _dispatcher = new WorkflowNodeDispatcher(_store, _runner, resolver, _definitions, new InMemorySkillStore(TimeProvider.System), _ => new FakeSecurityContext("workflow-engine"), gates: [], hostActions: []);
     }
 
     /// <summary>

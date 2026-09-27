@@ -269,7 +269,7 @@ public sealed class DispatchGateTests
         };
         var dispatcher = new WorkflowNodeDispatcher(
             store, runner, resolver, definitions, new InMemorySkillStore(TimeProvider.System),
-            _ => new FakeSecurityContext("workflow-engine"), gates);
+            _ => new FakeSecurityContext("workflow-engine"), gates, hostActions: []);
 
         var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "gated-task", Version = 1, CorrelationKey = "c-gated-task", StartNode = "work", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
         return (dispatcher, runner, store, store.TakeNext(runId)!);
@@ -307,7 +307,7 @@ public sealed class DispatchGateTests
 
         var dispatcher = new WorkflowNodeDispatcher(
             store, runner, resolver, definitions, skills,
-            _ => new FakeSecurityContext("workflow-engine"), gates);
+            _ => new FakeSecurityContext("workflow-engine"), gates, hostActions: []);
 
         var manifest = new RunManifest { Nodes = manifestNodes };
         var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "gated-task", Version = 1, CorrelationKey = "c-pinned-gated-task", StartNode = "work", InitialVariables = null, Manifest = manifest, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
@@ -327,7 +327,7 @@ public sealed class DispatchGateTests
         var runner = new FakeSubagentRunner();
         var dispatcher = new WorkflowNodeDispatcher(
             store, runner, resolver, definitions, new InMemorySkillStore(TimeProvider.System),
-            _ => new FakeSecurityContext("workflow-engine"), gates);
+            _ => new FakeSecurityContext("workflow-engine"), gates, hostActions: []);
 
         var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "gate-only", Version = 1, CorrelationKey = "c-gate-only", StartNode = "gate", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
         return (dispatcher, store, store.TakeNext(runId)!);
@@ -344,7 +344,7 @@ public sealed class DispatchGateTests
         var runner = new FakeSubagentRunner();
         var dispatcher = new WorkflowNodeDispatcher(
             store, runner, resolver, definitions, new InMemorySkillStore(TimeProvider.System),
-            _ => new FakeSecurityContext("workflow-engine"), gates);
+            _ => new FakeSecurityContext("workflow-engine"), gates, hostActions: []);
 
         var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "terminal-only", Version = 1, CorrelationKey = "c-terminal-only", StartNode = "done", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
         return (dispatcher, store, store.TakeNext(runId)!);

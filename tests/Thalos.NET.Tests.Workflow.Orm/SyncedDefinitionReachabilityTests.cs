@@ -184,9 +184,9 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
     /// </summary>
     private WorkflowNodeDispatcher NewDispatcher() =>
         // No run started by these tests carries a manifest, so this ISkillStore is never actually read from —
-        // an empty InMemorySkillStore stands in purely to satisfy the constructor. gates: [] - this suite is not
-        // about dispatch gates.
-        new(_store, new AlwaysSucceedsRunner(), new AlwaysResolves(), _definitions, new InMemorySkillStore(TimeProvider.System), _ => new StubSecurityContext(), gates: []);
+        // an empty InMemorySkillStore stands in purely to satisfy the constructor. gates: [] and hostActions: [] - this
+        // suite is about neither dispatch gates nor action nodes.
+        new(_store, new AlwaysSucceedsRunner(), new AlwaysResolves(), _definitions, new InMemorySkillStore(TimeProvider.System), _ => new StubSecurityContext(), gates: [], hostActions: []);
 
     private sealed class FakeSource : IProcessDefinitionSource
     {
@@ -201,12 +201,14 @@ public sealed class SyncedDefinitionReachabilityTests(PostgresFixture pg) : IAsy
         }
     }
 
-    /// <summary>Resolves every agent and skill name: these tests are about definition resolution, not reference resolution.</summary>
+    /// <summary>Resolves every agent, skill and host action name: these tests are about definition resolution, not reference resolution.</summary>
     private sealed class AlwaysResolves : IWorkflowReferenceResolver
     {
         public ValueTask<AgentId?> ResolveAgentIdAsync(string name, CancellationToken ct) => ValueTask.FromResult<AgentId?>(AgentId.New());
 
         public ValueTask<bool> SkillExistsAsync(string name, CancellationToken ct) => ValueTask.FromResult(true);
+
+        public ValueTask<bool> HostActionExistsAsync(string name, CancellationToken ct) => ValueTask.FromResult(true);
     }
 
     /// <summary>A turn that completes cleanly and reports no outcome — valid for a node with no declared outcomes.</summary>

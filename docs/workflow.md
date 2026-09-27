@@ -11,11 +11,12 @@ and `AddWorkflowOrm` registers two of them — this page is the other five.
 | --- | --- | --- |
 | `IWorkflowStore` (`OrmWorkflowStore`) | yes | Writes the run, the event log and the next dispatch in one transaction |
 | `IProcessDefinitionStore` (`OrmProcessDefinitionStore`, cached) | yes | The one answer to "what is this process, at this version" |
-| `IWorkflowReferenceResolver` | **no** | Turns an `agent:`/`skill:` name in the YAML into something that exists |
+| `IWorkflowReferenceResolver` | **no** | Turns an `agent:`/`skill:`/`action:` name in the YAML into something that exists |
 | `WorkflowNodeDispatcher` | **no** | Runs one node's agent turn and persists the transition |
 | An outbox consumer for `WorkflowDispatch.TypeName` | **no** | Takes a queued message off the table and calls `DispatchAsync` |
 | `WorkflowRunReconciler` on a timer | **no** | Terminates runs nothing is advancing any more |
 | `IProcessDefinitionSource` + `ProcessDefinitionSync` | **no** | Gets your `.process.yaml` files into the table |
+| `IWorkflowHostAction`s, only if a process uses `action:` | **no** | The host code an action node runs instead of an agent turn (§10) |
 
 Nothing in either package is a hosted service except the schema initializer. That is deliberate — a library that
 starts its own timers and pollers fights whatever hosting model you already have — but it does mean a host that
@@ -50,15 +51,16 @@ rolling deploy: migration 1004 is not backward compatible with pre-1004 code.
 ## 2. The reference resolver
 
 `WorkflowReferenceResolver` resolves `agent:` over `IAgentCatalog` and `skill:` over `ISkillStore`, both of which
-`AddThalos` already provides. It is not registered for you, because a host that resolves agent names some other way
-should be able to say so:
+`AddThalos` already provides, and `action:` over the `IWorkflowHostAction`s it is given (§10). It is not registered
+for you, because a host that resolves agent names some other way should be able to say so:
 
 ```csharp
 services.AddSingleton<IWorkflowReferenceResolver, WorkflowReferenceResolver>();
 ```
 
-Agent names are matched case-insensitively against `AgentDefinition.Name`. A skill whose file has disappeared does
-not count as existing.
+Its `hostActions` parameter is required; the container fills it with every registered `IWorkflowHostAction`, or an
+empty sequence when there are none. Agent names are matched case-insensitively against `AgentDefinition.Name`;
+action names are matched ordinally. A skill whose file has disappeared does not count as existing.
 
 ## 3. The node dispatcher
 
@@ -70,10 +72,13 @@ services.AddSingleton(sp => new WorkflowNodeDispatcher(
     sp.GetRequiredService<IProcessDefinitionStore>(),
     sp.GetRequiredService<ISkillStore>(),
     resolveCaller: run => new WorkflowCaller(run),
-    gates: sp.GetServices<IWorkflowDispatchGate>()));
+    gates: sp.GetServices<IWorkflowDispatchGate>(),
+    hostActions: sp.GetServices<IWorkflowHostAction>()));
 ```
 
-`gates` is required — pass `[]` if you host none. See §4 for what it is and when it runs.
+`gates` is required — pass `[]` if you host none. See §4 for what it is and when it runs. `hostActions` is required
+too — pass `[]` if no process uses `action:`. Give it the same actions the resolver gets, or a process can validate
+and then fail at dispatch; §10 has the details.
 
 `ISkillStore` is what a pinned run's task node loads its exact skill body through
 (`ISkillStore.GetVersionAsync`) — `AddThalos`'s `UseSkills` already registers it, the same instance
@@ -162,8 +167,8 @@ batch gets its own connection and disposes it with the scope.
 
 **Dispatch gates.** `WorkflowNodeDispatcher`'s `gates` argument (§3) is a list of `IWorkflowDispatchGate` — a
 host-supplied check run immediately before a task node's agent turn, and only before a task node's: a gate node,
-one with `await:` (an unrelated use of the word "gate", inherited from the process YAML) and a `terminal:` node
-are never gated, because neither spends a turn. The motivating case is a run's own tool servers: a gate can start
+one with `await:` (an unrelated use of the word "gate", inherited from the process YAML), a `terminal:` node and an
+`action:` node are never gated, because none of them spends a turn. The motivating case is a run's own tool servers: a gate can start
 them, or restart them after a host crash, and refuse the turn outright when they never come up, rather than
 dispatching an agent into a turn that would fail on its first tool call. A gate that refuses returns a failed
 `Result`; the dispatcher fails the run with that message, the same way a rejected outcome does, and calls no
@@ -184,11 +189,12 @@ B9, and ZeroAlloc.Outbox's is filed upstream as ZeroAlloc-Net/ZeroAlloc.Outbox#2
 
 Two things about the retry budget, because they decide what a failure costs. The dispatcher deliberately does
 **not** throw for a node-level failure — a turn that failed, an unresolvable agent name, an outcome outside the
-node's declared set, a gate that refused — it records the run as `Failed` and returns, so the outbox has nothing to
-retry and you never pay for the same losing agent turn `MaxAttempts` times. What does propagate, and therefore does
-get retried, is an unexpected exception out of `ISubagentRunner` or a gate's own non-cancellation exception, and a
-`WorkflowConcurrencyException` from the store: all three are transient by nature and are caught and retried by the
-outbox exactly alike. A gate's `OperationCanceledException` is the one exception to that: see above. And
+node's declared set, a gate that refused, an unregistered or failing host action — it records the run as `Failed`
+and returns, so the outbox has nothing to retry and you never pay for the same losing agent turn `MaxAttempts`
+times. What does propagate, and therefore does get retried, is an unexpected exception out of `ISubagentRunner`, a
+gate's or a host action's own non-cancellation exception, and a `WorkflowConcurrencyException` from the store: all
+of them are transient by nature and are caught and retried by the outbox exactly alike. An
+`OperationCanceledException` from a gate or a host action is the one exception to that: see above. And
 `MaxAttempts` is what eventually dead-letters a message that never succeeds — which is what leaves a run stranded,
 and why step 5 exists.
 
@@ -412,7 +418,41 @@ The validator treats a node as an action node whenever `action:` is set, and rej
 - an action node with no `outcomes:`: `node 'publish' is an action node and must declare 'outcomes'`;
 - a blank name, such as `action: ''`: `node 'publish' has a blank 'action'`;
 - an action node that also sets `await:` or `terminal:`, through the rule that every node is exactly one of task,
-  gate, terminal or action.
+  gate, terminal or action;
+- with a resolver, an action nobody registered:
+  `node 'publish' references unknown host action 'open-pull-request'`. `ProcessDefinitionSync` validates with the
+  resolver, so such a process is never activated.
+
+**Registering an action.** Register each action once and hand the same set to both the resolver and the
+dispatcher. With the wiring in §2 and §3, registering it in the container is all it takes:
+
+```csharp
+services.AddSingleton<IWorkflowHostAction, OpenPullRequestAction>();   // Name => "open-pull-request"
+```
+
+Names are compared ordinally, so `Open-Pull-Request` is a different action. Two actions under one name, a blank
+name or a null entry make the resolver's and the dispatcher's constructors throw `ArgumentException`, because which
+of two same-named actions a node ran would otherwise depend on registration order. A host with its own
+`IWorkflowReferenceResolver` must answer `HostActionExistsAsync` from the same set. The member is abstract, so a
+resolver written before action nodes existed no longer compiles until it does.
+
+**What the dispatcher does with an action node.** It runs the action instead of an agent turn. No dispatch gate
+runs first (§4), and a run manifest is not consulted, because an action node has no agent or skill to pin. Then:
+
+- An action name that is not registered fails the run:
+  `node 'publish' references host action 'open-pull-request', which is not registered.` This can only happen when
+  the resolver and the dispatcher were given different actions, or the action was removed after the process was
+  synced.
+- A failed `Result` fails the run with the action's message, prefixed with the node:
+  `node 'publish': push failed; worktree kept at C:/w`.
+- The returned outcome must be one of the node's declared `outcomes`. That holds when the node leaves by `next`
+  too, not only when it branches. An undeclared outcome is a defect in the action, and it fails the run with the
+  same message an agent's undeclared outcome gets:
+  `node 'publish' produced outcome 'merged' which is not one of its declared outcomes (published, failed)`.
+- The returned variables merge into the run under the caps a task node's report has (see the limits below): at most
+  8 per report and 16 distinct keys per run. Exceeding either fails the run.
+- An exception propagates, and so does an `OperationCanceledException` when the dispatch `ct` was cancelled, so the
+  outbox retries the delivery. Nothing is recorded, and the run stays at the node.
 
 ## Limits worth knowing before you author a process
 

@@ -182,6 +182,56 @@ public sealed class ProcessValidatorTests
         result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error : "");
     }
 
+    [Fact]
+    public async Task A_blank_agent_and_skill_are_reported_as_unknown_without_asking_the_resolver()
+    {
+        // WorkflowReferenceResolver refuses a blank name with ArgumentException, as its contract allows.
+        var resolver = new WorkflowReferenceResolver(
+            new FakeAgentCatalog([]), new Thalos.Skills.InMemorySkillStore(TimeProvider.System), hostActions: []);
+        var def = Load(WithNode("n", "agent: ''\n    skill: ''\n    next: done"));
+
+        var validate = async () => await ProcessValidator.ValidateAsync(def, resolver, CancellationToken.None);
+
+        // Red if ValidateReferencesAsync passes a blank agent or skill to the resolver: ArgumentException escapes
+        // and the file is reported with no error list at all.
+        var result = (await validate.Should().NotThrowAsync()).Subject;
+        result.IsFailure.Should().BeTrue();
+        result.Error.Should().Contain("node 'n' references unknown agent ''").And.Contain("node 'n' references unknown skill ''");
+    }
+
+    [Fact]
+    public async Task A_blank_action_is_reported_by_its_shape_rule_and_never_asked_about()
+    {
+        // The fake refuses a blank name with ArgumentException, as WorkflowReferenceResolver does.
+        var resolver = new FakeWorkflowReferenceResolver(new Dictionary<string, AgentId>(StringComparer.Ordinal));
+        var def = Load(WithNode("n", "action: '  '\n    outcomes: [ok]\n    branch: { ok: done }"));
+
+        var validate = async () => await ProcessValidator.ValidateAsync(def, resolver, CancellationToken.None);
+
+        // Red if the host-action rule drops its blank guard: ArgumentException escapes from the resolver.
+        var result = (await validate.Should().NotThrowAsync()).Subject;
+
+        // Red if the blank-action shape rule is deleted: with the resolver never asked, nothing reports the node.
+        result.IsFailure.Should().BeTrue();
+
+        // Red if the shape rule's message is reworded.
+        result.Error.Should().Contain("node 'n' has a blank 'action'");
+    }
+
+    [Fact]
+    public async Task A_registered_action_passes_reference_validation()
+    {
+        var resolver = new FakeWorkflowReferenceResolver(
+            new Dictionary<string, AgentId>(StringComparer.Ordinal),
+            new HashSet<string>(StringComparer.Ordinal) { "open-pull-request" });
+
+        var result = await ProcessValidator.ValidateAsync(Load(WellFormedActionYaml), resolver, CancellationToken.None);
+
+        // Red if the host-action rule inverts its HostActionExistsAsync check: the registered action is reported
+        // as unknown.
+        result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error : "");
+    }
+
     private static ProcessDefinition Load(string yaml) => ProcessLoader.Load(yaml).Value;
 
     private static string WithNode(string name, string body) =>

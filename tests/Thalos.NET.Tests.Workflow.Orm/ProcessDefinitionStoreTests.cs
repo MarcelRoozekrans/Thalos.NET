@@ -339,7 +339,7 @@ public sealed class ProcessDefinitionStoreTests(PostgresFixture pg) : IAsyncLife
     }
 
     /// <summary>
-    /// An <see cref="IWorkflowReferenceResolver"/> that resolves every agent and skill name — these tests are
+    /// An <see cref="IWorkflowReferenceResolver"/> that resolves every agent, skill and host action name — these tests are
     /// about activation, pinning and retention, not reference resolution (see
     /// <c>Thalos.Tests.Workflow.WorkflowReferenceResolverTests</c> for that), so the fixtures' agent and skill
     /// names never need to correspond to anything real.
@@ -349,5 +349,7 @@ public sealed class ProcessDefinitionStoreTests(PostgresFixture pg) : IAsyncLife
         public ValueTask<AgentId?> ResolveAgentIdAsync(string name, CancellationToken ct) => ValueTask.FromResult<AgentId?>(AgentId.New());
 
         public ValueTask<bool> SkillExistsAsync(string name, CancellationToken ct) => ValueTask.FromResult(true);
+
+        public ValueTask<bool> HostActionExistsAsync(string name, CancellationToken ct) => ValueTask.FromResult(true);
     }
 }

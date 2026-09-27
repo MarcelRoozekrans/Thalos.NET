@@ -26,7 +26,7 @@ public static class ProcessValidator
     /// (<c>await</c> set) resolves via <c>next</c> only — never <c>branch</c>/<c>outcomes</c> — a terminal declares
     /// no outgoing edge at all, an action node names a non-blank action, no <c>agent</c> or <c>skill</c>, and
     /// declares <c>outcomes</c>, and, when <paramref name="resolver"/> is not <see langword="null"/>, that every
-    /// declared agent and skill exists in the host.
+    /// declared agent, skill and host action exists in the host.
     /// </summary>
     public static async ValueTask<Result<ProcessDefinition>> ValidateAsync(
         ProcessDefinition process, IWorkflowReferenceResolver? resolver, CancellationToken ct)
@@ -262,7 +262,8 @@ public static class ProcessValidator
     /// is never taken. It declares <c>outcomes</c>, because <see cref="IWorkflowHostAction.RunAsync"/> must report
     /// one of them and an action node with none would have nothing it could legally report. And its name is not
     /// blank, which could never match a registered action. Whether the named action exists is a resolver-backed
-    /// question, not a shape rule, and is not checked here.
+    /// question, not a shape rule: <see cref="ValidateReferencesAsync"/> asks
+    /// <see cref="IWorkflowReferenceResolver.HostActionExistsAsync"/>.
     /// </summary>
     private static void ValidateActionNode(string name, ProcessNode node, List<string> errors)
     {
@@ -380,20 +381,38 @@ public static class ProcessValidator
         }
     }
 
-    /// <summary>Resolver-backed rule: every non-null <c>agent</c>/<c>skill</c> must exist in the host.</summary>
+    /// <summary>
+    /// Resolver-backed rule: every non-null <c>agent</c>, <c>skill</c> and <c>action</c> must exist in the host.
+    /// </summary>
+    /// <remarks>
+    /// A blank name is never passed to <paramref name="resolver"/>. The resolver contract lets an implementation
+    /// refuse one with <see cref="ArgumentException"/>, as <see cref="WorkflowReferenceResolver"/> does, and a
+    /// validator that threw on a malformed file would report nothing at all instead of the full error list. A blank
+    /// <c>agent</c> or <c>skill</c> names nothing that can exist, so it is reported as unknown here. A blank
+    /// <c>action</c> is already reported by <see cref="ValidateActionNode"/>'s shape rule and is skipped.
+    /// </remarks>
     private static async ValueTask ValidateReferencesAsync(
         ProcessDefinition process, IWorkflowReferenceResolver resolver, List<string> errors, CancellationToken ct)
     {
         foreach (var (name, node) in process.Nodes)
         {
-            if (node.Agent is not null && await resolver.ResolveAgentIdAsync(node.Agent, ct).ConfigureAwait(false) is null)
+            if (node.Agent is { } agent &&
+                (string.IsNullOrWhiteSpace(agent) || await resolver.ResolveAgentIdAsync(agent, ct).ConfigureAwait(false) is null))
             {
-                errors.Add($"node '{name}' references unknown agent '{node.Agent}'");
+                errors.Add($"node '{name}' references unknown agent '{agent}'");
             }
 
-            if (node.Skill is not null && !await resolver.SkillExistsAsync(node.Skill, ct).ConfigureAwait(false))
+            if (node.Skill is { } skill &&
+                (string.IsNullOrWhiteSpace(skill) || !await resolver.SkillExistsAsync(skill, ct).ConfigureAwait(false)))
             {
-                errors.Add($"node '{name}' references unknown skill '{node.Skill}'");
+                errors.Add($"node '{name}' references unknown skill '{skill}'");
+            }
+
+            if (node.Action is { } action &&
+                !string.IsNullOrWhiteSpace(action) &&
+                !await resolver.HostActionExistsAsync(action, ct).ConfigureAwait(false))
+            {
+                errors.Add($"node '{name}' references unknown host action '{action}'");
             }
         }
     }
