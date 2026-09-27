@@ -662,6 +662,38 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
 
     private static readonly EventId ProcessTreeNotEndedEvent = new(322);
 
+    [SkippableFact]
+    [SupportedOSPlatform("windows")]
+    public async Task A_stop_whose_killed_server_never_finishes_exiting_returns_and_warns_naming_its_process()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows(), "Only on Windows does the registry end the server's process tree itself.");
+        var events = new RecordingLoggerProvider();
+        using var loggerFactory = LoggerFactory.Create(b => b.SetMinimumLevel(LogLevel.Trace).AddProvider(events));
+        var definition = McpServerFixture.Definition("--host");
+        definition.RunScoped = new() { Args = [.. ServerArgs, "--shutdown-delay-ms", "60000"] }; // only a kill ends it
+        var registry = new RunMcpServerRegistry(Servers(definition), () => new FakeProvider(null), loggerFactory, TimeProvider.System);
+        _registries.Add(registry);
+        registry.WaitForProcessExit = (_, _) => Task.FromResult(false); // no killed process is ever seen to finish exiting
+        var workspace = Workspace() with { Root = Directory.CreateDirectory(Path.Combine(_root, "abandoned-ws")).FullName };
+
+        await registry.OnReadyAsync(workspace, CancellationToken.None);
+        var pid = await PidAsync(registry);
+        await KillWrapperOnlyAsync(pid); // the server outlives the SDK's dispose, so the registry's own kill and wait run
+        var removal = registry.OnRemovingAsync(workspace, CancellationToken.None).AsTask();
+        var returned = await Task.WhenAny(removal, Task.Delay(TimeSpan.FromSeconds(20))) == removal;
+
+        using (new AssertionScope())
+        {
+            returned.Should().BeTrue("a stop does not hang on a process that never finishes exiting");
+            events.Messages(ProcessTreeNotEndedEvent).Should().ContainSingle()
+                .Which.Should().MatchRegex($@"\b{pid}\b", "the warning names the server's process, which may still hold the workspace");
+        }
+
+        // The stop gave up on the teardown it began, as this test told it to; the kill still completes, and then the
+        // workspace is free.
+        await UntilAsync(() => TryDelete(workspace.Root), "the killed server to finish exiting");
+    }
+
     [Fact]
     public async Task Disposing_the_registry_while_a_server_is_starting_stops_it_promptly_and_leaves_no_process()
     {
@@ -840,9 +872,12 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
     /// <summary>Records the event id of every log entry, in order, so a test can tell what the registry did and when.</summary>
     private sealed class RecordingLoggerProvider : ILoggerProvider
     {
-        private readonly ConcurrentQueue<int> _events = new();
+        private readonly ConcurrentQueue<(int Id, string Message)> _events = new();
 
-        public int Count(EventId eventId) => _events.Count(id => id == eventId.Id);
+        public int Count(EventId eventId) => _events.Count(e => e.Id == eventId.Id);
+
+        /// <summary>The formatted messages of every entry with <paramref name="eventId"/>, in order.</summary>
+        public IReadOnlyList<string> Messages(EventId eventId) => [.. _events.Where(e => e.Id == eventId.Id).Select(e => e.Message)];
 
         public ILogger CreateLogger(string categoryName) => new Recorder(_events);
 
@@ -850,7 +885,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         {
         }
 
-        private sealed class Recorder(ConcurrentQueue<int> events) : ILogger
+        private sealed class Recorder(ConcurrentQueue<(int Id, string Message)> events) : ILogger
         {
             public IDisposable? BeginScope<TState>(TState state)
                 where TState : notnull => null;
@@ -858,7 +893,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
             public bool IsEnabled(LogLevel logLevel) => true;
 
             public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
-                events.Enqueue(eventId.Id);
+                events.Enqueue((eventId.Id, formatter(state, exception)));
         }
     }
 

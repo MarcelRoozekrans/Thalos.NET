@@ -22,8 +22,8 @@ namespace Thalos.Mcp;
 /// <para>
 /// Process ids are recycled, and a process listed in the snapshot may exit and give its id to a new one before it is
 /// opened. So a process is taken as the server's only if it was created at or after the start and no later than the
-/// snapshot, and a child of the wrapper's id only if it was also created before the session's close was observed and
-/// before any live process that holds that id now. Creation times, the start, the snapshot and the close are all read
+/// snapshot, and a child of the wrapper's id only if it was also created before the session closed, a time stamped as it
+/// closed, and before any live process that holds that id now. Creation times, the start, the snapshot and the close are all read
 /// from the system clock the kernel stamps processes with, so they compare. What these bounds cannot rule out is an id
 /// recycled, within that window, into a process whose recorded parent is itself a member of the tree; a job object
 /// holding the whole tree would, and is tracked as Thalos.NET issue 192.
@@ -67,7 +67,7 @@ internal static partial class ServerProcessTree
     /// </summary>
     /// <param name="wrapperPid">The process the SDK started, <c>cmd.exe</c>.</param>
     /// <param name="startedAt">From <see cref="Now"/>, taken before the start; a process created before it is not the server's.</param>
-    /// <param name="closedAt">From <see cref="Now"/>, taken once the session's close was observed; the wrapper's own children were all created before it.</param>
+    /// <param name="closedAt">From <see cref="Now"/>, stamped as the session closed; the wrapper's own children were all created before it.</param>
     /// <returns>How many processes of the tree were found, and the ids of those that had not exited when the wait ended.</returns>
     /// <exception cref="Win32Exception">The processes could not be listed.</exception>
     public static Task<(int Found, IReadOnlyList<int> StillRunning)> EndAsync(int wrapperPid, long startedAt, long closedAt) =>
@@ -116,7 +116,7 @@ internal static partial class ServerProcessTree
         var (children, running, snapshotAt) = snapshot;
         var tree = new List<OpenedProcess>();
 
-        // The wrapper's own children were created before its session's close was observed. A live process holding the
+        // The wrapper's own children were created before its session closed. A live process holding the
         // wrapper's id, created at or after the start and no later than the snapshot, and already terminating, is the
         // wrapper itself; any other holder reused the id, and the wrapper's children were all created before it. A holder
         // created after the snapshot says nothing about who held the id when the snapshot was taken, so none of that id's
@@ -191,7 +191,10 @@ internal static partial class ServerProcessTree
     {
         var children = new Dictionary<int, List<int>>();
         var running = new HashSet<int>();
-        var takenAt = Now(); // before the snapshot: every process in it was created no later than this
+        // Taken first, deliberately: a process created between this and the snapshot is listed but refused as created
+        // after it. That errs towards leaving a process running, never towards ending one that is not the server's; what
+        // it can miss is a descendant created in that gap of microseconds.
+        var takenAt = Now();
         using var snapshot = CreateToolhelp32Snapshot(SnapProcess, 0);
         if (snapshot.IsInvalid)
         {
@@ -319,7 +322,8 @@ internal static partial class ServerProcessTree
 
     /// <summary>
     /// A process listing: each parent id's children, every listed id, and the time, from <see cref="Now"/>, taken just
-    /// before the listing, so no process in it was created after that time.
+    /// before the listing. A process created in between is listed but refused as created after that time, which errs
+    /// towards leaving it running; only a descendant created in that gap can be missed.
     /// </summary>
     internal sealed record ProcessSnapshot(Dictionary<int, List<int>> Children, HashSet<int> Running, long TakenAt);
 

@@ -5,15 +5,22 @@ using ModelContextProtocol.Protocol;
 namespace Thalos.Mcp;
 
 /// <summary>
-/// A <see cref="StdioClientTransport"/> that remembers the session it connected, and when, so that once the session
-/// has closed <see cref="RunMcpServerRegistry"/> can find the process the SDK started and end the rest of its tree with
-/// <see cref="ServerProcessTree"/>. It works whether or not a client was ever built on the session: a client whose
-/// handshake fails closes the session too.
+/// A <see cref="StdioClientTransport"/> that remembers the session it connected, when it began, and when the session
+/// closed, so that <see cref="RunMcpServerRegistry"/> can later find the process the SDK started and end the rest of its
+/// tree with <see cref="ServerProcessTree"/>. It works whether or not a client was ever built on the session: a client
+/// whose handshake fails closes the session too.
 /// </summary>
+/// <remarks>
+/// The close is stamped when it happens, not when the registry asks: the registry may ask much later, at the next call
+/// to a server that died or at the run's removal, and by then the wrapper's process id may have been reused by a process
+/// that started children of its own. Those children were created after the close, so the close time keeps them out of
+/// the tree; the time of asking would not.
+/// </remarks>
 /// <param name="inner">The SDK transport that starts the process.</param>
 internal sealed class TrackedStdioClientTransport(StdioClientTransport inner) : IClientTransport
 {
     private ITransport? _session;
+    private Task<long>? _closedAt;
 
     /// <inheritdoc />
     public string Name => inner.Name;
@@ -29,36 +36,47 @@ internal sealed class TrackedStdioClientTransport(StdioClientTransport inner) : 
     {
         StartedAt = OperatingSystem.IsWindows() ? ServerProcessTree.Now() : 0;
         var session = await inner.ConnectAsync(cancellationToken).ConfigureAwait(false);
+        if (OperatingSystem.IsWindows())
+        {
+            Volatile.Write(ref _closedAt, StampClose(session));
+        }
+
         Volatile.Write(ref _session, session);
         return session;
     }
 
+    /// <summary>The time, from <see cref="ServerProcessTree.Now"/>, read as <paramref name="session"/> completes, on the thread that completes it.</summary>
+    [SupportedOSPlatform("windows")]
+    private static Task<long> StampClose(ITransport session) =>
+        session.MessageReader.Completion.ContinueWith(
+            static _ => ServerProcessTree.Now(), CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+
     /// <summary>
-    /// The id of the process the SDK started, as its closed session reports it, and when the close was observed, from
-    /// <see cref="ServerProcessTree.Now"/>; or <see langword="null"/> when no session was connected, it has not closed
-    /// within <paramref name="wait"/>, or it closed without a process id. Windows only.
+    /// The id of the process the SDK started, as its closed session reports it, and when the session closed, from
+    /// <see cref="ServerProcessTree.Now"/>, stamped as it closed; or <see langword="null"/> when no session was
+    /// connected, it has not closed within <paramref name="wait"/>, or it closed without a process id. Windows only.
     /// </summary>
     [SupportedOSPlatform("windows")]
     public async Task<(int Pid, long ClosedAt)?> ClosedProcessAsync(TimeSpan wait)
     {
-        if (Volatile.Read(ref _session) is not { } session)
+        if (Volatile.Read(ref _session) is not { } session || Volatile.Read(ref _closedAt) is not { } closed)
         {
             return null;
         }
 
+        long closedAt;
         try
         {
-            await session.MessageReader.Completion.WaitAsync(wait).ConfigureAwait(false);
+            closedAt = await closed.WaitAsync(wait).ConfigureAwait(false);
         }
-        catch (ClientTransportClosedException ex) when (ex.Details is StdioClientCompletionDetails { ProcessId: { } pid })
+        catch (TimeoutException)
         {
-            return (pid, ServerProcessTree.Now()); // a stdio session always closes this way, carrying the process id
-        }
-        catch (Exception ex) when (ex is TimeoutException or ClientTransportClosedException)
-        {
-            // Still open, or closed without stdio details.
+            return null; // still open
         }
 
-        return null;
+        // A stdio session always closes with this exception, carrying the process id.
+        return session.MessageReader.Completion.Exception?.InnerException is ClientTransportClosedException { Details: StdioClientCompletionDetails { ProcessId: { } pid } }
+            ? (pid, closedAt)
+            : null;
     }
 }
