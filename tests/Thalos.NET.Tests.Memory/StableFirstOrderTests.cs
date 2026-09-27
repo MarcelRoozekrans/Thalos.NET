@@ -135,4 +135,24 @@ public sealed class StableFirstOrderTests
         HasHint(messages[^2], PromptCacheHints.Breakpoint).Should().BeFalse();
         HasHint(messages[^2], PromptCacheHints.Transient).Should().BeTrue();
     }
+
+    [Fact]
+    public async Task With_prompt_caching_each_recalling_turn_breaks_at_the_end_of_its_stored_history()
+    {
+        await using var h = await SessionWithHistoryAsync(promptCaching: true);
+        h.Scripted.ThenText("ok").ThenText("ok again");
+        await h.Runtime.RunTurnAsync(new AgentTurnRequest(h.Session, "second question", Caller), CancellationToken.None);
+        await h.Runtime.RunTurnAsync(new AgentTurnRequest(h.Session, "the second question once more", Caller), CancellationToken.None);
+
+        // turn N caches the prefix through its stored history, which ends at "first answer"; turn N+1 extends it through
+        // "ok", the message that closed turn N, so each turn reads the earlier history back instead of rewriting it
+        var turnN = h.Scripted.Requests[^2].Messages.ToList();
+        var memN = turnN.FindIndex(m => HasHint(m, PromptCacheHints.Transient));
+        turnN[memN - 1].Text.Should().Be("first answer");
+        HasHint(turnN[memN - 1], PromptCacheHints.Breakpoint).Should().BeTrue();
+        var turnNext = h.Scripted.Requests[^1].Messages.ToList();
+        var memNext = turnNext.FindIndex(m => HasHint(m, PromptCacheHints.Transient));
+        turnNext[memNext - 1].Text.Should().Be("ok");
+        HasHint(turnNext[memNext - 1], PromptCacheHints.Breakpoint).Should().BeTrue();
+    }
 }

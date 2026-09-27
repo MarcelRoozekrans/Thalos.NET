@@ -124,6 +124,57 @@ public sealed class PromptCachingChatClientTests
         tools.Should().NotContain(t => IsHinted(t));
     }
 
+    private static ChatMessage Transient(string text) =>
+        new(ChatRole.User, text) { AdditionalProperties = new() { [PromptCacheHints.Transient] = true } };
+
+    [Fact]
+    public async Task The_message_before_a_transient_message_gets_a_breakpoint_too()
+    {
+        var (client, inner) = Build();
+        var a1 = new ChatMessage(ChatRole.Assistant, "a1");
+        var messages = new List<ChatMessage> { new(ChatRole.User, "u1"), a1, Transient("mem"), new(ChatRole.User, "u2") };
+
+        await client.GetResponseAsync(messages, new ChatOptions(), CancellationToken.None);
+
+        var seen = inner.Requests[^1].Messages;
+        seen.Select(m => m.Text).Should().Equal("u1", "a1", "mem", "u2");
+        IsHinted(seen[1]).Should().BeTrue("a1 ends the stored history, which the next turn's request shares");
+        seen.Where(IsHinted).Select(m => m.Text).Should().Equal(["a1", "u2"], "exactly one extra hint, on a1, and none on u1 or the transient message");
+        a1.AdditionalProperties.Should().BeNull("the hint goes on a copy, never on the caller's message");
+    }
+
+    [Fact]
+    public async Task Only_the_first_transient_message_places_a_history_breakpoint()
+    {
+        var (client, inner) = Build();
+        var messages = new List<ChatMessage> { new(ChatRole.User, "u1"), Transient("mem1"), new(ChatRole.Assistant, "a1"), Transient("mem2"), new(ChatRole.User, "u2") };
+
+        await client.GetResponseAsync(messages, new ChatOptions(), CancellationToken.None);
+
+        inner.Requests[^1].Messages.Where(IsHinted).Select(m => m.Text).Should().Equal("u1", "u2");
+    }
+
+    [Fact]
+    public async Task A_message_the_caller_already_hinted_before_the_transient_message_is_passed_through_as_is()
+    {
+        var (client, inner) = Build();
+        var a1 = new ChatMessage(ChatRole.Assistant, "a1") { AdditionalProperties = new() { [PromptCacheHints.Breakpoint] = true } };
+
+        await client.GetResponseAsync([new(ChatRole.User, "u1"), a1, Transient("mem"), new(ChatRole.User, "u2")], new ChatOptions(), CancellationToken.None);
+
+        inner.Requests[^1].Messages[1].Should().BeSameAs(a1, "an existing hint is not duplicated onto a copy");
+    }
+
+    [Fact]
+    public async Task A_transient_first_message_adds_no_history_breakpoint()
+    {
+        var (client, inner) = Build();
+
+        await client.GetResponseAsync([Transient("mem"), new(ChatRole.User, "u")], new ChatOptions(), CancellationToken.None);
+
+        inner.Requests[^1].Messages.Where(IsHinted).Select(m => m.Text).Should().Equal("u");
+    }
+
     // ---------- edge cases ----------
 
     [Fact]

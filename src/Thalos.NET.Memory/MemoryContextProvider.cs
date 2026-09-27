@@ -27,7 +27,8 @@ namespace Thalos.Memory;
 /// <remarks>
 /// This overrides <see cref="AIContextProvider.InvokingCoreAsync"/> rather than <c>ProvideAIContextAsync</c>: MAF 1.22's
 /// default merge appends a provider's messages after every input message, which would put the block after the latest user
-/// message. Here the provider returns the whole message sequence with the block inserted in place.
+/// message. Here the provider sets the context's whole message sequence, with the block inserted in place, and returns
+/// the context it was given.
 /// </remarks>
 public sealed partial class MemoryContextProvider(
     IMemoryService memory,
@@ -67,7 +68,8 @@ public sealed partial class MemoryContextProvider(
         var memories = new ChatMessage(ChatRole.User, block) { AdditionalProperties = new() { [PromptCacheHints.Transient] = true } }
             .WithAgentRequestMessageSource(AgentRequestMessageSourceType.AIContextProvider, GetType().FullName);
         messages.Insert(messages.FindLastIndex(m => ReferenceEquals(m, latest)), memories);
-        return new AIContext { Instructions = input.Instructions, Messages = messages, Tools = input.Tools };
+        input.Messages = messages; // MAF: providers modify and return the context they were given, so nothing else is dropped
+        return input;
     }
 
     /// <summary>The rendered block for <paramref name="query"/>, or null when there is no owner, nothing is kept or recall fails.</summary>
@@ -152,11 +154,9 @@ public sealed partial class MemoryContextProvider(
     /// <summary>Publishes into the current turn (streamed + hub); the provider only gets this far inside a turn.</summary>
     private ValueTask PublishAsync(Func<SessionId, TurnId, AgentEvent> make, CancellationToken ct) => MemoryEvents.PublishAsync(hub, make, ct);
 
-    internal static string? LastUserText(IEnumerable<ChatMessage>? messages) => LastUser(messages)?.Text;
-
     /// <summary>The last user message with non-blank text: the one recall queries for, and the one the block is placed before.</summary>
-    private static ChatMessage? LastUser(IEnumerable<ChatMessage>? messages) =>
-        messages?.LastOrDefault(m => m.Role == ChatRole.User && !string.IsNullOrWhiteSpace(m.Text));
+    internal static ChatMessage? LastUser(IEnumerable<ChatMessage> messages) =>
+        messages.LastOrDefault(m => m.Role == ChatRole.User && !string.IsNullOrWhiteSpace(m.Text));
 
     [LoggerMessage(EventId = 510, Level = LogLevel.Warning, Message = "Memory recall failed; the turn continues without memories: {Error}")]
     private static partial void LogRecallFailed(ILogger logger, string error);

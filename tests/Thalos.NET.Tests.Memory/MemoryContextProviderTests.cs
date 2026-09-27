@@ -78,7 +78,11 @@ public sealed class MemoryContextProviderTests
         ChatMessage earlier = new(ChatRole.User, "earlier question"), answer = new(ChatRole.Assistant, "earlier answer"), latest = new(ChatRole.User, "xUnit or NUnit?");
         AITool[] tools = [AIFunctionFactory.Create(() => "x", "t")];
 
-        var ctx = await provider.InvokingAsync(new(Agent(), null!, new AIContext { Instructions = "own", Messages = [earlier, answer, latest], Tools = tools }), default);
+        var given = new AIContext { Instructions = "own", Messages = [earlier, answer, latest], Tools = tools };
+
+        var ctx = await provider.InvokingAsync(new(Agent(), null!, given), default);
+
+        ctx.Should().BeSameAs(given, "the provider modifies and returns the context it was given, so nothing an earlier provider set is dropped");
 
         var messages = ctx.Messages!.ToList();
         messages.Should().HaveCount(4);
@@ -234,7 +238,7 @@ public sealed class MemoryContextProviderTests
     }
 
     [Fact]
-    public void LastUserText_takes_the_last_non_blank_user_message_and_joins_multi_content()
+    public void LastUser_takes_the_last_user_message_with_non_blank_text()
     {
         var messages = new List<ChatMessage>
         {
@@ -245,9 +249,8 @@ public sealed class MemoryContextProviderTests
             new(ChatRole.User, "   "),
         };
 
-        MemoryContextProvider.LastUserText(messages).Should().Be("part onepart two", "ChatMessage.Text concatenates the text contents");
-        MemoryContextProvider.LastUserText(null).Should().BeNull();
-        MemoryContextProvider.LastUserText([new ChatMessage(ChatRole.Assistant, "only assistant")]).Should().BeNull();
+        MemoryContextProvider.LastUser(messages).Should().BeSameAs(messages[2]);
+        MemoryContextProvider.LastUser([new ChatMessage(ChatRole.Assistant, "only assistant")]).Should().BeNull();
     }
 
     [Fact]
