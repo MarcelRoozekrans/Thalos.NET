@@ -66,9 +66,12 @@ public sealed partial class GitWorktreeWorkspaceProviderTests
 
     /// <summary>
     /// The claimant is another process, holding the run lock the way a create does, and is killed mid-create. While it
-    /// lives, its record is not removable; the moment the OS has reaped it, the record is removable at once, with no
-    /// grace period. The helper holds the lock with the OS's own primitive — <c>flock</c> on Linux, an unshared open
-    /// on Windows — which is exactly what <see cref="CrossProcessFileLock"/> takes, and is killed.
+    /// lives, its record is not removable; once the OS has released the lock, the record is removable at once, with no
+    /// grace period. Windows takes roughly 260 ms after a killed process exits before the kernel closes its handles
+    /// and the lock shows as free, later than <see cref="Process.WaitForExitAsync(CancellationToken)"/> returns, so
+    /// the test polls the lock itself rather than assuming the two happen together. The helper holds the lock with
+    /// the OS's own primitive — <c>flock</c> on Linux, an unshared open on Windows — which is exactly what
+    /// <see cref="CrossProcessFileLock"/> takes, and is killed.
     /// </summary>
     [Fact]
     public async Task A_claimant_process_killed_mid_create_makes_its_record_removable_at_once()
@@ -94,6 +97,7 @@ public sealed partial class GitWorktreeWorkspaceProviderTests
             await claimant.WaitForExitAsync();
         }
 
+        await WaitForRunLockFreeAsync(runId);
         var afterKill = await provider.RemoveAsync(runId, CancellationToken.None);
 
         afterKill.IsSuccess.Should().BeTrue($"the OS released the killed claimant's run lock, so its record is removable at once{FailureText(afterKill.IsFailure, () => afterKill.Error)}");
@@ -181,6 +185,30 @@ public sealed partial class GitWorktreeWorkspaceProviderTests
         {
             holder.HasExited.Should().BeFalse("the lock holder must still be running while it is awaited");
             DateTime.UtcNow.Should().BeBefore(deadline, "the lock holder never took its lock");
+            await Task.Delay(50);
+        }
+    }
+
+    /// <summary>
+    /// Polls the run lock at <paramref name="runId"/> with <see cref="CrossProcessFileLock.TryAcquire"/>, the same
+    /// primitive the product probes with, until the OS itself reports it free, up to 10 seconds. Disposes the probe
+    /// immediately so it never outlives the check. This is the OS's own signal, not the provider's: there is no
+    /// retry around <see cref="GitWorktreeWorkspaceProvider.RemoveAsync"/> here, so a real grace period in the
+    /// product would still turn the test's final assertion red.
+    /// </summary>
+    private async Task WaitForRunLockFreeAsync(Guid runId)
+    {
+        var lockPath = RunLockPath(runId);
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (true)
+        {
+            if (CrossProcessFileLock.TryAcquire(lockPath) is { } probe)
+            {
+                probe.Dispose();
+                return;
+            }
+
+            DateTime.UtcNow.Should().BeBefore(deadline, "the OS never released the killed claimant's run lock");
             await Task.Delay(50);
         }
     }
