@@ -263,8 +263,10 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
     /// would match <c>AGENT.md</c> under git's default pathspec magic — the exact shape of the glob bug — but is
     /// not itself a real file, and its brackets are valid on every filesystem this suite runs on (unlike <c>*</c> or
     /// <c>?</c>, both reserved on Windows, which would make <see cref="WorkspacePath.Resolve"/> refuse the path for
-    /// an unrelated reason before git is ever involved). With literal pathspecs, <c>git add</c> reports no match and
-    /// the call fails outright — never silently staging (and so committing) every file including <c>AGENT.md</c>.
+    /// an unrelated reason before git is ever involved). Taken literally, <c>"AGENT.m[d]"</c> is an absent,
+    /// untracked path, so it contributes nothing: no commit is made — never silently staging (and so committing)
+    /// <c>AGENT.md</c>, and never widening to every file. The presence check itself (<c>git ls-files</c>) runs with
+    /// <c>--literal-pathspecs</c> too, so the glob cannot sneak <c>AGENT.md</c> in through it either.
     /// </summary>
     [Fact]
     public async Task A_glob_looking_path_is_taken_literally_and_never_matches_a_real_file()
@@ -275,8 +277,10 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
 
         var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, Paths = ["AGENT.m[d]"] }, CancellationToken.None);
 
-        committed.IsFailure.Should().BeTrue("'AGENT.m[d]' must be taken as a literal, nonexistent filename, never as a glob matching AGENT.md");
+        committed.IsSuccess.Should().BeTrue("'AGENT.m[d]' taken literally is an absent, untracked path, which is not an error");
+        committed.Value.Created.Should().BeFalse("'AGENT.m[d]' must be taken as a literal, nonexistent filename, never as a glob matching AGENT.md");
         Git(ws.Root, "rev-parse HEAD").Should().Be(headBefore, "no commit must be made when the literal path matches nothing");
+        Git(ws.Root, "diff --name-only").Should().Be("AGENT.md", "AGENT.md's change stays unstaged in the worktree");
     }
 
     /// <summary>
@@ -296,6 +300,135 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
         committed.IsSuccess.Should().BeTrue();
         committed.Value.Created.Should().BeTrue("'AGENT.m[d]' must be taken as a literal, nonexistent filename, never as a glob that excludes AGENT.md");
         FilesIn(ws, committed.Value.Sha).Should().Contain("AGENT.md");
+    }
+
+    /// <summary>
+    /// Absent-path contract: a <c>Paths</c> entry that is neither on disk nor tracked contributes nothing — it is
+    /// not an error. With nothing else listed, nothing is staged, so no commit is made and <c>Sha</c> is
+    /// <c>HEAD</c>'s own, unchanged. This is the Daedalus shape: a path-scoped commit of a standing-instructions
+    /// file the repository does not have.
+    /// </summary>
+    [Fact]
+    public async Task An_absent_untracked_path_commits_nothing_and_head_is_unchanged()
+    {
+        var ws = await WorktreeAsync();
+        var headBefore = Git(ws.Root, "rev-parse HEAD");
+
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, Paths = ["STANDING.md"] }, CancellationToken.None);
+
+        committed.IsSuccess.Should().BeTrue("a path that is neither on disk nor tracked contributes nothing, and is not an error");
+        committed.Value.Created.Should().BeFalse();
+        committed.Value.Sha.Should().Be(headBefore);
+        Git(ws.Root, "rev-parse HEAD").Should().Be(headBefore);
+    }
+
+    /// <summary>Absent-path contract: an absent, untracked entry beside a present one stages only the present one, and nothing outside the list.</summary>
+    [Fact]
+    public async Task An_absent_path_beside_a_present_one_stages_only_the_present_one()
+    {
+        var ws = await WorktreeAsync();
+        File.WriteAllText(Path.Combine(ws.Root, "code.cs"), "class C {}");
+        File.WriteAllText(Path.Combine(ws.Root, "other.cs"), "class O {}");
+
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, Paths = ["STANDING.md", "code.cs"] }, CancellationToken.None);
+
+        committed.IsSuccess.Should().BeTrue();
+        committed.Value.Created.Should().BeTrue();
+        FilesIn(ws, committed.Value.Sha).Should().Equal("code.cs");
+    }
+
+    /// <summary>Absent-path contract: a tracked path deleted from disk is not "absent" — its deletion is still staged and committed.</summary>
+    [Fact]
+    public async Task An_absent_path_beside_a_tracked_deleted_one_commits_the_deletion()
+    {
+        var ws = await WorktreeAsync(("old.txt", "old"));
+        File.Delete(Path.Combine(ws.Root, "old.txt"));
+        File.WriteAllText(Path.Combine(ws.Root, "other.cs"), "class O {}");
+
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, Paths = ["STANDING.md", "old.txt"] }, CancellationToken.None);
+
+        committed.IsSuccess.Should().BeTrue();
+        committed.Value.Created.Should().BeTrue();
+        // Only the deletion is committed; other.cs, outside the list, is not.
+        FilesIn(ws, committed.Value.Sha).Should().Equal("old.txt");
+    }
+
+    /// <summary>
+    /// Stage-everything guard: when every <c>Paths</c> entry is absent and untracked, the filtered list is empty,
+    /// and an empty list must never fall through to <c>git add -A</c> with no pathspec — that would stage, and
+    /// commit, every other change in the worktree. Nothing is committed, and the other changes stay exactly as they
+    /// were: modified-but-unstaged and untracked.
+    /// </summary>
+    [Fact]
+    public async Task Every_path_absent_commits_nothing_and_never_stages_the_rest_of_the_worktree()
+    {
+        var ws = await WorktreeAsync(("tracked.txt", "before"));
+        File.WriteAllText(Path.Combine(ws.Root, "tracked.txt"), "after");
+        File.WriteAllText(Path.Combine(ws.Root, "other.cs"), "class O {}");
+        var headBefore = Git(ws.Root, "rev-parse HEAD");
+
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, Paths = ["STANDING.md", "missing/NOTES.md"] }, CancellationToken.None);
+
+        committed.IsSuccess.Should().BeTrue();
+        committed.Value.Created.Should().BeFalse("an all-absent path list must never widen to staging the whole worktree");
+        Git(ws.Root, "rev-parse HEAD").Should().Be(headBefore);
+        Git(ws.Root, "diff --name-only").Should().Be("tracked.txt", "the tracked change stays in the worktree, unstaged and uncommitted");
+        Git(ws.Root, "ls-files --others --exclude-standard").Should().Be("other.cs", "the untracked file stays untracked");
+    }
+
+    /// <summary>
+    /// Absent-path contract for <c>ExcludePaths</c>: <c>git reset -q -- &lt;path&gt;</c> exits 0 on a pathspec
+    /// that matches nothing (verified against git 2.54), so an absent, untracked exclusion excludes nothing and the
+    /// commit goes ahead. Pinned so a later change to how exclusions are unstaged cannot quietly make it an error.
+    /// </summary>
+    [Fact]
+    public async Task An_absent_untracked_exclude_path_is_not_an_error()
+    {
+        var ws = await WorktreeAsync();
+        File.WriteAllText(Path.Combine(ws.Root, "code.cs"), "class C {}");
+
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, ExcludePaths = ["STANDING.md"] }, CancellationToken.None);
+
+        committed.IsSuccess.Should().BeTrue("an absent, untracked exclusion excludes nothing and is not an error");
+        committed.Value.Created.Should().BeTrue();
+    }
+
+    /// <summary>Only the unmatched-pathspec case is removed: a real git failure — here, a locked index — still fails the commit, even with an absent path listed.</summary>
+    [Fact]
+    public async Task A_locked_index_still_fails_the_commit()
+    {
+        var ws = await WorktreeAsync();
+        File.WriteAllText(Path.Combine(ws.Root, "code.cs"), "class C {}");
+        var lockFile = Path.GetFullPath(Path.Combine(ws.Root, Git(ws.Root, "rev-parse --git-path index.lock")));
+        File.WriteAllText(lockFile, "");
+
+        try
+        {
+            var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, Paths = ["STANDING.md", "code.cs"] }, CancellationToken.None);
+
+            committed.IsFailure.Should().BeTrue("a locked index is a real git failure, not an absent path");
+        }
+        finally
+        {
+            File.Delete(lockFile);
+        }
+    }
+
+    /// <summary>
+    /// Only the unmatched-pathspec case is removed: a present path that <c>git add</c> itself refuses — an ignored
+    /// file — still fails the commit, exactly as before, even beside an absent path. Presence is decided from disk
+    /// and the index, never from git's error text, so this refusal is never mistaken for an absent path.
+    /// </summary>
+    [Fact]
+    public async Task An_ignored_present_path_beside_an_absent_one_still_fails()
+    {
+        var ws = await WorktreeAsync();
+        File.WriteAllText(Path.Combine(ws.Root, ".gitignore"), "ignored.log\n");
+        File.WriteAllText(Path.Combine(ws.Root, "ignored.log"), "noise");
+
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, Paths = ["STANDING.md", "ignored.log"] }, CancellationToken.None);
+
+        committed.IsFailure.Should().BeTrue("git add refusing an ignored present path is a real failure, not an absent path");
     }
 
     /// <summary>

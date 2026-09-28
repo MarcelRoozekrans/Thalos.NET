@@ -25,9 +25,14 @@ namespace Thalos.Git.Workspaces;
 /// <c>HEAD</c>'s own state, never a previous call's leftovers. It then stages
 /// <see cref="GitCommitRequest.Paths"/> with <c>git add -A -- &lt;Paths&gt;</c> (or <c>git add -A</c> when
 /// <see cref="GitCommitRequest.Paths"/> is <see langword="null"/>), then unstages
-/// <see cref="GitCommitRequest.ExcludePaths"/> with <c>git reset -q -- &lt;ExcludePaths&gt;</c>. Every one of these
-/// three calls passes <c>--literal-pathspecs</c>, a global git flag stated as an argument (never an environment
-/// variable — <see cref="GitCli"/> strips every inherited <c>GIT_*</c> variable, including
+/// <see cref="GitCommitRequest.ExcludePaths"/> with <c>git reset -q -- &lt;ExcludePaths&gt;</c>. A
+/// <see cref="GitCommitRequest.Paths"/> entry that is neither on disk nor listed by <c>git ls-files --cached
+/// --others</c> is dropped before <c>add</c> runs, since <c>git add</c> would otherwise fail the whole call with an
+/// unmatched pathspec; when every entry is dropped, <c>add</c> is skipped outright rather than run with no pathspec,
+/// which would stage the whole worktree. An absent <see cref="GitCommitRequest.ExcludePaths"/> entry needs no such
+/// filter: <c>git reset</c> exits 0 on a pathspec that matches nothing. Every one of these calls, the
+/// <c>ls-files</c> check included, passes <c>--literal-pathspecs</c>, a global git flag stated as an argument
+/// (never an environment variable — <see cref="GitCli"/> strips every inherited <c>GIT_*</c> variable, including
 /// <c>GIT_LITERAL_PATHSPECS</c>, on every call), so a path such as <c>"*"</c> or <c>"AGENT.m?"</c> is matched
 /// literally by its exact name rather than as a glob — a caller-supplied path is data, never a pattern. The commit
 /// itself is then a plain <c>git commit -m &lt;Message&gt;</c> with no path list of its own: by the time it runs,
@@ -155,7 +160,9 @@ public sealed partial class GitCliRunWorkspaceGit(
     /// Resets the index to <c>HEAD</c> (clearing any leftover from a previous, failed commit attempt in this same
     /// worktree), stages <see cref="GitCommitRequest.Paths"/> (or everything), and then unstages
     /// <see cref="GitCommitRequest.ExcludePaths"/> — in that order, so an excluded path staged by a broad
-    /// <c>add -A</c> is always unstaged again afterwards. Returns the failure, or <see langword="null"/> on success.
+    /// <c>add -A</c> is always unstaged again afterwards. A <see cref="GitCommitRequest.Paths"/> entry that is absent
+    /// and untracked is dropped first (<see cref="KnownPathsAsync"/>); if none is left, nothing is added at all.
+    /// Returns the failure, or <see langword="null"/> on success.
     /// </summary>
     private async Task<AgentError?> StageAsync(string root, GitCommitRequest request, CancellationToken ct)
     {
@@ -166,16 +173,30 @@ public sealed partial class GitCliRunWorkspaceGit(
         }
 
         var addArgs = new List<string> { "--literal-pathspecs", "add", "-A" };
+        var stageAnything = true;
         if (request.Paths is { Count: > 0 } paths)
         {
+            var known = await KnownPathsAsync(root, paths, ct).ConfigureAwait(false);
+            if (known.IsFailure)
+            {
+                return known.Error;
+            }
+
+            // Every listed path absent and untracked: nothing to stage. This must skip git add entirely — an empty
+            // pathspec list would otherwise turn "add -A -- <paths>" into a bare "add -A" that stages the whole
+            // worktree, the exact opposite of a path-scoped commit.
+            stageAnything = known.Value.Count > 0;
             addArgs.Add("--");
-            addArgs.AddRange(paths);
+            addArgs.AddRange(known.Value);
         }
 
-        var added = await _git.RunAsync(root, addArgs, null, null, ct).ConfigureAwait(false);
-        if (!added.Succeeded)
+        if (stageAnything)
         {
-            return GitFailure("git add failed.", added, secret: null);
+            var added = await _git.RunAsync(root, addArgs, null, null, ct).ConfigureAwait(false);
+            if (!added.Succeeded)
+            {
+                return GitFailure("git add failed.", added, secret: null);
+            }
         }
 
         if (request.ExcludePaths is not { Count: > 0 } excludePaths)
@@ -187,6 +208,44 @@ public sealed partial class GitCliRunWorkspaceGit(
         resetArgs.AddRange(excludePaths);
         var reset = await _git.RunAsync(root, resetArgs, null, null, ct).ConfigureAwait(false);
         return reset.Succeeded ? null : GitFailure("git reset failed.", reset, secret: null);
+    }
+
+    /// <summary>
+    /// <paramref name="paths"/> without every entry that is neither on disk nor known to git, in their original
+    /// order. Such an entry would make <c>git add</c> fail with an unmatched pathspec; it contributes nothing to the
+    /// commit instead. Absence is decided from facts, never from git's error text: an entry present on disk as a
+    /// file or directory is kept without asking git, so a present path behaves exactly as it always has; any other
+    /// entry is kept only when <c>git ls-files --cached --others</c>, with <c>--literal-pathspecs</c>, lists
+    /// something under it — a tracked path deleted from disk (whose deletion must still be staged) or an untracked
+    /// entry <see cref="File.Exists"/> and <see cref="Directory.Exists"/> do not see. Runs after the index reset
+    /// to <c>HEAD</c>, so "tracked" means tracked by <c>HEAD</c>. A failing <c>ls-files</c> is a failure, not an
+    /// absent path.
+    /// </summary>
+    private async Task<Result<List<string>, AgentError>> KnownPathsAsync(string root, IReadOnlyList<string> paths, CancellationToken ct)
+    {
+        var known = new List<string>(paths.Count);
+        foreach (var path in paths)
+        {
+            var full = Path.Combine(root, path);
+            if (File.Exists(full) || Directory.Exists(full))
+            {
+                known.Add(path);
+                continue;
+            }
+
+            var listed = await _git.RunAsync(root, ["--literal-pathspecs", "ls-files", "-z", "--cached", "--others", "--", path], null, null, ct).ConfigureAwait(false);
+            if (!listed.Succeeded)
+            {
+                return Result<List<string>, AgentError>.Failure(GitFailure("git ls-files failed.", listed, secret: null));
+            }
+
+            if (listed.StdOut.Length > 0)
+            {
+                known.Add(path);
+            }
+        }
+
+        return Result<List<string>, AgentError>.Success(known);
     }
 
     /// <summary>
