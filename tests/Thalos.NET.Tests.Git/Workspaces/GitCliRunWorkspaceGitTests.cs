@@ -416,7 +416,11 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
         committed.Value.Created.Should().BeTrue();
     }
 
-    /// <summary>Only the unmatched-pathspec case is removed: a real git failure — here, a locked index — still fails the commit, even with an absent path listed.</summary>
+    /// <summary>
+    /// A real git failure still fails the commit. This pins the reset-to-<c>HEAD</c> failure: with <c>index.lock</c>
+    /// present, the initial <c>git reset -q</c> exits 128, so the call fails before it ever reaches the path filter or
+    /// <c>git add</c>. The ignored-path test below covers a failing <c>git add</c> itself.
+    /// </summary>
     [Fact]
     public async Task A_locked_index_still_fails_the_commit()
     {
@@ -427,9 +431,9 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
 
         try
         {
-            var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, Paths = ["STANDING.md", "code.cs"] }, CancellationToken.None);
+            var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, Paths = ["code.cs"] }, CancellationToken.None);
 
-            committed.IsFailure.Should().BeTrue("a locked index is a real git failure, not an absent path");
+            committed.IsFailure.Should().BeTrue("a locked index makes the reset to HEAD fail, a real git failure");
         }
         finally
         {

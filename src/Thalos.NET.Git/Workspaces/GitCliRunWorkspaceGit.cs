@@ -221,8 +221,9 @@ public sealed partial class GitCliRunWorkspaceGit(
     /// entry is kept only when <c>git ls-files --cached --others</c>, with <c>--literal-pathspecs</c>, lists
     /// something under it — a tracked path deleted from disk (whose deletion must still be staged) or an untracked
     /// entry <see cref="File.Exists"/> and <see cref="Directory.Exists"/> do not see. Runs after the index reset
-    /// to <c>HEAD</c>, so "tracked" means tracked by <c>HEAD</c>. A failing <c>ls-files</c> is a failure, not an
-    /// absent path.
+    /// to <c>HEAD</c>, so "tracked" means tracked by <c>HEAD</c>. "Tracked" also means git's exact name: on a
+    /// case-insensitive file system, a deleted tracked file named with different casing is dropped, not staged. A
+    /// failing <c>ls-files</c> is a failure, not an absent path.
     /// </summary>
     private async Task<Result<List<string>, AgentError>> KnownPathsAsync(string root, IReadOnlyList<string> paths, CancellationToken ct)
     {
