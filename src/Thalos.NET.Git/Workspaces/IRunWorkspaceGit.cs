@@ -12,9 +12,13 @@ namespace Thalos.Git.Workspaces;
 public interface IRunWorkspaceGit
 {
     /// <summary>
-    /// Stages <see cref="GitCommitRequest.Paths"/> (or everything), unstages
+    /// Stages <see cref="GitCommitRequest.Paths"/> (or everything, only when it is <see langword="null"/>), unstages
     /// <see cref="GitCommitRequest.ExcludePaths"/>, and commits. Nothing staged gives
-    /// <see cref="GitCommitResult.Created"/> <see langword="false"/>, and no commit.
+    /// <see cref="GitCommitResult.Created"/> <see langword="false"/>, no commit, and <c>HEAD</c>'s unchanged sha.
+    /// A <see cref="GitCommitRequest.Paths"/> or <see cref="GitCommitRequest.ExcludePaths"/> entry that is neither
+    /// on disk nor tracked contributes nothing and is not an error; when every <see cref="GitCommitRequest.Paths"/>
+    /// entry is like that, or the list is empty, nothing is staged — never everything. A tracked path deleted from
+    /// disk is not absent: its deletion is staged. Any other git failure still fails the call.
     /// </summary>
     /// <param name="workspace">The run's worktree; the commit runs in <see cref="RunWorkspace.Root"/>.</param>
     /// <param name="request">The commit's message, identity and path scope.</param>
