@@ -28,8 +28,9 @@ namespace Thalos.Git.Workspaces;
 /// <see cref="GitCommitRequest.ExcludePaths"/> with <c>git reset -q -- &lt;ExcludePaths&gt;</c>. A
 /// <see cref="GitCommitRequest.Paths"/> entry that is neither on disk nor listed by <c>git ls-files --cached
 /// --others</c> is dropped before <c>add</c> runs, since <c>git add</c> would otherwise fail the whole call with an
-/// unmatched pathspec; when every entry is dropped, <c>add</c> is skipped outright rather than run with no pathspec,
-/// which would stage the whole worktree. An absent <see cref="GitCommitRequest.ExcludePaths"/> entry needs no such
+/// unmatched pathspec; when no entry is left — every entry dropped, or an explicit empty list, since only
+/// <see langword="null"/> means everything — <c>add</c> is skipped outright rather than run with no pathspec, which
+/// would stage the whole worktree. An absent <see cref="GitCommitRequest.ExcludePaths"/> entry needs no such
 /// filter: <c>git reset</c> exits 0 on a pathspec that matches nothing. Every one of these calls, the
 /// <c>ls-files</c> check included, passes <c>--literal-pathspecs</c>, a global git flag stated as an argument
 /// (never an environment variable — <see cref="GitCli"/> strips every inherited <c>GIT_*</c> variable, including
@@ -161,7 +162,8 @@ public sealed partial class GitCliRunWorkspaceGit(
     /// worktree), stages <see cref="GitCommitRequest.Paths"/> (or everything), and then unstages
     /// <see cref="GitCommitRequest.ExcludePaths"/> — in that order, so an excluded path staged by a broad
     /// <c>add -A</c> is always unstaged again afterwards. A <see cref="GitCommitRequest.Paths"/> entry that is absent
-    /// and untracked is dropped first (<see cref="KnownPathsAsync"/>); if none is left, nothing is added at all.
+    /// and untracked is dropped first (<see cref="KnownPathsAsync"/>); if none is left — including an explicit empty
+    /// list — nothing is added at all.
     /// Returns the failure, or <see langword="null"/> on success.
     /// </summary>
     private async Task<AgentError?> StageAsync(string root, GitCommitRequest request, CancellationToken ct)
@@ -174,7 +176,7 @@ public sealed partial class GitCliRunWorkspaceGit(
 
         var addArgs = new List<string> { "--literal-pathspecs", "add", "-A" };
         var stageAnything = true;
-        if (request.Paths is { Count: > 0 } paths)
+        if (request.Paths is { } paths)
         {
             var known = await KnownPathsAsync(root, paths, ct).ConfigureAwait(false);
             if (known.IsFailure)
@@ -182,9 +184,10 @@ public sealed partial class GitCliRunWorkspaceGit(
                 return known.Error;
             }
 
-            // Every listed path absent and untracked: nothing to stage. This must skip git add entirely — an empty
-            // pathspec list would otherwise turn "add -A -- <paths>" into a bare "add -A" that stages the whole
-            // worktree, the exact opposite of a path-scoped commit.
+            // Nothing left to stage — an explicit empty list, or every listed path absent and untracked. Only a null
+            // Paths means everything, so this must skip git add entirely: an empty pathspec list would otherwise turn
+            // "add -A -- <paths>" into a bare "add -A" that stages the whole worktree, the exact opposite of a
+            // path-scoped commit.
             stageAnything = known.Value.Count > 0;
             addArgs.Add("--");
             addArgs.AddRange(known.Value);

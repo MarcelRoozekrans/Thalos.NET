@@ -16,10 +16,11 @@ public sealed record GitCommitRequest
     public required GitAuthor Author { get; init; }
 
     /// <summary>
-    /// Repository-relative paths, confined to the workspace root, to stage. <see langword="null"/> stages every
-    /// change in the worktree. An entry that is neither on disk nor tracked contributes nothing and is not an
-    /// error; if every entry is like that, nothing is staged and no commit is made — the list never widens to
-    /// every change. A tracked entry deleted from disk stages its deletion.
+    /// Repository-relative paths, confined to the workspace root, to stage. Only <see langword="null"/> stages every
+    /// change in the worktree; an empty list names nothing, so nothing is staged and no commit is made. An entry that
+    /// is neither on disk nor tracked contributes nothing and is not an error; if every entry is like that, nothing
+    /// is staged and no commit is made — a list never widens to every change. A tracked entry deleted from disk
+    /// stages its deletion.
     /// </summary>
     public IReadOnlyList<string>? Paths { get; init; }
 

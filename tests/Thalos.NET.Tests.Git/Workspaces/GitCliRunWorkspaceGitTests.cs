@@ -377,6 +377,29 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
     }
 
     /// <summary>
+    /// Empty-list contract: only <see langword="null"/> <c>Paths</c> stages everything. An explicit empty list names
+    /// nothing, so nothing is staged and no commit is made, however much else in the worktree has changed — the same
+    /// guard as a list every entry of which is absent.
+    /// </summary>
+    [Fact]
+    public async Task An_explicit_empty_path_list_commits_nothing_and_never_stages_the_rest_of_the_worktree()
+    {
+        var ws = await WorktreeAsync(("tracked.txt", "before"));
+        File.WriteAllText(Path.Combine(ws.Root, "tracked.txt"), "after");
+        File.WriteAllText(Path.Combine(ws.Root, "other.cs"), "class O {}");
+        var headBefore = Git(ws.Root, "rev-parse HEAD");
+
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, Paths = [] }, CancellationToken.None);
+
+        committed.IsSuccess.Should().BeTrue();
+        committed.Value.Created.Should().BeFalse("an explicit empty path list names nothing; only null stages everything");
+        committed.Value.Sha.Should().Be(headBefore);
+        Git(ws.Root, "rev-parse HEAD").Should().Be(headBefore);
+        Git(ws.Root, "diff --name-only").Should().Be("tracked.txt", "the tracked change stays in the worktree, unstaged and uncommitted");
+        Git(ws.Root, "ls-files --others --exclude-standard").Should().Be("other.cs", "the untracked file stays untracked");
+    }
+
+    /// <summary>
     /// Absent-path contract for <c>ExcludePaths</c>: <c>git reset -q -- &lt;path&gt;</c> exits 0 on a pathspec
     /// that matches nothing (verified against git 2.54), so an absent, untracked exclusion excludes nothing and the
     /// commit goes ahead. Pinned so a later change to how exclusions are unstaged cannot quietly make it an error.
