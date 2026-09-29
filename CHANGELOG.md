@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.1](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.11.0...v0.11.1) (2026-09-29)
+
+
+### Bug Fixes
+
+* **git:** an absent, untracked commit path contributes nothing ([#210](https://github.com/MarcelRoozekrans/Thalos.NET/issues/210)) ([352712e](https://github.com/MarcelRoozekrans/Thalos.NET/commit/352712e3d63f26d19a5f82c10debfff5459aa105))
+
 ## [0.11.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.10.0...v0.11.0) (2026-09-27)
 
 
