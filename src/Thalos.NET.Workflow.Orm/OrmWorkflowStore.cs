@@ -899,8 +899,8 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         catch (PostgresException ex) when (string.Equals(ex.SqlState, PostgresErrorCodes.UniqueViolation, StringComparison.Ordinal) && string.Equals(ex.ConstraintName, "ix_workflow_run_event_run_id_seq", StringComparison.Ordinal))
         {
             // Defence in depth: every current caller of this method is safe from the race this mapping
-            // guards against, for two different reasons. ApplyTransitionAsync, FailAsync, and CancelAsync
-            // each run their xmin-checked UPDATE before this INSERT specifically so a losing racer throws
+            // guards against, for two different reasons. ApplyTransitionAsync, FailAsync, CancelAsync, and
+            // RetryFailedNodeAsync each run their xmin-checked UPDATE before this INSERT specifically so a losing racer throws
             // WorkflowConcurrencyException there and never reaches this statement at all: two racers can no
             // longer both attempt to insert an event at the same (run_id, seq). StartAsync is safe for an
             // unrelated reason — it inserts against a freshly generated Guid, so a (run_id, seq) collision is

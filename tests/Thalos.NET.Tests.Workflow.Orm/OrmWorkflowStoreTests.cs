@@ -714,6 +714,38 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     }
 
     [Fact]
+    public async Task RetryFailedNodeAsync_refuses_and_writes_nothing_when_the_pinned_definition_no_longer_resolves()
+    {
+        var store = await ActivatePublishingProcessAsync();
+        var runId = await FailedAtPublishAsync(store, "c-retry-no-definition");
+        await ExecuteAsync("DELETE FROM process_definition WHERE process = 'publishing' AND @id::uuid IS NOT NULL", runId);
+        var eventsBefore = await CountAsync("SELECT count(*) FROM workflow_run_event", null);
+        var outboxBefore = await CountAsync("SELECT count(*) FROM outboxmessages", null);
+
+        var result = await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 2, RetriedBy = TestApprover }, CancellationToken.None);
+
+        // Red if the definition lookup failure is ignored or throws instead of failing the result.
+        result.IsFailure.Should().BeTrue();
+        // Red if the refusal writes an event or a dispatch before or after the lookup.
+        (await CountAsync("SELECT count(*) FROM workflow_run_event", null)).Should().Be(eventsBefore);
+        (await CountAsync("SELECT count(*) FROM outboxmessages", null)).Should().Be(outboxBefore);
+        // Red if the UPDATE runs before the lookup and commits.
+        (await store.FindAsync(runId, CancellationToken.None))!.Status.Should().Be(WorkflowStatus.Failed);
+    }
+
+    [Fact]
+    public async Task RetryFailedNodeAsync_throws_on_a_null_retrier()
+    {
+        var store = await ActivatePublishingProcessAsync();
+        var runId = await FailedAtPublishAsync(store, "c-retry-null-retrier");
+
+        var act = async () => await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 2, RetriedBy = null! }, CancellationToken.None);
+
+        // Red if the null guard on RetriedBy is dropped: the retry goes through and records a Retried event with no actor.
+        await act.Should().ThrowAsync<ArgumentNullException>();
+    }
+
+    [Fact]
     public async Task RetryFailedNodeAsync_lets_exactly_one_of_two_concurrent_retries_win()
     {
         var store = await ActivatePublishingProcessAsync();
@@ -723,7 +755,10 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
             store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 2, RetriedBy = TestApprover }, CancellationToken.None).AsTask(),
             store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 2, RetriedBy = TestApprover }, CancellationToken.None).AsTask());
 
-        // Red if the UPDATE drops its xmin check: both commit, and two dispatches run the action twice.
+        // Red if the UPDATE drops its xmin check: both UPDATEs commit through the row lock, then the loser's
+        // Retried INSERT collides on the unique index at S+1 and throws WorkflowConcurrencyException, so
+        // Task.WhenAll rethrows before these assertions run. The contract is a Result failure for the loser and
+        // never a throw.
         results.Count(r => r.IsSuccess).Should().Be(1);
         (await CountAsync("SELECT count(*) FROM workflow_run_event WHERE run_id = @id AND kind = 'Retried'", runId)).Should().Be(1);
     }
