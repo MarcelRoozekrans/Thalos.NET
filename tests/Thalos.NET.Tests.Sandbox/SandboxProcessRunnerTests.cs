@@ -76,9 +76,10 @@ public sealed class SandboxProcessRunnerTests
     }
 
     /// <summary>
-    /// 20000 error lines then a summary line, with a 10000 character cap. Red: remove the cap in OutputBuffer.AppendLine,
-    /// which turns the length assertion red; count error lines from the retained text instead of as lines arrive, which
-    /// turns the ErrorLineCount assertion red; make OutputBuffer.ToString return the first max characters instead of the last, which turns the EndWith and newest-lines assertions red.
+    /// 20000 error lines then a summary line, with a 10000 character cap. Red: make OutputBuffer.ToString return the first
+    /// max characters instead of the last, which turns the EndWith and newest-lines assertions red; count error lines from
+    /// the retained text instead of as lines arrive, which turns the ErrorLineCount assertion red. The memory bound itself
+    /// is asserted by <see cref="The_buffer_never_holds_more_than_twice_the_cap"/>, not here, because ToString trims on read.
     /// </summary>
     [Fact]
     public async Task Output_beyond_the_cap_is_bounded_keeps_the_end_and_still_counts_dropped_errors()
@@ -95,6 +96,21 @@ public sealed class SandboxProcessRunnerTests
         outcome.FullOutput.TrimEnd().Should().EndWith("Passed!");
         outcome.FullOutput.Should().Contain($"error E {lines}", "the newest lines survive, not the oldest");
         outcome.ErrorLineCount.Should().Be(lines);
+    }
+
+    /// <summary>Red: remove the Remove call that trims in OutputBuffer.AppendLine, so the buffer grows without bound.</summary>
+    [Fact]
+    public void The_buffer_never_holds_more_than_twice_the_cap()
+    {
+        var buffer = new SandboxProcessRunner.OutputBuffer(1000);
+
+        for (var i = 0; i < 5000; i++)
+        {
+            buffer.AppendLine(new string('x', 99));
+            buffer.RetainedLength.Should().BeLessThanOrEqualTo(2 * 1000 + 100);
+        }
+
+        buffer.ToString().Length.Should().BeLessThanOrEqualTo(1000);
     }
 
     private static ProcessSpec SpawnGrandchild(string pidFile, string dir) => OperatingSystem.IsWindows()

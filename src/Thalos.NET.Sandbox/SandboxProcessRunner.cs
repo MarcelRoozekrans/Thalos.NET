@@ -109,7 +109,7 @@ public sealed class SandboxProcessRunner : ISandboxProcessRunner
         }
     }
 
-    /// <summary>Whether <paramref name="line"/> is an error line: an MSBuild "path: error CODE: text" or one starting "error ".</summary>
+    /// <summary>Whether <paramref name="line"/> is an error line: an MSBuild "path: error CODE: text", or one starting "error " after any leading whitespace. The leading-whitespace tolerance is deliberate; the first version required "error " at column 0.</summary>
     internal static bool IsErrorLine(string line) =>
         line.Contains(": error ", StringComparison.OrdinalIgnoreCase) || line.TrimStart().StartsWith("error ", StringComparison.OrdinalIgnoreCase);
 
@@ -117,11 +117,23 @@ public sealed class SandboxProcessRunner : ISandboxProcessRunner
     /// Stdout and stderr lines appended in arrival order from the two reader callbacks, keeping only the last
     /// <c>max</c> characters and counting error lines as they arrive.
     /// </summary>
-    private sealed class OutputBuffer(int max)
+    internal sealed class OutputBuffer(int max)
     {
         private readonly StringBuilder _text = new();
         private readonly Lock _gate = new();
         private int _errorLines;
+
+        /// <summary>How many characters are held right now, before <see cref="ToString"/> trims to the cap. Never more than twice the cap, which is the memory bound.</summary>
+        internal int RetainedLength
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _text.Length;
+                }
+            }
+        }
 
         public int ErrorLines
         {
@@ -134,7 +146,7 @@ public sealed class SandboxProcessRunner : ISandboxProcessRunner
             }
         }
 
-        public void AppendLine(string? line)
+        internal void AppendLine(string? line)
         {
             if (line is null)
             {
