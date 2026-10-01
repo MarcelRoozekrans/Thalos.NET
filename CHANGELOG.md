@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.12.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.11.1...v0.12.0) (2026-10-01)
+
+
+### ⚠ BREAKING CHANGES
+
+* **workflow:** IWorkflowStore has a new required member, RetryFailedNodeAsync. Every implementation must add it. WorkflowRunEvent has a new trailing positional parameter, Actor, which defaults to null.
+
+### Features
+
+* **workflow:** retry a run that failed at a host-action node ([#228](https://github.com/MarcelRoozekrans/Thalos.NET/issues/228)) ([3d49750](https://github.com/MarcelRoozekrans/Thalos.NET/commit/3d49750835380f66b38284ab29653bb7a49f10f3))
+
 ## [0.11.1](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.11.0...v0.11.1) (2026-09-29)
 
 
