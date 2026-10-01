@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net10.0</TargetFrameworks>
+    <RootNamespace>Thalos.Sandbox</RootNamespace>
+    <PackageId>Thalos.NET.Sandbox</PackageId>
+    <Description>Run sandboxes for Thalos.NET: confine a workflow run's workspace, build and Roslyn to a per-run container.</Description>
+    <PackageTags>agents;sandbox;container;workflow;microsoft-agent-framework;zeroalloc</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />
+    <ProjectReference Include="..\Thalos.NET.Git\Thalos.NET.Git.csproj" />
+    <ProjectReference Include="..\Thalos.NET.Mcp\Thalos.NET.Mcp.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Sandbox" />
+  </ItemGroup>
+</Project>
