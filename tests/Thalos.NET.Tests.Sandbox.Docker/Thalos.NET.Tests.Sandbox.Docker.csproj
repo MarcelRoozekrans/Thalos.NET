@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Thalos.NET.Sandbox.Docker\Thalos.NET.Sandbox.Docker.csproj" />
+    <PackageReference Include="Xunit.SkippableFact" />
+  </ItemGroup>
+</Project>

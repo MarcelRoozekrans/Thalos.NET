@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net10.0</TargetFrameworks>
+    <RootNamespace>Thalos.Sandbox.Docker</RootNamespace>
+    <PackageId>Thalos.NET.Sandbox.Docker</PackageId>
+    <Description>Docker runtime for Thalos.NET run sandboxes.</Description>
+    <PackageTags>agents;sandbox;container;docker;microsoft-agent-framework;zeroalloc</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\Thalos.NET.Sandbox\Thalos.NET.Sandbox.csproj" />
+    <PackageReference Include="Docker.DotNet.Enhanced" />
+  </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Infrastructure\nginx.conf" LogicalName="Thalos.Sandbox.Docker.Infrastructure.nginx.conf" />
+    <EmbeddedResource Include="Infrastructure\squid.conf" LogicalName="Thalos.Sandbox.Docker.Infrastructure.squid.conf" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Sandbox.Docker" />
+  </ItemGroup>
+</Project>
