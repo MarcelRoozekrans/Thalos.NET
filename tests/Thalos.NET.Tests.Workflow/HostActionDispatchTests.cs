@@ -116,15 +116,15 @@ public sealed class HostActionDispatchTests
         action.Calls.Should().Be(2);
         var run = await store.FindAsync(message.RunId, CancellationToken.None);
 
-        // Red for the same reason: the run stays at publish.
+        // Red if the action fails on every call: the run stays at publish.
         run!.CurrentNode.Should().Be("done");
 
-        // Red if the retried dispatch advances no further: there is no message for the terminal node to take.
+        // Red if the terminal node's dispatch is not enqueued after the action completes.
         var terminal = store.TakeNext(message.RunId);
         terminal.Should().NotBeNull();
         await dispatcher.DispatchAsync(terminal!, CancellationToken.None);
 
-        // Red if the retry leaves the run Failed, or the terminal node is not reached: the run is not Succeeded.
+        // Red if the terminal node's dispatch does not complete the run.
         (await store.FindAsync(message.RunId, CancellationToken.None))!.Status.Should().Be(WorkflowStatus.Succeeded);
     }
 
