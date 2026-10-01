@@ -70,7 +70,7 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
     public DockerClient Docker => docker;
 
     /// <summary>The most one set-up may take: two pulls, two readiness waits, and a bounded number of engine calls.</summary>
-    private TimeSpan SetUpBudget => (2 * options.ImagePullTimeout) + (2 * options.InfrastructureReadyTimeout) + (20 * options.EngineTimeout);
+    internal TimeSpan SetUpBudget => (2 * options.ImagePullTimeout) + (2 * options.InfrastructureReadyTimeout) + (20 * options.EngineTimeout);
 
     /// <summary>Returns verified infrastructure, setting it up when there is none or the cached one is gone.</summary>
     public async ValueTask<Result<SandboxInfrastructureState, AgentError>> EnsureAsync(CancellationToken ct)
@@ -168,6 +168,18 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
             .Replace("{{EXTRA}}", string.Join(' ', domains), StringComparison.Ordinal)
             .Replace("{{SUBNETS}}", string.Join(' ', subnets), StringComparison.Ordinal));
     }
+
+    /// <summary>
+    /// The error for a set-up that was cancelled without the caller asking: the whole budget ran out, or, when the budget
+    /// token was not cancelled, one engine call hit the client's own timeout.
+    /// </summary>
+    internal static AgentError SetUpCancelled(bool budgetExpired, TimeSpan budget, TimeSpan engineTimeout) => budgetExpired
+        ? AgentError.ProviderError($"could not set up the sandbox network within {budget.TotalSeconds:0} s")
+        : EngineCallTimedOut(engineTimeout);
+
+    /// <summary>One engine call did not answer within the client timeout.</summary>
+    internal static AgentError EngineCallTimedOut(TimeSpan engineTimeout) =>
+        AgentError.ProviderError($"could not set up the sandbox network: a Docker engine call timed out after {engineTimeout.TotalSeconds:0} s");
 
     /// <summary>The gateway's nginx server config.</summary>
     internal static string NginxConf => ReadResource("nginx.conf");
@@ -285,7 +297,7 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            return Result<SandboxInfrastructureState, AgentError>.Failure(AgentError.ProviderError($"could not set up the sandbox network within {SetUpBudget.TotalSeconds:0} s"));
+            return Result<SandboxInfrastructureState, AgentError>.Failure(SetUpCancelled(budget.IsCancellationRequested, SetUpBudget, options.EngineTimeout));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -407,7 +419,9 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
-                return UnitResult<AgentError>.Failure(AgentError.ProviderError($"could not pull '{image}' within {options.ImagePullTimeout.TotalSeconds:0} s"));
+                return UnitResult<AgentError>.Failure(bounded.IsCancellationRequested
+                    ? AgentError.ProviderError($"could not pull '{image}' within {options.ImagePullTimeout.TotalSeconds:0} s")
+                    : EngineCallTimedOut(options.EngineTimeout));
             }
         }
 

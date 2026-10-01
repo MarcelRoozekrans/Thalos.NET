@@ -464,6 +464,58 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
         (await GetWhenUpAsync(http, result.Value.BaseAddress)).StatusCode.Should().Be(HttpStatusCode.OK);
     }
 
+    /// <summary>
+    /// Concurrent creates of one sandbox. Create A pauses after making the work volume; create B is let go. Unserialised,
+    /// B takes A's fresh volume for a leftover and deletes it, A's container then gets an unlabelled volume the engine
+    /// makes on the fly, and DeleteAsync would later refuse it. Serialised, B waits for A, then finds A's container
+    /// and fails without touching it. Red: drop the per-sandbox lock.
+    /// </summary>
+    [SkippableFact]
+    public async Task Concurrent_creates_of_one_sandbox_leave_the_winner_intact()
+    {
+        Skip.IfNot(DockerAvailable.Value);
+        var runtime = fixture.NewRuntime(fixture.Options());
+        var spec = DockerSandboxFixture.Spec(fixture.CurlImage);
+        fixture.RemoveVolumeAfterwards(DockerSandboxRuntime.VolumeName(spec.SandboxId));
+        var who = new AsyncLocal<string>();
+        var aPaused = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseA = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var bPrechecked = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseB = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        runtime.StageReached = async (stage, ct) =>
+        {
+            if (string.Equals(who.Value, "A", StringComparison.Ordinal) && string.Equals(stage, "volume-created", StringComparison.Ordinal))
+            {
+                aPaused.TrySetResult();
+                await releaseA.Task.WaitAsync(ct);
+            }
+            else if (string.Equals(who.Value, "B", StringComparison.Ordinal) && string.Equals(stage, "prechecked", StringComparison.Ordinal))
+            {
+                bPrechecked.TrySetResult();
+                await releaseB.Task.WaitAsync(ct);
+            }
+        };
+
+        var a = Task.Run(async () => { who.Value = "A"; return await runtime.CreateAsync(spec, Ct); });
+        await aPaused.Task.WaitAsync(TimeSpan.FromMinutes(1));
+        var b = Task.Run(async () => { who.Value = "B"; return await runtime.CreateAsync(spec, Ct); });
+
+        // Unserialised, B reaches its pre-check while A is paused; serialised, it cannot, and this wait times out.
+        await Task.WhenAny(bPrechecked.Task, Task.Delay(TimeSpan.FromSeconds(3)));
+        releaseA.TrySetResult();
+        var resultA = await a.WaitAsync(TimeSpan.FromMinutes(1));
+        releaseB.TrySetResult();
+        var resultB = await b.WaitAsync(TimeSpan.FromMinutes(1));
+
+        new[] { resultA, resultB }.Count(r => r.IsSuccess).Should().Be(1);
+        var container = await fixture.Docker.Containers.InspectContainerAsync(DockerSandboxRuntime.ContainerName(spec.SandboxId), Ct);
+        container.State!.Running.Should().BeTrue();
+        var volume = await fixture.Docker.Volumes.InspectAsync(DockerSandboxRuntime.VolumeName(spec.SandboxId), Ct);
+        (volume.Labels ?? new Dictionary<string, string>(StringComparer.Ordinal)).Should().Contain("thalos.run_id", spec.RunId.ToString("D"));
+        container.Mounts!.Should().ContainSingle(m => string.Equals(m.Name, volume.Name, StringComparison.Ordinal));
+        (await runtime.DeleteAsync(spec.SandboxId, Ct)).IsSuccess.Should().BeTrue();
+    }
+
     /// <summary>Needs no engine. Red: let a library exception escape CreateAsync.</summary>
     [Fact]
     public async Task An_unreachable_engine_fails_create_without_throwing()

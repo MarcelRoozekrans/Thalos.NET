@@ -145,6 +145,42 @@ public sealed class DockerSandboxOptionsTests
         options.Validate().IsFailure.Should().BeTrue();
     }
 
+    /// <summary>
+    /// A client timeout of one engine call is not the whole set-up budget. Red: map every non-caller cancellation to the
+    /// budget message.
+    /// </summary>
+    [Fact]
+    public void A_set_up_cancellation_names_what_ran_out()
+    {
+        DockerSandboxInfrastructure.SetUpCancelled(budgetExpired: true, TimeSpan.FromSeconds(900), TimeSpan.FromSeconds(15))
+            .Message.Should().Be("could not set up the sandbox network within 900 s");
+        DockerSandboxInfrastructure.SetUpCancelled(budgetExpired: false, TimeSpan.FromSeconds(900), TimeSpan.FromSeconds(15))
+            .Message.Should().Be("could not set up the sandbox network: a Docker engine call timed out after 15 s");
+    }
+
+    /// <summary>Red: never remove an entry, or release the gate without leaving.</summary>
+    [Fact]
+    public async Task A_keyed_lock_serialises_one_key_and_forgets_it_afterwards()
+    {
+        var keyed = new KeyedLock();
+        var first = await keyed.TryAcquireAsync("a", TimeSpan.FromSeconds(1), CancellationToken.None);
+        first.Should().NotBeNull();
+
+        (await keyed.TryAcquireAsync("a", TimeSpan.FromMilliseconds(50), CancellationToken.None)).Should().BeNull();
+        using (var other = await keyed.TryAcquireAsync("b", TimeSpan.FromSeconds(1), CancellationToken.None))
+        {
+            other.Should().NotBeNull();
+        }
+
+        first!.Dispose();
+        using (var again = await keyed.TryAcquireAsync("a", TimeSpan.FromSeconds(1), CancellationToken.None))
+        {
+            again.Should().NotBeNull();
+        }
+
+        keyed.Count.Should().Be(0);
+    }
+
     [Fact]
     public void The_defaults_are_valid() => new DockerSandboxOptions().Validate().IsSuccess.Should().BeTrue();
 }

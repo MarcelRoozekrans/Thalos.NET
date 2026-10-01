@@ -24,6 +24,7 @@ public sealed class DockerSandboxFixture : IAsyncLifetime
     private readonly List<string> scopes = [];
     private readonly List<DockerSandboxRuntime> runtimes = [];
     private readonly List<string> imagesToRemove = [];
+    private readonly List<string> volumesToRemove = [];
 
     public string Suffix { get; } = Guid.NewGuid().ToString("N")[..10];
 
@@ -165,6 +166,11 @@ public sealed class DockerSandboxFixture : IAsyncLifetime
 
         await BoundedAsync(ct => RemoveLabelledAsync($"{TestLabel}={Suffix}", ct));
 
+        foreach (var volume in volumesToRemove)
+        {
+            await BoundedAsync(ct => Quietly(() => Docker.Volumes.RemoveAsync(volume, force: true, ct)));
+        }
+
         foreach (var image in imagesToRemove)
         {
             await BoundedAsync(ct => Quietly(() => Docker.Images.DeleteImageAsync(image, new ImageDeleteParameters { Force = true }, ct)));
@@ -179,6 +185,15 @@ public sealed class DockerSandboxFixture : IAsyncLifetime
         });
 
         Docker.Dispose();
+    }
+
+    /// <summary>A volume a test may leave without labels, to delete by exact name when the fixture is disposed.</summary>
+    public void RemoveVolumeAfterwards(string name)
+    {
+        lock (scopes)
+        {
+            volumesToRemove.Add(name);
+        }
     }
 
     /// <summary>An image a test pulled, to delete when the fixture is disposed.</summary>
