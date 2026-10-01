@@ -44,6 +44,9 @@ public sealed partial class DockerSandboxOptions
     /// <summary>How long a freshly started gateway or egress proxy may take to accept connections.</summary>
     public TimeSpan InfrastructureReadyTimeout { get; set; } = TimeSpan.FromSeconds(30);
 
+    /// <summary>How long pulling a missing gateway or egress image may take. Run images are never pulled.</summary>
+    public TimeSpan ImagePullTimeout { get; set; } = TimeSpan.FromMinutes(5);
+
     /// <summary>The domains the egress proxy always allows.</summary>
     internal static readonly string[] BuiltInEgressDomains = [".nuget.org"];
 
@@ -76,9 +79,9 @@ public sealed partial class DockerSandboxOptions
             return Invalid($"GatewayPort {GatewayPort} is outside 0-65535.");
         }
 
-        if (EngineTimeout <= TimeSpan.Zero || InfrastructureReadyTimeout <= TimeSpan.Zero)
+        if (EngineTimeout <= TimeSpan.Zero || InfrastructureReadyTimeout <= TimeSpan.Zero || ImagePullTimeout <= TimeSpan.Zero)
         {
-            return Invalid("EngineTimeout and InfrastructureReadyTimeout must be positive.");
+            return Invalid("EngineTimeout, InfrastructureReadyTimeout and ImagePullTimeout must be positive.");
         }
 
         return ValidateEgressDomains(ExtraEgressDomains);
@@ -93,6 +96,12 @@ public sealed partial class DockerSandboxOptions
             if (domain is null || !EgressDomain().IsMatch(domain))
             {
                 return Invalid($"Egress domain '{domain}' must be a lowercase domain, optionally with a leading dot.");
+            }
+
+            // An IP literal is matched by address, so it is never a domain; an all-digit last label is how one looks.
+            if (IsAllDigits(domain.AsSpan(domain.LastIndexOf('.') + 1)))
+            {
+                return Invalid($"Egress domain '{domain}' is an IP address; only domain names may be allowed.");
             }
 
             foreach (var other in accepted)
@@ -124,6 +133,19 @@ public sealed partial class DockerSandboxOptions
         var core = wide[1..];
         var other = narrow.TrimStart('.');
         return string.Equals(other, core, StringComparison.Ordinal) || other.EndsWith(wide, StringComparison.Ordinal);
+    }
+
+    private static bool IsAllDigits(ReadOnlySpan<char> label)
+    {
+        foreach (var c in label)
+        {
+            if (!char.IsAsciiDigit(c))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static UnitResult<AgentError> Invalid(string message) => UnitResult<AgentError>.Failure(AgentError.Validation(message));

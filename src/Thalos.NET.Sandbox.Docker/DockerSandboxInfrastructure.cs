@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using Docker.DotNet;
 using Docker.DotNet.Models;
 using Microsoft.Extensions.Logging;
@@ -14,7 +15,10 @@ namespace Thalos.Sandbox.Docker;
 /// <summary>What a sandbox needs from the shared infrastructure.</summary>
 /// <param name="EgressProxy">The only route out of a sandbox.</param>
 /// <param name="GatewayPort">The loopback port the gateway publishes.</param>
-internal sealed record SandboxInfrastructureState(Uri EgressProxy, int GatewayPort);
+/// <param name="NetworkId">The internal network's id. Run containers attach by id, never by name, so a same-named replacement network is never used.</param>
+/// <param name="EgressContainerId">The egress proxy container.</param>
+/// <param name="GatewayContainerId">The gateway container.</param>
+internal sealed record SandboxInfrastructureState(Uri EgressProxy, int GatewayPort, string NetworkId, string EgressContainerId, string GatewayContainerId);
 
 /// <summary>Label keys on every Docker object the runtime creates.</summary>
 internal static class SandboxLabels
@@ -31,20 +35,31 @@ internal static class SandboxLabels
 }
 
 /// <summary>
-/// The internal network, the egress proxy and the gateway that every sandbox shares. Set up once, lazily, and
-/// left running: the infrastructure outlives the host, and a later host adopts it.
+/// The internal network, the egress proxy and the gateway that every sandbox shares. Set up lazily and left running:
+/// the infrastructure outlives the host, and a later host adopts it.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Each container is created on the default bridge, its config is put in by put-archive, it is connected to the
 /// internal network with its alias, and then started. An alias is only accepted on the internal network; the default
 /// bridge rejects network-scoped aliases. A container is adopted only when it carries this runtime's labels, the same
 /// image, the same config hash, the expected port and an endpoint on the current internal network, and has been
 /// started before; a labelled container that differs is replaced, and an unlabelled one is refused.
+/// </para>
+/// <para>
+/// The cached state is re-verified on every <see cref="EnsureAsync"/>: when the network, the egress proxy or the
+/// gateway is gone or stopped, the infrastructure is set up again. Every wait is bounded: the gate, the whole set-up,
+/// each image pull and each log read.
+/// </para>
 /// </remarks>
 internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, DockerSandboxOptions options, TimeProvider clock, ILogger logger) : IDisposable
 {
     private const string GatewayContainerPort = "8080/tcp";
     private const string SquidReadyLine = "Accepting HTTP Socket connections";
+
+    /// <summary>Bump when the infrastructure containers' create parameters change, so older containers are replaced, not adopted.</summary>
+    private const string InfraRevision = "2";
+
     private static readonly Uri EgressUri = new("http://egress:3128");
 
     private readonly SemaphoreSlim gate = new(1, 1);
@@ -54,15 +69,33 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
     /// <summary>The Docker client, shared with the runtime.</summary>
     public DockerClient Docker => docker;
 
-    /// <summary>Sets the infrastructure up once; later calls return the cached state.</summary>
+    /// <summary>The most one set-up may take: two pulls, two readiness waits, and a bounded number of engine calls.</summary>
+    private TimeSpan SetUpBudget => (2 * options.ImagePullTimeout) + (2 * options.InfrastructureReadyTimeout) + (20 * options.EngineTimeout);
+
+    /// <summary>Returns verified infrastructure, setting it up when there is none or the cached one is gone.</summary>
     public async ValueTask<Result<SandboxInfrastructureState, AgentError>> EnsureAsync(CancellationToken ct)
     {
-        if (Volatile.Read(ref state) is { } ready)
+        if (Volatile.Read(ref state) is { } cached)
         {
-            return Result<SandboxInfrastructureState, AgentError>.Success(ready);
+            var problem = await ProblemWithAsync(cached, ct).ConfigureAwait(false);
+            if (problem.IsFailure)
+            {
+                return Result<SandboxInfrastructureState, AgentError>.Failure(problem.Error);
+            }
+
+            if (problem.Value is null)
+            {
+                return Result<SandboxInfrastructureState, AgentError>.Success(cached);
+            }
+
+            Invalidate(cached, problem.Value);
         }
 
-        await gate.WaitAsync(ct).ConfigureAwait(false);
+        if (!await gate.WaitAsync(SetUpBudget, ct).ConfigureAwait(false))
+        {
+            return Result<SandboxInfrastructureState, AgentError>.Failure(AgentError.ProviderError("the sandbox infrastructure is still being set up by another call"));
+        }
+
         try
         {
             if (state is { } raced)
@@ -91,24 +124,125 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
         }
     }
 
-    /// <summary>Renders squid.conf with the extra egress domains, after validating them.</summary>
-    internal static Result<string, AgentError> RenderSquidConf(IEnumerable<string> extraDomains)
+    /// <summary>Drops the cached state when it is this one and something about it is no longer true.</summary>
+    /// <returns>true when <paramref name="used"/> was found broken and dropped.</returns>
+    public async ValueTask<bool> RecheckAsync(SandboxInfrastructureState used, CancellationToken ct)
+    {
+        var problem = await ProblemWithAsync(used, ct).ConfigureAwait(false);
+        if (problem.IsFailure || problem.Value is null)
+        {
+            return false;
+        }
+
+        Invalidate(used, problem.Value);
+        return true;
+    }
+
+    /// <summary>Renders squid.conf with the extra egress domains and the internal network's subnets, after validating both.</summary>
+    internal static Result<string, AgentError> RenderSquidConf(IEnumerable<string> extraDomains, IEnumerable<string> clientSubnets)
     {
         var domains = extraDomains.ToList();
         var valid = DockerSandboxOptions.ValidateEgressDomains(domains);
-        return valid.IsFailure
-            ? Result<string, AgentError>.Failure(valid.Error)
-            : Result<string, AgentError>.Success(ReadResource("squid.conf").Replace("{{EXTRA}}", string.Join(' ', domains), StringComparison.Ordinal));
+        if (valid.IsFailure)
+        {
+            return Result<string, AgentError>.Failure(valid.Error);
+        }
+
+        var subnets = new List<string>();
+        foreach (var subnet in clientSubnets)
+        {
+            if (!IPNetwork.TryParse(subnet, out var parsed))
+            {
+                return Result<string, AgentError>.Failure(AgentError.ProviderError($"the internal network reports a subnet '{subnet}' that is not a CIDR range"));
+            }
+
+            subnets.Add(parsed.ToString());
+        }
+
+        if (subnets.Count == 0)
+        {
+            return Result<string, AgentError>.Failure(AgentError.ProviderError("the internal network reports no subnet, so the egress proxy could not be limited to sandboxes"));
+        }
+
+        return Result<string, AgentError>.Success(ReadResource("squid.conf")
+            .Replace("{{EXTRA}}", string.Join(' ', domains), StringComparison.Ordinal)
+            .Replace("{{SUBNETS}}", string.Join(' ', subnets), StringComparison.Ordinal));
     }
 
     /// <summary>The gateway's nginx server config.</summary>
     internal static string NginxConf => ReadResource("nginx.conf");
+
+    /// <summary>Turns a container's StartedAt into the engine's "since" form, seconds.nanoseconds, or null.</summary>
+    internal static string? SinceOf(string? startedAt)
+    {
+        if (startedAt is null)
+        {
+            return null;
+        }
+
+        var match = Rfc3339().Match(startedAt);
+        if (!match.Success
+            || !DateTimeOffset.TryParse(match.Groups["s"].Value + match.Groups["z"].Value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal, out var whole))
+        {
+            return null;
+        }
+
+        var fraction = match.Groups["f"].Value.PadRight(9, '0')[..9];
+        return $"{whole.ToUnixTimeSeconds().ToString(CultureInfo.InvariantCulture)}.{fraction}";
+    }
 
     public void Dispose()
     {
         probe.Dispose();
         gate.Dispose();
         docker.Dispose();
+    }
+
+    private void Invalidate(SandboxInfrastructureState stale, string reason)
+    {
+        if (Interlocked.CompareExchange(ref state, null, stale) == stale)
+        {
+            LogReEnsuring(logger, options.InternalNetwork, reason);
+        }
+    }
+
+    /// <summary>Why cached infrastructure can no longer be used, null when it can, or a failure when the engine did not answer.</summary>
+    private async ValueTask<Result<string?, AgentError>> ProblemWithAsync(SandboxInfrastructureState cached, CancellationToken ct)
+    {
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        bounded.CancelAfter(3 * options.EngineTimeout);
+        try
+        {
+            NetworkResponse network;
+            try
+            {
+                network = await docker.Networks.InspectNetworkAsync(cached.NetworkId, bounded.Token).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (DockerErrors.IsNotFound(ex))
+            {
+                return Result<string?, AgentError>.Success("the internal network is gone");
+            }
+
+            if (!network.Internal || !string.Equals(network.Name, options.InternalNetwork, StringComparison.Ordinal))
+            {
+                return Result<string?, AgentError>.Success("the internal network changed");
+            }
+
+            foreach (var (role, id) in new[] { (SandboxLabels.RoleEgress, cached.EgressContainerId), (SandboxLabels.RoleGateway, cached.GatewayContainerId) })
+            {
+                var container = await DockerErrors.TryInspectContainerAsync(docker, id, bounded.Token).ConfigureAwait(false);
+                if (container?.State?.Running != true)
+                {
+                    return Result<string?, AgentError>.Success($"the {role} container is gone or stopped");
+                }
+            }
+
+            return Result<string?, AgentError>.Success(null);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            return Result<string?, AgentError>.Failure(AgentError.ProviderError("could not check the sandbox network", DockerErrors.Describe(ex, options.EngineTimeout)));
+        }
     }
 
     private async ValueTask<Result<SandboxInfrastructureState, AgentError>> SetUpAsync(CancellationToken ct)
@@ -119,41 +253,48 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
             return Result<SandboxInfrastructureState, AgentError>.Failure(valid.Error);
         }
 
-        var squid = RenderSquidConf(options.ExtraEgressDomains);
-        if (squid.IsFailure)
-        {
-            return Result<SandboxInfrastructureState, AgentError>.Failure(squid.Error);
-        }
-
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(SetUpBudget);
         try
         {
-            var network = await EnsureNetworkAsync(ct).ConfigureAwait(false);
+            var network = await EnsureNetworkAsync(budget.Token).ConfigureAwait(false);
             if (network.IsFailure)
             {
                 return Result<SandboxInfrastructureState, AgentError>.Failure(network.Error);
             }
 
+            var squid = RenderSquidConf(options.ExtraEgressDomains, network.Value.Subnets);
+            if (squid.IsFailure)
+            {
+                return Result<SandboxInfrastructureState, AgentError>.Failure(squid.Error);
+            }
+
             var egress = new InfraContainer(SandboxLabels.RoleEgress, options.EgressContainerName, options.EgressImage, "/etc/squid", "squid.conf", squid.Value, "egress", RequestedPort: null);
-            var egressResult = await EnsureContainerAsync(egress, network.Value, ct).ConfigureAwait(false);
+            var egressResult = await EnsureContainerAsync(egress, network.Value.Id, budget.Token).ConfigureAwait(false);
             if (egressResult.IsFailure)
             {
                 return Result<SandboxInfrastructureState, AgentError>.Failure(egressResult.Error);
             }
 
             var gateway = new InfraContainer(SandboxLabels.RoleGateway, options.GatewayContainerName, options.GatewayImage, "/etc/nginx/conf.d", "default.conf", NginxConf, "gateway", options.GatewayPort);
-            var gatewayResult = await EnsureContainerAsync(gateway, network.Value, ct).ConfigureAwait(false);
+            var gatewayResult = await EnsureContainerAsync(gateway, network.Value.Id, budget.Token).ConfigureAwait(false);
             return gatewayResult.IsFailure
                 ? Result<SandboxInfrastructureState, AgentError>.Failure(gatewayResult.Error)
-                : Result<SandboxInfrastructureState, AgentError>.Success(new SandboxInfrastructureState(EgressUri, gatewayResult.Value));
+                : Result<SandboxInfrastructureState, AgentError>.Success(new SandboxInfrastructureState(
+                    EgressUri, gatewayResult.Value.Port, network.Value.Id, egressResult.Value.Id, gatewayResult.Value.Id));
         }
-        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return Result<SandboxInfrastructureState, AgentError>.Failure(AgentError.ProviderError($"could not set up the sandbox network within {SetUpBudget.TotalSeconds:0} s"));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             return Result<SandboxInfrastructureState, AgentError>.Failure(AgentError.ProviderError("could not set up the sandbox network", DockerErrors.Describe(ex, options.EngineTimeout)));
         }
     }
 
-    /// <summary>Finds or creates the internal network; returns its id.</summary>
-    private async ValueTask<Result<string, AgentError>> EnsureNetworkAsync(CancellationToken ct)
+    /// <summary>Finds or creates the internal network; returns its id and subnets.</summary>
+    private async ValueTask<Result<(string Id, IReadOnlyList<string> Subnets), AgentError>> EnsureNetworkAsync(CancellationToken ct)
     {
         var name = options.InternalNetwork;
         var found = await docker.Networks.ListNetworksAsync(
@@ -161,42 +302,53 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
             ct).ConfigureAwait(false);
 
         // The name filter is a substring match.
-        var existing = found.FirstOrDefault(n => string.Equals(n.Name, name, StringComparison.Ordinal));
-        if (existing is not null)
+        var network = found.FirstOrDefault(n => string.Equals(n.Name, name, StringComparison.Ordinal));
+        if (network is not null)
         {
-            return existing.Internal
-                ? Result<string, AgentError>.Success(existing.ID)
-                : Result<string, AgentError>.Failure(AgentError.ProviderError($"network '{name}' exists but is not internal; refusing to attach sandboxes to it"));
+            if (!network.Internal)
+            {
+                return Result<(string, IReadOnlyList<string>), AgentError>.Failure(AgentError.ProviderError($"network '{name}' exists but is not internal; refusing to attach sandboxes to it"));
+            }
+
+            if (!HasLabel(network.Labels, SandboxLabels.Sandbox, "true"))
+            {
+                LogAdoptingUnlabelledNetwork(logger, name);
+            }
+        }
+        else
+        {
+            var created = await docker.Networks.CreateNetworkAsync(
+                new NetworksCreateParameters
+                {
+                    Name = name,
+                    Driver = "bridge",
+                    Internal = true,
+                    Labels = new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        [SandboxLabels.Sandbox] = "true",
+                        [SandboxLabels.Network] = name,
+                    },
+                },
+                ct).ConfigureAwait(false);
+            LogNetworkCreated(logger, name);
+            network = await docker.Networks.InspectNetworkAsync(created.ID, ct).ConfigureAwait(false);
         }
 
-        var created = await docker.Networks.CreateNetworkAsync(
-            new NetworksCreateParameters
-            {
-                Name = name,
-                Driver = "bridge",
-                Internal = true,
-                Labels = new Dictionary<string, string>(StringComparer.Ordinal)
-                {
-                    [SandboxLabels.Sandbox] = "true",
-                    [SandboxLabels.Network] = name,
-                },
-            },
-            ct).ConfigureAwait(false);
-        LogNetworkCreated(logger, name);
-        return Result<string, AgentError>.Success(created.ID);
+        var subnets = network.IPAM?.Config?.Select(c => c.Subnet).Where(s => !string.IsNullOrEmpty(s)).ToList() ?? [];
+        return Result<(string, IReadOnlyList<string>), AgentError>.Success((network.ID, subnets));
     }
 
-    /// <summary>Adopts or creates one infrastructure container; returns its published port, or 0 for none.</summary>
-    private async ValueTask<Result<int, AgentError>> EnsureContainerAsync(InfraContainer spec, string networkId, CancellationToken ct)
+    /// <summary>Adopts or creates one infrastructure container; returns its id and published port, or 0 for none.</summary>
+    private async ValueTask<Result<(string Id, int Port), AgentError>> EnsureContainerAsync(InfraContainer spec, string networkId, CancellationToken ct)
     {
-        var configHash = Hash(spec.Content);
+        var configHash = Hash(InfraRevision + "\n" + spec.Content);
         var existing = await DockerErrors.TryInspectContainerAsync(docker, spec.Name, ct).ConfigureAwait(false);
         if (existing is not null)
         {
             var labels = existing.Config?.Labels;
             if (!HasLabel(labels, SandboxLabels.Sandbox, "true") || !HasLabel(labels, SandboxLabels.Role, spec.Role) || !HasLabel(labels, SandboxLabels.Network, options.InternalNetwork))
             {
-                return Result<int, AgentError>.Failure(AgentError.ProviderError($"container '{spec.Name}' exists and is not this runtime's {spec.Role}; refusing to replace it"));
+                return Result<(string, int), AgentError>.Failure(AgentError.ProviderError($"container '{spec.Name}' exists and is not this runtime's {spec.Role}; refusing to replace it"));
             }
 
             var boundPort = BoundPort(existing);
@@ -209,22 +361,68 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
                     var waited = await WaitReadyAsync(spec, existing.ID, boundPort, ct).ConfigureAwait(false);
                     if (waited.IsFailure)
                     {
-                        return Result<int, AgentError>.Failure(waited.Error);
+                        return Result<(string, int), AgentError>.Failure(waited.Error);
                     }
                 }
 
                 LogAdopted(logger, spec.Role, spec.Name);
-                return Result<int, AgentError>.Success(boundPort);
+                return Result<(string, int), AgentError>.Success((existing.ID, boundPort));
             }
 
             LogReplacing(logger, spec.Role, spec.Name, reason);
-            await docker.Containers.RemoveContainerAsync(existing.ID, new ContainerRemoveParameters { Force = true }, ct).ConfigureAwait(false);
+            await docker.Containers.RemoveContainerAsync(existing.ID, new ContainerRemoveParameters { Force = true, RemoveVolumes = true }, ct).ConfigureAwait(false);
         }
 
-        return await CreateContainerAsync(spec, configHash, networkId, ct).ConfigureAwait(false);
+        var image = await EnsureImageAsync(spec.Image, ct).ConfigureAwait(false);
+        return image.IsFailure
+            ? Result<(string, int), AgentError>.Failure(image.Error)
+            : await CreateContainerAsync(spec, configHash, networkId, ct).ConfigureAwait(false);
     }
 
-    private async ValueTask<Result<int, AgentError>> CreateContainerAsync(InfraContainer spec, string configHash, string networkId, CancellationToken ct)
+    /// <summary>Pulls an infrastructure image that is not present. Never used for a run image.</summary>
+    private async ValueTask<UnitResult<AgentError>> EnsureImageAsync(string image, CancellationToken ct)
+    {
+        try
+        {
+            await docker.Images.InspectImageAsync(image, ct).ConfigureAwait(false);
+            return UnitResult<AgentError>.Success();
+        }
+        catch (Exception ex) when (DockerErrors.IsNotFound(ex))
+        {
+            // Not present: pull it below.
+        }
+
+        LogPulling(logger, image);
+        string? lastError = null;
+        using (var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        {
+            bounded.CancelAfter(options.ImagePullTimeout);
+            try
+            {
+                await docker.Images.CreateImageAsync(
+                    new ImagesCreateParameters { FromImage = image },
+                    authConfig: null,
+                    new SyncProgress(message => lastError = message.Error?.Message ?? lastError),
+                    bounded.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                return UnitResult<AgentError>.Failure(AgentError.ProviderError($"could not pull '{image}' within {options.ImagePullTimeout.TotalSeconds:0} s"));
+            }
+        }
+
+        try
+        {
+            await docker.Images.InspectImageAsync(image, ct).ConfigureAwait(false);
+            return UnitResult<AgentError>.Success();
+        }
+        catch (Exception ex) when (DockerErrors.IsNotFound(ex))
+        {
+            return UnitResult<AgentError>.Failure(AgentError.ProviderError($"could not pull '{image}'", lastError));
+        }
+    }
+
+    private async ValueTask<Result<(string Id, int Port), AgentError>> CreateContainerAsync(InfraContainer spec, string configHash, string networkId, CancellationToken ct)
     {
         var port = spec.RequestedPort switch
         {
@@ -251,11 +449,11 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
             if (ready.IsFailure)
             {
                 await RemoveQuietlyAsync(created.ID).ConfigureAwait(false);
-                return Result<int, AgentError>.Failure(ready.Error);
+                return Result<(string, int), AgentError>.Failure(ready.Error);
             }
 
             LogCreated(logger, spec.Role, spec.Name);
-            return Result<int, AgentError>.Success(port);
+            return Result<(string, int), AgentError>.Success((created.ID, port));
         }
         catch
         {
@@ -265,8 +463,15 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
         }
     }
 
+    /// <summary>
+    /// The infrastructure containers' create parameters. Both run with <c>no-new-privileges</c>, a memory and process
+    /// limit, and every capability dropped except those their images need to start: verified on Engine 29.5.2, nginx
+    /// needs CHOWN, SETUID and SETGID, and squid additionally DAC_OVERRIDE.
+    /// </summary>
     private CreateContainerParameters InfraParameters(InfraContainer spec, string configHash, int port)
     {
+        var gateway = spec.RequestedPort is not null;
+        var memory = gateway ? 128L * 1024 * 1024 : 256L * 1024 * 1024;
         var parameters = new CreateContainerParameters
         {
             Name = spec.Name,
@@ -282,10 +487,16 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
             {
                 NetworkMode = "bridge",
                 RestartPolicy = new RestartPolicy { Name = RestartPolicyKind.UnlessStopped },
+                SecurityOpt = ["no-new-privileges:true"],
+                CapDrop = ["ALL"],
+                CapAdd = gateway ? ["CHOWN", "SETUID", "SETGID"] : ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE"],
+                Memory = memory,
+                MemorySwap = memory,
+                PidsLimit = 256,
             },
         };
 
-        if (spec.RequestedPort is not null)
+        if (gateway)
         {
             parameters.ExposedPorts = new Dictionary<string, EmptyStruct>(StringComparer.Ordinal) { [GatewayContainerPort] = default };
             parameters.HostConfig.PortBindings = new Dictionary<string, IList<PortBinding>>(StringComparer.Ordinal)
@@ -297,19 +508,20 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
         return parameters;
     }
 
-    /// <summary>Waits until the gateway answers its own 404, or squid reports it accepts connections.</summary>
+    /// <summary>Waits until the gateway answers its own 404, or squid reports, since this start, that it accepts connections.</summary>
     private async ValueTask<UnitResult<AgentError>> WaitReadyAsync(InfraContainer spec, string containerId, int port, CancellationToken ct)
     {
-        var deadline = clock.GetTimestamp();
+        var since = clock.GetTimestamp();
+        var startedAt = SinceOf((await docker.Containers.InspectContainerAsync(containerId, ct).ConfigureAwait(false)).State?.StartedAt);
         while (true)
         {
-            if (string.Equals(spec.Role, SandboxLabels.RoleGateway, StringComparison.Ordinal) ? await GatewayAnswersAsync(port, ct).ConfigureAwait(false) : await SquidAcceptsAsync(containerId, ct).ConfigureAwait(false))
+            if (string.Equals(spec.Role, SandboxLabels.RoleGateway, StringComparison.Ordinal) ? await GatewayAnswersAsync(port, ct).ConfigureAwait(false) : await SquidAcceptsAsync(containerId, startedAt, ct).ConfigureAwait(false))
             {
                 return UnitResult<AgentError>.Success();
             }
 
             var inspect = await docker.Containers.InspectContainerAsync(containerId, ct).ConfigureAwait(false);
-            if (inspect.State?.Running != true || clock.GetElapsedTime(deadline) > options.InfrastructureReadyTimeout)
+            if (inspect.State?.Running != true || clock.GetElapsedTime(since) > options.InfrastructureReadyTimeout)
             {
                 var tail = await LogTailAsync(containerId, ct).ConfigureAwait(false);
                 var why = inspect.State?.Running == true ? $"did not become ready within {options.InfrastructureReadyTimeout.TotalSeconds:0} s" : $"exited with code {inspect.State?.ExitCode}";
@@ -333,17 +545,24 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
         }
     }
 
-    private async ValueTask<bool> SquidAcceptsAsync(string containerId, CancellationToken ct)
+    private async ValueTask<bool> SquidAcceptsAsync(string containerId, string? since, CancellationToken ct)
     {
-        var logs = await ReadLogsAsync(containerId, tail: "all", ct).ConfigureAwait(false);
-        return logs.Contains(SquidReadyLine, StringComparison.Ordinal);
+        try
+        {
+            var logs = await ReadLogsAsync(containerId, tail: "all", since, ct).ConfigureAwait(false);
+            return logs.Contains(SquidReadyLine, StringComparison.Ordinal);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return false;
+        }
     }
 
     private async ValueTask<string> LogTailAsync(string containerId, CancellationToken ct)
     {
         try
         {
-            return await ReadLogsAsync(containerId, tail: "20", ct).ConfigureAwait(false);
+            return await ReadLogsAsync(containerId, tail: "20", since: null, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
@@ -351,13 +570,16 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
         }
     }
 
-    private async ValueTask<string> ReadLogsAsync(string containerId, string tail, CancellationToken ct)
+    /// <summary>Reads logs under its own engine timeout: the library streams logs with no timeout of its own.</summary>
+    private async ValueTask<string> ReadLogsAsync(string containerId, string tail, string? since, CancellationToken ct)
     {
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        bounded.CancelAfter(options.EngineTimeout);
         using var stream = await docker.Containers.GetContainerLogsAsync(
             containerId,
-            new ContainerLogsParameters { ShowStdout = true, ShowStderr = true, Tail = tail },
-            ct).ConfigureAwait(false);
-        var (stdout, stderr) = await stream.ReadOutputToEndAsync(ct).ConfigureAwait(false);
+            new ContainerLogsParameters { ShowStdout = true, ShowStderr = true, Tail = tail, Since = since },
+            bounded.Token).ConfigureAwait(false);
+        var (stdout, stderr) = await stream.ReadOutputToEndAsync(bounded.Token).ConfigureAwait(false);
         return stdout + stderr;
     }
 
@@ -365,7 +587,7 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
     {
         try
         {
-            await docker.Containers.RemoveContainerAsync(containerId, new ContainerRemoveParameters { Force = true }, CancellationToken.None).ConfigureAwait(false);
+            await docker.Containers.RemoveContainerAsync(containerId, new ContainerRemoveParameters { Force = true, RemoveVolumes = true }, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -470,6 +692,9 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
         return reader.ReadToEnd().Replace("\r\n", "\n", StringComparison.Ordinal);
     }
 
+    [GeneratedRegex(@"^(?<s>\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d)(\.(?<f>\d{1,9}))?(?<z>Z|[+-]\d\d:\d\d)\z", RegexOptions.CultureInvariant | RegexOptions.ExplicitCapture, matchTimeoutMilliseconds: 1000)]
+    private static partial Regex Rfc3339();
+
     [LoggerMessage(EventId = 1200, Level = LogLevel.Information, Message = "Created the internal sandbox network {Network}")]
     private static partial void LogNetworkCreated(ILogger logger, string network);
 
@@ -491,6 +716,21 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
     [LoggerMessage(EventId = 1206, Level = LogLevel.Warning, Message = "Could not remove the half-created infrastructure container {ContainerId}: {Error}")]
     private static partial void LogCleanupFailed(ILogger logger, string containerId, string error);
 
+    [LoggerMessage(EventId = 1207, Level = LogLevel.Warning, Message = "Setting the sandbox infrastructure of network {Network} up again: {Reason}")]
+    private static partial void LogReEnsuring(ILogger logger, string network, string reason);
+
+    [LoggerMessage(EventId = 1208, Level = LogLevel.Information, Message = "Pulling the missing sandbox infrastructure image {Image}")]
+    private static partial void LogPulling(ILogger logger, string image);
+
+    [LoggerMessage(EventId = 1209, Level = LogLevel.Warning, Message = "Adopting the internal network {Network}, which this runtime did not create: it has no thalos.sandbox label")]
+    private static partial void LogAdoptingUnlabelledNetwork(ILogger logger, string network);
+
     /// <summary>One shared infrastructure container.</summary>
     private sealed record InfraContainer(string Role, string Name, string Image, string Directory, string FileName, string Content, string Alias, int? RequestedPort);
+
+    /// <summary>Reports progress on the calling thread, unlike <see cref="Progress{T}"/>, so the last error is set before the pull returns.</summary>
+    private sealed class SyncProgress(Action<JSONMessage> report) : IProgress<JSONMessage>
+    {
+        public void Report(JSONMessage value) => report(value);
+    }
 }

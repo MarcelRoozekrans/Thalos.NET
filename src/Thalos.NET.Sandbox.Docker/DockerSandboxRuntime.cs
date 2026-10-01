@@ -44,44 +44,21 @@ public sealed partial class DockerSandboxRuntime(DockerSandboxOptions options, T
             return Result<SandboxHandle, AgentError>.Failure(valid.Error);
         }
 
-        var infra = await infrastructure.EnsureAsync(ct).ConfigureAwait(false);
-        if (infra.IsFailure)
+        // At most two attempts: a create that fails because the network or an infrastructure container went away
+        // between the check and the create sets the infrastructure up again and tries once more.
+        for (var attempt = 1; ; attempt++)
         {
-            return Fail(spec.SandboxId, infra.Error.Message, infra.Error.Detail);
-        }
-
-        var id = spec.SandboxId;
-        var started = clock.GetTimestamp();
-        var volumeMade = false;
-        string? containerId = null;
-        try
-        {
-            if (await DockerErrors.TryInspectVolumeAsync(Docker, VolumeName(id), ct).ConfigureAwait(false) is not null)
+            var infra = await infrastructure.EnsureAsync(ct).ConfigureAwait(false);
+            if (infra.IsFailure)
             {
-                return Fail(id, $"the volume '{VolumeName(id)}' already exists; delete the sandbox first", detail: null);
+                return Fail(spec.SandboxId, infra.Error.Message, infra.Error.Detail);
             }
 
-            await Docker.Volumes.CreateAsync(new VolumesCreateParameters { Name = VolumeName(id), Labels = RunLabels(spec.RunId) }, ct).ConfigureAwait(false);
-            volumeMade = true;
-
-            var created = await Docker.Containers.CreateContainerAsync(ContainerParameters(spec, infra.Value.EgressProxy), ct).ConfigureAwait(false);
-            containerId = created.ID;
-            await Docker.Containers.StartContainerAsync(containerId, new ContainerStartParameters(), ct).ConfigureAwait(false);
-
-            var inspect = await Docker.Containers.InspectContainerAsync(containerId, ct).ConfigureAwait(false);
-            var elapsedMs = (long)clock.GetElapsedTime(started).TotalMilliseconds;
-            LogCreated(logger, id, spec.RunId, elapsedMs);
-            return Result<SandboxHandle, AgentError>.Success(ToHandle(id, spec.RunId, inspect, infra.Value.GatewayPort));
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
-        {
-            await CleanUpAsync(id, containerId, volumeMade).ConfigureAwait(false);
-            return Fail(id, DockerErrors.Describe(ex, options.EngineTimeout), detail: null);
-        }
-        catch (OperationCanceledException)
-        {
-            await CleanUpAsync(id, containerId, volumeMade).ConfigureAwait(false);
-            throw;
+            var result = await CreateOnceAsync(spec, infra.Value, ct).ConfigureAwait(false);
+            if (result.IsSuccess || attempt == 2 || !await infrastructure.RecheckAsync(infra.Value, ct).ConfigureAwait(false))
+            {
+                return result;
+            }
         }
     }
 
@@ -223,7 +200,7 @@ public sealed partial class DockerSandboxRuntime(DockerSandboxOptions options, T
     internal static string VolumeName(string sandboxId) => $"thalos-sandbox-{sandboxId}-work";
 
     /// <summary>The create parameters of a run container: exactly these, and nothing from the host.</summary>
-    internal CreateContainerParameters ContainerParameters(SandboxSpec spec, Uri egressProxy)
+    internal CreateContainerParameters ContainerParameters(SandboxSpec spec, SandboxInfrastructureState infra)
     {
         var limits = spec.Limits;
         return new CreateContainerParameters
@@ -232,10 +209,10 @@ public sealed partial class DockerSandboxRuntime(DockerSandboxOptions options, T
             Name = ContainerName(spec.SandboxId),
             Labels = RunLabels(spec.RunId),
             User = RunUser,
-            Env = [.. spec.Environment(egressProxy).Select(pair => $"{pair.Key}={pair.Value}")],
+            Env = [.. spec.Environment(infra.EgressProxy).Select(pair => $"{pair.Key}={pair.Value}")],
             HostConfig = new HostConfig
             {
-                NetworkMode = options.InternalNetwork,
+                NetworkMode = infra.NetworkId,
                 CapDrop = ["ALL"],
                 SecurityOpt = ["no-new-privileges:true"],
                 ReadonlyRootfs = true,
@@ -251,6 +228,60 @@ public sealed partial class DockerSandboxRuntime(DockerSandboxOptions options, T
                 AutoRemove = false,
             },
         };
+    }
+
+    private async ValueTask<Result<SandboxHandle, AgentError>> CreateOnceAsync(SandboxSpec spec, SandboxInfrastructureState infra, CancellationToken ct)
+    {
+        var id = spec.SandboxId;
+        var started = clock.GetTimestamp();
+        var attempted = false;
+        try
+        {
+            if (await DockerErrors.TryInspectContainerAsync(Docker, ContainerName(id), ct).ConfigureAwait(false) is not null)
+            {
+                return Fail(id, $"the container '{ContainerName(id)}' already exists; delete the sandbox first", detail: null);
+            }
+
+            if (await DockerErrors.TryInspectVolumeAsync(Docker, VolumeName(id), ct).ConfigureAwait(false) is { } leftover)
+            {
+                if (!IsOwnRun(leftover.Labels, id, out _))
+                {
+                    return Fail(id, $"the volume '{VolumeName(id)}' exists and is not a sandbox volume of network '{options.InternalNetwork}'", detail: null);
+                }
+
+                // A leftover of an earlier attempt for this run, with no container: never reuse a stale /work.
+                LogReplacingLeftoverVolume(logger, id);
+                await RemoveVolumeAsync(VolumeName(id), ct).ConfigureAwait(false);
+            }
+
+            attempted = true;
+            await Docker.Volumes.CreateAsync(new VolumesCreateParameters { Name = VolumeName(id), Labels = RunLabels(spec.RunId) }, ct).ConfigureAwait(false);
+            var created = await Docker.Containers.CreateContainerAsync(ContainerParameters(spec, infra), ct).ConfigureAwait(false);
+            await Docker.Containers.StartContainerAsync(created.ID, new ContainerStartParameters(), ct).ConfigureAwait(false);
+
+            var inspect = await Docker.Containers.InspectContainerAsync(created.ID, ct).ConfigureAwait(false);
+            var elapsedMs = (long)clock.GetElapsedTime(started).TotalMilliseconds;
+            LogCreated(logger, id, spec.RunId, elapsedMs);
+            return Result<SandboxHandle, AgentError>.Success(ToHandle(id, spec.RunId, inspect, infra.GatewayPort));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            if (attempted)
+            {
+                await CleanUpAsync(id).ConfigureAwait(false);
+            }
+
+            return Fail(id, DockerErrors.Describe(ex, options.EngineTimeout), detail: null);
+        }
+        catch (OperationCanceledException)
+        {
+            if (attempted)
+            {
+                await CleanUpAsync(id).ConfigureAwait(false);
+            }
+
+            throw;
+        }
     }
 
     private static DockerClient BuildClient(DockerSandboxOptions options)
@@ -303,7 +334,7 @@ public sealed partial class DockerSandboxRuntime(DockerSandboxOptions options, T
     {
         try
         {
-            await Docker.Containers.RemoveContainerAsync(containerId, new ContainerRemoveParameters { Force = true }, ct).ConfigureAwait(false);
+            await Docker.Containers.RemoveContainerAsync(containerId, new ContainerRemoveParameters { Force = true, RemoveVolumes = true }, ct).ConfigureAwait(false);
         }
         catch (Exception ex) when (DockerErrors.IsNotFound(ex))
         {
@@ -323,31 +354,36 @@ public sealed partial class DockerSandboxRuntime(DockerSandboxOptions options, T
         }
     }
 
-    /// <summary>Best effort: removes what a failed create made, and nothing else.</summary>
-    private async ValueTask CleanUpAsync(string sandboxId, string? containerId, bool volumeMade)
+    /// <summary>
+    /// Best effort, by name: removes the run's container and volume when they carry this runtime's labels for this run.
+    /// By name, not by id, because a client timeout can leave an object the engine created but whose id never came back.
+    /// </summary>
+    private async ValueTask CleanUpAsync(string sandboxId)
     {
-        if (containerId is not null)
+        try
         {
-            try
+            var container = await DockerErrors.TryInspectContainerAsync(Docker, ContainerName(sandboxId), CancellationToken.None).ConfigureAwait(false);
+            if (container is not null && IsOwnRun(container.Config?.Labels, sandboxId, out _))
             {
-                await RemoveContainerAsync(containerId, CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                LogCleanupFailed(logger, sandboxId, "remove the container", DockerErrors.Describe(ex, options.EngineTimeout));
+                await RemoveContainerAsync(container.ID, CancellationToken.None).ConfigureAwait(false);
             }
         }
-
-        if (volumeMade)
+        catch (Exception ex)
         {
-            try
+            LogCleanupFailed(logger, sandboxId, "remove the container", DockerErrors.Describe(ex, options.EngineTimeout));
+        }
+
+        try
+        {
+            var volume = await DockerErrors.TryInspectVolumeAsync(Docker, VolumeName(sandboxId), CancellationToken.None).ConfigureAwait(false);
+            if (volume is not null && IsOwnRun(volume.Labels, sandboxId, out _))
             {
-                await RemoveVolumeAsync(VolumeName(sandboxId), CancellationToken.None).ConfigureAwait(false);
+                await RemoveVolumeAsync(volume.Name, CancellationToken.None).ConfigureAwait(false);
             }
-            catch (Exception ex)
-            {
-                LogCleanupFailed(logger, sandboxId, "remove the volume", DockerErrors.Describe(ex, options.EngineTimeout));
-            }
+        }
+        catch (Exception ex)
+        {
+            LogCleanupFailed(logger, sandboxId, "remove the volume", DockerErrors.Describe(ex, options.EngineTimeout));
         }
     }
 
@@ -374,6 +410,9 @@ public sealed partial class DockerSandboxRuntime(DockerSandboxOptions options, T
 
     [LoggerMessage(EventId = 1215, Level = LogLevel.Warning, Message = "Could not look up sandbox {SandboxId}; treating it as absent: {Error}")]
     private static partial void LogLookupFailed(ILogger logger, string sandboxId, string error);
+
+    [LoggerMessage(EventId = 1217, Level = LogLevel.Warning, Message = "Replacing the leftover work volume of sandbox {SandboxId}, which has no container")]
+    private static partial void LogReplacingLeftoverVolume(ILogger logger, string sandboxId);
 
     [LoggerMessage(EventId = 1216, Level = LogLevel.Warning, Message = "Could not list sandboxes; returning none: {Error}")]
     private static partial void LogListFailed(ILogger logger, string error);

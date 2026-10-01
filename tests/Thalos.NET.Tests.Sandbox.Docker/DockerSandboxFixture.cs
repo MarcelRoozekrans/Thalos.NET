@@ -1,4 +1,7 @@
 using System.Formats.Tar;
+using System.Globalization;
+using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using Docker.DotNet;
 using Docker.DotNet.Models;
@@ -20,6 +23,7 @@ public sealed class DockerSandboxFixture : IAsyncLifetime
 
     private readonly List<string> scopes = [];
     private readonly List<DockerSandboxRuntime> runtimes = [];
+    private readonly List<string> imagesToRemove = [];
 
     public string Suffix { get; } = Guid.NewGuid().ToString("N")[..10];
 
@@ -28,6 +32,9 @@ public sealed class DockerSandboxFixture : IAsyncLifetime
 
     /// <summary><c>curlimages/curl:8.10.1</c> that sleeps instead of running curl.</summary>
     public string CurlImage => $"thalos-sandbox-test-curl:{Suffix}";
+
+    /// <summary>The curl probe with an anonymous <c>VOLUME /data</c>, which a container removal must take with it.</summary>
+    public string VolumeImage => $"thalos-sandbox-test-vol:{Suffix}";
 
     /// <summary><c>nginx:1.27-alpine</c> serving <c>probe uri=$request_uri</c> on 8080, as user 10001 on a read-only rootfs.</summary>
     public string NginxImage => $"thalos-sandbox-test-nginx:{Suffix}";
@@ -105,6 +112,10 @@ public sealed class DockerSandboxFixture : IAsyncLifetime
             FROM curlimages/curl:8.10.1
             ENTRYPOINT ["sleep", "3600"]
             """);
+        await BuildImageAsync(VolumeImage, $"""
+            FROM {CurlImage}
+            VOLUME /data
+            """);
         await BuildImageAsync(NginxImage, """
             FROM nginx:1.27-alpine
             COPY probe.conf /etc/nginx/probe.conf
@@ -131,6 +142,10 @@ public sealed class DockerSandboxFixture : IAsyncLifetime
             """));
     }
 
+    /// <summary>
+    /// Removes everything this fixture made. Each step is bounded and isolated, so one slow or failing step does not
+    /// leave the rest behind.
+    /// </summary>
     public async Task DisposeAsync()
     {
         if (!DockerAvailable.Value)
@@ -145,40 +160,96 @@ public sealed class DockerSandboxFixture : IAsyncLifetime
 
         foreach (var scope in scopes)
         {
-            var filter = Filter("label", $"thalos.sandbox.network={scope}");
-            foreach (var container in await Docker.Containers.ListContainersAsync(new ContainersListParameters { All = true, Filters = filter }))
-            {
-                await Quietly(() => Docker.Containers.RemoveContainerAsync(container.ID, new ContainerRemoveParameters { Force = true }));
-            }
-
-            foreach (var volume in (await Docker.Volumes.ListAsync(new VolumesListParameters { Filters = filter })).Volumes ?? [])
-            {
-                await Quietly(() => Docker.Volumes.RemoveAsync(volume.Name, force: true));
-            }
-
-            foreach (var network in await Docker.Networks.ListNetworksAsync(new NetworksListParameters { Filters = filter }))
-            {
-                await Quietly(() => Docker.Networks.DeleteNetworkAsync(network.ID));
-            }
+            await BoundedAsync(ct => RemoveLabelledAsync($"thalos.sandbox.network={scope}", ct));
         }
 
-        var mine = Filter("label", $"{TestLabel}={Suffix}");
-        foreach (var container in await Docker.Containers.ListContainersAsync(new ContainersListParameters { All = true, Filters = mine }))
+        await BoundedAsync(ct => RemoveLabelledAsync($"{TestLabel}={Suffix}", ct));
+
+        foreach (var image in imagesToRemove)
         {
-            await Quietly(() => Docker.Containers.RemoveContainerAsync(container.ID, new ContainerRemoveParameters { Force = true }));
+            await BoundedAsync(ct => Quietly(() => Docker.Images.DeleteImageAsync(image, new ImageDeleteParameters { Force = true }, ct)));
         }
 
-        foreach (var network in await Docker.Networks.ListNetworksAsync(new NetworksListParameters { Filters = mine }))
+        await BoundedAsync(async ct =>
         {
-            await Quietly(() => Docker.Networks.DeleteNetworkAsync(network.ID));
-        }
-
-        foreach (var image in await Docker.Images.ListImagesAsync(new ImagesListParameters { Filters = mine }))
-        {
-            await Quietly(() => Docker.Images.DeleteImageAsync(image.ID, new ImageDeleteParameters { Force = true }));
-        }
+            foreach (var image in await Docker.Images.ListImagesAsync(new ImagesListParameters { Filters = Filter("label", $"{TestLabel}={Suffix}") }, ct))
+            {
+                await Quietly(() => Docker.Images.DeleteImageAsync(image.ID, new ImageDeleteParameters { Force = true }, ct));
+            }
+        });
 
         Docker.Dispose();
+    }
+
+    /// <summary>An image a test pulled, to delete when the fixture is disposed.</summary>
+    public void RemoveImageAfterwards(string image)
+    {
+        lock (scopes)
+        {
+            imagesToRemove.Add(image);
+        }
+    }
+
+    /// <summary>Starts a probe container on the default bridge, outside every sandbox network; removed by the test label.</summary>
+    public async Task<string> RunOnBridgeAsync()
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(1));
+        var name = $"thalos-sbx-test-outsider-{Guid.NewGuid():N}";
+        await Docker.Containers.CreateContainerAsync(new CreateContainerParameters
+        {
+            Name = name,
+            Image = CurlImage,
+            Labels = new Dictionary<string, string>(StringComparer.Ordinal) { [TestLabel] = Suffix },
+            HostConfig = new HostConfig { NetworkMode = "bridge" },
+        }, timeout.Token);
+        await Docker.Containers.StartContainerAsync(name, new ContainerStartParameters(), timeout.Token);
+        return name;
+    }
+
+    /// <summary>Sends one raw GET, path untouched by any client normalisation, and returns the status code.</summary>
+    public static async Task<int> RawStatusAsync(int port, string path)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        using var client = new TcpClient();
+        await client.ConnectAsync(IPAddress.Loopback, port, timeout.Token);
+        await using var stream = client.GetStream();
+        await stream.WriteAsync(Encoding.ASCII.GetBytes($"GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n"), timeout.Token);
+        using var reader = new StreamReader(stream, Encoding.ASCII);
+        var status = await reader.ReadLineAsync(timeout.Token) ?? "";
+        return int.Parse(status.Split(' ')[1], CultureInfo.InvariantCulture);
+    }
+
+    private static async Task BoundedAsync(Func<CancellationToken, Task> step)
+    {
+        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        try
+        {
+            await step(timeout.Token);
+        }
+        catch (Exception ex)
+        {
+            // Best effort: one failed or timed-out step must not stop the others.
+            await Console.Error.WriteLineAsync($"Sandbox test clean-up step failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private async Task RemoveLabelledAsync(string label, CancellationToken ct)
+    {
+        var filter = Filter("label", label);
+        foreach (var container in await Docker.Containers.ListContainersAsync(new ContainersListParameters { All = true, Filters = filter }, ct))
+        {
+            await Quietly(() => Docker.Containers.RemoveContainerAsync(container.ID, new ContainerRemoveParameters { Force = true, RemoveVolumes = true }, ct));
+        }
+
+        foreach (var volume in (await Docker.Volumes.ListAsync(new VolumesListParameters { Filters = filter }, ct)).Volumes ?? [])
+        {
+            await Quietly(() => Docker.Volumes.RemoveAsync(volume.Name, force: true, ct));
+        }
+
+        foreach (var network in await Docker.Networks.ListNetworksAsync(new NetworksListParameters { Filters = filter }, ct))
+        {
+            await Quietly(() => Docker.Networks.DeleteNetworkAsync(network.ID, ct));
+        }
     }
 
     public static IDictionary<string, IDictionary<string, bool>> Filter(string key, string value) =>

@@ -23,7 +23,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
 
     /// <summary>
     /// Red, one per flag, by commenting it out of <c>ContainerParameters</c>: CapDrop, SecurityOpt, ReadonlyRootfs,
-    /// PidsLimit, MemorySwap, NanoCPUs, Tmpfs, Mounts, NetworkMode and User. Memory: halve it, because the engine
+    /// PidsLimit, MemorySwap, NanoCPUs, Tmpfs, Mounts, NetworkMode and User; NetworkMode by name instead of id. Memory: halve it, because the engine
     /// refuses a MemorySwap without a Memory at least as large. AutoRemove: set it. Privileged, a port binding, and a
     /// docker.sock bind: add one.
     /// </summary>
@@ -49,7 +49,9 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
         host.AutoRemove.Should().BeFalse();
         inspect.Config!.User.Should().Be("10001:10001");
 
-        host.NetworkMode.Should().Be(fixture.Network);
+        var network = await fixture.Docker.Networks.InspectNetworkAsync(fixture.Network, Ct);
+        network.Internal.Should().BeTrue();
+        host.NetworkMode.Should().Be(network.ID);
         inspect.NetworkSettings!.Networks!.Keys.Should().Equal(fixture.Network);
 
         (host.PortBindings ?? new Dictionary<string, IList<PortBinding>>(StringComparer.Ordinal)).Should().BeEmpty();
@@ -62,7 +64,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     }
 
     /// <summary>
-    /// S1. Red: pass the process environment through, appending Environment.GetEnvironmentVariables() to Env. Leave
+    /// S1, keys and values. Red: pass the process environment through, appending Environment.GetEnvironmentVariables() to Env. Leave
     /// out PATH and names Docker cannot hold, or the container fails to start and the red is for the wrong reason.
     /// </summary>
     [SkippableFact]
@@ -78,8 +80,14 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
             var image = await fixture.Docker.Images.InspectImageAsync(fixture.CurlImage, Ct);
             var container = await fixture.Docker.Containers.InspectContainerAsync(DockerSandboxRuntime.ContainerName(handle.SandboxId), Ct);
 
-            var expected = spec.Environment(new Uri("http://egress:3128")).Keys.Union(image.Config!.Env!.Select(Key), StringComparer.Ordinal);
-            container.Config!.Env!.Select(Key).Should().BeEquivalentTo(expected);
+            // The image's declared pairs, overridden by the spec's: exactly what the engine merges, keys and values.
+            var expected = image.Config!.Env!.ToDictionary(Key, Value, StringComparer.Ordinal);
+            foreach (var (key, value) in spec.Environment(new Uri("http://egress:3128")))
+            {
+                expected[key] = value;
+            }
+
+            container.Config!.Env!.ToDictionary(Key, Value, StringComparer.Ordinal).Should().Equal(expected);
             container.Config.Env.Should().NotContain(e => e.StartsWith("GITHUB_TOKEN=", StringComparison.Ordinal));
         }
         finally
@@ -88,6 +96,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
         }
 
         static string Key(string entry) => entry[..entry.IndexOf('=', StringComparison.Ordinal)];
+        static string Value(string entry) => entry[(entry.IndexOf('=', StringComparison.Ordinal) + 1)..];
     }
 
     /// <summary>S2. Red: create the network without Internal.</summary>
@@ -103,7 +112,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
         exit.Should().BeOneOf([6L, 7L, 28L], stderr);
     }
 
-    /// <summary>S2. Red: add example.com to the ACL in squid.conf.</summary>
+    /// <summary>S2. Red: add example.com to the ACL in squid.conf; for the port case, drop the Safe_ports deny.</summary>
     [SkippableFact]
     public async Task A_sandbox_reaches_nuget_through_the_egress_proxy_and_nothing_else()
     {
@@ -117,9 +126,17 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
         var other = await fixture.ExecAsync(name, "curl", "-m", "20", "-sS", "-o", "/dev/null", "https://example.com");
         other.ExitCode.Should().NotBe(0);
         other.Stderr.Should().Contain("CONNECT tunnel failed, response 403");
+
+        // A plain-HTTP request to an allowed domain on a port other than 80 or 443 is refused by the proxy itself.
+        // curl reads only a lowercase http_proxy for http:// URLs, so the proxy is given explicitly.
+        var port = await fixture.ExecAsync(name, "curl", "-m", "20", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "-x", "http://egress:3128", "http://api.nuget.org:8443/");
+        port.Stdout.Should().Be("403", port.Stderr);
     }
 
-    /// <summary>Red: loosen the location regex to <c>(?&lt;sid&gt;[^/]+)</c>, or take the remainder from the decoded <c>$uri</c>.</summary>
+    /// <summary>
+    /// Red: loosen the location regex to <c>(?&lt;sid&gt;[^/]+)</c>, take the remainder from the decoded <c>$uri</c>, or
+    /// drop the check that the raw id equals the matched id.
+    /// </summary>
     [SkippableFact]
     public async Task The_gateway_reaches_the_sandbox_by_id_and_nothing_else()
     {
@@ -139,6 +156,16 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
         (await http.GetAsync(new Uri($"{gateway}/sandboxes/{handle.SandboxId.ToUpperInvariant()}/"))).StatusCode.Should().Be(HttpStatusCode.NotFound);
         (await http.GetAsync(new Uri($"{gateway}/sandboxes/{handle.SandboxId}"))).StatusCode.Should().Be(HttpStatusCode.NotFound);
         (await http.GetAsync(new Uri($"{gateway}/"))).StatusCode.Should().Be(HttpStatusCode.NotFound);
+
+        // Dot segments, sent raw so no client normalises them. nginx matches on the normalised path, so leaving the id
+        // leaves the route, and a raw id that normalises onto another id is refused: the upstream host is always the
+        // id the client wrote, and it is 32 hex.
+        var port = handle.BaseAddress.Port;
+        var other = Guid.NewGuid().ToString("N");
+        (await DockerSandboxFixture.RawStatusAsync(port, $"/sandboxes/{handle.SandboxId}/../../etc/passwd")).Should().Be(404);
+        (await DockerSandboxFixture.RawStatusAsync(port, $"/sandboxes/{handle.SandboxId}/%2e%2e/%2e%2e/etc/passwd")).Should().Be(404);
+        (await DockerSandboxFixture.RawStatusAsync(port, $"/sandboxes/{other}/%2e%2e/{handle.SandboxId}/")).Should().Be(404);
+        (await DockerSandboxFixture.RawStatusAsync(port, $"/sandboxes/{handle.SandboxId}/x/%2e%2e/")).Should().Be(200);
     }
 
     /// <summary>Red: keep the list in memory, so a new instance returns nothing.</summary>
@@ -190,14 +217,22 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
         (await fixture.Docker.Containers.InspectContainerAsync(DockerSandboxRuntime.ContainerName(sandboxId), Ct)).Should().NotBeNull();
     }
 
-    /// <summary>Red: skip the volume removal, or treat the second delete's 404 as a failure.</summary>
+    /// <summary>
+    /// Red: skip the volume removal, remove the container without RemoveVolumes so the image's anonymous volume stays,
+    /// or treat the second delete's 404 as a failure.
+    /// </summary>
     [SkippableFact]
     public async Task Delete_is_idempotent_and_removes_the_volume()
     {
         Skip.IfNot(DockerAvailable.Value);
-        var handle = await CreateAsync(DockerSandboxFixture.Spec(fixture.CurlImage));
+        var handle = await CreateAsync(DockerSandboxFixture.Spec(fixture.VolumeImage));
+        var inspect = await fixture.Docker.Containers.InspectContainerAsync(DockerSandboxRuntime.ContainerName(handle.SandboxId), Ct);
+        var anonymous = inspect.Mounts!.Single(m => string.Equals(m.Destination, "/data", StringComparison.Ordinal)).Name!;
 
         (await fixture.Runtime.DeleteAsync(handle.SandboxId, Ct)).IsSuccess.Should().BeTrue();
+
+        await FluentActions.Awaiting(() => fixture.Docker.Volumes.InspectAsync(anonymous, Ct))
+            .Should().ThrowAsync<DockerApiException>().Where(e => e.StatusCode == HttpStatusCode.NotFound);
 
         await FluentActions.Awaiting(() => fixture.Docker.Containers.InspectContainerAsync(DockerSandboxRuntime.ContainerName(handle.SandboxId), Ct))
             .Should().ThrowAsync<DockerContainerNotFoundException>();
@@ -241,6 +276,192 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
 
         result.IsFailure.Should().BeTrue();
         result.Error.Message.Should().Contain($"network '{name}' exists but is not internal; refusing to attach sandboxes to it");
+    }
+
+    /// <summary>Red: bind the gateway on 0.0.0.0, publish a port from the egress proxy, or drop an infrastructure hardening flag.</summary>
+    [SkippableFact]
+    public async Task The_gateway_publishes_only_on_loopback_and_the_egress_proxy_publishes_nothing()
+    {
+        Skip.IfNot(DockerAvailable.Value);
+        await CreateAsync(DockerSandboxFixture.Spec(fixture.CurlImage));
+        var options = fixture.Options();
+
+        var gateway = await fixture.Docker.Containers.InspectContainerAsync(options.GatewayContainerName, Ct);
+        var egress = await fixture.Docker.Containers.InspectContainerAsync(options.EgressContainerName, Ct);
+
+        gateway.HostConfig!.PortBindings!.Keys.Should().Equal("8080/tcp");
+        gateway.HostConfig.PortBindings["8080/tcp"].Should().ContainSingle().Which.HostIP.Should().Be("127.0.0.1");
+        (egress.HostConfig!.PortBindings ?? new Dictionary<string, IList<PortBinding>>(StringComparer.Ordinal)).Should().BeEmpty();
+        foreach (var infra in new[] { gateway, egress })
+        {
+            infra.HostConfig!.SecurityOpt.Should().Contain("no-new-privileges:true");
+            infra.HostConfig.CapDrop.Should().Equal("ALL");
+            infra.HostConfig.Memory.Should().BePositive();
+            infra.HostConfig.Privileged.Should().BeFalse();
+        }
+    }
+
+    /// <summary>
+    /// S2, the reverse-DNS bypass: without <c>dstdomain -n</c>, squid matches an IP-literal destination by its PTR name,
+    /// and 8.8.8.8's PTR is dns.google. Red: drop <c>-n</c> from squid.conf. That red shows only where the egress
+    /// proxy's resolver answers PTR queries: Docker Desktop's resolver does not, so there the test stays green without
+    /// <c>-n</c> and <c>Squid_conf_is_pinned</c> is the guard. With a PTR-answering resolver the bypass reproduces.
+    /// </summary>
+    [SkippableFact]
+    public async Task An_ip_literal_is_refused_even_when_its_reverse_dns_name_is_allowed()
+    {
+        Skip.IfNot(DockerAvailable.Value);
+        var options = fixture.Options($"{fixture.Network}-dns");
+        options.ExtraEgressDomains.Add("dns.google");
+        var runtime = fixture.NewRuntime(options);
+        var result = await runtime.CreateAsync(DockerSandboxFixture.Spec(fixture.CurlImage), Ct);
+        result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error.Message + " " + result.Error.Detail : "");
+        var name = DockerSandboxRuntime.ContainerName(result.Value.SandboxId);
+
+        var byName = await fixture.ExecAsync(name, "curl", "-m", "20", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "https://dns.google/");
+        byName.Stdout.Should().Be("200", byName.Stderr);
+
+        var byAddress = await fixture.ExecAsync(name, "curl", "-m", "20", "-sS", "-o", "/dev/null", "https://8.8.8.8/");
+        byAddress.Stderr.Should().Contain("CONNECT tunnel failed, response 403");
+    }
+
+    /// <summary>The proxy serves only the internal network. Red: drop <c>http_access deny !sandboxes</c>.</summary>
+    [SkippableFact]
+    public async Task A_container_on_the_default_bridge_cannot_use_the_egress_proxy()
+    {
+        Skip.IfNot(DockerAvailable.Value);
+        await CreateAsync(DockerSandboxFixture.Spec(fixture.CurlImage));
+        var egress = await fixture.Docker.Containers.InspectContainerAsync(fixture.Options().EgressContainerName, Ct);
+        var bridgeAddress = egress.NetworkSettings!.Networks!["bridge"].IPAddress;
+        var outsider = await fixture.RunOnBridgeAsync();
+
+        var attempt = await fixture.ExecAsync(outsider, "curl", "-m", "20", "-sS", "-o", "/dev/null", "-w", "%{http_code}", "-x", $"http://{bridgeAddress}:3128", "http://api.nuget.org/v3/index.json");
+
+        attempt.Stdout.Should().Be("403", attempt.Stderr);
+    }
+
+    /// <summary>
+    /// Run containers attach by network id, and a replaced network is re-checked. Red: attach by name and skip the
+    /// re-check, so the same-named open network is used.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_network_replaced_by_an_open_one_is_never_used()
+    {
+        Skip.IfNot(DockerAvailable.Value);
+        var options = fixture.Options($"{fixture.Network}-swap");
+        var runtime = fixture.NewRuntime(options);
+        var first = await runtime.CreateAsync(DockerSandboxFixture.Spec(fixture.CurlImage), Ct);
+        first.IsSuccess.Should().BeTrue(first.IsFailure ? first.Error.Message + " " + first.Error.Detail : "");
+        (await runtime.DeleteAsync(first.Value.SandboxId, Ct)).IsSuccess.Should().BeTrue();
+
+        // Take the internal network away and put an open one with the same name in its place.
+        foreach (var infra in new[] { options.GatewayContainerName, options.EgressContainerName })
+        {
+            await fixture.Docker.Networks.DisconnectNetworkAsync(options.InternalNetwork, new NetworkDisconnectParameters { Container = infra, Force = true }, Ct);
+        }
+
+        await fixture.Docker.Networks.DeleteNetworkAsync(options.InternalNetwork, Ct);
+        await fixture.Docker.Networks.CreateNetworkAsync(new NetworksCreateParameters
+        {
+            Name = options.InternalNetwork,
+            Internal = false,
+            Labels = new Dictionary<string, string>(StringComparer.Ordinal) { [DockerSandboxFixture.TestLabel] = fixture.Suffix },
+        }, Ct);
+
+        var spec = DockerSandboxFixture.Spec(fixture.CurlImage);
+        var second = await runtime.CreateAsync(spec, Ct);
+
+        second.IsFailure.Should().BeTrue();
+        second.Error.Message.Should().Contain("exists but is not internal");
+        await FluentActions.Awaiting(() => fixture.Docker.Containers.InspectContainerAsync(DockerSandboxRuntime.ContainerName(spec.SandboxId), Ct))
+            .Should().ThrowAsync<DockerContainerNotFoundException>();
+    }
+
+    /// <summary>A gateway removed behind the runtime's back is set up again. Red: return the cached state without checking it.</summary>
+    [SkippableFact]
+    public async Task A_removed_gateway_is_set_up_again()
+    {
+        Skip.IfNot(DockerAvailable.Value);
+        var options = fixture.Options($"{fixture.Network}-gone");
+        var runtime = fixture.NewRuntime(options);
+        var first = await runtime.CreateAsync(DockerSandboxFixture.Spec(fixture.CurlImage), Ct);
+        first.IsSuccess.Should().BeTrue(first.IsFailure ? first.Error.Message + " " + first.Error.Detail : "");
+
+        await fixture.Docker.Containers.RemoveContainerAsync(options.GatewayContainerName, new ContainerRemoveParameters { Force = true }, Ct);
+
+        var second = await runtime.CreateAsync(DockerSandboxFixture.Spec(fixture.NginxImage), Ct);
+        second.IsSuccess.Should().BeTrue(second.IsFailure ? second.Error.Message + " " + second.Error.Detail : "");
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        (await GetWhenUpAsync(http, second.Value.BaseAddress)).StatusCode.Should().Be(HttpStatusCode.OK);
+    }
+
+    /// <summary>
+    /// A labelled leftover work volume of the same run is replaced, never reused; an unlabelled one is refused and kept.
+    /// Red: reuse the labelled volume, or delete the unlabelled one.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_leftover_work_volume_is_replaced_only_when_it_is_ours()
+    {
+        Skip.IfNot(DockerAvailable.Value);
+        await CreateAsync(DockerSandboxFixture.Spec(fixture.CurlImage));
+
+        var ours = DockerSandboxFixture.Spec(fixture.CurlImage);
+        await fixture.Docker.Volumes.CreateAsync(new VolumesCreateParameters
+        {
+            Name = DockerSandboxRuntime.VolumeName(ours.SandboxId),
+            Labels = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["thalos.sandbox"] = "true",
+                ["thalos.sandbox.role"] = "run",
+                ["thalos.run_id"] = ours.RunId.ToString("D"),
+                ["thalos.sandbox.network"] = fixture.Network,
+                ["stale"] = "yes",
+            },
+        }, Ct);
+        await CreateAsync(ours);
+        var replaced = await fixture.Docker.Volumes.InspectAsync(DockerSandboxRuntime.VolumeName(ours.SandboxId), Ct);
+        replaced.Labels.Should().NotContainKey("stale");
+
+        var foreign = DockerSandboxFixture.Spec(fixture.CurlImage);
+        await fixture.Docker.Volumes.CreateAsync(new VolumesCreateParameters
+        {
+            Name = DockerSandboxRuntime.VolumeName(foreign.SandboxId),
+            Labels = new Dictionary<string, string>(StringComparer.Ordinal) { [DockerSandboxFixture.TestLabel] = fixture.Suffix },
+        }, Ct);
+        var refused = await fixture.Runtime.CreateAsync(foreign, Ct);
+        refused.IsFailure.Should().BeTrue();
+        (await fixture.Docker.Volumes.InspectAsync(DockerSandboxRuntime.VolumeName(foreign.SandboxId), Ct)).Labels.Should().ContainKey(DockerSandboxFixture.TestLabel);
+    }
+
+    /// <summary>
+    /// A missing gateway image is pulled. Uses <c>nginx:1.27-alpine-slim</c> and removes it afterwards; skips when it is
+    /// already present, because then nothing would be pulled. Red: skip the pull.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_missing_infrastructure_image_is_pulled()
+    {
+        Skip.IfNot(DockerAvailable.Value);
+        const string image = "nginx:1.27-alpine-slim";
+        var present = true;
+        try
+        {
+            await fixture.Docker.Images.InspectImageAsync(image, Ct);
+        }
+        catch (DockerImageNotFoundException)
+        {
+            present = false;
+        }
+
+        Skip.If(present, $"{image} is already present, so a pull cannot be observed");
+        fixture.RemoveImageAfterwards(image);
+        var options = fixture.Options($"{fixture.Network}-pull");
+        options.GatewayImage = image;
+
+        var result = await fixture.NewRuntime(options).CreateAsync(DockerSandboxFixture.Spec(fixture.NginxImage), Ct);
+
+        result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error.Message + " " + result.Error.Detail : "");
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+        (await GetWhenUpAsync(http, result.Value.BaseAddress)).StatusCode.Should().Be(HttpStatusCode.OK);
     }
 
     /// <summary>Needs no engine. Red: let a library exception escape CreateAsync.</summary>
