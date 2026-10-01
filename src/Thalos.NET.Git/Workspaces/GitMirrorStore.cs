@@ -31,7 +31,12 @@ public sealed partial class GitMirrorStore(GitWorkspaceOptions options, ILogger<
 {
     private readonly GitCli _git = new(options);
     private readonly string _dataRoot = Path.GetFullPath(options.DataRoot);
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _repositoryLocks = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// In-process gates, keyed by the full path of the mirror lock file and static, so every store and provider in
+    /// this process that shares a DataRoot shares one gate per repository, whether or not file locking works.
+    /// </summary>
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> RepositoryGates = new(StringComparer.Ordinal);
 
     /// <summary>Clones the bare mirror if absent, retargets origin, fetches, validates its config. Serialised per repository across processes.</summary>
     /// <param name="repository">The repository name; one path segment, naming the mirror directory.</param>
@@ -55,16 +60,43 @@ public sealed partial class GitMirrorStore(GitWorkspaceOptions options, ILogger<
         }
     }
 
+    /// <summary>Fails unless <paramref name="mirror"/> is the one this store itself keeps for its repository name.</summary>
+    private AgentError? ValidateMirror(GitMirror mirror)
+    {
+        ArgumentNullException.ThrowIfNull(mirror);
+        if (!IsValidRepositoryName(mirror.Repository))
+        {
+            return AgentError.Validation($"Repository '{mirror.Repository}' is not a valid mirror directory name.");
+        }
+
+        return string.Equals(Path.GetFullPath(mirror.Directory), Path.GetFullPath(MirrorPath(mirror.Repository)), StringComparison.Ordinal)
+            ? null
+            : AgentError.Validation($"'{mirror.Directory}' is not the mirror of repository '{mirror.Repository}'.");
+    }
+
     /// <summary>The full sha of <c>refs/remotes/origin/&lt;branch&gt;</c>.</summary>
     /// <param name="mirror">A mirror from <see cref="PrepareAsync"/>.</param>
     /// <param name="branch">The branch name.</param>
     /// <param name="ct">Cancellation token.</param>
     public async Task<Result<string, AgentError>> ResolveBranchAsync(GitMirror mirror, string branch, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(mirror);
-        if (string.IsNullOrWhiteSpace(branch))
+        if (ValidateMirror(mirror) is { } badMirror)
         {
-            return Result<string, AgentError>.Failure(AgentError.Validation("Branch must not be blank."));
+            return Result<string, AgentError>.Failure(badMirror);
+        }
+
+        if (string.IsNullOrWhiteSpace(branch) || branch.StartsWith('-'))
+        {
+            return Result<string, AgentError>.Failure(AgentError.Validation($"Branch '{branch}' is not a valid branch name."));
+        }
+
+        // A branch name only: revision syntax such as main~1 or main@{1} must not reach rev-parse.
+        var format = await _git.RunAsync(mirror.Directory, ["check-ref-format", "--branch", branch], null, null, ct).ConfigureAwait(false);
+        if (!format.Succeeded)
+        {
+            return format.TimedOut
+                ? Result<string, AgentError>.Failure(GitFailure("git check-ref-format timed out.", format, secret: null))
+                : Result<string, AgentError>.Failure(AgentError.Validation($"Branch '{branch}' is not a valid branch name."));
         }
 
         var resolved = await _git.RunAsync(mirror.Directory, ["rev-parse", "--verify", $"refs/remotes/origin/{branch}^{{commit}}"], null, null, ct).ConfigureAwait(false);
@@ -82,6 +114,8 @@ public sealed partial class GitMirrorStore(GitWorkspaceOptions options, ILogger<
     /// mirror's lock, and the importer clones the bundle and checks out <paramref name="commit"/> by sha. The ref is
     /// under <c>refs/heads/</c>, not a private namespace, because <c>git clone</c> of a bundle fetches only branch
     /// refs: a commit bundled under any other ref arrives in the clone without its objects, and the checkout fails.
+    /// A remote branch literally named <c>thalos-bundle</c> makes creating the temporary ref fail loudly, as a
+    /// directory and file ref conflict, rather than corrupting anything.
     /// </remarks>
     /// <param name="mirror">A mirror from <see cref="PrepareAsync"/>.</param>
     /// <param name="commit">The full 40-character sha to bundle.</param>
@@ -89,7 +123,11 @@ public sealed partial class GitMirrorStore(GitWorkspaceOptions options, ILogger<
     /// <param name="ct">Cancellation token.</param>
     public async Task<UnitResult<AgentError>> CreateBundleAsync(GitMirror mirror, string commit, string bundlePath, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(mirror);
+        if (ValidateMirror(mirror) is { } badMirror)
+        {
+            return UnitResult<AgentError>.Failure(badMirror);
+        }
+
         if (!IsFullSha(commit))
         {
             return UnitResult<AgentError>.Failure(AgentError.Validation("The commit must be a full 40-character sha."));
@@ -100,18 +138,21 @@ public sealed partial class GitMirrorStore(GitWorkspaceOptions options, ILogger<
             return UnitResult<AgentError>.Failure(AgentError.Validation("The bundle path must not be blank."));
         }
 
+        // Absolute: git runs in the mirror, so a relative path would land inside it, and "-" would mean stdout.
+        var fullBundlePath = Path.GetFullPath(bundlePath);
         var temporaryRef = $"refs/heads/thalos-bundle/{Guid.NewGuid():N}";
         using (await LockRepositoryAsync(mirror.Repository, ct).ConfigureAwait(false))
         {
-            var created = await _git.RunAsync(mirror.Directory, ["update-ref", temporaryRef, commit], null, null, ct).ConfigureAwait(false);
-            if (!created.Succeeded)
-            {
-                return UnitResult<AgentError>.Failure(GitFailure("git update-ref of the bundle ref failed.", created, secret: null));
-            }
-
             try
             {
-                var bundled = await _git.RunAsync(mirror.Directory, ["bundle", "create", bundlePath, temporaryRef], null, null, ct).ConfigureAwait(false);
+                // Inside the try, uncancelled: a cancellation after the ref is written must still reach the delete.
+                var created = await _git.RunAsync(mirror.Directory, ["update-ref", temporaryRef, commit], null, null, CancellationToken.None).ConfigureAwait(false);
+                if (!created.Succeeded)
+                {
+                    return UnitResult<AgentError>.Failure(GitFailure("git update-ref of the bundle ref failed.", created, secret: null));
+                }
+
+                var bundled = await _git.RunAsync(mirror.Directory, ["bundle", "create", fullBundlePath, temporaryRef], null, null, ct).ConfigureAwait(false);
                 return bundled.Succeeded
                     ? UnitResult<AgentError>.Success()
                     : UnitResult<AgentError>.Failure(GitFailure("git bundle create failed.", bundled, secret: null));
@@ -130,7 +171,7 @@ public sealed partial class GitMirrorStore(GitWorkspaceOptions options, ILogger<
 
     /// <summary>
     /// The text of <paramref name="relativePath"/> at <paramref name="commit"/>, or <see langword="null"/> when it
-    /// is absent or is not a file.
+    /// is absent or is not a file. A commit that is not in the mirror is a failure.
     /// </summary>
     /// <remarks>
     /// The path is checked lexically by <see cref="RepoRelativePath.Validate"/> before any git process starts. A
@@ -143,7 +184,11 @@ public sealed partial class GitMirrorStore(GitWorkspaceOptions options, ILogger<
     /// <param name="ct">Cancellation token.</param>
     public async Task<Result<string?, AgentError>> ReadFileAsync(GitMirror mirror, string commit, string relativePath, CancellationToken ct)
     {
-        ArgumentNullException.ThrowIfNull(mirror);
+        if (ValidateMirror(mirror) is { } badMirror)
+        {
+            return Result<string?, AgentError>.Failure(badMirror);
+        }
+
         if (RepoRelativePath.Validate(relativePath) is { } invalid)
         {
             return Result<string?, AgentError>.Failure(invalid);
@@ -152,6 +197,13 @@ public sealed partial class GitMirrorStore(GitWorkspaceOptions options, ILogger<
         if (!IsFullSha(commit))
         {
             return Result<string?, AgentError>.Failure(AgentError.Validation("The commit must be a full 40-character sha."));
+        }
+
+        // The commit must exist: a missing commit, or git failing to run, is a failure, never an absent file.
+        var commitCheck = await _git.RunAsync(mirror.Directory, ["cat-file", "-e", $"{commit}^{{commit}}"], null, null, ct).ConfigureAwait(false);
+        if (!commitCheck.Succeeded)
+        {
+            return Result<string?, AgentError>.Failure(GitFailure($"Commit '{commit}' is not in the mirror.", commitCheck, secret: null));
         }
 
         var spec = $"{commit}:{relativePath.Replace('\\', '/')}";
@@ -253,7 +305,7 @@ public sealed partial class GitMirrorStore(GitWorkspaceOptions options, ILogger<
                 // Indeterminate: a timeout, a validation command that failed for a reason other than a definitive
                 // "not bare" or "no fetch refspec" answer, or dubious ownership. None of these is a positive
                 // signal the mirror is invalid, so it is never deleted on this path — only a positive answer is
-                // grounds for deletion (see the class remarks); the create simply fails and an operator decides.
+                // grounds for deletion (see the provider class remarks); the create simply fails and an operator decides.
                 // detail carries git's own extracted error line (e.g. "dubious ownership"), so an operator sees
                 // why validation could not reach a definitive answer, not just that it didn't.
                 default:
@@ -317,7 +369,7 @@ public sealed partial class GitMirrorStore(GitWorkspaceOptions options, ILogger<
         var mirrorsDir = Path.Combine(_dataRoot, "mirrors");
         Directory.CreateDirectory(mirrorsDir);
 
-        // This call holds the repository's mirror lock (see CreateClaimedAsync), so no other clone of the same
+        // This call holds the repository's mirror lock (through PrepareAsync, or the provider create), so no other clone of the same
         // repository can be in progress right now — any .tmp-* directory already here for this repository was left
         // by a clone that was killed mid-way, never cleaned up on its own path, and is safe to delete. A directory
         // left by a concurrent clone of a *different* repository, under its own lock, is untouched: the name
@@ -338,8 +390,8 @@ public sealed partial class GitMirrorStore(GitWorkspaceOptions options, ILogger<
                 return UnitResult<AgentError>.Failure(GitFailure("git config remote.origin.fetch failed.", fetchSpec, secret: null));
             }
 
-            // Persisted on the mirror in addition to being passed again on every worktree checkout below — see the
-            // class remarks for why symlinks must never reach a workspace this provider creates.
+            // Persisted on the mirror in addition to being passed again on every worktree checkout the provider
+            // makes; see the provider class remarks for why symlinks must never reach a workspace.
             var noSymlinks = await _git.RunAsync(temp, ["config", "core.symlinks", "false"], null, null, ct).ConfigureAwait(false);
             if (!noSymlinks.Succeeded)
             {
@@ -539,6 +591,12 @@ public sealed partial class GitMirrorStore(GitWorkspaceOptions options, ILogger<
         }
     }
 
+    private string LockPathFor(string repository) =>
+        Path.GetFullPath(Path.Combine(LocksDirectory, "mirrors", repository + ".lock"));
+
+    /// <summary>The in-process gate for <paramref name="repository"/>'s mirror lock file, shared by every store in this process.</summary>
+    internal SemaphoreSlim GateFor(string repository) => RepositoryGates.GetOrAdd(LockPathFor(repository), static _ => new SemaphoreSlim(1, 1));
+
     /// <summary>
     /// Serialises git on one repository's mirror: first within this process, through a <see cref="SemaphoreSlim"/>,
     /// so this process's own callers queue without polling, then across processes, through a
@@ -546,12 +604,13 @@ public sealed partial class GitMirrorStore(GitWorkspaceOptions options, ILogger<
     /// </summary>
     internal async Task<MirrorLease> LockRepositoryAsync(string repository, CancellationToken ct)
     {
-        var gate = _repositoryLocks.GetOrAdd(repository, static _ => new SemaphoreSlim(1, 1));
+        var lockPath = LockPathFor(repository);
+        var gate = GateFor(repository);
         await gate.WaitAsync(ct).ConfigureAwait(false);
         var leased = false;
         try
         {
-            var file = await CrossProcessFileLock.AcquireAsync(Path.Combine(LocksDirectory, "mirrors", repository + ".lock"), ct).ConfigureAwait(false);
+            var file = await CrossProcessFileLock.AcquireAsync(lockPath, ct).ConfigureAwait(false);
             leased = true;
             return new MirrorLease(gate, file);
         }
@@ -598,7 +657,6 @@ public sealed partial class GitMirrorStore(GitWorkspaceOptions options, ILogger<
     private static string Scrub(string text, string? secret) =>
         secret is null ? text : text.Replace(secret, "***", StringComparison.Ordinal);
 
-
     /// <summary>
     /// The first line starting with <c>fatal:</c> or <c>error:</c> — git's own convention for the line that names
     /// what went wrong, buried among progress and hint lines <c>-q</c> does not suppress — or, when no line
@@ -627,9 +685,9 @@ public sealed partial class GitMirrorStore(GitWorkspaceOptions options, ILogger<
         return lastNonEmpty ?? string.Empty;
     }
 
-    [LoggerMessage(EventId = 1100, Level = LogLevel.Warning, Message = "Could not {What}: {Error}")]
+    [LoggerMessage(EventId = 1001, Level = LogLevel.Warning, Message = "Could not {What}: {Error}")]
     private static partial void LogCleanupFailed(ILogger logger, string what, string error);
 
-    [LoggerMessage(EventId = 1101, Level = LogLevel.Information, Message = "Another process cloned the mirror at '{Mirror}' first; validating and using it.")]
+    [LoggerMessage(EventId = 1003, Level = LogLevel.Information, Message = "Another process cloned the mirror at '{Mirror}' first; validating and using it.")]
     private static partial void LogFirstCloneRaceLost(ILogger logger, string mirror);
 }

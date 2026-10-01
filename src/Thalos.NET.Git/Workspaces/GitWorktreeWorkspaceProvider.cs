@@ -1137,7 +1137,4 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
     [LoggerMessage(EventId = 1002, Level = LogLevel.Warning, Message = "Sidecar '{Path}' could not be read and was skipped: {Error}")]
     private static partial void LogUnreadableSidecar(ILogger logger, string path, string error);
-
-    [LoggerMessage(EventId = 1003, Level = LogLevel.Information, Message = "Another process cloned the mirror at '{Mirror}' first; validating and using it.")]
-    private static partial void LogFirstCloneRaceLost(ILogger logger, string mirror);
 }

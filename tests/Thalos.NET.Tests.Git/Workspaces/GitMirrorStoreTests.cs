@@ -148,7 +148,7 @@ public sealed class GitMirrorStoreTests : IDisposable
 
     /// <summary>
     /// Red: drop the RepoRelativePath.Validate call in ReadFileAsync, so the path reaches git, which cannot start
-    /// here, and the failure says so instead of refusing the path.
+    /// here, and the failure is a git operation failure, not the Validation code the assertion requires.
     /// </summary>
     [Theory]
     [InlineData("../x")]
@@ -163,7 +163,6 @@ public sealed class GitMirrorStoreTests : IDisposable
 
         read.IsFailure.Should().BeTrue();
         read.Error.Code.Should().Be(AgentErrorCode.Validation);
-        read.Error.ToString().Should().NotContain("could not start");
     }
 
     /// <summary>Red: make MirrorConfigSurface.FindViolationAsync return null, so a mirror with core.fsmonitor set prepares successfully.</summary>
@@ -179,5 +178,103 @@ public sealed class GitMirrorStoreTests : IDisposable
 
         again.IsFailure.Should().BeTrue();
         again.Error.Message.Should().Contain("outside the allowed surface");
+    }
+
+    /// <summary>
+    /// Red: make the in-process gate table an instance field again, so each store has its own gate. The file lock
+    /// alone still serialises where the OS allows it, which is why this asserts the gate itself.
+    /// </summary>
+    [Fact]
+    public void Two_stores_on_one_data_root_share_one_in_process_gate()
+    {
+        var first = Store();
+        var second = Store();
+
+        first.GateFor("repo").Should().BeSameAs(second.GateFor("repo"));
+    }
+
+    /// <summary>Red: drop the lock taken by PrepareAsync, so the second store does not wait for the first store's lease.</summary>
+    [Fact]
+    public async Task Two_stores_on_one_data_root_are_serialised()
+    {
+        using var remote = LocalGitRemote.Create();
+        var first = Store();
+        var second = Store();
+
+        var held = await first.LockRepositoryAsync("repo", CancellationToken.None);
+        var waiting = second.PrepareAsync("repo", remote.Url, CancellationToken.None);
+
+        await Task.Delay(500);
+        waiting.IsCompleted.Should().BeFalse("the second store must wait for the lease the first holds");
+        held.Dispose();
+        (await waiting).IsSuccess.Should().BeTrue();
+    }
+
+    /// <summary>Red: drop the check-ref-format call in ResolveBranchAsync, so revision syntax reaches rev-parse and resolves.</summary>
+    [Theory]
+    [InlineData("main~1")]
+    [InlineData("main@{1}")]
+    public async Task ResolveBranch_refuses_revision_syntax(string branch)
+    {
+        using var remote = LocalGitRemote.Create();
+        Push(remote, "README.md", "# later" + System.Environment.NewLine);
+        var store = Store();
+        var mirror = (await store.PrepareAsync("repo", remote.Url, CancellationToken.None)).Value;
+
+        var resolved = await store.ResolveBranchAsync(mirror, branch, CancellationToken.None);
+
+        resolved.IsFailure.Should().BeTrue();
+        resolved.Error.Code.Should().Be(AgentErrorCode.Validation);
+    }
+
+    /// <summary>Red: drop the cat-file -e commit check in ReadFileAsync, so a commit absent from the mirror reads as a null file.</summary>
+    [Fact]
+    public async Task ReadFile_fails_for_a_commit_that_is_not_in_the_mirror()
+    {
+        using var remote = LocalGitRemote.Create();
+        var store = Store();
+        var mirror = (await store.PrepareAsync("repo", remote.Url, CancellationToken.None)).Value;
+
+        var read = await store.ReadFileAsync(mirror, new string('a', 40), "README.md", CancellationToken.None);
+
+        read.IsFailure.Should().BeTrue();
+    }
+
+    /// <summary>Red: drop ValidateMirror in ReadFileAsync, so a GitMirror naming any directory is read.</summary>
+    [Fact]
+    public async Task A_mirror_that_is_not_the_stores_own_is_refused()
+    {
+        using var remote = LocalGitRemote.Create();
+        var store = Store();
+        var own = (await store.PrepareAsync("repo", remote.Url, CancellationToken.None)).Value;
+        var foreign = new GitMirror("repo", remote.Url);
+
+        var read = await store.ReadFileAsync(foreign, remote.HeadOf("main"), "README.md", CancellationToken.None);
+
+        own.Directory.Should().NotBe(foreign.Directory);
+        read.IsFailure.Should().BeTrue();
+        read.Error.Code.Should().Be(AgentErrorCode.Validation);
+    }
+
+    /// <summary>Red: pass bundlePath to git as given, so a relative path lands inside the mirror.</summary>
+    [Fact]
+    public async Task A_relative_bundle_path_is_resolved_against_the_callers_directory()
+    {
+        using var remote = LocalGitRemote.Create();
+        var store = Store();
+        var mirror = (await store.PrepareAsync("repo", remote.Url, CancellationToken.None)).Value;
+        var name = "rel-" + Guid.NewGuid().ToString("N") + ".bundle";
+        var expected = Path.GetFullPath(name);
+        try
+        {
+            (await store.CreateBundleAsync(mirror, remote.HeadOf("main"), name, CancellationToken.None)).IsSuccess.Should().BeTrue();
+
+            File.Exists(expected).Should().BeTrue();
+            File.Exists(Path.Combine(mirror.Directory, name)).Should().BeFalse();
+        }
+        finally
+        {
+            File.Delete(expected);
+        }
     }
 }
