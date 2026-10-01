@@ -22,6 +22,10 @@ namespace Thalos.Workflow;
 /// a host-action node.
 /// </param>
 /// <param name="CreatedAt">When the event was recorded, on the store's clock.</param>
+/// <param name="Actor">
+/// Who caused the event, for a <see cref="WorkflowEventKind.Retried"/> event. <see langword="null"/> for every other
+/// kind: a start's starter is <see cref="WorkflowRun.StartedBy"/> and a resume's approver is <see cref="WorkflowRun.LastResume"/>.
+/// </param>
 public sealed record WorkflowRunEvent(
     long Seq,
     string Kind,
@@ -31,4 +35,5 @@ public sealed record WorkflowRunEvent(
     string? Outcome,
     string? Error,
     TurnUsage? Usage,
-    DateTimeOffset CreatedAt);
+    DateTimeOffset CreatedAt,
+    RunPrincipal? Actor = null);

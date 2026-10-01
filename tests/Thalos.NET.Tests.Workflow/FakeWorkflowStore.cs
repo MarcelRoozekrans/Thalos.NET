@@ -263,6 +263,46 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
         return ValueTask.CompletedTask;
     }
 
+    public async ValueTask<Result> RetryFailedNodeAsync(Guid runId, WorkflowRetryRequest request, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(request.RetriedBy);
+
+        // Mirrors OrmWorkflowStore.RetryFailedNodeAsync: the same guards in the same order, the same seq layout
+        // (Retried at S+1, dispatch at S+2), and the same fields left alone. This fake keeps no event log, so the
+        // Retried event itself is not recorded; the ORM suite proves it.
+        if (!_runs.TryGetValue(runId, out var run))
+        {
+            return Result.Failure($"Workflow run '{runId}' was not found.");
+        }
+
+        if (run.Status != WorkflowStatus.Failed)
+        {
+            return Result.Failure($"Workflow run '{runId}' is {run.Status}; only a Failed run can be retried.");
+        }
+
+        if (run.CurrentSeq != request.ExpectedSeq)
+        {
+            return Result.Failure($"Workflow run '{runId}' is at seq {run.CurrentSeq}, not {request.ExpectedSeq}; it changed since it was read.");
+        }
+
+        var definition = await definitions.GetAsync(run.Process, run.ProcessVersion, ct);
+        if (definition.IsFailure)
+        {
+            return Result.Failure(definition.Error);
+        }
+
+        if (!definition.Value.Nodes.TryGetValue(run.CurrentNode, out var node) || node.Action is null)
+        {
+            return Result.Failure($"Workflow run '{runId}' failed at '{run.CurrentNode}', which is not a host-action node; only a host-action node can be retried.");
+        }
+
+        var dispatchSeq = run.CurrentSeq + 2;
+        _runs[runId] = run with { Status = WorkflowStatus.Running, LastError = null, CurrentSeq = dispatchSeq };
+        _outbox.Add(new WorkflowDispatchMessage(runId, dispatchSeq, run.CurrentNode));
+        return Result.Success();
+    }
+
     public ValueTask<IReadOnlyList<WorkflowRun>> FindStrandedAsync(TimeSpan olderThan, CancellationToken ct) =>
         ValueTask.FromResult<IReadOnlyList<WorkflowRun>>([]);
 

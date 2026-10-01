@@ -589,6 +589,173 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     private OrmProcessDefinitionStore NewDefinitionStore() =>
         new(new WorkflowOrmOptions { ConnectionString = pg.ConnectionString });
 
+    // --- RetryFailedNodeAsync ------------------------------------------------------------------------------
+
+    [Fact]
+    public async Task RetryFailedNodeAsync_reruns_a_failed_action_node_and_records_who_asked()
+    {
+        var store = await ActivatePublishingProcessAsync();
+        var runId = await FailedAtPublishAsync(store, "c-retry");
+        var outboxBefore = await CountAsync("SELECT count(*) FROM outboxmessages", null);
+
+        var result = await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 2, RetriedBy = TestApprover }, CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error : "");
+        var run = await store.FindAsync(runId, CancellationToken.None);
+        // Red if the UPDATE leaves status alone.
+        run!.Status.Should().Be(WorkflowStatus.Running);
+        // Red if last_error is not cleared.
+        run.LastError.Should().BeNull();
+        // Red if the retry moves the run, for example to the definition's next node.
+        run.CurrentNode.Should().Be("publish");
+        // Red if current_seq is set to S+1, where the node's completion would collide with Retried.
+        run.CurrentSeq.Should().Be(4);
+        // Red if the retry counts as an entry: publish was entered once.
+        run.Visits["publish"].Should().Be(1);
+        // Red if the retry rewrites the bag.
+        run.Variables.Should().ContainKey("work_intent");
+        // Red if nothing is enqueued, which leaves the run Running with nothing to advance it.
+        (await CountAsync("SELECT count(*) FROM outboxmessages", null)).Should().Be(outboxBefore + 1);
+
+        var events = await store.ListEventsAsync(runId, CancellationToken.None);
+        var retried = events.Should().ContainSingle(e => string.Equals(e.Kind, nameof(WorkflowEventKind.Retried), StringComparison.Ordinal)).Subject;
+        // Red if the event is written at S, which also throws on the unique index, or at S+2.
+        retried.Seq.Should().Be(3);
+        // Red if actor is not written or not read back.
+        retried.Actor!.Id.Should().Be(TestApprover.Id);
+        retried.Actor.Roles.Should().Equal(TestApprover.Roles);
+        // Red if a Failed or Entered event also gets an actor.
+        events.Where(e => !string.Equals(e.Kind, nameof(WorkflowEventKind.Retried), StringComparison.Ordinal)).Should().OnlyContain(e => e.Actor == null);
+    }
+
+    [Fact]
+    public async Task RetryFailedNodeAsync_keeps_the_last_resume()
+    {
+        var store = await ActivateApprovalProcessAsync();
+        var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "approval", Version = 1, CorrelationKey = "c-retry-resume", StartNode = "start", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
+        await store.CompleteNodeAsync(runId, seq: 1, new WorkflowTransition("gate", WorkflowStatus.Awaiting, "ok", WorkflowEventKind.Awaiting), new NodeResult(null, Empty), CancellationToken.None);
+        (await store.ResumeAsync(runId, new WorkflowResumeRequest { Signal = "ok", Payload = null, ResumedBy = TestApprover }, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        await store.FailAsync(runId, "boom", CancellationToken.None);
+
+        // The approval process has no action node, so this retry is refused. The run still holds its LastResume.
+        // This guards that the refusal path writes nothing; the success path is guarded by the next assertion.
+        (await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 3, RetriedBy = TestPrincipals.Starter }, CancellationToken.None)).IsFailure.Should().BeTrue();
+        // Red if a refused retry clears last_resumed_by.
+        (await store.FindAsync(runId, CancellationToken.None))!.LastResume!.By.Id.Should().Be(TestApprover.Id);
+    }
+
+    [Fact]
+    public async Task RetryFailedNodeAsync_leaves_last_resume_on_a_successful_retry()
+    {
+        var store = await ActivatePublishingProcessAsync();
+        var runId = await FailedAtPublishAsync(store, "c-retry-keeps-resume");
+        // A publishing run has no gate, so seed LastResume the way a gated run would hold it.
+        await ExecuteAsync("""UPDATE workflow_run SET last_resumed_by = '{"principal":{"id":"test-approver","roles":["admin"]},"signal":"ok"}'::jsonb, last_resumed_at = now() WHERE id = @id""", runId);
+
+        (await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 2, RetriedBy = TestPrincipals.Starter }, CancellationToken.None)).IsSuccess.Should().BeTrue();
+
+        // Red if the retry's UPDATE also writes last_resumed_by or last_resumed_at.
+        (await store.FindAsync(runId, CancellationToken.None))!.LastResume!.By.Id.Should().Be("test-approver");
+    }
+
+    [Theory]
+    [InlineData("running")]
+    [InlineData("stale-seq")]
+    [InlineData("not-found")]
+    public async Task RetryFailedNodeAsync_refuses_and_writes_nothing(string shape)
+    {
+        var store = await ActivatePublishingProcessAsync();
+        Guid runId;
+        long seq = 2;
+        switch (shape)
+        {
+            case "running":
+                runId = (await store.StartAsync(new WorkflowStartRequest { Process = "publishing", Version = 1, CorrelationKey = "c-retry-running", StartNode = "start", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
+                // Parked on the action node at its own seq, so the status guard is the only thing refusing it: on the
+                // start node the action-node guard would refuse it first, and dropping the status guard would stay green.
+                await store.CompleteNodeAsync(runId, seq: 1, new WorkflowTransition("publish", WorkflowStatus.Running, null, WorkflowEventKind.Completed), new NodeResult(null, Empty), CancellationToken.None);
+                seq = 2;
+                break;
+            case "stale-seq":
+                runId = await FailedAtPublishAsync(store, "c-retry-stale");
+                seq = 1;
+                break;
+            default:
+                runId = Guid.NewGuid();
+                break;
+        }
+
+        var eventsBefore = await CountAsync("SELECT count(*) FROM workflow_run_event", null);
+        var outboxBefore = await CountAsync("SELECT count(*) FROM outboxmessages", null);
+
+        var result = await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = seq, RetriedBy = TestApprover }, CancellationToken.None);
+
+        // Red on "running" if the status guard is dropped; on "stale-seq" if the seq guard is dropped; on
+        // "not-found" if a missing row throws instead of failing.
+        result.IsFailure.Should().BeTrue();
+        // Red if any refusal path writes an event or a dispatch before refusing.
+        (await CountAsync("SELECT count(*) FROM workflow_run_event", null)).Should().Be(eventsBefore);
+        (await CountAsync("SELECT count(*) FROM outboxmessages", null)).Should().Be(outboxBefore);
+    }
+
+    [Fact]
+    public async Task RetryFailedNodeAsync_refuses_a_run_that_failed_at_an_agent_node()
+    {
+        var store = await ActivatePublishingProcessAsync();
+        var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "publishing", Version = 1, CorrelationKey = "c-retry-agent", StartNode = "start", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
+        await store.FailAsync(runId, "turn failed", CancellationToken.None);
+
+        var result = await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 1, RetriedBy = TestApprover }, CancellationToken.None);
+
+        // Red if the action-node guard is dropped: an agent node would re-run and re-spend its turn.
+        result.IsFailure.Should().BeTrue();
+        result.Error.Should().Contain("'start'").And.Contain("not a host-action node");
+        (await store.FindAsync(runId, CancellationToken.None))!.Status.Should().Be(WorkflowStatus.Failed);
+    }
+
+    [Fact]
+    public async Task RetryFailedNodeAsync_lets_exactly_one_of_two_concurrent_retries_win()
+    {
+        var store = await ActivatePublishingProcessAsync();
+        var runId = await FailedAtPublishAsync(store, "c-retry-race");
+
+        var results = await Task.WhenAll(
+            store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 2, RetriedBy = TestApprover }, CancellationToken.None).AsTask(),
+            store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 2, RetriedBy = TestApprover }, CancellationToken.None).AsTask());
+
+        // Red if the UPDATE drops its xmin check: both commit, and two dispatches run the action twice.
+        results.Count(r => r.IsSuccess).Should().Be(1);
+        (await CountAsync("SELECT count(*) FROM workflow_run_event WHERE run_id = @id AND kind = 'Retried'", runId)).Should().Be(1);
+    }
+
+    /// <summary>A task node, then an action node: the shape a retry is for.</summary>
+    private const string PublishingYaml = """
+        process: publishing
+        version: 1
+        nodes:
+          start: { next: publish }
+          publish: { action: open-pull-request, outcomes: [published], next: done }
+          done: { terminal: succeeded }
+        """;
+
+    private async Task<OrmWorkflowStore> ActivatePublishingProcessAsync()
+    {
+        var definitions = NewDefinitionStore();
+        var definition = ProcessLoader.Load(PublishingYaml);
+        definition.IsSuccess.Should().BeTrue(definition.IsFailure ? definition.Error : "");
+        await definitions.UpsertAndActivateAsync(definition.Value, PublishingYaml, CancellationToken.None);
+        return new OrmWorkflowStore(new WorkflowOrmOptions { ConnectionString = pg.ConnectionString }, definitions);
+    }
+
+    /// <summary>Starts a publishing run, moves it onto <c>publish</c> at seq 2, and fails it there.</summary>
+    private static async Task<Guid> FailedAtPublishAsync(OrmWorkflowStore store, string key)
+    {
+        var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "publishing", Version = 1, CorrelationKey = key, StartNode = "start", InitialVariables = new Dictionary<string, object?>(StringComparer.Ordinal) { ["work_intent"] = "x" }, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
+        await store.CompleteNodeAsync(runId, seq: 1, new WorkflowTransition("publish", WorkflowStatus.Running, null, WorkflowEventKind.Completed), new NodeResult(null, Empty), CancellationToken.None);
+        await store.FailAsync(runId, "node 'publish': push failed", CancellationToken.None);
+        return runId;
+    }
+
     /// <summary>The YAML behind <see cref="ActivateApprovalProcessAsync"/>: a task node, an approval gate, a terminal.</summary>
     private const string ApprovalYaml = """
         process: approval

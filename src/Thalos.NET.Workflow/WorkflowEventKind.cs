@@ -30,4 +30,7 @@ public enum WorkflowEventKind
 
     /// <summary>A loop-back node's <c>maxVisits</c> cap was reached and its <c>onExceeded</c> edge was taken instead.</summary>
     CapExceeded,
+
+    /// <summary>An operator re-ran a run that failed at a host-action node; see <see cref="IWorkflowStore.RetryFailedNodeAsync"/>.</summary>
+    Retried,
 }
