@@ -38,7 +38,7 @@ public sealed partial class SandboxTools(IRunWorkspaceProvider workspaces, ISand
 
         List<string> arguments = ["build", TargetOf(workspace), "--nologo", "-v:q", "-clp:ErrorsOnly"];
         var outcome = await runner.RunAsync(new ProcessSpec(DotNet, arguments, workspace.Root, options.BuildTimeout), ct).ConfigureAwait(false);
-        return Format(outcome, options.BuildTimeout, BuildSummary(outcome.FullOutput));
+        return Format(outcome, options.BuildTimeout, $"errors: {outcome.ErrorLineCount}");
     }
 
     /// <summary><c>sandbox__test</c>: runs <c>dotnet test</c> on the run's solution, optionally filtered.</summary>
@@ -87,6 +87,11 @@ public sealed partial class SandboxTools(IRunWorkspaceProvider workspaces, ISand
 
     private string Format(ProcessOutcome outcome, TimeSpan timeout, string summary)
     {
+        if (outcome.StartError is not null)
+        {
+            return $"error: could not start {DotNet}: {outcome.StartError}";
+        }
+
         var exit = outcome.TimedOut ? $"timed out after {timeout:c}" : outcome.ExitCode!.Value.ToString(CultureInfo.InvariantCulture);
         var tail = Tail(outcome.FullOutput, options.OutputTailBytes);
         return $"exit: {exit}\n{summary}\n--- output (last {Encoding.UTF8.GetByteCount(tail)} bytes) ---\n{tail}";
@@ -95,10 +100,12 @@ public sealed partial class SandboxTools(IRunWorkspaceProvider workspaces, ISand
     /// <summary>The last <paramref name="maxBytes"/> bytes of <paramref name="text"/> as UTF-8, without starting mid-character.</summary>
     private static string Tail(string text, int maxBytes)
     {
-        var bytes = Encoding.UTF8.GetBytes(text);
+        // The last maxBytes characters hold at least maxBytes bytes, so only that part is ever encoded.
+        var candidate = text.Length > maxBytes ? text[^maxBytes..] : text;
+        var bytes = Encoding.UTF8.GetBytes(candidate);
         if (bytes.Length <= maxBytes)
         {
-            return text;
+            return candidate;
         }
 
         var start = bytes.Length - maxBytes;
@@ -108,12 +115,6 @@ public sealed partial class SandboxTools(IRunWorkspaceProvider workspaces, ISand
         }
 
         return Encoding.UTF8.GetString(bytes, start, bytes.Length - start);
-    }
-
-    private static string BuildSummary(string output)
-    {
-        var errors = Lines(output).Count(l => l.Contains(": error ", StringComparison.OrdinalIgnoreCase) || l.StartsWith("error ", StringComparison.OrdinalIgnoreCase));
-        return $"errors: {errors}";
     }
 
     /// <summary>The <c>Passed!</c> or <c>Failed!</c> line, or the <c>Total tests:</c> block, from the full output.</summary>

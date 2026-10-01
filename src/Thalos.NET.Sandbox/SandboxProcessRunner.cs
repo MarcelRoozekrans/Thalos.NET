@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
 
@@ -14,7 +15,18 @@ public sealed class SandboxProcessRunner : ISandboxProcessRunner
     {
         ArgumentNullException.ThrowIfNull(spec);
 
-        using var process = Start(spec, out var output);
+        var output = new OutputBuffer(spec.MaxOutputChars);
+        Process process;
+        try
+        {
+            process = Start(spec, output);
+        }
+        catch (Exception ex) when (ex is Win32Exception or InvalidOperationException)
+        {
+            return new ProcessOutcome(null, TimedOut: false, "", StartError: ex.Message);
+        }
+
+        using var owned = process;
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(spec.Timeout);
         try
@@ -30,13 +42,14 @@ public sealed class SandboxProcessRunner : ISandboxProcessRunner
                 throw;
             }
 
-            return new ProcessOutcome(null, TimedOut: true, output.ToString());
+            return new ProcessOutcome(null, TimedOut: true, output.ToString(), ErrorLineCount: output.ErrorLines);
         }
 
-        return new ProcessOutcome(process.ExitCode, TimedOut: false, output.ToString());
+        return new ProcessOutcome(process.ExitCode, TimedOut: false, output.ToString(), ErrorLineCount: output.ErrorLines);
     }
 
-    private static Process Start(ProcessSpec spec, out OutputBuffer output)
+    /// <summary>Starts the process. When any step throws, what already started is killed and disposed before the exception propagates.</summary>
+    private static Process Start(ProcessSpec spec, OutputBuffer buffer)
     {
         var info = new ProcessStartInfo(spec.FileName)
         {
@@ -52,16 +65,23 @@ public sealed class SandboxProcessRunner : ISandboxProcessRunner
             info.ArgumentList.Add(argument);
         }
 
-        var buffer = new OutputBuffer();
         var process = new Process { StartInfo = info };
         process.OutputDataReceived += (_, e) => buffer.AppendLine(e.Data);
         process.ErrorDataReceived += (_, e) => buffer.AppendLine(e.Data);
-        process.Start();
-        process.StandardInput.Close();
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-        output = buffer;
-        return process;
+        try
+        {
+            process.Start();
+            process.StandardInput.Close();
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+            return process;
+        }
+        catch
+        {
+            Kill(process);
+            process.Dispose();
+            throw;
+        }
     }
 
     private static void Kill(Process process)
@@ -70,9 +90,9 @@ public sealed class SandboxProcessRunner : ISandboxProcessRunner
         {
             process.Kill(entireProcessTree: true);
         }
-        catch (InvalidOperationException)
+        catch (Exception ex) when (ex is InvalidOperationException or Win32Exception or AggregateException)
         {
-            // Already exited.
+            // Already exited, never started, or only part of the tree could be killed. The caller still drains and reports.
         }
     }
 
@@ -89,11 +109,30 @@ public sealed class SandboxProcessRunner : ISandboxProcessRunner
         }
     }
 
-    /// <summary>Stdout and stderr lines appended in arrival order from the two reader callbacks.</summary>
-    private sealed class OutputBuffer
+    /// <summary>Whether <paramref name="line"/> is an error line: an MSBuild "path: error CODE: text" or one starting "error ".</summary>
+    internal static bool IsErrorLine(string line) =>
+        line.Contains(": error ", StringComparison.OrdinalIgnoreCase) || line.TrimStart().StartsWith("error ", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Stdout and stderr lines appended in arrival order from the two reader callbacks, keeping only the last
+    /// <c>max</c> characters and counting error lines as they arrive.
+    /// </summary>
+    private sealed class OutputBuffer(int max)
     {
         private readonly StringBuilder _text = new();
         private readonly Lock _gate = new();
+        private int _errorLines;
+
+        public int ErrorLines
+        {
+            get
+            {
+                lock (_gate)
+                {
+                    return _errorLines;
+                }
+            }
+        }
 
         public void AppendLine(string? line)
         {
@@ -104,7 +143,16 @@ public sealed class SandboxProcessRunner : ISandboxProcessRunner
 
             lock (_gate)
             {
-                _text.Append(line).Append('\n');
+                if (IsErrorLine(line))
+                {
+                    _errorLines++;
+                }
+
+                _text.Append(line).Append((char)10);
+                if (_text.Length > max * 2L)
+                {
+                    _text.Remove(0, _text.Length - max);
+                }
             }
         }
 
@@ -112,7 +160,8 @@ public sealed class SandboxProcessRunner : ISandboxProcessRunner
         {
             lock (_gate)
             {
-                return _text.ToString();
+                var start = Math.Max(0, _text.Length - max);
+                return _text.ToString(start, _text.Length - start);
             }
         }
     }

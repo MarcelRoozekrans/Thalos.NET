@@ -5,13 +5,20 @@ namespace Thalos.Sandbox;
 /// <param name="Arguments">Each entry is passed as exactly one argument; nothing is split, quoted or expanded.</param>
 /// <param name="WorkingDirectory">The process's working directory.</param>
 /// <param name="Timeout">How long it may run before its whole process tree is killed.</param>
-public sealed record ProcessSpec(string FileName, IReadOnlyList<string> Arguments, string WorkingDirectory, TimeSpan Timeout);
+/// <param name="MaxOutputChars">The most output characters kept. Older output is dropped from the front, so the end, where summaries are, survives.</param>
+public sealed record ProcessSpec(string FileName, IReadOnlyList<string> Arguments, string WorkingDirectory, TimeSpan Timeout, int MaxOutputChars = ProcessSpec.DefaultMaxOutputChars)
+{
+    /// <summary>The default bound on retained output, 4 million characters.</summary>
+    public const int DefaultMaxOutputChars = 4 * 1024 * 1024;
+}
 
 /// <summary>How a process ended.</summary>
 /// <param name="ExitCode">The exit code, or null when the process was killed on timeout.</param>
 /// <param name="TimedOut">True when the timeout ran out and the process tree was killed.</param>
-/// <param name="FullOutput">Everything written to stdout and stderr, interleaved in arrival order.</param>
-public sealed record ProcessOutcome(int? ExitCode, bool TimedOut, string FullOutput);
+/// <param name="FullOutput">The end of what was written to stdout and stderr, interleaved in arrival order. Bounded by <see cref="ProcessSpec.MaxOutputChars"/>: a longer output loses its oldest part.</param>
+/// <param name="StartError">Why the process could not be started, or null when it started.</param>
+/// <param name="ErrorLineCount">How many output lines were error lines, counted as they arrived, so output dropped from the front of <paramref name="FullOutput"/> is still counted.</param>
+public sealed record ProcessOutcome(int? ExitCode, bool TimedOut, string FullOutput, string? StartError = null, int ErrorLineCount = 0);
 
 /// <summary>Runs one process to completion or timeout.</summary>
 public interface ISandboxProcessRunner

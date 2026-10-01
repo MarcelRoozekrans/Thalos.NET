@@ -79,7 +79,7 @@ public sealed class SandboxToolsTests
     /// <summary>
     /// S-argument-injection. Red: drop the regex from SandboxTools.IsValidFilter, which lets "--logger x", "a;b" and "$(x)"
     /// through and turns the theory red; separately, drop the StartsWith('-') check, which turns "-p:X=1" red because
-    /// it matches the character class.
+    /// it matches the character class; and change the pattern's \z back to $, which turns the trailing-newline case red.
     /// </summary>
     [Theory]
     [InlineData("--logger x")]
@@ -107,17 +107,37 @@ public sealed class SandboxToolsTests
         (await Tools().Test(Caller(), new string('a', 256))).Should().StartWith("exit: 0");
     }
 
-    /// <summary>Red: return a workspace from the tool without checking the caller's run claim, or let a null workspace through to the runner.</summary>
+    /// <summary>Red: in SandboxTools.FindWorkspaceAsync look the workspace up with a fallback run id instead of requiring the caller's run claim, as in `RunIdOf(caller) ?? knownId`.</summary>
     [Fact]
-    public async Task A_caller_without_a_run_is_refused()
+    public async Task A_caller_without_a_run_claim_is_refused()
     {
         var tools = Tools();
 
         (await tools.Build(new TestCaller(NoClaims))).Should().StartWith("error:");
         (await tools.Test(new TestCaller(NoClaims))).Should().StartWith("error:");
-        _workspaces.Workspace = null;
-        (await tools.Build(Caller())).Should().StartWith("error:");
         _runner.Specs.Should().BeEmpty();
+    }
+
+    /// <summary>Red: in SandboxTools.Build and Test drop the null check on the found workspace, so a missing one reaches the runner or throws.</summary>
+    [Fact]
+    public async Task A_run_with_no_workspace_is_refused()
+    {
+        var tools = Tools();
+        _workspaces.Workspace = null;
+
+        (await tools.Build(Caller())).Should().StartWith("error:");
+        (await tools.Test(Caller())).Should().StartWith("error:");
+        _runner.Specs.Should().BeEmpty();
+    }
+
+    /// <summary>Red: drop the StartError branch in SandboxTools.Format, which then fails on the null exit code.</summary>
+    [Fact]
+    public async Task A_process_that_cannot_start_is_reported_not_thrown()
+    {
+        _runner.Next = new ProcessOutcome(null, false, "", StartError: "No such file");
+
+        (await Tools().Build(Caller())).Should().Be("error: could not start dotnet: No such file");
+        (await Tools().Test(Caller())).Should().Be("error: could not start dotnet: No such file");
     }
 
     /// <summary>Red: compute the test summary from the tailed output instead of the full output.</summary>
@@ -161,11 +181,11 @@ public sealed class SandboxToolsTests
         result.Should().EndWith("partial");
     }
 
-    /// <summary>Red: stop counting error lines in SandboxTools.BuildSummary.</summary>
+    /// <summary>Red: stop using outcome.ErrorLineCount for the build summary, e.g. hardcode 0.</summary>
     [Fact]
     public async Task The_build_summary_counts_error_lines()
     {
-        _runner.Next = new ProcessOutcome(1, false, "/work/A.cs(1,1): error CS1002: ; expected\n/work/B.cs(2,2): error CS0103: x\n");
+        _runner.Next = new ProcessOutcome(1, false, "", ErrorLineCount: 2);
 
         var result = await Tools().Build(Caller());
 
