@@ -73,7 +73,7 @@ public sealed record SandboxSpec
         {
             [SandboxEnvironment.RunId] = RunId.ToString("D"),
             [SandboxEnvironment.Token] = Token,
-            [SandboxEnvironment.WriteExtensions] = AllowedWriteExtensions is null ? "*" : string.Join(';', AllowedWriteExtensions.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal)),
+            [SandboxEnvironment.WriteExtensions] = AllowedWriteExtensions is null ? "*" : string.Join(';', AllowedWriteExtensions.Order(StringComparer.Ordinal).Distinct(StringComparer.OrdinalIgnoreCase)),
             [SandboxEnvironment.ProtectedPaths] = string.Join(';', ProtectedPaths.Entries),
             ["HTTPS_PROXY"] = egressProxy.ToString(),
             ["HTTP_PROXY"] = egressProxy.ToString(),

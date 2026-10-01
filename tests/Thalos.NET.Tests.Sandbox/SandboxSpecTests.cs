@@ -39,12 +39,12 @@ public sealed class SandboxSpecTests
     public void An_extension_list_is_semicolon_joined() =>
         Spec(new HashSet<string>(StringComparer.Ordinal) { ".csproj", ".cs" }).Environment(new Uri("http://e:1"))[SandboxEnvironment.WriteExtensions].Should().Be(".cs;.csproj");
 
-    /// <summary>Red: drop the Distinct from the extension projection.</summary>
+    /// <summary>Red: drop the Distinct, or Distinct before Order. The set holds ".cs" first, so Distinct-then-Order keeps ".cs" and fails.</summary>
     [Fact]
     public void Extensions_are_deduplicated_ignoring_case_and_ordered()
     {
         var ext = new HashSet<string>(StringComparer.Ordinal) { ".cs", ".CS", ".csproj" };
-        Spec(ext).Environment(new Uri("http://e:1"))[SandboxEnvironment.WriteExtensions].Should().BeOneOf(".cs;.csproj", ".CS;.csproj");
+        Spec(ext).Environment(new Uri("http://e:1"))[SandboxEnvironment.WriteExtensions].Should().Be(".CS;.csproj");
     }
 
     /// <summary>Red: change the ProtectedPaths separator, use "N" for RunId, or alter any fixed value.</summary>
