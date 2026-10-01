@@ -91,6 +91,44 @@ public sealed class HostActionDispatchTests
     }
 
     [Fact]
+    public async Task A_retried_action_node_runs_the_action_again_and_advances()
+    {
+        var action = RecordingAction.FailingThenReturning(ActionName, "push failed", new HostActionResult("published", Vars(("pr_url", "https://x/1"))));
+        var (dispatcher, store, message) = await ArrangeAsync(NextActionYaml, [action]);
+
+        await dispatcher.DispatchAsync(message, CancellationToken.None);
+        var failed = await store.FindAsync(message.RunId, CancellationToken.None);
+
+        // Red if FailingThenReturning never fails its first call: the run is Succeeded here.
+        failed!.Status.Should().Be(WorkflowStatus.Failed);
+
+        var retried = await store.RetryFailedNodeAsync(message.RunId, new WorkflowRetryRequest { ExpectedSeq = failed.CurrentSeq, RetriedBy = new RunPrincipal("op", ["admin"]) }, CancellationToken.None);
+
+        // Red if the fake's retry refuses a Failed action-node run.
+        retried.IsSuccess.Should().BeTrue(retried.IsFailure ? retried.Error : "");
+
+        // Red if the fake's retry enqueues nothing: TakeNext returns null.
+        var next = store.TakeNext(message.RunId);
+        next.Should().NotBeNull();
+        await dispatcher.DispatchAsync(next!, CancellationToken.None);
+
+        // Red if the retry dispatches at a seq the dispatcher drops: the action runs once, not twice.
+        action.Calls.Should().Be(2);
+        var run = await store.FindAsync(message.RunId, CancellationToken.None);
+
+        // Red for the same reason: the run stays at publish.
+        run!.CurrentNode.Should().Be("done");
+
+        // Red if the retried dispatch advances no further: there is no message for the terminal node to take.
+        var terminal = store.TakeNext(message.RunId);
+        terminal.Should().NotBeNull();
+        await dispatcher.DispatchAsync(terminal!, CancellationToken.None);
+
+        // Red if the retry leaves the run Failed, or the terminal node is not reached: the run is not Succeeded.
+        (await store.FindAsync(message.RunId, CancellationToken.None))!.Status.Should().Be(WorkflowStatus.Succeeded);
+    }
+
+    [Fact]
     public async Task An_unregistered_action_fails_the_run_at_dispatch()
     {
         // Registered under the same name in a different case: IWorkflowHostAction.Name is compared ordinally.
