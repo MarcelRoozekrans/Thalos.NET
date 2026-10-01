@@ -141,7 +141,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     IEnumerable<IRunWorkspaceObserver> observers,
     ILogger<GitWorktreeWorkspaceProvider> logger,
     TimeProvider clock,
-    IGitCredentialSource? credentials = null) : IRunWorkspaceProvider
+    IGitCredentialSource? credentials = null) : IRunWorkspaceProvider, IRunBaseFileReader, IRunWorkspaceHandoff
 {
     /// <summary>
     /// How old a claim or publish temp file must be before <see cref="ListAsync"/> sweeps it. A write takes
@@ -160,6 +160,26 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     /// which .NET's own file APIs normalise away, fails in <c>link(2)</c> and in git.
     /// </summary>
     private readonly string _dataRoot = Path.GetFullPath(options.DataRoot);
+
+    /// <summary>Whether <paramref name="value"/> is exactly 40 lowercase hex digits, a full sha-1 commit id.</summary>
+    private static bool IsFullSha(string value)
+    {
+        const int ShaLength = 40;
+        if (value.Length != ShaLength)
+        {
+            return false;
+        }
+
+        foreach (var c in value)
+        {
+            if (!char.IsAsciiHexDigitLower(c))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     private readonly GitCli _git = new(options);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _repositoryLocks = new(StringComparer.Ordinal);
@@ -304,6 +324,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
                 $"'{root}' already exists but no workspace record owns it; refusing to use or delete it."));
         }
 
+        string baseCommit;
         using (await LockRepositoryAsync(request.Repository, ct).ConfigureAwait(false))
         {
             var prepared = await PrepareMirrorAsync(mirror, request.Remote, secretConfig, secret, ct).ConfigureAwait(false);
@@ -312,15 +333,10 @@ public sealed partial class GitWorktreeWorkspaceProvider(
                 return Result<RunWorkspace, AgentError>.Failure(prepared.Error);
             }
 
-            var branchExists = await BranchExistsAsync(mirror, request.Branch, ct).ConfigureAwait(false);
-            if (branchExists.IsFailure)
+            var branchFree = await EnsureBranchIsFreeAsync(mirror, request.Branch, ct).ConfigureAwait(false);
+            if (branchFree.IsFailure)
             {
-                return Result<RunWorkspace, AgentError>.Failure(branchExists.Error);
-            }
-
-            if (branchExists.Value)
-            {
-                return Result<RunWorkspace, AgentError>.Failure(AgentError.GitBranchAlreadyExists(request.Branch));
+                return Result<RunWorkspace, AgentError>.Failure(branchFree.Error);
             }
 
             // Set before the call: a cancellation mid-checkout can leave a partial root, registration and branch, and
@@ -331,6 +347,8 @@ public sealed partial class GitWorktreeWorkspaceProvider(
             {
                 return Result<RunWorkspace, AgentError>.Failure(added.Error);
             }
+
+            baseCommit = added.Value;
         }
 
         var solution = ResolveSolution(root, request.Solution);
@@ -344,7 +362,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         // first clone or a queued mirror lock that may itself take longer than the grace (ruling R9). The claim-time
         // stamp still matters for a provisional record, which ListAsync reports: it only decides when a sweeper first
         // tries to remove the record, and the run lock decides whether that removal goes ahead.
-        var workspace = provisional with { SolutionPath = solution.Value, CreatedAt = clock.GetUtcNow() };
+        var workspace = provisional with { SolutionPath = solution.Value, CreatedAt = clock.GetUtcNow(), BaseCommit = baseCommit };
         var published = await PublishSidecarAsync(new WorkspaceSidecar(WorkspaceSidecarState.Ready, workspace), ct).ConfigureAwait(false);
         if (published.IsFailure)
         {
@@ -565,6 +583,55 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
         var (removed, pruned, branchDeleted) = await RemoveWorktreeAndBranchAsync(mirror, root, branch, ct).ConfigureAwait(false);
         return InterpretRemoval(root, removed, pruned, branchDeleted);
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<Result<string?, AgentError>> ReadBaseFileAsync(Guid runId, string relativePath, CancellationToken ct)
+    {
+        var ws = await FindAsync(runId, ct).ConfigureAwait(false);
+        if (ws is null)
+        {
+            return Result<string?, AgentError>.Failure(AgentError.Validation($"Run '{runId}' has no workspace."));
+        }
+
+        if (ws.BaseCommit is null)
+        {
+            return Result<string?, AgentError>.Failure(AgentError.Validation($"The workspace of run '{runId}' has no recorded base commit."));
+        }
+
+        var resolved = WorkspacePath.Resolve(ws.Root, relativePath);
+        if (resolved.IsFailure)
+        {
+            return Result<string?, AgentError>.Failure(resolved.Error);
+        }
+
+        // WorkspacePath.Resolve confined the path; the object name is its lexically normalised relative form with
+        // forward slashes, which is how git addresses a tree entry on every OS.
+        var rootFull = Path.GetFullPath(ws.Root);
+        var relative = Path.GetRelativePath(rootFull, Path.GetFullPath(Path.Combine(rootFull, relativePath))).Replace(Path.DirectorySeparatorChar, '/');
+        var spec = $"{ws.BaseCommit}:{relative}";
+
+        var exists = await _git.RunAsync(ws.Root, ["cat-file", "-e", spec], null, null, ct).ConfigureAwait(false);
+        if (!exists.Succeeded)
+        {
+            return exists.TimedOut
+                ? Result<string?, AgentError>.Failure(GitFailure("git cat-file timed out.", exists, secret: null))
+                : Result<string?, AgentError>.Success(null);
+        }
+
+        var shown = await _git.RunAsync(ws.Root, ["show", spec], null, null, ct).ConfigureAwait(false);
+        return shown.Succeeded
+            ? Result<string?, AgentError>.Success(shown.StdOut)
+            : Result<string?, AgentError>.Failure(GitFailure("git show of the base file failed.", shown, secret: null));
+    }
+
+    /// <inheritdoc />
+    public async ValueTask<Result<RunWorkspace, AgentError>> CheckoutForPublishAsync(Guid runId, CancellationToken ct)
+    {
+        var ws = await FindAsync(runId, ct).ConfigureAwait(false);
+        return ws is null
+            ? Result<RunWorkspace, AgentError>.Failure(AgentError.Validation($"Run '{runId}' has no workspace."))
+            : Result<RunWorkspace, AgentError>.Success(ws);
     }
 
     // ---------- mirror + worktree ----------
@@ -808,6 +875,20 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         return Directory.Exists(worktreesDir) && Directory.EnumerateFileSystemEntries(worktreesDir).Any();
     }
 
+    /// <summary>Fails with <see cref="AgentError.GitBranchAlreadyExists"/> when <paramref name="branch"/> exists in <paramref name="mirror"/>.</summary>
+    private async Task<UnitResult<AgentError>> EnsureBranchIsFreeAsync(string mirror, string branch, CancellationToken ct)
+    {
+        var exists = await BranchExistsAsync(mirror, branch, ct).ConfigureAwait(false);
+        if (exists.IsFailure)
+        {
+            return UnitResult<AgentError>.Failure(exists.Error);
+        }
+
+        return exists.Value
+            ? UnitResult<AgentError>.Failure(AgentError.GitBranchAlreadyExists(branch))
+            : UnitResult<AgentError>.Success();
+    }
+
     /// <summary>
     /// Whether <paramref name="branch"/> already exists in <paramref name="mirror"/>. Checked before
     /// <c>git worktree add -b</c>, so that a branch present afterwards is known to be this create's own and its undo
@@ -826,7 +907,8 @@ public sealed partial class GitWorktreeWorkspaceProvider(
             : Result<bool, AgentError>.Failure(GitFailure("git show-ref for the run branch failed.", shown, secret: null));
     }
 
-    private async Task<UnitResult<AgentError>> AddWorktreeAsync(string mirror, string root, RunWorkspaceRequest request, CancellationToken ct)
+    /// <summary>Adds the run's worktree and returns the full sha it was cut from.</summary>
+    private async Task<Result<string, AgentError>> AddWorktreeAsync(string mirror, string root, RunWorkspaceRequest request, CancellationToken ct)
     {
         // --no-track: without it, branch.autoSetupMerge's default writes branch.<Branch>.remote and
         // branch.<Branch>.merge into the mirror's shared config, keyed by this run's own branch name — one more
@@ -835,15 +917,21 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         // --no-track keeps the mirror's config within MirrorConfigSurface's fixed allow-list (fix round 2 ruling).
         var added = await _git.RunAsync(
             mirror,
-            ["worktree", "add", "--no-track", "-b", request.Branch, "--", root, $"origin/{request.DefaultBranch}"],
+            ["worktree", "add", "--no-track", "-b", request.Branch, "--", root, request.StartPoint ?? $"origin/{request.DefaultBranch}"],
             ["core.symlinks=false"],
             null,
             ct).ConfigureAwait(false);
 
         // A failed add is undone by UndoCreateAsync, together with every other way a create can end incomplete.
-        return added.Succeeded
-            ? UnitResult<AgentError>.Success()
-            : UnitResult<AgentError>.Failure(GitFailure("git worktree add failed.", added, secret: null));
+        if (!added.Succeeded)
+        {
+            return Result<string, AgentError>.Failure(GitFailure("git worktree add failed.", added, secret: null));
+        }
+
+        var head = await _git.RunAsync(root, ["rev-parse", "HEAD"], null, null, ct).ConfigureAwait(false);
+        return head.Succeeded
+            ? Result<string, AgentError>.Success(head.StdOut.Trim())
+            : Result<string, AgentError>.Failure(GitFailure("git rev-parse HEAD failed.", head, secret: null));
     }
 
     /// <summary>
@@ -1068,6 +1156,11 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         if (request.Branch.StartsWith('-'))
         {
             return AgentError.Validation($"Branch '{request.Branch}' must not start with '-'.");
+        }
+
+        if (request.StartPoint is not null && !IsFullSha(request.StartPoint))
+        {
+            return AgentError.Validation("StartPoint must be a full 40-character commit sha.");
         }
 
         return null;

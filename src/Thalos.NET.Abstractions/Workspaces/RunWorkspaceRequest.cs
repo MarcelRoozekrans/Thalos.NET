@@ -17,4 +17,8 @@ namespace Thalos.Workspaces;
 /// Path to the solution file to build, relative to the workspace root. <see langword="null"/> when the repository
 /// has no solution file, or the run does not need one.
 /// </param>
-public sealed record RunWorkspaceRequest(Guid RunId, string Repository, string Remote, string DefaultBranch, string Branch, string? Solution);
+public sealed record RunWorkspaceRequest(Guid RunId, string Repository, string Remote, string DefaultBranch, string Branch, string? Solution)
+{
+    /// <summary>A full commit sha to cut the run branch from instead of <c>origin/&lt;DefaultBranch&gt;</c>; null for the default.</summary>
+    public string? StartPoint { get; init; }
+}
