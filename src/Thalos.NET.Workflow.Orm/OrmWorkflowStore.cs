@@ -138,7 +138,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             fromNode: null, toNode: startNode,
             status: WorkflowStatus.Running, awaitingSignal: null,
             outcome: null, variables: seeded.Count == 0 ? null : seeded, error: null, usage: null,
-            kind: nameof(WorkflowEventKind.Entered), ct).ConfigureAwait(false);
+            kind: nameof(WorkflowEventKind.Entered), actor: null, ct).ConfigureAwait(false);
 
         // The start node's own dispatch, on this same transaction. Without it a run created through this API
         // reaches Running with nothing in the outbox and nothing that will ever dispatch its start node — it
@@ -500,7 +500,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             fromNode: row.CurrentNode, toNode: row.CurrentNode,
             status: WorkflowStatus.Failed, awaitingSignal: null,
             outcome: null, variables: null, error: errorMessage, usage: null,
-            kind: nameof(WorkflowEventKind.Failed), ct).ConfigureAwait(false);
+            kind: nameof(WorkflowEventKind.Failed), actor: null, ct).ConfigureAwait(false);
 
         return true;
     }
@@ -562,9 +562,91 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             fromNode: row.CurrentNode, toNode: row.CurrentNode,
             status: WorkflowStatus.Cancelled, awaitingSignal: null,
             outcome: null, variables: null, error: reason, usage: null,
-            kind: "Cancelled", ct).ConfigureAwait(false);
+            kind: "Cancelled", actor: null, ct).ConfigureAwait(false);
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
+    }
+
+    /// <inheritdoc/>
+    public async ValueTask<Result> RetryFailedNodeAsync(Guid runId, WorkflowRetryRequest request, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(request.RetriedBy);
+
+        await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using var tx = await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+
+        var row = await ReadRunRowAsync(connection, tx, runId, ct).ConfigureAwait(false);
+        if (row is null)
+        {
+            return Result.Failure($"Workflow run '{runId}' was not found.");
+        }
+
+        if (row.Status != WorkflowStatus.Failed)
+        {
+            return Result.Failure($"Workflow run '{runId}' is {row.Status}; only a Failed run can be retried.");
+        }
+
+        if (row.CurrentSeq != request.ExpectedSeq)
+        {
+            return Result.Failure($"Workflow run '{runId}' is at seq {row.CurrentSeq}, not {request.ExpectedSeq}; it changed since it was read.");
+        }
+
+        // Resolved on the run's pinned version, as ResumeAsync does; see _definitions.
+        var definition = await _definitions.GetAsync(row.Process, row.ProcessVersion, ct).ConfigureAwait(false);
+        if (definition.IsFailure)
+        {
+            return Result.Failure(definition.Error);
+        }
+
+        if (!definition.Value.Nodes.TryGetValue(row.CurrentNode, out var node) || node.Action is null)
+        {
+            return Result.Failure($"Workflow run '{runId}' failed at '{row.CurrentNode}', which is not a host-action node; only a host-action node can be retried.");
+        }
+
+        var retriedSeq = row.CurrentSeq + 1;
+        var dispatchSeq = row.CurrentSeq + 2;
+
+        // UPDATE before INSERT, as in FailAsync and for the same reason: a losing concurrent retry fails the xmin
+        // check here and never reaches the event INSERT or the enqueue.
+        if (!await MarkRetriedAsync(connection, tx, runId, row.Xmin, dispatchSeq, ct).ConfigureAwait(false))
+        {
+            return Result.Failure($"Workflow run '{runId}' was concurrently modified.");
+        }
+
+        await InsertEventAsync(
+            connection, tx, runId, retriedSeq,
+            fromNode: row.CurrentNode, toNode: row.CurrentNode,
+            status: WorkflowStatus.Running, awaitingSignal: null,
+            outcome: null, variables: null, error: null, usage: null,
+            kind: nameof(WorkflowEventKind.Retried), actor: request.RetriedBy, ct).ConfigureAwait(false);
+
+        await EnqueueDispatchAsync(connection, tx, runId, dispatchSeq, row.CurrentNode, ct).ConfigureAwait(false);
+
+        await tx.CommitAsync(ct).ConfigureAwait(false);
+        return Result.Success();
+    }
+
+    /// <summary>
+    /// Flips a Failed run back to Running and moves its <c>current_seq</c> to <paramref name="dispatchSeq"/>, clearing
+    /// <c>last_error</c>. Names only those columns, so visits, variables, manifest, starter and last resume are left as
+    /// they are. <see langword="false"/> when the xmin check matched no row: another writer got there first.
+    /// </summary>
+    private static async Task<bool> MarkRetriedAsync(NpgsqlConnection connection, NpgsqlTransaction tx, Guid runId, long expectedXmin, long dispatchSeq, CancellationToken ct)
+    {
+        await using var update = connection.CreateCommand();
+        update.Transaction = tx;
+        update.CommandText = """
+            UPDATE workflow_run
+            SET status = @status, last_error = NULL, current_seq = @seq, updated_at = now()
+            WHERE id = @id AND xmin::text::bigint = @expectedXmin
+            """;
+        update.Parameters.AddWithValue("status", nameof(WorkflowStatus.Running));
+        update.Parameters.AddWithValue("seq", dispatchSeq);
+        update.Parameters.AddWithValue("id", runId);
+        update.Parameters.AddWithValue("expectedXmin", expectedXmin);
+
+        return await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false) == 1;
     }
 
     /// <summary>
@@ -628,7 +710,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
         await using var cmd = connection.CreateCommand();
         cmd.CommandText = """
-            SELECT seq, kind, from_node, to_node, status, outcome, error, usage, created_at
+            SELECT seq, kind, from_node, to_node, status, outcome, error, usage, created_at, actor
             FROM workflow_run_event
             WHERE run_id = @runId
             ORDER BY seq ASC
@@ -654,7 +736,8 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         Outcome: reader.IsDBNull(5) ? null : reader.GetString(5),
         Error: reader.IsDBNull(6) ? null : reader.GetString(6),
         Usage: reader.IsDBNull(7) ? null : JsonSerializer.Deserialize<TurnUsage>(reader.GetString(7), ManifestJsonOptions),
-        CreatedAt: reader.GetFieldValue<DateTimeOffset>(8));
+        CreatedAt: reader.GetFieldValue<DateTimeOffset>(8),
+        Actor: reader.IsDBNull(9) ? null : JsonSerializer.Deserialize<RunPrincipal>(reader.GetString(9), ManifestJsonOptions));
 
     private async Task<NpgsqlConnection> OpenConnectionAsync(CancellationToken ct)
     {
@@ -716,7 +799,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             fromNode: row.CurrentNode, toNode: transition.NextNode,
             status: transition.NextStatus, awaitingSignal: transition.AwaitingSignal,
             outcome: outcome, variables: variables, error: null, usage: usage,
-            kind: transition.Kind.ToString(), ct).ConfigureAwait(false);
+            kind: transition.Kind.ToString(), actor: null, ct).ConfigureAwait(false);
 
         if (transition.NextStatus == WorkflowStatus.Running)
         {
@@ -789,13 +872,13 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         NpgsqlConnection connection, NpgsqlTransaction tx, Guid runId, long seq,
         string? fromNode, string toNode, WorkflowStatus status, string? awaitingSignal,
         string? outcome, IReadOnlyDictionary<string, object?>? variables, string? error, TurnUsage? usage,
-        string kind, CancellationToken ct)
+        string kind, RunPrincipal? actor, CancellationToken ct)
     {
         await using var cmd = connection.CreateCommand();
         cmd.Transaction = tx;
         cmd.CommandText = """
-            INSERT INTO workflow_run_event (run_id, seq, kind, from_node, to_node, status, awaiting_signal, outcome, variables, error, usage)
-            VALUES (@runId, @seq, @kind, @fromNode, @toNode, @status, @awaitingSignal, @outcome, @variables::jsonb, @error, @usage::jsonb)
+            INSERT INTO workflow_run_event (run_id, seq, kind, from_node, to_node, status, awaiting_signal, outcome, variables, error, usage, actor)
+            VALUES (@runId, @seq, @kind, @fromNode, @toNode, @status, @awaitingSignal, @outcome, @variables::jsonb, @error, @usage::jsonb, @actor::jsonb)
             """;
         cmd.Parameters.AddWithValue("runId", runId);
         cmd.Parameters.AddWithValue("seq", seq);
@@ -808,6 +891,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         cmd.Parameters.AddWithValue("variables", variables is null ? DBNull.Value : JsonSerializer.Serialize(variables));
         cmd.Parameters.AddWithValue("error", (object?)error ?? DBNull.Value);
         cmd.Parameters.AddWithValue("usage", usage is null ? DBNull.Value : JsonSerializer.Serialize(usage.Value, ManifestJsonOptions));
+        cmd.Parameters.AddWithValue("actor", actor is null ? DBNull.Value : JsonSerializer.Serialize(actor, ManifestJsonOptions));
         try
         {
             await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
@@ -815,8 +899,8 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         catch (PostgresException ex) when (string.Equals(ex.SqlState, PostgresErrorCodes.UniqueViolation, StringComparison.Ordinal) && string.Equals(ex.ConstraintName, "ix_workflow_run_event_run_id_seq", StringComparison.Ordinal))
         {
             // Defence in depth: every current caller of this method is safe from the race this mapping
-            // guards against, for two different reasons. ApplyTransitionAsync, FailAsync, and CancelAsync
-            // each run their xmin-checked UPDATE before this INSERT specifically so a losing racer throws
+            // guards against, for two different reasons. ApplyTransitionAsync, FailAsync, CancelAsync, and
+            // RetryFailedNodeAsync each run their xmin-checked UPDATE before this INSERT specifically so a losing racer throws
             // WorkflowConcurrencyException there and never reaches this statement at all: two racers can no
             // longer both attempt to insert an event at the same (run_id, seq). StartAsync is safe for an
             // unrelated reason — it inserts against a freshly generated Guid, so a (run_id, seq) collision is

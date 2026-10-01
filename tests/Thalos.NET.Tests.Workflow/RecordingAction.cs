@@ -26,6 +26,15 @@ internal sealed class RecordingAction(string name, Func<CancellationToken, Value
     public static RecordingAction Failing(string name, string error) =>
         new(name, _ => ValueTask.FromResult(Result<HostActionResult>.Failure(error)));
 
+    /// <summary>Fails its first call with <paramref name="error"/> and returns <paramref name="then"/> on every later one.</summary>
+    public static RecordingAction FailingThenReturning(string name, string error, HostActionResult then)
+    {
+        var calls = 0;
+        return new(name, _ => ValueTask.FromResult(++calls == 1
+            ? Result<HostActionResult>.Failure(error)
+            : Result<HostActionResult>.Success(then)));
+    }
+
     public static RecordingAction Throwing(string name, Exception exception) =>
         new(name, _ => throw exception);
 

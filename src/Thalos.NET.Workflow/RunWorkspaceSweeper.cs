@@ -29,10 +29,13 @@ namespace Thalos.Workflow;
 /// <para>
 /// <b>Check, then act.</b> Each workspace's run is read from <see cref="IWorkflowStore"/> immediately before that
 /// workspace's removal, never from a snapshot taken for the whole sweep. The only states that lead to removal are
-/// the terminal ones, and <see cref="IWorkflowStore"/> never moves a run out of a terminal status — see its remarks —
-/// so a run read as removable stays removable while <see cref="IWorkflowStore"/> is asked nothing further; in
-/// particular a Failed or Cancelled run can never gain a <see cref="WorkflowRun.LastResume"/>, because only a run
-/// <see cref="WorkflowStatus.Awaiting"/> can be resumed. The one decision with a window left is the orphan's: a run
+/// the terminal ones. <see cref="IWorkflowStore"/> never moves a run out of Succeeded or Cancelled, so a run read as
+/// either stays removable. A run read as Failed with no <see cref="WorkflowRun.LastResume"/> is the exception: the
+/// store's retry can move it back to Running between the read and the removal, and that retry then finds no
+/// workspace, so its action fails the run again. That fails closed, and loses no work that was not already
+/// unrecoverable without the workspace. A Failed or Cancelled run can still never gain a
+/// <see cref="WorkflowRun.LastResume"/>, because only a run <see cref="WorkflowStatus.Awaiting"/> can be resumed. The
+/// one other decision with a window left is the orphan's: a run
 /// row written for a workspace older than <see cref="OrphanGrace"/> after the sweep read none. That is a host that
 /// stalled for longer than the grace period between creating the worktree and starting the run, and it fails
 /// closed: the run finds no workspace and its write-granted nodes are refused.

@@ -10,15 +10,20 @@ namespace Thalos.Workflow;
 /// memory.
 /// </summary>
 /// <remarks>
-/// <b>Terminal statuses are final.</b> No member moves a run out of <see cref="WorkflowStatus.Succeeded"/>,
-/// <see cref="WorkflowStatus.Failed"/> or <see cref="WorkflowStatus.Cancelled"/>: <see cref="CompleteNodeAsync"/>
+/// <b>Terminal statuses are final, with one exception.</b> No member moves a run out of <see cref="WorkflowStatus.Succeeded"/>
+/// or <see cref="WorkflowStatus.Cancelled"/>, and only <see cref="RetryFailedNodeAsync"/> moves one out of
+/// <see cref="WorkflowStatus.Failed"/>: back to <see cref="WorkflowStatus.Running"/> at the same node, and only
+/// when that node is a host-action node. <see cref="CompleteNodeAsync"/>
 /// refuses a run that is not <see cref="WorkflowStatus.Running"/>, <see cref="ResumeAsync"/> refuses one that is not
 /// <see cref="WorkflowStatus.Awaiting"/> and so never records a <see cref="WorkflowRun.LastResume"/> on a terminal
 /// run, and <see cref="FailAsync"/>, <see cref="FailStrandedAsync"/> and <see cref="CancelAsync"/> are no-ops on one.
 /// A run those three end, parked at a gate or not, is left with a <see langword="null"/>
 /// <see cref="WorkflowRun.AwaitingSignal"/>, since it awaits nothing any more.
 /// <see cref="RunWorkspaceSweeper"/> relies on this: it reads a run's status and then removes its workspace, with no
-/// lock between the two, and that is safe only because a run it reads as terminal stays exactly as it read it.
+/// lock between the two. A run it reads as Succeeded or Cancelled stays that way. A run it reads as Failed with no
+/// <see cref="WorkflowRun.LastResume"/> can be retried between the read and the removal; that retry then finds no
+/// workspace, and its action fails the run again. It fails closed, and no work is lost that was not already
+/// unrecoverable without the workspace.
 /// </remarks>
 public interface IWorkflowStore
 {
@@ -156,6 +161,34 @@ public interface IWorkflowStore
 
     /// <summary>Cancels a run for <paramref name="reason"/> before it reaches a terminal node.</summary>
     ValueTask CancelAsync(Guid runId, string reason, CancellationToken ct);
+
+    /// <summary>
+    /// Re-runs the host-action node a run failed at. In one transaction: the run must be
+    /// <see cref="WorkflowStatus.Failed"/>, at <see cref="WorkflowRetryRequest.ExpectedSeq"/>, at a node whose
+    /// definition sets <see cref="ProcessNode.Action"/>. Then <see cref="WorkflowRun.Status"/> becomes
+    /// <see cref="WorkflowStatus.Running"/>, <see cref="WorkflowRun.LastError"/> is cleared, a
+    /// <see cref="WorkflowEventKind.Retried"/> event carrying <see cref="WorkflowRetryRequest.RetriedBy"/> is
+    /// recorded at <c>ExpectedSeq + 1</c>, and the node is dispatched at <c>ExpectedSeq + 2</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Host-action nodes only.</b> A host action runs host code against state the run already holds, so running it
+    /// again costs nothing an operator did not already approve. An agent node's turn is a model call, and a
+    /// failed one is a different decision, which this member does not make.
+    /// </para>
+    /// <para>
+    /// <b>Nothing else changes.</b> <see cref="WorkflowRun.Visits"/>, <see cref="WorkflowRun.Variables"/>,
+    /// <see cref="WorkflowRun.Manifest"/>, <see cref="WorkflowRun.StartedBy"/> and <see cref="WorkflowRun.LastResume"/>
+    /// are left as they are. A retry is not an entry. The approval the run carried is still the approval the action acts on.
+    /// </para>
+    /// <para>
+    /// Every refusal surfaces as <see cref="Result.Failure"/> and writes nothing: the run is not found, not Failed,
+    /// past <see cref="WorkflowRetryRequest.ExpectedSeq"/>, at a node that is not a host action, on a definition
+    /// that no longer resolves, or a concurrent write won the xmin check. A null
+    /// <see cref="WorkflowRetryRequest.RetriedBy"/> is a programming error and throws <see cref="ArgumentNullException"/>.
+    /// </para>
+    /// </remarks>
+    ValueTask<Result> RetryFailedNodeAsync(Guid runId, WorkflowRetryRequest request, CancellationToken ct);
 
     /// <summary>
     /// Finds runs stranded by a dead-lettered dispatch message, for <see cref="WorkflowRunReconciler"/> to
