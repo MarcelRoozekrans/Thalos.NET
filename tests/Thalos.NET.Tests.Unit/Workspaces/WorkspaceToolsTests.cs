@@ -1091,6 +1091,38 @@ public sealed class WorkspaceToolsTests : IDisposable
         (await tools.WriteFile(caller, "notes.md", "x")).Should().StartWith("wrote");
     }
 
+    /// <summary>Red: keep the old exact-match IsProtected.</summary>
+    [Fact]
+    public async Task Write_is_refused_under_a_protected_directory_prefix()
+    {
+        var (tools, _, root) = Build(protectedPaths: [".github/"]);
+
+        var result = await tools.WriteFile(Caller(RunId), ".github/workflows/x.yml", "x");
+
+        result.Should().StartWith("error:").And.Contain("protected");
+        File.Exists(Path.Combine(root, ".github", "workflows", "x.yml")).Should().BeFalse();
+    }
+
+    /// <summary>Red: ignore AllowAnyWriteExtension.</summary>
+    [Fact]
+    public async Task Any_extension_is_writable_when_the_ceiling_allows_any()
+    {
+        var (tools, _, root) = Build(allowedWriteExtensions: new HashSet<string>(StringComparer.OrdinalIgnoreCase), allowAnyWriteExtension: true);
+
+        (await tools.WriteFile(Caller(RunId), "Lib.csproj", "<Project />")).Should().StartWith("wrote");
+        File.Exists(Path.Combine(root, "Lib.csproj")).Should().BeTrue();
+    }
+
+    /// <summary>Red: return early on AllowAnyWriteExtension before the claim check.</summary>
+    [Fact]
+    public async Task A_callers_extension_claim_still_narrows_an_any_ceiling()
+    {
+        var (tools, _, root) = Build(allowedWriteExtensions: new HashSet<string>(StringComparer.OrdinalIgnoreCase), allowAnyWriteExtension: true);
+
+        (await tools.WriteFile(Caller(RunId, writeExtensions: ".cs"), "Lib.csproj", "<Project />")).Should().StartWith("error: extension '.csproj'");
+        File.Exists(Path.Combine(root, "Lib.csproj")).Should().BeFalse();
+    }
+
     /// <summary>A claim that is present but blank is a grant of zero extensions, not "no grant" — only an absent claim falls back to the ceiling.</summary>
     [Fact]
     public async Task A_blank_grant_claim_refuses_every_write()
@@ -1703,6 +1735,7 @@ public sealed class WorkspaceToolsTests : IDisposable
     private (WorkspaceTools Tools, FakeChangeListener Listener, string Root) Build(
         IReadOnlySet<string>? allowedWriteExtensions = null,
         IEnumerable<string>? protectedPaths = null,
+        bool allowAnyWriteExtension = false,
         int? maxReadBytes = null,
         int? maxListEntries = null,
         TimeSpan? contentionTimeout = null,
@@ -1717,6 +1750,7 @@ public sealed class WorkspaceToolsTests : IDisposable
         {
             AllowedWriteExtensions = allowedWriteExtensions ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cs", ".md" },
         };
+        options.AllowAnyWriteExtension = allowAnyWriteExtension;
         if (maxReadBytes is { } bytes)
         {
             options.MaxReadBytes = bytes;

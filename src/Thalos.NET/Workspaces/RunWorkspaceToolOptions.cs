@@ -14,7 +14,14 @@ public sealed class RunWorkspaceToolOptions
     /// </summary>
     public required IReadOnlySet<string> AllowedWriteExtensions { get; init; }
 
-    /// <summary>Repository-relative paths that may be read but never written, e.g. a host's standing-instructions file.</summary>
+    /// <summary>
+    /// When true, the host-wide ceiling allows every extension, and only a caller's
+    /// <c>thalos.workspace.write_extensions</c> claim narrows it. Only for workspaces whose build files are never evaluated
+    /// on the host, such as a run sandbox. A host that loads a run's solution in-process must keep an extension list.
+    /// </summary>
+    public bool AllowAnyWriteExtension { get; set; }
+
+    /// <summary>Repository-relative paths that may be read but never written, e.g. a host's standing-instructions file. An entry ending in <c>/</c> protects that directory and everything under it.</summary>
     public IList<string> ProtectedPaths { get; } = [];
 
     /// <summary><c>read_file</c> refuses a file larger than this many bytes. Default 256 KiB.</summary>

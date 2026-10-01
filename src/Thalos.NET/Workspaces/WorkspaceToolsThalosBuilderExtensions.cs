@@ -40,4 +40,22 @@ public static class WorkspaceToolsThalosBuilderExtensions
         builder.Services.AddSingleton(options);
         return builder.AddLocalTools(RunWorkspaceToolOptions.SourceName, typeof(WorkspaceTools));
     }
+
+    /// <summary>
+    /// Enables the <c>workspace__*</c> file tools with every option set by <paramref name="configure"/>, including
+    /// <see cref="RunWorkspaceToolOptions.AllowAnyWriteExtension"/>. The ceiling starts empty.
+    /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="configure"/> left a value that cannot work.</exception>
+    [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
+    [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
+    public static ThalosBuilder UseRunWorkspaceTools(this ThalosBuilder builder, Action<RunWorkspaceToolOptions> configure)
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentNullException.ThrowIfNull(configure);
+        var options = new RunWorkspaceToolOptions { AllowedWriteExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase) };
+        configure(options);
+        options.Validate(nameof(configure));
+        builder.Services.AddSingleton(options);
+        return builder.AddLocalTools(RunWorkspaceToolOptions.SourceName, typeof(WorkspaceTools));
+    }
 }
