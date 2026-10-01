@@ -1,4 +1,5 @@
 using Thalos.Workspaces;
+using ZeroAlloc.Results;
 
 namespace Thalos.Sandbox;
 
@@ -14,10 +15,10 @@ public sealed record SandboxSpec
     /// <summary>Per-sandbox bearer token, 32 random bytes as base64url. The host requires it on every request.</summary>
     public required string Token { get; init; }
 
-    /// <summary>null = any extension.</summary>
+    /// <summary>null = any extension, which is "*" on the wire. Entries must not be empty, contain a semicolon or be "*"; <see cref="Validate"/> enforces that.</summary>
     public required IReadOnlySet<string>? AllowedWriteExtensions { get; init; }
 
-    /// <summary>Paths a change may not touch.</summary>
+    /// <summary>Paths a change may not touch. Entries must not contain a semicolon; <see cref="Validate"/> enforces that.</summary>
     public required ProtectedPathSet ProtectedPaths { get; init; }
 
     /// <summary>Resource limits.</summary>
@@ -25,6 +26,42 @@ public sealed record SandboxSpec
 
     /// <summary>The run id in "N" format.</summary>
     public string SandboxId => RunId.ToString("N");
+
+    /// <summary>Checks that nothing in the spec can corrupt the semicolon-joined environment values.</summary>
+    /// <returns>Success, or a validation error naming the offending entry.</returns>
+    public UnitResult<AgentError> Validate()
+    {
+        if (AllowedWriteExtensions is not null)
+        {
+            foreach (var ext in AllowedWriteExtensions)
+            {
+                if (string.IsNullOrWhiteSpace(ext))
+                {
+                    return UnitResult<AgentError>.Failure(AgentError.Validation("An allowed write extension must not be empty or whitespace."));
+                }
+
+                if (ext.Contains(';', StringComparison.Ordinal))
+                {
+                    return UnitResult<AgentError>.Failure(AgentError.Validation($"Allowed write extension '{ext}' must not contain a semicolon."));
+                }
+
+                if (string.Equals(ext, "*", StringComparison.Ordinal))
+                {
+                    return UnitResult<AgentError>.Failure(AgentError.Validation("The allowed write extension '*' is reserved for any; use a null set instead."));
+                }
+            }
+        }
+
+        foreach (var entry in ProtectedPaths.Entries)
+        {
+            if (entry.Contains(';', StringComparison.Ordinal))
+            {
+                return UnitResult<AgentError>.Failure(AgentError.Validation($"Protected path '{entry}' must not contain a semicolon."));
+            }
+        }
+
+        return UnitResult<AgentError>.Success();
+    }
 
     /// <summary>The container's complete environment (S1): the runtime passes exactly this and nothing else.</summary>
     /// <param name="egressProxy">The only route out of the sandbox.</param>
@@ -36,7 +73,7 @@ public sealed record SandboxSpec
         {
             [SandboxEnvironment.RunId] = RunId.ToString("D"),
             [SandboxEnvironment.Token] = Token,
-            [SandboxEnvironment.WriteExtensions] = AllowedWriteExtensions is null ? "*" : string.Join(';', AllowedWriteExtensions),
+            [SandboxEnvironment.WriteExtensions] = AllowedWriteExtensions is null ? "*" : string.Join(';', AllowedWriteExtensions.Distinct(StringComparer.OrdinalIgnoreCase).Order(StringComparer.Ordinal)),
             [SandboxEnvironment.ProtectedPaths] = string.Join(';', ProtectedPaths.Entries),
             ["HTTPS_PROXY"] = egressProxy.ToString(),
             ["HTTP_PROXY"] = egressProxy.ToString(),

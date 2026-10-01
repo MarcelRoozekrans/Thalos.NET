@@ -11,10 +11,10 @@ public sealed class SandboxOptions
     /// <summary>Per-sandbox resource limits.</summary>
     public SandboxLimits Limits { get; set; } = new();
 
-    /// <summary>null = any extension. Only meaningful under a sandbox.</summary>
+    /// <summary>null = any extension, which is "*" on the wire. Only meaningful under a sandbox. Entries must not contain a semicolon or be "*".</summary>
     public IReadOnlySet<string>? AllowedWriteExtensions { get; set; }
 
-    /// <summary>Extra protected path entries.</summary>
+    /// <summary>Extra protected path entries. Entries must not contain a semicolon.</summary>
     public IList<string> ProtectedPaths { get; } = [];
 
     /// <summary>How long importing a workspace may take.</summary>
