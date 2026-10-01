@@ -29,6 +29,27 @@ public sealed class GitWorkspaceThalosBuilderExtensionsTests
         }
     }
 
+    /// <summary>Red: drop either the IRunBaseFileReader or the IRunWorkspaceHandoff registration line.</summary>
+    [Fact]
+    public void UseGitWorktreeWorkspaces_registers_the_base_file_and_handoff_roles_as_the_provider_instance()
+    {
+        var dataRoot = Directory.CreateTempSubdirectory("thalos-git-di-").FullName;
+        try
+        {
+            var services = new ServiceCollection().AddLogging();
+            services.AddThalos(t => t.UseGitWorktreeWorkspaces(o => o.DataRoot = dataRoot));
+            using var sp = services.BuildServiceProvider();
+
+            var provider = sp.GetRequiredService<IRunWorkspaceProvider>();
+            sp.GetRequiredService<IRunBaseFileReader>().Should().BeSameAs(provider);
+            sp.GetRequiredService<IRunWorkspaceHandoff>().Should().BeSameAs(provider);
+        }
+        finally
+        {
+            Directory.Delete(dataRoot, recursive: true);
+        }
+    }
+
     [Fact]
     public void UseGitWorktreeWorkspaces_registers_IRunWorkspaceGit_as_a_singleton()
     {

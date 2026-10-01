@@ -606,23 +606,35 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         }
 
         // WorkspacePath.Resolve confined the path; the object name is its lexically normalised relative form with
-        // forward slashes, which is how git addresses a tree entry on every OS.
+        // forward slashes, which is how git addresses a tree entry on every OS. The path is used as given: git's
+        // tree is case-sensitive and stays the source of truth, so a wrongly-cased path reads as absent even on a
+        // case-insensitive filesystem (ruling R12).
         var rootFull = Path.GetFullPath(ws.Root);
         var relative = Path.GetRelativePath(rootFull, Path.GetFullPath(Path.Combine(rootFull, relativePath))).Replace(Path.DirectorySeparatorChar, '/');
         var spec = $"{ws.BaseCommit}:{relative}";
 
-        var exists = await _git.RunAsync(ws.Root, ["cat-file", "-e", spec], null, null, ct).ConfigureAwait(false);
-        if (!exists.Succeeded)
+        // Run against the mirror, where the objects live, so no git process runs inside a tree an agent has written to.
+        var mirror = MirrorPath(ws.Repository);
+
+        // A missing object and a non-blob object, such as a directory's tree, both read as absent.
+        var kind = await _git.RunAsync(mirror, ["cat-file", "-t", spec], null, null, ct).ConfigureAwait(false);
+        if (!kind.Succeeded)
         {
-            return exists.TimedOut
-                ? Result<string?, AgentError>.Failure(GitFailure("git cat-file timed out.", exists, secret: null))
+            return kind.TimedOut
+                ? Result<string?, AgentError>.Failure(GitFailure("git cat-file timed out.", kind, secret: null))
                 : Result<string?, AgentError>.Success(null);
         }
 
-        var shown = await _git.RunAsync(ws.Root, ["show", spec], null, null, ct).ConfigureAwait(false);
+        if (!string.Equals(kind.StdOut.Trim(), "blob", StringComparison.Ordinal))
+        {
+            return Result<string?, AgentError>.Success(null);
+        }
+
+        // cat-file blob, not show: show would apply textconv.
+        var shown = await _git.RunAsync(mirror, ["cat-file", "blob", spec], null, null, ct).ConfigureAwait(false);
         return shown.Succeeded
             ? Result<string?, AgentError>.Success(shown.StdOut)
-            : Result<string?, AgentError>.Failure(GitFailure("git show of the base file failed.", shown, secret: null));
+            : Result<string?, AgentError>.Failure(GitFailure("git cat-file of the base file failed.", shown, secret: null));
     }
 
     /// <inheritdoc />
