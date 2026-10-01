@@ -21,7 +21,7 @@ public sealed class RunWorkspaceToolOptions
     /// </summary>
     public bool AllowAnyWriteExtension { get; set; }
 
-    /// <summary>Repository-relative paths that may be read but never written, e.g. a host's standing-instructions file. An entry ending in <c>/</c> protects that directory and everything under it.</summary>
+    /// <summary>Repository-relative paths that may be read but never written, e.g. a host's standing-instructions file. An entry ending in <c>/</c> protects that directory and everything under it. The list is read once, on first tool use; later changes have no effect.</summary>
     public IList<string> ProtectedPaths { get; } = [];
 
     /// <summary><c>read_file</c> refuses a file larger than this many bytes. Default 256 KiB.</summary>

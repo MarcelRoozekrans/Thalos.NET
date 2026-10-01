@@ -1123,6 +1123,33 @@ public sealed class WorkspaceToolsTests : IDisposable
         File.Exists(Path.Combine(root, "Lib.csproj")).Should().BeFalse();
     }
 
+    /// <summary>Red: refuse whenever a claim is present, even when the claim lists the extension.</summary>
+    [Fact]
+    public async Task A_callers_extension_claim_still_permits_what_it_lists_under_an_any_ceiling()
+    {
+        var (tools, _, root) = Build(allowedWriteExtensions: new HashSet<string>(StringComparer.OrdinalIgnoreCase), allowAnyWriteExtension: true);
+
+        (await tools.WriteFile(Caller(RunId, writeExtensions: ".cs"), "Lib.cs", "class A {}")).Should().StartWith("wrote");
+        File.Exists(Path.Combine(root, "Lib.cs")).Should().BeTrue();
+    }
+
+    /// <summary>Red: the overload leaves AllowAnyWriteExtension false.</summary>
+    [Fact]
+    public async Task The_allowing_any_extension_overload_registers_an_any_ceiling()
+    {
+        var services = new ServiceCollection();
+        services.AddThalos(t => t.UseRunWorkspaceToolsAllowingAnyExtension(o => o.ProtectedPaths.Add(".github/")));
+        using var provider = services.BuildServiceProvider();
+        var options = provider.GetRequiredService<RunWorkspaceToolOptions>();
+        var root = NewTempDir("thalos-workspace-tools-");
+        var workspace = new RunWorkspace(RunId, "repo", "https://example.invalid/repo.git", "main", $"run/{RunId}", root, null);
+        var tools = new WorkspaceTools(new FakeRunWorkspaceProvider(workspace), options, [new FakeChangeListener()], NullLogger<WorkspaceTools>.Instance);
+
+        options.AllowAnyWriteExtension.Should().BeTrue();
+        (await tools.WriteFile(Caller(RunId), "Lib.csproj", "<Project />")).Should().StartWith("wrote");
+        (await tools.WriteFile(Caller(RunId), ".github/x.yml", "x")).Should().Contain("protected");
+    }
+
     /// <summary>A claim that is present but blank is a grant of zero extensions, not "no grant" — only an absent claim falls back to the ceiling.</summary>
     [Fact]
     public async Task A_blank_grant_claim_refuses_every_write()
@@ -1749,8 +1776,8 @@ public sealed class WorkspaceToolsTests : IDisposable
         var options = new RunWorkspaceToolOptions
         {
             AllowedWriteExtensions = allowedWriteExtensions ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cs", ".md" },
+            AllowAnyWriteExtension = allowAnyWriteExtension,
         };
-        options.AllowAnyWriteExtension = allowAnyWriteExtension;
         if (maxReadBytes is { } bytes)
         {
             options.MaxReadBytes = bytes;

@@ -42,18 +42,26 @@ public static class WorkspaceToolsThalosBuilderExtensions
     }
 
     /// <summary>
-    /// Enables the <c>workspace__*</c> file tools with every option set by <paramref name="configure"/>, including
-    /// <see cref="RunWorkspaceToolOptions.AllowAnyWriteExtension"/>. The ceiling starts empty.
+    /// Enables the <c>workspace__*</c> file tools with an any-extension ceiling
+    /// (<see cref="RunWorkspaceToolOptions.AllowAnyWriteExtension"/>); only a caller's own
+    /// <see cref="RunWorkspaceClaims.WriteExtensions"/> claim narrows it. Only for hosts that never evaluate a
+    /// workspace's build files on the host, such as a run sandbox. Any other host must use
+    /// <see cref="UseRunWorkspaceTools(ThalosBuilder, IReadOnlySet{string}, Action{RunWorkspaceToolOptions}?)"/> with an extension list.
     /// </summary>
+    /// <param name="builder">The builder to register on.</param>
+    /// <param name="configure">Customises protected paths and limits; runs after the any-extension ceiling is set.</param>
     /// <exception cref="ArgumentException"><paramref name="configure"/> left a value that cannot work.</exception>
     [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
     [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
-    public static ThalosBuilder UseRunWorkspaceTools(this ThalosBuilder builder, Action<RunWorkspaceToolOptions> configure)
+    public static ThalosBuilder UseRunWorkspaceToolsAllowingAnyExtension(this ThalosBuilder builder, Action<RunWorkspaceToolOptions>? configure = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
-        ArgumentNullException.ThrowIfNull(configure);
-        var options = new RunWorkspaceToolOptions { AllowedWriteExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase) };
-        configure(options);
+        var options = new RunWorkspaceToolOptions
+        {
+            AllowedWriteExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+            AllowAnyWriteExtension = true,
+        };
+        configure?.Invoke(options);
         options.Validate(nameof(configure));
         builder.Services.AddSingleton(options);
         return builder.AddLocalTools(RunWorkspaceToolOptions.SourceName, typeof(WorkspaceTools));

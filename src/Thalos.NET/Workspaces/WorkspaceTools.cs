@@ -904,9 +904,9 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
     /// <summary>Compares <paramref name="candidate"/>'s path relative to <paramref name="canonicalRoot"/> against <see cref="RunWorkspaceToolOptions.ProtectedPaths"/>, case-insensitively — never the raw input a model supplied.</summary>
     private bool IsProtected(string canonicalRoot, string candidate) => ProtectedSet.IsProtected(RelativeToRoot(canonicalRoot, candidate));
 
-    private ProtectedPathSet ProtectedSet => _protected ??= new ProtectedPathSet(options.ProtectedPaths);
-
     private ProtectedPathSet? _protected;
+
+    private ProtectedPathSet ProtectedSet => _protected ??= new ProtectedPathSet(options.ProtectedPaths);
 
     private static string RelativeToRoot(string canonicalRoot, string realPath) => NormalizeSeparators(Path.GetRelativePath(canonicalRoot, realPath));
 
