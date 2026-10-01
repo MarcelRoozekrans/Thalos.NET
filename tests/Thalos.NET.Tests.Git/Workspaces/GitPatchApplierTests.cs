@@ -384,6 +384,33 @@ public sealed class GitPatchApplierTests : IDisposable
     }
 
     /// <summary>
+    /// Fix round 2, item 3: an index already dirty with a different change, plus a patch that applies in reverse on
+    /// repetitive content, is not "already applied" — the index tree is not base plus the patch — so it fails, and the
+    /// patch is not applied on top.
+    /// Red 1: drop the tree comparison, treating any dirty index as already applied, so it succeeds.
+    /// Red 2: stop passing GIT_INDEX_FILE, so the base and the patch land in the real index, the trees match, and it
+    /// succeeds.
+    /// </summary>
+    [Fact]
+    public async Task A_dirty_index_that_is_not_exactly_the_patch_fails_instead_of_counting_as_applied()
+    {
+        const string Base = "1\nx\nx\nx\nx\nx\nx\nx\n2\n";
+        using var remote = SeededRemote(("src/R.txt", Base));
+        var ws = await WorkspaceAsync(remote);
+        var patch = BuildPatch(remote, ws, dir => File.WriteAllText(Path.Combine(dir, "src", "R.txt"), Base.Replace("1\n", "1\nx\n", StringComparison.Ordinal)));
+        File.AppendAllText(Path.Combine(ws.Root, "src", "A.cs"), "// a different change\n");
+        Git(ws.Root, "add", "src/A.cs");
+        Git(ws.Root, "apply", "--check", "--reverse", "--cached", patch);
+
+        var result = await Applier().ApplyAsync(ws, patch, Defaults, new PatchApplyLimits(), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue(result.IsSuccess ? string.Join(',', result.Value) : "");
+        result.Error.Message.Should().Be("The worktree's index already holds changes that are not exactly this patch; publish refused.");
+        File.ReadAllText(Path.Combine(ws.Root, "src", "R.txt")).Should().Be(Base, "the patch is not applied on top of a dirty index");
+        Directory.EnumerateFiles(Path.Combine(_dataRoot, "patches")).Should().BeEmpty("the private index and patch copy are deleted");
+    }
+
+    /// <summary>
     /// Important 2: paths that leave the worktree or name a .git directory are refused by the applier itself, not only
     /// by git's verify_path.
     /// Red: drop LeavesWorktreeOrNamesGitDirectory from FindRefusal. git then refuses /abs and src/.git/hooks/x itself,

@@ -19,10 +19,23 @@ public sealed record PatchApplyLimits(long MaxPatchBytes = 16 * 1024 * 1024, int
 /// <para>
 /// <b>Order.</b> The patch path must name a regular file — not a directory, link, FIFO or device. It is copied into a
 /// private file under <see cref="GitWorkspaceOptions.DataRoot"/>, and refused when it is longer than
-/// <see cref="PatchApplyLimits.MaxPatchBytes"/>. Every later step reads that copy, never the caller's file, so nothing
-/// that can still write the caller's file (a sandbox volume, say) can swap the content between the check and the
-/// apply. An empty copy is a run with no changes: nothing is applied and the re-check runs alone. Otherwise git lists
-/// the paths the patch touches, the paths are checked, and only then is anything applied.
+/// <see cref="PatchApplyLimits.MaxPatchBytes"/>. Every later step reads that copy, never the caller's file, so the
+/// content git checks is the content git applies. An empty copy is a run with no changes: nothing is applied and the
+/// re-check runs alone. Otherwise git lists the paths the patch touches, the paths are checked, and only then is
+/// anything applied.
+/// </para>
+/// <para>
+/// <b>Precondition: the patch path is trusted.</b> The patch path must be in a location the sandbox cannot write,
+/// such as a directory under the trusted <see cref="GitWorkspaceOptions.DataRoot"/>; the caller asserts it. The
+/// regular-file check and the open are two steps, so a writer that could swap the path for a FIFO between them would
+/// make the open block. Copying protects the content, not the path.
+/// </para>
+/// <para>
+/// <b>Which platforms detect a FIFO.</b> On Linux the file type comes from <c>statx</c>, so a FIFO, socket or device
+/// is refused, and an unreadable type is refused too. On Windows a directory, reparse point or device attribute is
+/// refused; FIFOs do not exist there as ordinary paths. On any other Unix, macOS and the BSDs included, .NET reports a
+/// FIFO as an ordinary file and this type has no tested way to read the file type, so every patch path is refused
+/// there, failing closed.
 /// </para>
 /// <para>
 /// <b>Both sides of a rename or copy.</b> <c>git apply --numstat -z</c> prints one name per file: the new name, or
@@ -44,10 +57,12 @@ public sealed record PatchApplyLimits(long MaxPatchBytes = 16 * 1024 * 1024, int
 /// <c>core.protectNTFS</c> and <c>core.protectHFS</c>.
 /// </para>
 /// <para>
-/// <b>Already applied.</b> A patch counts as already applied only when the index already differs from the base commit
-/// and the patch applies in reverse. On an unchanged base the patch is always applied forward: a reverse check alone
-/// passes on repetitive content the patch never touched — adding one line to a run of identical lines reverses
-/// cleanly against the base — and would drop the change silently.
+/// <b>Already applied.</b> On an index that matches the base commit the patch is always applied forward. On an index
+/// that already differs, the patch counts as already applied only when the index's tree is exactly the base commit
+/// plus the patch: the base is read into a private index file (<c>GIT_INDEX_FILE</c>, set through
+/// <see cref="GitCli"/>'s environment, never argv), the patch is applied to it with <c>--cached</c>, and the two
+/// <c>write-tree</c> results are compared. Any other dirty index fails: the patch is never applied on top of changes
+/// it did not make. A reverse check is not used, because it passes on repetitive content the patch never touched.
 /// </para>
 /// <para>
 /// <b>Re-check.</b> After applying, the staged entries against the base commit, both sides of every rename, and every
@@ -75,6 +90,10 @@ public sealed partial class GitPatchApplier(GitWorkspaceOptions options, ILogger
     /// over the limits or touching a protected path on either side of a rename; re-checks the staged names afterwards. Returns the
     /// staged paths. Idempotent: an already-applied patch succeeds without applying twice.
     /// </summary>
+    /// <remarks>
+    /// <paramref name="patchPath"/> must be in a location the sandbox cannot write, such as under the trusted
+    /// <see cref="GitWorkspaceOptions.DataRoot"/>; the caller asserts it. See the class remarks.
+    /// </remarks>
     public async Task<Result<IReadOnlyList<string>, AgentError>> ApplyAsync(
         RunWorkspace workspace, string patchPath, ProtectedPathSet protectedPaths, PatchApplyLimits limits, CancellationToken ct)
     {
@@ -221,7 +240,10 @@ public sealed partial class GitPatchApplier(GitWorkspaceOptions options, ILogger
         return Result<IReadOnlyList<string>, AgentError>.Success([.. newNames.Concat(oldNames).Distinct(StringComparer.Ordinal)]);
     }
 
-    /// <summary>Applies the patch forward, unless the index already differs from the base and the patch applies in reverse — see the class remarks.</summary>
+    /// <summary>
+    /// Applies the patch forward on an index that matches the base; on a dirty index, succeeds only when the index is
+    /// exactly the base plus the patch — see the class remarks.
+    /// </summary>
     private async Task<UnitResult<AgentError>> ApplyUnlessAlreadyAppliedAsync(string root, string copy, string baseCommit, CancellationToken ct)
     {
         var differs = await _git.RunAsync(root, ["diff", "--cached", "--quiet", baseCommit], GitConfig, null, ct).ConfigureAwait(false);
@@ -232,22 +254,63 @@ public sealed partial class GitPatchApplier(GitWorkspaceOptions options, ILogger
 
         if (differs.ExitCode == 1)
         {
-            var reverseCheck = await _git.RunAsync(root, ["apply", "--index", "--check", "--reverse", copy], GitConfig, null, ct).ConfigureAwait(false);
-            if (reverseCheck.TimedOut)
-            {
-                return UnitResult<AgentError>.Failure(GitMirrorStore.GitFailure("Could not check whether the patch is already applied.", reverseCheck, secret: null));
-            }
-
-            if (reverseCheck.Succeeded)
-            {
-                return UnitResult<AgentError>.Success();
-            }
+            return await CheckAlreadyAppliedAsync(root, copy, baseCommit, ct).ConfigureAwait(false);
         }
 
         var applied = await _git.RunAsync(root, ["apply", "--index", "--binary", "--whitespace=nowarn", copy], GitConfig, null, ct).ConfigureAwait(false);
         return applied.Succeeded
             ? UnitResult<AgentError>.Success()
             : UnitResult<AgentError>.Failure(GitMirrorStore.GitFailure("git apply failed.", applied, secret: null));
+    }
+
+    /// <summary>Succeeds only when the real index's tree equals the tree of the base commit with the patch applied.</summary>
+    private async Task<UnitResult<AgentError>> CheckAlreadyAppliedAsync(string root, string copy, string baseCommit, CancellationToken ct)
+    {
+        var expected = await TreeOfBasePlusPatchAsync(root, copy, baseCommit, ct).ConfigureAwait(false);
+        if (expected.IsFailure)
+        {
+            return UnitResult<AgentError>.Failure(expected.Error);
+        }
+
+        var actual = await RunAsync(root, ["write-tree"], "write the index tree", ct).ConfigureAwait(false);
+        if (actual.IsFailure)
+        {
+            return UnitResult<AgentError>.Failure(actual.Error);
+        }
+
+        return string.Equals(actual.Value.Trim(), expected.Value, StringComparison.Ordinal)
+            ? UnitResult<AgentError>.Success()
+            : UnitResult<AgentError>.Failure(AgentError.Validation("The worktree's index already holds changes that are not exactly this patch; publish refused."));
+    }
+
+    /// <summary>The tree of <paramref name="baseCommit"/> with the patch applied, built in a private index file that is always deleted.</summary>
+    private async Task<Result<string, AgentError>> TreeOfBasePlusPatchAsync(string root, string copy, string baseCommit, CancellationToken ct)
+    {
+        var index = Path.Combine(Path.GetDirectoryName(copy)!, Guid.NewGuid().ToString("N") + ".index");
+        try
+        {
+            var read = await _git.RunWithIndexFileAsync(root, ["read-tree", baseCommit], GitConfig, null, index, ct).ConfigureAwait(false);
+            if (!read.Succeeded)
+            {
+                return Result<string, AgentError>.Failure(GitMirrorStore.GitFailure("Could not read the base commit into a private index.", read, secret: null));
+            }
+
+            var applied = await _git.RunWithIndexFileAsync(root, ["apply", "--cached", "--binary", "--whitespace=nowarn", copy], GitConfig, null, index, ct).ConfigureAwait(false);
+            if (!applied.Succeeded)
+            {
+                return Result<string, AgentError>.Failure(GitMirrorStore.GitFailure("The index already differs from the base, and the patch does not apply to the base.", applied, secret: null));
+            }
+
+            var tree = await _git.RunWithIndexFileAsync(root, ["write-tree"], GitConfig, null, index, ct).ConfigureAwait(false);
+            return tree.Succeeded
+                ? Result<string, AgentError>.Success(tree.StdOut.Trim())
+                : Result<string, AgentError>.Failure(GitMirrorStore.GitFailure("Could not write the expected tree.", tree, secret: null));
+        }
+        finally
+        {
+            TryDelete(index);
+            TryDelete(index + ".lock");
+        }
     }
 
     /// <summary>Resets the worktree to <paramref name="baseCommit"/>, or to HEAD when that fails, then cleans it, ignored files included.</summary>
@@ -312,9 +375,10 @@ public sealed partial class GitPatchApplier(GitWorkspaceOptions options, ILogger
     }
 
     /// <summary>
-    /// Whether <paramref name="path"/> is a regular file, not following a final link. On Linux the file type comes from
-    /// <c>statx</c>, which tells a FIFO or device — that would block or never end on open — from a regular file; an
-    /// unreadable type fails closed. Elsewhere, a directory, link or device attribute refuses it.
+    /// Whether <paramref name="path"/> is a regular file, not following a final link. A link, directory, reparse point
+    /// or device attribute refuses it everywhere. On Linux the file type also comes from <c>statx</c>, which tells a
+    /// FIFO, socket or device, that would block or never end on open, from a regular file; an unreadable type fails
+    /// closed. On any other Unix the type cannot be read, so every path is refused. On Windows the attributes decide.
     /// </summary>
     private static bool IsRegularFile(string path)
     {
@@ -327,7 +391,12 @@ public sealed partial class GitPatchApplier(GitWorkspaceOptions options, ILogger
             return false;
         }
 
-        return !OperatingSystem.IsLinux() || UnixLinkCount.IsRegularFile(path) == true;
+        if (OperatingSystem.IsLinux())
+        {
+            return UnixLinkCount.IsRegularFile(path) == true;
+        }
+
+        return OperatingSystem.IsWindows();
     }
 
     /// <summary>Copies <paramref name="source"/> to <paramref name="target"/>; <see langword="false"/> once more than <paramref name="maxBytes"/> are read.</summary>
