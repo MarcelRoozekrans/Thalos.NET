@@ -1,5 +1,3 @@
-using System.Collections.Concurrent;
-using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Thalos.Workspaces;
@@ -48,7 +46,7 @@ namespace Thalos.Git.Workspaces;
 /// <c>remote.origin.fetch</c> set — before it is trusted, and only ever deleted on a <em>positive</em> invalid answer
 /// from that validation: a timeout, an ownership refusal, or any other inconclusive result fails the create instead,
 /// and never a mirror whose <c>worktrees/</c> directory still has an entry in it, however the validation came out —
-/// a mirror with a live worktree is never deleted by this provider, full stop. See <see cref="MirrorValidation"/>.
+/// a mirror with a live worktree is never deleted by this provider, full stop. See <see cref="GitMirrorStore.MirrorValidation"/>.
 /// </para>
 /// <para>
 /// <b>Ownership of a run is claimed atomically, across processes, by publishing a whole record.</b>
@@ -161,28 +159,13 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     /// </summary>
     private readonly string _dataRoot = Path.GetFullPath(options.DataRoot);
 
-    /// <summary>Whether <paramref name="value"/> is exactly 40 lowercase hex digits, a full sha-1 commit id.</summary>
-    private static bool IsFullSha(string value)
-    {
-        const int ShaLength = 40;
-        if (value.Length != ShaLength)
-        {
-            return false;
-        }
-
-        foreach (var c in value)
-        {
-            if (!char.IsAsciiHexDigitLower(c))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
     private readonly GitCli _git = new(options);
-    private readonly ConcurrentDictionary<string, SemaphoreSlim> _repositoryLocks = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The mirror handling: clone, fetch, validation and the per-repository lock. Built from the same options and
+    /// credentials, and logging through this provider's own logger.
+    /// </summary>
+    private readonly GitMirrorStore _mirrors = new(options, new CategoryLogger<GitMirrorStore>(logger), credentials);
 
     /// <inheritdoc />
     public async ValueTask<Result<RunWorkspace, AgentError>> CreateAsync(RunWorkspaceRequest request, CancellationToken ct)
@@ -196,7 +179,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
         var mirror = MirrorPath(request.Repository);
         var root = WorktreeRoot(request.RunId);
-        var (secretConfig, secret) = CredentialConfig(request.Remote);
+        var (secretConfig, secret) = _mirrors.CredentialConfig(request.Remote);
 
         // The run lock is this create's liveness signal: held from before the claim until the undo has finished,
         // and released by the OS if this process dies. See the class remarks.
@@ -325,9 +308,9 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         }
 
         string baseCommit;
-        using (await LockRepositoryAsync(request.Repository, ct).ConfigureAwait(false))
+        using (await _mirrors.LockRepositoryAsync(request.Repository, ct).ConfigureAwait(false))
         {
-            var prepared = await PrepareMirrorAsync(mirror, request.Remote, secretConfig, secret, ct).ConfigureAwait(false);
+            var prepared = await _mirrors.PrepareMirrorAsync(mirror, request.Remote, secretConfig, secret, ct).ConfigureAwait(false);
             if (prepared.IsFailure)
             {
                 return Result<RunWorkspace, AgentError>.Failure(prepared.Error);
@@ -400,10 +383,10 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
         if (progress.WorktreeAttempted)
         {
-            MirrorLease lease;
+            GitMirrorStore.MirrorLease lease;
             try
             {
-                lease = await LockRepositoryAsync(request.Repository, CancellationToken.None).ConfigureAwait(false);
+                lease = await _mirrors.LockRepositoryAsync(request.Repository, CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -535,7 +518,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
         // A provisional record here belongs to a claimant that is gone: it would still hold the run lock otherwise.
         var workspace = sidecar.Workspace;
-        if (!IsValidRepositoryName(workspace.Repository))
+        if (!GitMirrorStore.IsValidRepositoryName(workspace.Repository))
         {
             return UnitResult<AgentError>.Failure(AgentError.Validation(
                 $"The workspace record for run '{runId}' names repository '{workspace.Repository}', which is not a valid mirror directory name; leaving it for an operator."));
@@ -562,7 +545,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         var mirror = MirrorPath(workspace.Repository);
         var root = WorktreeRoot(runId);
         UnitResult<AgentError> result;
-        using (await LockRepositoryAsync(workspace.Repository, ct).ConfigureAwait(false))
+        using (await _mirrors.LockRepositoryAsync(workspace.Repository, ct).ConfigureAwait(false))
         {
             result = await RemoveFromGitAsync(mirror, root, workspace.Branch, ct).ConfigureAwait(false);
         }
@@ -647,245 +630,6 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     }
 
     // ---------- mirror + worktree ----------
-
-    private async Task<UnitResult<AgentError>> PrepareMirrorAsync(string mirror, string remote, IReadOnlyList<(string Key, string Value)>? secretConfig, string? secret, CancellationToken ct)
-    {
-        if (Directory.Exists(mirror))
-        {
-            var (state, detail) = await ValidateMirrorAsync(mirror, ct).ConfigureAwait(false);
-            switch (state)
-            {
-                case MirrorValidation.Valid:
-                    break;
-
-                case MirrorValidation.Invalid when HasLiveWorktrees(mirror):
-                    return UnitResult<AgentError>.Failure(AgentError.Validation(
-                        $"The mirror at '{mirror}' looks invalid but still has live worktrees; refusing to delete it. An operator must resolve this."));
-
-                case MirrorValidation.Invalid:
-                    TryDeleteDirectory(mirror, "remove the invalid mirror before re-cloning");
-                    break;
-
-                // A positive answer — the mirror's own config carries a key outside MirrorConfigSurface's
-                // allow-list — but never grounds for deletion, unlike Invalid: the mirror is left exactly as
-                // found, for an operator to inspect, not silently deleted and recloned (fix round 2 ruling).
-                case MirrorValidation.ConfigNotAllowed:
-                    return UnitResult<AgentError>.Failure(AgentError.Validation(
-                        $"The mirror at '{mirror}' has git config outside the allowed surface; refusing it. An operator must resolve this. Detail: {detail}"));
-
-                // Indeterminate: a timeout, a validation command that failed for a reason other than a definitive
-                // "not bare" or "no fetch refspec" answer, or dubious ownership. None of these is a positive
-                // signal the mirror is invalid, so it is never deleted on this path — only a positive answer is
-                // grounds for deletion (see the class remarks); the create simply fails and an operator decides.
-                // detail carries git's own extracted error line (e.g. "dubious ownership"), so an operator sees
-                // why validation could not reach a definitive answer, not just that it didn't.
-                default:
-                    return UnitResult<AgentError>.Failure(AgentError.GitOperationFailed(
-                        $"Could not validate the mirror at '{mirror}'; leaving it untouched.", detail));
-            }
-        }
-
-        if (!Directory.Exists(mirror))
-        {
-            var cloned = await CloneMirrorAsync(mirror, remote, secretConfig, secret, ct).ConfigureAwait(false);
-            if (cloned.IsFailure)
-            {
-                return cloned;
-            }
-        }
-
-        return await RetargetFetchAndValidateAsync(mirror, remote, secretConfig, secret, ct).ConfigureAwait(false);
-    }
-
-    /// <summary>
-    /// Re-targets an existing or freshly cloned mirror at <paramref name="remote"/>, fetches, and only then runs
-    /// the full <see cref="MirrorConfigSurface"/> check — <c>remote.origin.url</c>'s own value included. Running
-    /// that full check here, after this call's own write, rather than before it, is deliberate (fix round 3
-    /// ruling; see <see cref="MirrorConfigSurface"/>'s own remarks for why the timing matters): the earlier,
-    /// pre-fetch <see cref="ValidateMirrorAsync"/> check passes <c>remote: null</c>, since <c>remote.origin.url</c>
-    /// legitimately still holds an older run's value at that point, for a mirror this create is reusing and about
-    /// to re-target. By the time this method's own write has run, it holds this create's own value, so checking it
-    /// strictly here catches a genuine tamper without ever refusing a legitimate remote change.
-    /// </summary>
-    private async Task<UnitResult<AgentError>> RetargetFetchAndValidateAsync(
-        string mirror, string remote, IReadOnlyList<(string Key, string Value)>? secretConfig, string? secret, CancellationToken ct)
-    {
-        // Before every fetch, not only on first clone: a mirror kept for a repository name can otherwise go on
-        // fetching (and sending credentials to) a remote the current request no longer names.
-        var setUrl = await _git.RunAsync(mirror, ["config", "remote.origin.url", remote], null, null, ct).ConfigureAwait(false);
-        if (!setUrl.Succeeded)
-        {
-            return UnitResult<AgentError>.Failure(GitFailure("git config remote.origin.url failed.", setUrl, secret: null));
-        }
-
-        var fetched = await _git.RunAsync(mirror, ["fetch", "-q", "origin", "--prune"], null, secretConfig, ct).ConfigureAwait(false);
-        if (!fetched.Succeeded)
-        {
-            return UnitResult<AgentError>.Failure(GitFailure("git fetch failed.", fetched, secret));
-        }
-
-        var violation = await MirrorConfigSurface.FindViolationAsync(_git, mirror, remote, ct).ConfigureAwait(false);
-        if (violation is not null)
-        {
-            return UnitResult<AgentError>.Failure(AgentError.Validation(
-                $"The mirror at '{mirror}' has git config outside the allowed surface after this create's own update; refusing it. An operator must resolve this. Detail: {violation}"));
-        }
-
-        return UnitResult<AgentError>.Success();
-    }
-
-    private async Task<UnitResult<AgentError>> CloneMirrorAsync(string mirror, string remote, IReadOnlyList<(string Key, string Value)>? secretConfig, string? secret, CancellationToken ct)
-    {
-        var repository = Path.GetFileName(mirror);
-        var mirrorsDir = Path.Combine(_dataRoot, "mirrors");
-        Directory.CreateDirectory(mirrorsDir);
-
-        // This call holds the repository's mirror lock (see CreateClaimedAsync), so no other clone of the same
-        // repository can be in progress right now — any .tmp-* directory already here for this repository was left
-        // by a clone that was killed mid-way, never cleaned up on its own path, and is safe to delete. A directory
-        // left by a concurrent clone of a *different* repository, under its own lock, is untouched: the name
-        // carries the repository so the sweep never reaches across repositories.
-        SweepStaleCloneTempDirectories(mirrorsDir, repository);
-        var temp = Path.Combine(mirrorsDir, TempCloneDirectoryName(repository));
-        try
-        {
-            var cloned = await _git.RunAsync(mirrorsDir, ["clone", "--bare", "-q", "--", remote, temp], null, secretConfig, ct).ConfigureAwait(false);
-            if (!cloned.Succeeded)
-            {
-                return UnitResult<AgentError>.Failure(GitFailure("git clone --bare failed.", cloned, secret));
-            }
-
-            var fetchSpec = await _git.RunAsync(temp, ["config", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"], null, null, ct).ConfigureAwait(false);
-            if (!fetchSpec.Succeeded)
-            {
-                return UnitResult<AgentError>.Failure(GitFailure("git config remote.origin.fetch failed.", fetchSpec, secret: null));
-            }
-
-            // Persisted on the mirror in addition to being passed again on every worktree checkout below — see the
-            // class remarks for why symlinks must never reach a workspace this provider creates.
-            var noSymlinks = await _git.RunAsync(temp, ["config", "core.symlinks", "false"], null, null, ct).ConfigureAwait(false);
-            if (!noSymlinks.Succeeded)
-            {
-                return UnitResult<AgentError>.Failure(GitFailure("git config core.symlinks failed.", noSymlinks, secret: null));
-            }
-
-            try
-            {
-                Directory.Move(temp, mirror);
-            }
-            catch (IOException) when (Directory.Exists(mirror))
-            {
-                // Another claimant, most likely another host process sharing this DataRoot, finished its own first
-                // clone of this repository first. Its mirror is complete, because it too moved it into place only
-                // after clone and config succeeded; validate it and continue with it rather than failing a create
-                // that merely lost a race. This call's own clone is deleted by the finally below.
-                return await AdoptRacedMirrorAsync(mirror, ct).ConfigureAwait(false);
-            }
-
-            return UnitResult<AgentError>.Success();
-        }
-        finally
-        {
-            // Runs whether the clone succeeded (the temp directory has already been moved away and this is a
-            // no-op) or failed at any step (nothing is left half-cloned at either the temp or the real path).
-            TryDeleteDirectory(temp, "remove the temporary clone directory");
-        }
-    }
-
-    /// <summary>
-    /// Continues with a mirror another claimant moved into place while this call was cloning, after checking it is a
-    /// valid one. A mirror that does not validate is left alone — this call did not create it — and fails the create.
-    /// </summary>
-    private async Task<UnitResult<AgentError>> AdoptRacedMirrorAsync(string mirror, CancellationToken ct)
-    {
-        LogFirstCloneRaceLost(logger, mirror);
-        var (state, detail) = await ValidateMirrorAsync(mirror, ct).ConfigureAwait(false);
-        return state == MirrorValidation.Valid
-            ? UnitResult<AgentError>.Success()
-            : UnitResult<AgentError>.Failure(AgentError.GitOperationFailed(
-                $"Another process cloned the mirror at '{mirror}' first, and it did not validate; leaving it untouched.", detail));
-    }
-
-    /// <summary>
-    /// Whether an existing mirror is usable as-is (<see cref="Valid"/>), positively confirmed unusable and eligible
-    /// for deletion (<see cref="Invalid"/>), positively confirmed to carry git config outside
-    /// <see cref="MirrorConfigSurface"/>'s allow-list (<see cref="ConfigNotAllowed"/>), or neither confirmed
-    /// (<see cref="Indeterminate"/>) — a validation command that failed to give either a clear "yes, bare, with a
-    /// fetch refspec" or a clear "no" answer, such as a timeout or a "dubious ownership" refusal. Only
-    /// <see cref="Invalid"/> ever leads to deleting the mirror; <see cref="ConfigNotAllowed"/> and
-    /// <see cref="Indeterminate"/> both fail the create and leave the mirror exactly as found.
-    /// </summary>
-    private enum MirrorValidation
-    {
-        Valid,
-        Invalid,
-        Indeterminate,
-        ConfigNotAllowed,
-    }
-
-    /// <summary>
-    /// Validates an existing mirror without ever guessing: <see cref="MirrorValidation.Invalid"/> only for a
-    /// positive invalid answer — <c>rev-parse --is-bare-repository</c> succeeding and printing exactly
-    /// <c>"false"</c>, or <c>config --get remote.origin.fetch</c> exiting exactly 1 (git's own convention for "key
-    /// not found") after a positive <c>"true"</c>. Every other outcome — a timeout, a nonzero exit that is not
-    /// exactly that convention, an unrecognised <c>rev-parse</c> answer — is <see cref="MirrorValidation.Indeterminate"/>,
-    /// never treated as invalid, and carries git's own extracted error detail (e.g. a "dubious ownership" refusal)
-    /// so a failed create says why, not just that validation could not reach a definitive answer. A mirror that is
-    /// otherwise bare with a fetch refspec is still checked against <see cref="MirrorConfigSurface"/>'s allow-list —
-    /// keys, and, for the keys the provider itself writes other than <c>remote.origin.url</c>, their exact values
-    /// too (fix round 2 and 3 rulings). <c>remote.origin.url</c>'s own value is deliberately not checked here: this
-    /// call runs before <c>PrepareMirrorAsync</c> overwrites it for a mirror being reused with a possibly different
-    /// remote, so it may still legitimately hold an earlier run's value; <c>PrepareMirrorAsync</c> checks it
-    /// strictly, separately, right after writing it — see <see cref="MirrorConfigSurface"/>'s own remarks.
-    /// </summary>
-    /// <param name="mirror">The mirror to validate.</param>
-    /// <param name="ct">Cancellation token.</param>
-    private async Task<(MirrorValidation State, string? Detail)> ValidateMirrorAsync(string mirror, CancellationToken ct)
-    {
-        var isBare = await _git.RunAsync(mirror, ["rev-parse", "--is-bare-repository"], null, null, ct).ConfigureAwait(false);
-        if (!isBare.Succeeded)
-        {
-            return (MirrorValidation.Indeterminate, IndeterminateDetail(isBare, "rev-parse --is-bare-repository"));
-        }
-
-        var isBareAnswer = isBare.StdOut.Trim();
-        if (string.Equals(isBareAnswer, "false", StringComparison.Ordinal))
-        {
-            return (MirrorValidation.Invalid, null);
-        }
-
-        if (!string.Equals(isBareAnswer, "true", StringComparison.Ordinal))
-        {
-            return (MirrorValidation.Indeterminate, $"rev-parse --is-bare-repository printed an unrecognised answer: '{isBareAnswer}'.");
-        }
-
-        var fetchSpec = await _git.RunAsync(mirror, ["config", "--get", "remote.origin.fetch"], null, null, ct).ConfigureAwait(false);
-        if (!fetchSpec.Succeeded || string.IsNullOrWhiteSpace(fetchSpec.StdOut))
-        {
-            return !fetchSpec.TimedOut && fetchSpec.ExitCode == 1
-                ? (MirrorValidation.Invalid, null)
-                : (MirrorValidation.Indeterminate, IndeterminateDetail(fetchSpec, "config --get remote.origin.fetch"));
-        }
-
-        var violation = await MirrorConfigSurface.FindViolationAsync(_git, mirror, remote: null, ct).ConfigureAwait(false);
-        return violation is null
-            ? (MirrorValidation.Valid, null)
-            : (MirrorValidation.ConfigNotAllowed, violation);
-    }
-
-    private static string IndeterminateDetail(GitCliResult result, string command) =>
-        result.TimedOut ? $"{command} timed out." : ExtractErrorDetail(result.StdErr);
-
-    /// <summary>
-    /// Whether <paramref name="mirror"/>'s <c>worktrees/</c> administrative directory has any entries — a positive
-    /// answer means at least one worktree, live or merely registered, still points at this mirror, so it must never
-    /// be deleted regardless of what <see cref="ValidateMirrorAsync"/> says.
-    /// </summary>
-    private static bool HasLiveWorktrees(string mirror)
-    {
-        var worktreesDir = Path.Combine(mirror, "worktrees");
-        return Directory.Exists(worktreesDir) && Directory.EnumerateFileSystemEntries(worktreesDir).Any();
-    }
 
     /// <summary>Fails with <see cref="AgentError.GitBranchAlreadyExists"/> when <paramref name="branch"/> exists in <paramref name="mirror"/>.</summary>
     private async Task<UnitResult<AgentError>> EnsureBranchIsFreeAsync(string mirror, string branch, CancellationToken ct)
@@ -1076,29 +820,11 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     }
     // ---------- credentials ----------
 
-    private (IReadOnlyList<(string Key, string Value)>? SecretConfig, string? Secret) CredentialConfig(string remoteUrl)
-    {
-        if (credentials?.GetCredentials(remoteUrl) is not { } creds)
-        {
-            return (null, null);
-        }
+    private static AgentError GitFailure(string message, GitCliResult result, string? secret) =>
+        GitMirrorStore.GitFailure(message, result, secret);
 
-        var token = Convert.ToBase64String(Encoding.UTF8.GetBytes($"{creds.Username}:{creds.Password}"));
-        return ([("http.extraHeader", $"AUTHORIZATION: basic {token}")], token);
-    }
-
-    private static AgentError GitFailure(string message, GitCliResult result, string? secret)
-    {
-        if (result.TimedOut)
-        {
-            return AgentError.GitOperationFailed($"{message} The git command timed out.");
-        }
-
-        return AgentError.GitOperationFailed(message, Scrub(ExtractErrorDetail(result.StdErr), secret));
-    }
-
-    private static string Scrub(string text, string? secret) =>
-        secret is null ? text : text.Replace(secret, "***", StringComparison.Ordinal);
+    /// <inheritdoc cref="GitMirrorStore.ExtractErrorDetail"/>
+    internal static string ExtractErrorDetail(string stdErr) => GitMirrorStore.ExtractErrorDetail(stdErr);
 
     /// <summary>
     /// <see langword="true"/> when <paramref name="stdErr"/> is git's own <c>fatal: '&lt;path&gt;' is not a
@@ -1107,40 +833,11 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     /// </summary>
     private static bool IsNotAWorkingTree(string stdErr) =>
         stdErr.Contains("is not a working tree", StringComparison.Ordinal);
-
-    /// <summary>
-    /// The first line starting with <c>fatal:</c> or <c>error:</c> — git's own convention for the line that names
-    /// what went wrong, buried among progress and hint lines <c>-q</c> does not suppress — or, when no line
-    /// matches, the last non-empty line, which is usually the most specific one available. Internal (not private)
-    /// so it can be unit-tested directly.
-    /// </summary>
-    internal static string ExtractErrorDetail(string stdErr)
-    {
-        string? lastNonEmpty = null;
-        using var reader = new StringReader(stdErr);
-        while (reader.ReadLine() is { } line)
-        {
-            var trimmed = line.Trim();
-            if (trimmed.Length == 0)
-            {
-                continue;
-            }
-
-            lastNonEmpty = trimmed;
-            if (trimmed.StartsWith("fatal:", StringComparison.Ordinal) || trimmed.StartsWith("error:", StringComparison.Ordinal))
-            {
-                return trimmed;
-            }
-        }
-
-        return lastNonEmpty ?? string.Empty;
-    }
-
     // ---------- validation ----------
 
     private static AgentError? Validate(RunWorkspaceRequest request)
     {
-        if (!IsValidRepositoryName(request.Repository))
+        if (!GitMirrorStore.IsValidRepositoryName(request.Repository))
         {
             return AgentError.Validation($"Repository '{request.Repository}' is not a valid mirror directory name.");
         }
@@ -1170,22 +867,13 @@ public sealed partial class GitWorktreeWorkspaceProvider(
             return AgentError.Validation($"Branch '{request.Branch}' must not start with '-'.");
         }
 
-        if (request.StartPoint is not null && !IsFullSha(request.StartPoint))
+        if (request.StartPoint is not null && !GitMirrorStore.IsFullSha(request.StartPoint))
         {
             return AgentError.Validation("StartPoint must be a full 40-character commit sha.");
         }
 
         return null;
     }
-
-    private static bool IsValidRepositoryName(string repository) =>
-        !string.IsNullOrWhiteSpace(repository)
-        && repository is not ("." or "..")
-        && !repository.Contains('/')
-        && !repository.Contains('\\')
-        && !repository.Contains('\0')
-        && !repository.Contains(':');
-
 
     // ---------- paths ----------
 
@@ -1234,7 +922,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         }
     }
 
-    private string MirrorPath(string repository) => Path.Combine(_dataRoot, "mirrors", repository);
+    private string MirrorPath(string repository) => _mirrors.MirrorPath(repository);
 
     private string WorktreeRoot(Guid runId) => Path.Combine(RunsDirectory, runId.ToString());
 
@@ -1246,31 +934,6 @@ public sealed partial class GitWorktreeWorkspaceProvider(
     /// </summary>
     private string PendingSidecarPath(Guid runId) =>
         Path.Combine(RunsDirectory, $".{runId:N}.{Guid.NewGuid():N}{PendingSidecarSuffix}");
-
-    /// <summary>
-    /// Serialises git on one repository's mirror: first within this process, through a <see cref="SemaphoreSlim"/>,
-    /// so this process's own callers queue without polling, then across processes, through a
-    /// <see cref="CrossProcessFileLock"/> on <c>locks/mirrors/&lt;repository&gt;.lock</c>. Dispose the lease to release both.
-    /// </summary>
-    private async Task<MirrorLease> LockRepositoryAsync(string repository, CancellationToken ct)
-    {
-        var gate = _repositoryLocks.GetOrAdd(repository, static _ => new SemaphoreSlim(1, 1));
-        await gate.WaitAsync(ct).ConfigureAwait(false);
-        var leased = false;
-        try
-        {
-            var file = await CrossProcessFileLock.AcquireAsync(Path.Combine(LocksDirectory, "mirrors", repository + ".lock"), ct).ConfigureAwait(false);
-            leased = true;
-            return new MirrorLease(gate, file);
-        }
-        finally
-        {
-            if (!leased)
-            {
-                gate.Release();
-            }
-        }
-    }
 
     // ---------- sidecar store ----------
 
@@ -1423,57 +1086,6 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         }
     }
 
-    /// <summary>
-    /// The length of the fixed part of <see cref="TempCloneDirectoryName"/> before the repository name: the
-    /// <c>.tmp-</c> prefix plus a <see cref="Guid.ToString(string?)"/> <c>"N"</c> value, which is always exactly 32
-    /// hex digits, plus the separator before the repository name.
-    /// </summary>
-    private const int TempCloneDirectoryRepositoryOffset = 5 + 32 + 1;
-
-    /// <summary>
-    /// A unique temporary clone directory name for <paramref name="repository"/>, carrying the repository so a
-    /// later sweep can tell which repository's stale directories are whose without reaching across repositories
-    /// sharing the same <c>mirrors</c> directory. The GUID comes first, in fixed-width hex, so
-    /// <see cref="IsTempCloneDirectoryFor"/> can find where it ends and the repository name begins without
-    /// guessing at a separator a repository name — which may itself contain <c>-</c> — could also produce.
-    /// </summary>
-    private static string TempCloneDirectoryName(string repository) => $".tmp-{Guid.NewGuid():N}-{repository}";
-
-    /// <summary>
-    /// Deletes <c>.tmp-*</c> directories under <paramref name="mirrorsDir"/> left behind by a clone of
-    /// <paramref name="repository"/> that was killed before it moved its temporary directory into place — see
-    /// <see cref="CloneMirrorAsync"/>, which calls this holding that repository's mirror lock, the reason it is
-    /// safe: no other clone of the same repository can be running right now, so every matching directory found here
-    /// belongs to one that is not. A failed delete is logged, not fatal — an operator can remove it by hand.
-    /// </summary>
-    private void SweepStaleCloneTempDirectories(string mirrorsDir, string repository)
-    {
-        if (!Directory.Exists(mirrorsDir))
-        {
-            return;
-        }
-
-        foreach (var directory in Directory.EnumerateDirectories(mirrorsDir, ".tmp-*"))
-        {
-            if (IsTempCloneDirectoryFor(Path.GetFileName(directory), repository))
-            {
-                TryDeleteDirectory(directory, $"sweep the stale temporary clone directory '{directory}'");
-            }
-        }
-    }
-
-    /// <summary>
-    /// Whether <paramref name="directoryName"/> is a <see cref="TempCloneDirectoryName"/> for exactly
-    /// <paramref name="repository"/>. The GUID segment has a fixed length, so the repository name is read from a
-    /// fixed offset and compared whole — never a prefix match — so repository <c>foo</c> cannot match a directory
-    /// that in fact belongs to repository <c>foo-bar</c>.
-    /// </summary>
-    private static bool IsTempCloneDirectoryFor(string directoryName, string repository) =>
-        directoryName.Length == TempCloneDirectoryRepositoryOffset + repository.Length
-        && directoryName.StartsWith(".tmp-", StringComparison.Ordinal)
-        && directoryName[TempCloneDirectoryRepositoryOffset - 1] == '-'
-        && string.CompareOrdinal(directoryName, TempCloneDirectoryRepositoryOffset, repository, 0, repository.Length) == 0;
-
     /// <summary>Deletes <paramref name="path"/> recursively if present, logging a failure; reports whether it is gone.</summary>
     private bool TryDeleteDirectory(string path, string what)
     {
@@ -1503,16 +1115,6 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         TryDeleteDirectory(root, what)
             ? UnitResult<AgentError>.Success()
             : UnitResult<AgentError>.Failure(AgentError.StoreError($"Could not delete the worktree directory '{root}'."));
-
-    /// <summary>Holds one repository's in-process and cross-process locks until disposed.</summary>
-    private sealed class MirrorLease(SemaphoreSlim gate, FileStream file) : IDisposable
-    {
-        public void Dispose()
-        {
-            file.Dispose();
-            gate.Release();
-        }
-    }
 
     /// <summary>How far one create got after its claim, so its undo removes exactly what it created.</summary>
     private sealed class CreateProgress
