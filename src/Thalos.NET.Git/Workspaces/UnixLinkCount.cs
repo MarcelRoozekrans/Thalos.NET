@@ -27,6 +27,40 @@ internal static unsafe partial class UnixLinkCount
     /// <summary>The link count of the file at <paramref name="path"/>, not following a final symlink.</summary>
     public static long? OfPath(string path) => Query(AtFdCwd, path, AtSymlinkNoFollow);
 
+    private const uint StatxType = 0x1;
+    private const int ModeOffset = 28;
+    private const int FileTypeMask = 0xF000;
+    private const int RegularFileType = 0x8000;
+
+    /// <summary>
+    /// Whether <paramref name="path"/> is a regular file, not following a final symlink: <see langword="false"/> for a
+    /// FIFO, socket, device, directory or link. <see langword="null"/> when the type could not be read, for the same
+    /// reasons as the link count. <c>stx_mode</c> is the 16-bit field at byte offset 28 of <c>struct statx</c>.
+    /// </summary>
+    public static bool? IsRegularFile(string path)
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return null;
+        }
+
+        var buffer = stackalloc byte[BufferSize];
+        try
+        {
+            if (Statx(AtFdCwd, path, AtSymlinkNoFollow, StatxType, buffer) != 0)
+            {
+                return null;
+            }
+        }
+        catch (EntryPointNotFoundException)
+        {
+            return null;
+        }
+
+        var mask = *(uint*)buffer;
+        return (mask & StatxType) != 0 ? (*(ushort*)(buffer + ModeOffset) & FileTypeMask) == RegularFileType : null;
+    }
+
     /// <summary>
     /// The link count of the open file <paramref name="handle"/> refers to. Zero means its last name was unlinked
     /// while it stayed open.

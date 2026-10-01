@@ -193,31 +193,45 @@ public sealed class GitPatchApplierTests : IDisposable
     }
 
     /// <summary>
-    /// The worktree's own config is switched to <c>core.symlinks=true</c> first, so only the applier's
-    /// <c>-c core.symlinks=false</c> keeps the link from becoming real.
-    /// Red: drop <c>-c core.symlinks=false</c> from the apply call. Where links can be made, git writes a real link
-    /// and the LinkTarget assertion fails; skipped where they cannot, using the LinkTestHelpers pattern.
+    /// R17: a patch that creates a symlink is refused, and the re-check resets and cleans. The patch is hand-written,
+    /// so no filesystem symlink is needed and the test runs on every OS.
+    /// Red: drop the new-mode check from the re-check, so the symlink is staged and the apply succeeds.
     /// </summary>
-    [SkippableFact]
-    public async Task A_symlink_in_the_patch_arrives_as_a_regular_file()
+    [Fact]
+    public async Task A_symlink_in_the_patch_is_refused()
     {
-        SkipUnlessSymlinksWork();
         using var remote = SeededRemote();
         var ws = await WorkspaceAsync(remote);
-        Git(ws.Root, "config", "core.symlinks", "true");
-        var patch = BuildPatch(remote, ws, dir =>
-        {
-            Git(dir, "config", "core.symlinks", "true");
-            File.CreateSymbolicLink(Path.Combine(dir, "link"), "../outside/secret.txt");
-        });
-        File.ReadAllText(patch).Should().Contain("new file mode 120000", "the patch must carry a symlink for this test to mean anything");
+        var patch = WritePatch(
+            "diff --git a/link b/link\nnew file mode 120000\n--- /dev/null\n+++ b/link\n@@ -0,0 +1 @@\n+../outside/secret.txt\n\\ No newline at end of file\n");
+        Freeze(ws);
 
         var result = await Applier().ApplyAsync(ws, patch, Defaults, new PatchApplyLimits(), CancellationToken.None);
 
-        result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error.Message + " " + result.Error.Detail : "");
-        var link = new FileInfo(Path.Combine(ws.Root, "link"));
-        link.LinkTarget.Should().BeNull("core.symlinks=false must turn a patched symlink into a plain file");
-        File.ReadAllText(link.FullName).Should().Be("../outside/secret.txt");
+        result.IsFailure.Should().BeTrue();
+        result.Error.Message.Should().Be("the change makes 'link' a symlink or submodule; publish refused");
+        File.Exists(Path.Combine(ws.Root, "link")).Should().BeFalse();
+        Git(ws.Root, "status", "--porcelain", "--untracked-files=all", "--ignored").Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// R17: a patch that creates a gitlink, a submodule entry without a .gitmodules, is refused.
+    /// Red: drop the new-mode check from the re-check, so the gitlink is staged and the apply succeeds.
+    /// </summary>
+    [Fact]
+    public async Task A_gitlink_in_the_patch_is_refused()
+    {
+        using var remote = SeededRemote();
+        var ws = await WorkspaceAsync(remote);
+        var commit = ws.BaseCommit!;
+        var patch = WritePatch(
+            $"diff --git a/sub b/sub\nnew file mode 160000\nindex 0000000000000000000000000000000000000000..{commit}\n--- /dev/null\n+++ b/sub\n@@ -0,0 +1 @@\n+Subproject commit {commit}\n");
+
+        var result = await Applier().ApplyAsync(ws, patch, Defaults, new PatchApplyLimits(), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue(result.IsSuccess ? string.Join(',', result.Value) : "");
+        result.Error.Message.Should().Be("the change makes 'sub' a symlink or submodule; publish refused");
+        Git(ws.Root, "status", "--porcelain", "--untracked-files=all", "--ignored").Should().BeEmpty();
     }
 
     /// <summary>
@@ -349,6 +363,324 @@ public sealed class GitPatchApplierTests : IDisposable
         GitPatchApplier.ParseNumstat("src/A.cs\0").Should().BeNull();
     }
 
+    /// <summary>
+    /// Important 1 from the review: base <c>1, x×7, 2</c>, and a patch that adds one <c>x</c>. Against the untouched
+    /// base the patch also applies in reverse, so a reverse check alone reads it as already applied and drops it.
+    /// Red: drop the index-differs condition, so the reverse check alone decides and the change is skipped.
+    /// </summary>
+    [Fact]
+    public async Task A_patch_on_repetitive_content_is_applied_not_mistaken_for_already_applied()
+    {
+        const string Base = "1\nx\nx\nx\nx\nx\nx\nx\n2\n";
+        using var remote = SeededRemote(("src/R.txt", Base));
+        var ws = await WorkspaceAsync(remote);
+        var patch = BuildPatch(remote, ws, dir => File.WriteAllText(Path.Combine(dir, "src", "R.txt"), Base.Replace("1\n", "1\nx\n", StringComparison.Ordinal)));
+
+        var result = await Applier().ApplyAsync(ws, patch, Defaults, new PatchApplyLimits(), CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error.Message + " " + result.Error.Detail : "");
+        result.Value.Should().Equal("src/R.txt");
+        File.ReadAllText(Path.Combine(ws.Root, "src", "R.txt")).Split('\n').Count(l => string.Equals(l, "x", StringComparison.Ordinal)).Should().Be(8);
+    }
+
+    /// <summary>
+    /// Important 2: paths that leave the worktree or name a .git directory are refused by the applier itself, not only
+    /// by git's verify_path.
+    /// Red: drop LeavesWorktreeOrNamesGitDirectory from FindRefusal. git then refuses /abs and src/.git/hooks/x itself,
+    /// as git apply failed, and ProtectedPathSet refuses ../x as a protected path — each a different message.
+    /// </summary>
+    [Theory]
+    [InlineData("/abs")]
+    [InlineData("src/.git/hooks/x")]
+    [InlineData("src/.GIT/hooks/x")]
+    [InlineData("../x")]
+    [InlineData("C:/x")]
+    public async Task A_path_outside_the_worktree_or_into_a_git_directory_is_refused(string path)
+    {
+        using var remote = SeededRemote();
+        var ws = await WorkspaceAsync(remote);
+        var patch = WritePatch(CreationPatch(path));
+        Freeze(ws);
+
+        var result = await Applier().ApplyAsync(ws, patch, Defaults, new PatchApplyLimits(), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Message.Should().Be($"the change touches path '{path}', which leaves the worktree or names a .git directory; publish refused");
+        AssertUntouched(ws);
+    }
+
+    /// <summary>
+    /// Important 2: a write beyond a symlink the base already holds is refused before git runs. The base symlink is
+    /// committed as a git object, so the test needs no filesystem symlink and runs on every OS; the worktree holds it
+    /// as a plain file because the provider checks out with core.symlinks=false.
+    /// Red: drop the links check from FindRefusal. git then refuses the write itself, as git apply failed.
+    /// </summary>
+    [Fact]
+    public async Task A_write_beyond_a_symlink_in_the_base_is_refused()
+    {
+        using var remote = LocalGitRemote.CreateWithSymlink("lnk", "src");
+        var ws = await WorkspaceAsync(remote);
+        var patch = WritePatch(CreationPatch("lnk/evil.txt"));
+        Freeze(ws);
+
+        var result = await Applier().ApplyAsync(ws, patch, Defaults, new PatchApplyLimits(), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Message.Should().Be("the change touches path 'lnk/evil.txt', which lies beyond a symlink or submodule; publish refused");
+        AssertUntouched(ws);
+    }
+
+    /// <summary>
+    /// Important 3: a copy from a protected path lists the source only in the reverse numstat.
+    /// Red: drop the reverse names, so only x.md is checked and the copy is applied.
+    /// </summary>
+    [Fact]
+    public async Task A_copy_from_a_protected_path_is_refused()
+    {
+        using var remote = SeededRemote();
+        var ws = await WorkspaceAsync(remote);
+        var patch = WritePatch("diff --git a/AGENT.md b/x.md\nsimilarity index 100%\ncopy from AGENT.md\ncopy to x.md\n");
+        Freeze(ws);
+
+        var result = await Applier().ApplyAsync(ws, patch, Defaults, new PatchApplyLimits(), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Message.Should().Be("the change touches protected path 'AGENT.md'; publish refused");
+        AssertUntouched(ws);
+    }
+
+    /// <summary>
+    /// Important 3: a git header naming different files with no rename lines. git applies it as a move of src/A.cs to
+    /// .github/x; forward numstat lists .github/x, reverse lists src/A.cs.
+    /// Red: drop the forward names, so only src/A.cs is checked, the patch is applied, and the re-check's reset
+    /// rewrites src/A.cs.
+    /// </summary>
+    [Fact]
+    public async Task A_header_with_two_names_and_no_rename_lines_is_refused()
+    {
+        using var remote = SeededRemote();
+        var ws = await WorkspaceAsync(remote);
+        var patch = WritePatch("diff --git a/src/A.cs b/.github/x\n--- a/src/A.cs\n+++ b/.github/x\n@@ -1 +1,2 @@\n a\n+b\n");
+        Freeze(ws);
+
+        var result = await Applier().ApplyAsync(ws, patch, Defaults, new PatchApplyLimits(), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Message.Should().Be("the change touches protected path '.github/x'; publish refused");
+        AssertUntouched(ws);
+    }
+
+    /// <summary>
+    /// Important 3: deleting a protected file.
+    /// Red: drop the pre-apply check, so AGENT.md is deleted and the re-check's reset rewrites it.
+    /// </summary>
+    [Fact]
+    public async Task Deleting_a_protected_file_is_refused()
+    {
+        using var remote = SeededRemote();
+        var ws = await WorkspaceAsync(remote);
+        var patch = WritePatch("diff --git a/AGENT.md b/AGENT.md\ndeleted file mode 100644\n--- a/AGENT.md\n+++ /dev/null\n@@ -1 +0,0 @@\n-# sandbox\n");
+        Freeze(ws);
+
+        var result = await Applier().ApplyAsync(ws, patch, Defaults, new PatchApplyLimits(), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Message.Should().Be("the change touches protected path 'AGENT.md'; publish refused");
+        AssertUntouched(ws);
+    }
+
+    /// <summary>
+    /// Important 3: a mode-only change and an octal-quoted name. numstat lists the mode-only change with zero counts,
+    /// and decodes the quoted <c>.git\150ub</c> to <c>.github</c>.
+    /// Red: report a protected path as allowed, in both FindRefusal calls, so each patch is applied and succeeds.
+    /// </summary>
+    [Theory]
+    [InlineData("diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml\nold mode 100644\nnew mode 100755\n", ".github/workflows/ci.yml")]
+    [InlineData("diff --git \"a/.git\\150ub/y\" \"b/.git\\150ub/y\"\nnew file mode 100644\n--- /dev/null\n+++ \"b/.git\\150ub/y\"\n@@ -0,0 +1 @@\n+x\n", ".github/y")]
+    public async Task A_mode_only_change_or_quoted_name_on_a_protected_path_is_refused(string patchText, string path)
+    {
+        using var remote = SeededRemote();
+        var ws = await WorkspaceAsync(remote);
+        var patch = WritePatch(patchText);
+
+        var result = await Applier().ApplyAsync(ws, patch, Defaults, new PatchApplyLimits(), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Message.Should().Be($"the change touches protected path '{path}'; publish refused");
+        Git(ws.Root, "status", "--porcelain", "--untracked-files=all", "--ignored").Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// R16: a 0-byte patch is a run with no changes: success with no staged names, and nothing written.
+    /// Red: drop the empty-copy branch, so git refuses the empty input as no valid patches.
+    /// </summary>
+    [Fact]
+    public async Task An_empty_patch_is_a_no_op_success()
+    {
+        using var remote = SeededRemote();
+        var ws = await WorkspaceAsync(remote);
+        var patch = WritePatch("");
+        Freeze(ws);
+
+        var result = await Applier().ApplyAsync(ws, patch, Defaults, new PatchApplyLimits(), CancellationToken.None);
+
+        result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error.Message + " " + result.Error.Detail : "");
+        result.Value.Should().BeEmpty();
+        AssertUntouched(ws);
+    }
+
+    /// <summary>
+    /// R16: a non-empty patch with no valid hunks still fails.
+    /// Red: treat any patch without a diff header as empty, so the no-op branch takes it.
+    /// </summary>
+    [Fact]
+    public async Task A_non_empty_patch_with_no_valid_hunks_fails()
+    {
+        using var remote = SeededRemote();
+        var ws = await WorkspaceAsync(remote);
+        var patch = WritePatch("this is not a patch\n");
+
+        var result = await Applier().ApplyAsync(ws, patch, Defaults, new PatchApplyLimits(), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Message.Should().Be("Could not read the patch.");
+    }
+
+    /// <summary>
+    /// R19: .gitattributes and .gitmodules are refused at any depth; a nested .gitattributes has the same filter
+    /// power over its subtree.
+    /// Red: drop IsAttributesOrModulesFile from FindRefusal, so the nested file is applied and succeeds.
+    /// </summary>
+    [Theory]
+    [InlineData("src/.gitattributes", "* filter=evil\n")]
+    [InlineData("a/b/.gitmodules", "[submodule \"x\"]\n\tpath = x\n\turl = https://example.invalid/x\n")]
+    public async Task Nested_gitattributes_and_gitmodules_are_refused(string path, string content)
+    {
+        using var remote = SeededRemote();
+        var ws = await WorkspaceAsync(remote);
+        var patch = BuildPatch(remote, ws, dir =>
+        {
+            var full = Path.Combine(dir, path);
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            File.WriteAllText(full, content);
+            File.AppendAllText(Path.Combine(dir, "src", "A.cs"), "// edited\n");
+        });
+        Freeze(ws);
+
+        var result = await Applier().ApplyAsync(ws, patch, Defaults, new PatchApplyLimits(), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Message.Should().Be($"the change touches protected path '{path}'; publish refused");
+        AssertUntouched(ws);
+    }
+
+    /// <summary>
+    /// Minor 1: a directory is not a regular file.
+    /// Red: drop the regular-file check, so opening the directory fails as a store error with a different message.
+    /// </summary>
+    [Fact]
+    public async Task A_patch_path_that_is_a_directory_is_refused()
+    {
+        using var remote = SeededRemote();
+        var ws = await WorkspaceAsync(remote);
+        var directory = Directory.CreateDirectory(Path.Combine(_temp, "not-a-patch")).FullName;
+
+        var result = await Applier().ApplyAsync(ws, directory, Defaults, new PatchApplyLimits(), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Message.Should().Be($"The patch '{directory}' is not a regular file; publish refused.");
+    }
+
+    /// <summary>
+    /// Minor 1: a symlink to a valid patch is not a regular file. Skipped where symlinks cannot be made.
+    /// Red: drop the regular-file check, so the link is followed and the patch applies.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_patch_path_that_is_a_symlink_is_refused()
+    {
+        SkipUnlessSymlinksWork();
+        using var remote = SeededRemote();
+        var ws = await WorkspaceAsync(remote);
+        var patch = BuildPatch(remote, ws, dir => File.AppendAllText(Path.Combine(dir, "src", "A.cs"), "// edited\n"));
+        var link = Path.Combine(_temp, "link.patch");
+        File.CreateSymbolicLink(link, patch);
+
+        var result = await Applier().ApplyAsync(ws, link, Defaults, new PatchApplyLimits(), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Message.Should().Be($"The patch '{link}' is not a regular file; publish refused.");
+    }
+
+    /// <summary>
+    /// Minor 1: a FIFO would block the open forever. Linux only; the wait is bounded so a red cannot hang the run.
+    /// Red: drop the statx file-type check, so the open blocks and the bounded wait throws a TimeoutException.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_patch_path_that_is_a_fifo_is_refused()
+    {
+        Skip.IfNot(OperatingSystem.IsLinux(), "a FIFO is a Linux file type here.");
+        using var remote = SeededRemote();
+        var ws = await WorkspaceAsync(remote);
+        var fifo = Path.Combine(_temp, "fifo.patch");
+        using (var mkfifo = System.Diagnostics.Process.Start("mkfifo", fifo))
+        {
+            await mkfifo.WaitForExitAsync();
+            mkfifo.ExitCode.Should().Be(0);
+        }
+
+        // On the thread pool: a blocking open happens before ApplyAsync's first await, so without it the bound below
+        // would never get the chance to fire.
+        var result = await Task.Run(() => Applier().ApplyAsync(ws, fifo, Defaults, new PatchApplyLimits(), CancellationToken.None)).WaitAsync(TimeSpan.FromSeconds(30));
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Message.Should().Be($"The patch '{fifo}' is not a regular file; publish refused.");
+    }
+
+    /// <summary>
+    /// Minor 2: a re-check whose listing fails resets and cleans too, falling back to HEAD when the base commit itself
+    /// cannot be reached.
+    /// Red 1: reset only on a refusal, not on a listing failure, so the staged edit stays.
+    /// Red 2: drop the HEAD fallback, so the reset to the unreachable base fails and the staged edit stays.
+    /// </summary>
+    [Fact]
+    public async Task A_recheck_whose_listing_fails_still_resets_and_cleans()
+    {
+        using var remote = SeededRemote();
+        var ws = await WorkspaceAsync(remote);
+        File.AppendAllText(Path.Combine(ws.Root, "src", "A.cs"), "// edited\n");
+        File.WriteAllText(Path.Combine(ws.Root, "src", "New.cs"), "new\n");
+        Git(ws.Root, "add", "-A");
+
+        var result = await Applier().RecheckAsync(ws with { BaseCommit = "1234567890abcdef1234567890abcdef12345678" }, Defaults, CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Message.Should().Be("Could not list the staged entries.");
+        Git(ws.Root, "status", "--porcelain", "--untracked-files=all", "--ignored").Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// Red 1: drop the header validation, so the record without a header is read and throws.
+    /// Red 2: read the old mode instead of the new one, so the symlink entry reports 100644.
+    /// </summary>
+    [Fact]
+    public void ParseRaw_reads_the_new_mode_and_path_and_rejects_malformed_output()
+    {
+        var sha = new string('0', 40);
+        GitPatchApplier.ParseRaw($":100644 120000 {sha} {sha} T\0link\0").Should().Equal(new GitPatchApplier.RawEntry("120000", "link"));
+        GitPatchApplier.ParseRaw("link\0other\0").Should().BeNull();
+    }
+
+    private static string CreationPatch(string path) =>
+        $"diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1 @@\n+x\n";
+
+    /// <summary>Writes a hand-written patch, with exactly the line endings given, to a new file.</summary>
+    private string WritePatch(string text)
+    {
+        var patch = Path.Combine(_temp, "patch-" + Guid.NewGuid().ToString("N") + ".patch");
+        File.WriteAllBytes(patch, System.Text.Encoding.UTF8.GetBytes(text));
+        return patch;
+    }
+
     private GitPatchApplier Applier() =>
         new(new GitWorkspaceOptions { DataRoot = _dataRoot }, NullLogger<GitPatchApplier>.Instance);
 
@@ -366,8 +698,11 @@ public sealed class GitPatchApplierTests : IDisposable
         return created.Value;
     }
 
-    /// <summary>A remote whose main holds src/A.cs, .github/workflows/ci.yml and a .gitignore that ignores *.log.</summary>
-    private LocalGitRemote SeededRemote()
+    /// <summary>
+    /// A remote whose main holds src/A.cs, .github/workflows/ci.yml, a .gitignore that ignores *.log, and each of
+    /// <paramref name="extra"/>.
+    /// </summary>
+    private LocalGitRemote SeededRemote(params (string Path, string Content)[] extra)
     {
         var remote = LocalGitRemote.Create();
         var scratch = Scratch(remote);
@@ -376,6 +711,11 @@ public sealed class GitPatchApplierTests : IDisposable
         File.WriteAllText(Path.Combine(scratch, "src", "A.cs"), "a\n");
         File.WriteAllText(Path.Combine(scratch, ".github", "workflows", "ci.yml"), "on: push\n");
         File.WriteAllText(Path.Combine(scratch, ".gitignore"), "*.log\n");
+        foreach (var (path, content) in extra)
+        {
+            File.WriteAllText(Path.Combine(scratch, path), content);
+        }
+
         Git(scratch, "add", "-A");
         Git(scratch, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "seed files");
         Git(scratch, "push", "-q", "origin", "main");

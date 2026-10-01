@@ -17,11 +17,12 @@ public sealed record PatchApplyLimits(long MaxPatchBytes = 16 * 1024 * 1024, int
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Order.</b> The patch is first copied into a private file under <see cref="GitWorkspaceOptions.DataRoot"/>, and
-/// the copy is refused when it is longer than <see cref="PatchApplyLimits.MaxPatchBytes"/>. Every later step reads
-/// that copy, never the caller's file, so nothing that can still write the caller's file (a sandbox volume, say) can
-/// swap the content between the check and the apply. Git then lists the paths the patch touches, the paths are
-/// checked, and only then is anything applied.
+/// <b>Order.</b> The patch path must name a regular file — not a directory, link, FIFO or device. It is copied into a
+/// private file under <see cref="GitWorkspaceOptions.DataRoot"/>, and refused when it is longer than
+/// <see cref="PatchApplyLimits.MaxPatchBytes"/>. Every later step reads that copy, never the caller's file, so nothing
+/// that can still write the caller's file (a sandbox volume, say) can swap the content between the check and the
+/// apply. An empty copy is a run with no changes: nothing is applied and the re-check runs alone. Otherwise git lists
+/// the paths the patch touches, the paths are checked, and only then is anything applied.
 /// </para>
 /// <para>
 /// <b>Both sides of a rename or copy.</b> <c>git apply --numstat -z</c> prints one name per file: the new name, or
@@ -32,18 +33,29 @@ public sealed record PatchApplyLimits(long MaxPatchBytes = 16 * 1024 * 1024, int
 /// that an adversarial patch could make disagree with git's.
 /// </para>
 /// <para>
-/// <b>Windows short names.</b> On an NTFS volume with 8.3 names, <c>GITHUB~1</c> is another name for an existing
-/// <c>.github</c> directory: a patch creating <c>GITHUB~1/evil.yml</c> passes a name check and git writes the file
-/// into <c>.github</c>, while the index records the short name. Git itself guards only the short names of
-/// <c>.git</c>. Any path with a segment shaped like a short name (<c>~</c>, digits, then the end or a <c>.</c>) is
-/// refused on every OS. Trailing dots and spaces and <c>:</c> streams are not checked here: git for Windows already
-/// refuses those paths as invalid, and on other systems they name distinct files.
+/// <b>Path rules.</b> Besides <see cref="ProtectedPathSet"/>, a path is refused when it is empty or holds a line
+/// break; leaves the worktree (a leading <c>/</c> or <c>\</c>, a <c>..</c> segment, a <c>:</c> or drive prefix); has a
+/// <c>.git</c> segment at any depth; ends in <c>.gitattributes</c> or <c>.gitmodules</c> at any depth, since a nested
+/// <c>.gitattributes</c> has the same filter power over its subtree; has a segment shaped like a Windows 8.3 short
+/// name; or lies beyond a symlink or submodule the index already holds. Git's own <c>verify_path</c> refuses several
+/// of these too; the applier does not rely on it. On an NTFS volume with 8.3 names, <c>GITHUB~1</c> is another name
+/// for an existing <c>.github</c>: git writes <c>GITHUB~1/evil.yml</c> into <c>.github</c> while the index records the
+/// short name, and git itself guards only the short names of <c>.git</c>. Every git call also carries
+/// <c>core.protectNTFS</c> and <c>core.protectHFS</c>.
 /// </para>
 /// <para>
-/// <b>Re-check.</b> After applying, the staged names against the base commit, both sides of every rename, and every
-/// name <c>git status</c> reports in the worktree, untracked and ignored included, are checked again. The worktree
-/// scan catches a file that reached a protected path on disk under a name the index does not show. On a hit the
-/// worktree is reset to the base commit and cleaned, and the apply fails.
+/// <b>Already applied.</b> A patch counts as already applied only when the index already differs from the base commit
+/// and the patch applies in reverse. On an unchanged base the patch is always applied forward: a reverse check alone
+/// passes on repetitive content the patch never touched — adding one line to a run of identical lines reverses
+/// cleanly against the base — and would drop the change silently.
+/// </para>
+/// <para>
+/// <b>Re-check.</b> After applying, the staged entries against the base commit, both sides of every rename, and every
+/// name <c>git status</c> reports in the worktree, untracked and ignored included, are checked again, and so are the
+/// staged modes: an entry that becomes a symlink (<c>120000</c>) or submodule (<c>160000</c>) is refused, type
+/// changes included. The worktree scan catches a file that reached a protected path on disk under a name the index
+/// does not show. On any failure of the re-check, a refusal or a listing that could not be read, the worktree is reset
+/// to the base commit, or to HEAD when the base cannot be reached, and cleaned.
 /// </para>
 /// <para>
 /// <b>Line breaks.</b> <see cref="GitCli"/> reads output line by line, which turns a carriage return in a file name
@@ -54,7 +66,7 @@ public sealed record PatchApplyLimits(long MaxPatchBytes = 16 * 1024 * 1024, int
 /// <param name="logger">Required: every host has one.</param>
 public sealed partial class GitPatchApplier(GitWorkspaceOptions options, ILogger<GitPatchApplier> logger)
 {
-    private static readonly string[] SymlinksOff = ["core.symlinks=false"];
+    private static readonly string[] GitConfig = ["core.symlinks=false", "core.protectNTFS=true", "core.protectHFS=true"];
 
     private readonly GitCli _git = new(options);
 
@@ -84,7 +96,9 @@ public sealed partial class GitPatchApplier(GitWorkspaceOptions options, ILogger
 
         try
         {
-            return await ApplyCopyAsync(workspace, copy.Value, protectedPaths, limits, ct).ConfigureAwait(false);
+            return new FileInfo(copy.Value).Length == 0
+                ? await RecheckAsync(workspace, protectedPaths, ct).ConfigureAwait(false)
+                : await ApplyCopyAsync(workspace, copy.Value, protectedPaths, limits, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -93,10 +107,10 @@ public sealed partial class GitPatchApplier(GitWorkspaceOptions options, ILogger
     }
 
     /// <summary>
-    /// Re-checks what the worktree holds against <paramref name="protectedPaths"/>: the staged names against the base
-    /// commit, both sides of a rename, and every name <c>git status</c> reports. On a hit the worktree is reset to the
-    /// base commit and cleaned. Returns the staged names. Internal so the re-check can be tested on its own, since no
-    /// patch that passes the earlier checks is known to reach it.
+    /// Re-checks what the worktree holds against <paramref name="protectedPaths"/>: the staged entries against the base
+    /// commit, both sides of a rename, their modes, and every name <c>git status</c> reports. On any failure the
+    /// worktree is reset and cleaned. Returns the staged names. Internal so the re-check can be tested on its own,
+    /// since no patch that passes the earlier checks is known to reach it.
     /// </summary>
     internal async Task<Result<IReadOnlyList<string>, AgentError>> RecheckAsync(RunWorkspace workspace, ProtectedPathSet protectedPaths, CancellationToken ct)
     {
@@ -105,27 +119,45 @@ public sealed partial class GitPatchApplier(GitWorkspaceOptions options, ILogger
             return Fail(AgentError.Validation($"The workspace of run '{workspace.RunId}' has no full base commit; publish refused."));
         }
 
-        var staged = await ListAsync(workspace.Root, ["diff", "--cached", "--name-only", "-z", "--no-renames", baseCommit], "list the staged names", ct).ConfigureAwait(false);
-        if (staged.IsFailure)
+        var problem = await FindRecheckProblemAsync(workspace.Root, baseCommit, protectedPaths, ct).ConfigureAwait(false);
+        if (problem.IsSuccess)
         {
-            return staged;
+            return problem;
         }
 
-        var status = await ListAsync(workspace.Root, ["status", "--porcelain", "-z", "--untracked-files=all", "--ignored", "--no-renames"], "list the worktree status", ct).ConfigureAwait(false);
+        LogRefused(logger, workspace.RunId, problem.Error.Message);
+        await ResetAsync(workspace.Root, baseCommit, ct).ConfigureAwait(false);
+        return problem;
+    }
+
+    /// <summary>The staged names when the re-check passes; otherwise why it did not.</summary>
+    private async Task<Result<IReadOnlyList<string>, AgentError>> FindRecheckProblemAsync(string root, string baseCommit, ProtectedPathSet protectedPaths, CancellationToken ct)
+    {
+        var raw = await RunAsync(root, ["diff", "--cached", "--raw", "-z", "--no-renames", baseCommit], "list the staged entries", ct).ConfigureAwait(false);
+        if (raw.IsFailure)
+        {
+            return Fail(raw.Error);
+        }
+
+        var status = await RunAsync(root, ["status", "--porcelain", "-z", "--untracked-files=all", "--ignored", "--no-renames"], "list the worktree status", ct).ConfigureAwait(false);
         if (status.IsFailure)
         {
-            return status;
+            return Fail(status.Error);
         }
 
-        var refusal = FindRefusal(staged.Value, protectedPaths) ?? FindRefusal(StatusNames(status.Value), protectedPaths);
-        if (refusal is null)
+        var entries = ParseRaw(raw.Value);
+        if (entries is null)
         {
-            return staged;
+            return Fail(AgentError.Validation("git diff --raw printed output that could not be parsed; publish refused."));
         }
 
-        LogRefused(logger, workspace.RunId, refusal);
-        await ResetAsync(workspace, ct).ConfigureAwait(false);
-        return Fail(AgentError.Validation(refusal));
+        var names = entries.Select(e => e.Path).ToList();
+        var refusal = FindLinkModeRefusal(entries)
+            ?? FindRefusal(names, protectedPaths)
+            ?? FindRefusal(StatusNames(SplitNul(status.Value)), protectedPaths);
+        return refusal is null
+            ? Result<IReadOnlyList<string>, AgentError>.Success(names)
+            : Fail(AgentError.Validation(refusal));
     }
 
     private async Task<Result<IReadOnlyList<string>, AgentError>> ApplyCopyAsync(
@@ -137,14 +169,20 @@ public sealed partial class GitPatchApplier(GitWorkspaceOptions options, ILogger
             return touched;
         }
 
-        var refusal = FindRefusal(touched.Value, protectedPaths);
+        var links = await RunAsync(workspace.Root, ["ls-files", "-s", "-z"], "list the index", ct).ConfigureAwait(false);
+        if (links.IsFailure)
+        {
+            return Fail(links.Error);
+        }
+
+        var refusal = FindRefusal(touched.Value, protectedPaths, LinkPaths(links.Value));
         if (refusal is not null)
         {
             LogRefused(logger, workspace.RunId, refusal);
             return Fail(AgentError.Validation(refusal));
         }
 
-        var applied = await ApplyUnlessAlreadyAppliedAsync(workspace.Root, copy, ct).ConfigureAwait(false);
+        var applied = await ApplyUnlessAlreadyAppliedAsync(workspace.Root, copy, workspace.BaseCommit!, ct).ConfigureAwait(false);
         return applied.IsFailure ? Fail(applied.Error) : await RecheckAsync(workspace, protectedPaths, ct).ConfigureAwait(false);
     }
 
@@ -183,63 +221,76 @@ public sealed partial class GitPatchApplier(GitWorkspaceOptions options, ILogger
         return Result<IReadOnlyList<string>, AgentError>.Success([.. newNames.Concat(oldNames).Distinct(StringComparer.Ordinal)]);
     }
 
-    private async Task<UnitResult<AgentError>> ApplyUnlessAlreadyAppliedAsync(string root, string copy, CancellationToken ct)
+    /// <summary>Applies the patch forward, unless the index already differs from the base and the patch applies in reverse — see the class remarks.</summary>
+    private async Task<UnitResult<AgentError>> ApplyUnlessAlreadyAppliedAsync(string root, string copy, string baseCommit, CancellationToken ct)
     {
-        var reverseCheck = await _git.RunAsync(root, ["apply", "--index", "--check", "--reverse", copy], SymlinksOff, null, ct).ConfigureAwait(false);
-        if (reverseCheck.TimedOut)
+        var differs = await _git.RunAsync(root, ["diff", "--cached", "--quiet", baseCommit], GitConfig, null, ct).ConfigureAwait(false);
+        if (differs.TimedOut || differs.ExitCode is not (0 or 1))
         {
-            return UnitResult<AgentError>.Failure(GitMirrorStore.GitFailure("Could not check whether the patch is already applied.", reverseCheck, secret: null));
+            return UnitResult<AgentError>.Failure(GitMirrorStore.GitFailure("Could not compare the index with the base commit.", differs, secret: null));
         }
 
-        if (reverseCheck.Succeeded)
+        if (differs.ExitCode == 1)
         {
-            return UnitResult<AgentError>.Success();
+            var reverseCheck = await _git.RunAsync(root, ["apply", "--index", "--check", "--reverse", copy], GitConfig, null, ct).ConfigureAwait(false);
+            if (reverseCheck.TimedOut)
+            {
+                return UnitResult<AgentError>.Failure(GitMirrorStore.GitFailure("Could not check whether the patch is already applied.", reverseCheck, secret: null));
+            }
+
+            if (reverseCheck.Succeeded)
+            {
+                return UnitResult<AgentError>.Success();
+            }
         }
 
-        var applied = await _git.RunAsync(root, ["apply", "--index", "--binary", "--whitespace=nowarn", copy], SymlinksOff, null, ct).ConfigureAwait(false);
+        var applied = await _git.RunAsync(root, ["apply", "--index", "--binary", "--whitespace=nowarn", copy], GitConfig, null, ct).ConfigureAwait(false);
         return applied.Succeeded
             ? UnitResult<AgentError>.Success()
             : UnitResult<AgentError>.Failure(GitMirrorStore.GitFailure("git apply failed.", applied, secret: null));
     }
 
-    private async Task ResetAsync(RunWorkspace workspace, CancellationToken ct)
+    /// <summary>Resets the worktree to <paramref name="baseCommit"/>, or to HEAD when that fails, then cleans it, ignored files included.</summary>
+    private async Task ResetAsync(string root, string baseCommit, CancellationToken ct)
     {
-        var reset = await _git.RunAsync(workspace.Root, ["reset", "--hard", "-q", workspace.BaseCommit!], SymlinksOff, null, ct).ConfigureAwait(false);
+        var reset = await _git.RunAsync(root, ["reset", "--hard", "-q", baseCommit], GitConfig, null, ct).ConfigureAwait(false);
         if (!reset.Succeeded)
         {
             LogCleanupFailed(logger, "reset the worktree to the base commit", GitWorktreeWorkspaceProvider.ExtractErrorDetail(reset.StdErr));
+            var toHead = await _git.RunAsync(root, ["reset", "--hard", "-q", "HEAD"], GitConfig, null, ct).ConfigureAwait(false);
+            if (!toHead.Succeeded)
+            {
+                LogCleanupFailed(logger, "reset the worktree to HEAD", GitWorktreeWorkspaceProvider.ExtractErrorDetail(toHead.StdErr));
+            }
         }
 
-        var clean = await _git.RunAsync(workspace.Root, ["clean", "-ffdxq"], SymlinksOff, null, ct).ConfigureAwait(false);
+        var clean = await _git.RunAsync(root, ["clean", "-ffdxq"], GitConfig, null, ct).ConfigureAwait(false);
         if (!clean.Succeeded)
         {
             LogCleanupFailed(logger, "clean the worktree", GitWorktreeWorkspaceProvider.ExtractErrorDetail(clean.StdErr));
         }
     }
 
-    private async Task<Result<IReadOnlyList<string>, AgentError>> ListAsync(string root, IReadOnlyList<string> args, string what, CancellationToken ct)
-    {
-        var output = await RunAsync(root, args, what, ct).ConfigureAwait(false);
-        return output.IsFailure
-            ? Fail(output.Error)
-            : Result<IReadOnlyList<string>, AgentError>.Success(SplitNul(output.Value));
-    }
-
     private async Task<Result<string, AgentError>> RunAsync(string root, IReadOnlyList<string> args, string what, CancellationToken ct)
     {
-        var result = await _git.RunAsync(root, args, SymlinksOff, null, ct).ConfigureAwait(false);
+        var result = await _git.RunAsync(root, args, GitConfig, null, ct).ConfigureAwait(false);
         return result.Succeeded
             ? Result<string, AgentError>.Success(result.StdOut)
             : Result<string, AgentError>.Failure(GitMirrorStore.GitFailure($"Could not {what}.", result, secret: null));
     }
 
     /// <summary>
-    /// Copies the patch into a private file under <see cref="GitWorkspaceOptions.DataRoot"/>, refusing it once more
-    /// than <paramref name="maxBytes"/> have been read — the length is counted while copying, never taken from file
-    /// metadata, so a link or a file still growing cannot slip past it.
+    /// Copies the patch into a private file under <see cref="GitWorkspaceOptions.DataRoot"/>, refusing it when the path
+    /// is not a regular file, or once more than <paramref name="maxBytes"/> have been read — the length is counted while
+    /// copying, never taken from file metadata, so a file still growing cannot slip past it.
     /// </summary>
     private async Task<Result<string, AgentError>> CopyPatchAsync(string patchPath, long maxBytes, CancellationToken ct)
     {
+        if (!IsRegularFile(patchPath))
+        {
+            return Result<string, AgentError>.Failure(AgentError.Validation($"The patch '{patchPath}' is not a regular file; publish refused."));
+        }
+
         var directory = Path.Combine(Path.GetFullPath(options.DataRoot), "patches");
         var copy = Path.Combine(directory, Guid.NewGuid().ToString("N") + ".patch");
         try
@@ -258,6 +309,25 @@ public sealed partial class GitPatchApplier(GitWorkspaceOptions options, ILogger
             TryDelete(copy);
             return Result<string, AgentError>.Failure(AgentError.StoreError($"Could not read the patch '{patchPath}'.", ex.Message));
         }
+    }
+
+    /// <summary>
+    /// Whether <paramref name="path"/> is a regular file, not following a final link. On Linux the file type comes from
+    /// <c>statx</c>, which tells a FIFO or device — that would block or never end on open — from a regular file; an
+    /// unreadable type fails closed. Elsewhere, a directory, link or device attribute refuses it.
+    /// </summary>
+    private static bool IsRegularFile(string path)
+    {
+        var info = new FileInfo(path);
+        if (!info.Exists || info.LinkTarget is not null
+            || info.Attributes.HasFlag(FileAttributes.Directory)
+            || info.Attributes.HasFlag(FileAttributes.ReparsePoint)
+            || info.Attributes.HasFlag(FileAttributes.Device))
+        {
+            return false;
+        }
+
+        return !OperatingSystem.IsLinux() || UnixLinkCount.IsRegularFile(path) == true;
     }
 
     /// <summary>Copies <paramref name="source"/> to <paramref name="target"/>; <see langword="false"/> once more than <paramref name="maxBytes"/> are read.</summary>
@@ -279,152 +349,6 @@ public sealed partial class GitPatchApplier(GitWorkspaceOptions options, ILogger
             }
 
             await output.WriteAsync(buffer.AsMemory(0, read), ct).ConfigureAwait(false);
-        }
-
-        return true;
-    }
-
-    /// <summary>
-    /// The names in <c>git apply --numstat -z</c> output: <c>added\tdeleted\tname\0</c> per file, or
-    /// <c>added\tdeleted\t\0old\0new\0</c> should git ever print both sides of a rename the way <c>git diff</c> does.
-    /// Binary files print <c>-</c> for both counts. <see langword="null"/> when a record is malformed.
-    /// </summary>
-    internal static List<string>? ParseNumstat(string output)
-    {
-        var fields = SplitNul(output);
-        var names = new List<string>();
-        for (var i = 0; i < fields.Count; i++)
-        {
-            var record = fields[i];
-            var first = record.IndexOf('\t', StringComparison.Ordinal);
-            var second = first < 0 ? -1 : record.IndexOf('\t', first + 1);
-            if (second < 0 || !IsCount(record.AsSpan(0, first)) || !IsCount(record.AsSpan(first + 1, second - first - 1)))
-            {
-                return null;
-            }
-
-            var name = record[(second + 1)..];
-            if (name.Length > 0)
-            {
-                names.Add(name);
-                continue;
-            }
-
-            if (i + 2 >= fields.Count)
-            {
-                return null;
-            }
-
-            names.Add(fields[++i]);
-            names.Add(fields[++i]);
-        }
-
-        return names;
-    }
-
-    /// <summary>The paths in <c>git status --porcelain -z --no-renames</c> output, each record <c>XY path</c>.</summary>
-    private static IEnumerable<string> StatusNames(IReadOnlyList<string> records) =>
-        records.Select(record => record.Length > 3 ? record[3..] : record);
-
-    /// <summary>
-    /// Splits NUL-terminated output into its fields. <see cref="GitCli"/> appends a line feed after the last line it
-    /// reads, so one trailing line feed is dropped first; an empty last field after the final NUL is not a field.
-    /// </summary>
-    private static List<string> SplitNul(string output)
-    {
-        var text = output.EndsWith('\n') ? output[..^1] : output;
-        var fields = new List<string>(text.Split('\0'));
-        if (fields.Count > 0 && fields[^1].Length == 0)
-        {
-            fields.RemoveAt(fields.Count - 1);
-        }
-
-        return fields;
-    }
-
-    /// <summary>Why <paramref name="paths"/> must not be published, or <see langword="null"/> when nothing in it is refused.</summary>
-    internal static string? FindRefusal(IEnumerable<string> paths, ProtectedPathSet protectedPaths)
-    {
-        foreach (var path in paths)
-        {
-            if (path.Length == 0 || path.Contains('\n', StringComparison.Ordinal) || path.Contains('\r', StringComparison.Ordinal))
-            {
-                return "the change touches a path that is empty or holds a line break; publish refused";
-            }
-
-            if (protectedPaths.IsProtected(path))
-            {
-                return $"the change touches protected path '{path}'; publish refused";
-            }
-
-            if (HasShortNameSegment(path))
-            {
-                return $"the change touches path '{path}', which can name another file on Windows; publish refused";
-            }
-        }
-
-        return null;
-    }
-
-    /// <summary>
-    /// <see langword="true"/> when a segment of <paramref name="path"/> is shaped like a Windows 8.3 short name: a
-    /// <c>~</c>, one or more digits, then the end of the segment or a <c>.</c> — <c>GITHUB~1</c>, <c>GITATT~1</c>.
-    /// </summary>
-    internal static bool HasShortNameSegment(string path)
-    {
-        for (var tilde = path.IndexOf('~', StringComparison.Ordinal); tilde >= 0; tilde = path.IndexOf('~', tilde + 1))
-        {
-            var end = tilde + 1;
-            while (end < path.Length && char.IsAsciiDigit(path[end]))
-            {
-                end++;
-            }
-
-            if (end > tilde + 1 && (end == path.Length || path[end] is '.' or '/' or (char)92))
-            {
-                return true;
-            }
-        }
-
-        return false;
-    }
-
-    private static bool IsCount(ReadOnlySpan<char> value)
-    {
-        if (value is "-")
-        {
-            return true;
-        }
-
-        if (value.IsEmpty)
-        {
-            return false;
-        }
-
-        foreach (var c in value)
-        {
-            if (!char.IsAsciiDigit(c))
-            {
-                return false;
-            }
-        }
-
-        return true;
-    }
-
-    private static bool IsFullSha(string? value)
-    {
-        if (value is not { Length: 40 })
-        {
-            return false;
-        }
-
-        foreach (var c in value)
-        {
-            if (!char.IsAsciiDigit(c) && c is not (>= 'a' and <= 'f'))
-            {
-                return false;
-            }
         }
 
         return true;
