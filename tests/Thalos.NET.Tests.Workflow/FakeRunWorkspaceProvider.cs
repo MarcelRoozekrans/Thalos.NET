@@ -8,7 +8,7 @@ namespace Thalos.Tests.Workflow;
 /// what <see cref="Add"/> stored, lists it in insertion order, and records every successful removal; it creates
 /// nothing. <c>GitWorktreeWorkspaceProvider</c>'s own suite proves the real removal's refusals and retries.
 /// </summary>
-internal sealed class FakeRunWorkspaceProvider : IRunWorkspaceProvider
+internal class FakeRunWorkspaceProvider : IRunWorkspaceProvider
 {
     private readonly List<RunWorkspace> _workspaces = [];
 
@@ -51,5 +51,29 @@ internal sealed class FakeRunWorkspaceProvider : IRunWorkspaceProvider
         _workspaces.RemoveAll(w => w.RunId == runId);
         Removed.Add(runId);
         return UnitResult<AgentError>.Success();
+    }
+}
+
+/// <summary>
+/// A <see cref="FakeRunWorkspaceProvider"/> that can park, for the sweeper's park step: it records every park, and
+/// refuses one for <see cref="FailParkFor"/>.
+/// </summary>
+internal sealed class FakeParkableRunWorkspaceProvider : FakeRunWorkspaceProvider, IParkableRunWorkspaceProvider
+{
+    /// <summary>The run ids <see cref="ParkAsync"/> parked, in order.</summary>
+    public List<Guid> Parked { get; } = [];
+
+    /// <summary><see cref="ParkAsync"/> returns a failure for this run id and parks nothing.</summary>
+    public Guid? FailParkFor { get; set; }
+
+    public ValueTask<UnitResult<AgentError>> ParkAsync(Guid runId, CancellationToken ct)
+    {
+        if (runId == FailParkFor)
+        {
+            return ValueTask.FromResult(UnitResult<AgentError>.Failure(AgentError.ProviderError("the fake could not export")));
+        }
+
+        Parked.Add(runId);
+        return ValueTask.FromResult(UnitResult<AgentError>.Success());
     }
 }

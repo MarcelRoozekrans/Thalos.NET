@@ -30,8 +30,10 @@ namespace Thalos.Sandbox;
 /// re-created sandbox never accepts its predecessor's token.
 /// </para>
 /// <para>
-/// <b>One call per run at a time.</b> <see cref="CreateAsync"/> and <see cref="RemoveAsync"/> hold the run's lock,
-/// <c>sandboxes/locks/&lt;run-id&gt;.lock</c>, for their whole length, and refuse at once when another call holds it.
+/// <b>One call per run at a time.</b> <see cref="CreateAsync"/>, <see cref="RemoveAsync"/>, <see cref="ParkAsync"/>
+/// and <see cref="CheckoutForPublishAsync"/> hold the run's lock, <c>sandboxes/locks/&lt;run-id&gt;.lock</c>, for their
+/// whole length. A create or remove refuses at once when another call holds it; a park or checkout waits for it, for a
+/// bounded time.
 /// The observers are told under that lock, so a run's <see cref="IRunWorkspaceObserver.OnReadyAsync"/> and
 /// <see cref="IRunWorkspaceObserver.OnRemovingAsync"/> never overlap and arrive in order: a late removal notice can
 /// never reach an observer after the run's next sandbox was announced ready. The claim itself is an atomic no-replace
@@ -71,11 +73,8 @@ public sealed partial class SandboxRunWorkspaceProvider(
     /// <summary>How often <see cref="WaitAllReadyAsync"/> asks the sandbox. Two seconds; tests shorten it.</summary>
     internal TimeSpan ReadyPollInterval { get; set; } = TimeSpan.FromSeconds(2);
 
-    /// <summary>Where the trusted state lives, for A11's park and hand-off.</summary>
+    /// <summary>The trusted state, for tests.</summary>
     internal SandboxRecordStore Store => _store;
-
-    /// <summary>Applies a run's stored patch for publishing; used from A11.</summary>
-    internal GitPatchApplier Patches => patches;
 
     // ---------- find, list ----------
 
@@ -187,6 +186,7 @@ public sealed partial class SandboxRunWorkspaceProvider(
 
         // The paths the run id implies, never a path read from the record.
         if (!_store.DeleteFileIfPresent(_store.PatchPath(runId), "delete a removed run's stored patch")
+            || !_store.DeleteFileIfPresent(_store.PatchTempPath(runId), "delete a removed run's partial patch")
             || !_store.DeleteFileIfPresent(_store.BundlePath(runId), "delete a removed run's bundle"))
         {
             return UnitResult<AgentError>.Failure(AgentError.StoreError($"Could not delete the stored files of run '{runId}'."));
@@ -195,16 +195,6 @@ public sealed partial class SandboxRunWorkspaceProvider(
         var unpublished = await publishWorktrees.RemoveAsync(runId, ct).ConfigureAwait(false);
         return unpublished.IsFailure ? unpublished : _store.Delete(runId);
     }
-
-    // ---------- park, hand-off ----------
-
-    /// <inheritdoc />
-    public ValueTask<UnitResult<AgentError>> ParkAsync(Guid runId, CancellationToken ct) =>
-        ValueTask.FromResult(UnitResult<AgentError>.Failure(AgentError.ProviderError("not implemented until A11")));
-
-    /// <inheritdoc />
-    public ValueTask<Result<RunWorkspace, AgentError>> CheckoutForPublishAsync(Guid runId, CancellationToken ct) =>
-        ValueTask.FromResult(Result<RunWorkspace, AgentError>.Failure(AgentError.ProviderError("not implemented until A11")));
 
     // ---------- helpers ----------
 
@@ -308,4 +298,7 @@ public sealed partial class SandboxRunWorkspaceProvider(
 
     [LoggerMessage(EventId = 2109, Level = LogLevel.Warning, Message = "Reconciling {Subject} failed and was skipped: {Error}")]
     private static partial void LogReconcileStepFailed(ILogger logger, string subject, string error);
+
+    [LoggerMessage(EventId = 2110, Level = LogLevel.Error, Message = "SandboxLost: the sandbox {SandboxId} of run {RunId} was gone before its patch was exported; the run is parked with no patch to publish")]
+    private static partial void LogLostBeforeExport(ILogger logger, Guid runId, string sandboxId);
 }

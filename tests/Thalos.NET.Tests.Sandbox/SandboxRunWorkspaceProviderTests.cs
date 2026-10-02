@@ -293,7 +293,7 @@ public sealed class SandboxRunWorkspaceProviderTests : IAsyncLifetime
 
     /// <summary>
     /// Red 1: skip runtime.DeleteAsync in RemoveLockedAsync; the sandbox survives. Red 2: skip deleting the stored patch;
-    /// it survives. Red 3: skip publishWorktrees.RemoveAsync; the publish worktree survives. Red 4: skip telling the
+    /// it survives. Red 2b: skip deleting the partial patch; it survives. Red 3: skip publishWorktrees.RemoveAsync; the publish worktree survives. Red 4: skip telling the
     /// observers; they hear nothing. Red 5: fail when the record is absent; the second remove fails.
     /// </summary>
     [Fact]
@@ -307,6 +307,7 @@ public sealed class SandboxRunWorkspaceProviderTests : IAsyncLifetime
         (await _publish.CreateAsync(publishRequest, CancellationToken.None)).IsSuccess.Should().BeTrue();
         var patch = provider.Store.PatchPath(runId);
         await File.WriteAllTextAsync(patch, "diff --git a/x b/x\n");
+        await File.WriteAllTextAsync(provider.Store.PatchTempPath(runId), "diff --git a/x");
 
         var removed = await provider.RemoveAsync(runId, CancellationToken.None);
         var again = await provider.RemoveAsync(runId, CancellationToken.None);
@@ -316,6 +317,7 @@ public sealed class SandboxRunWorkspaceProviderTests : IAsyncLifetime
         again.IsSuccess.Should().BeTrue();
         Runtime.Ids.Should().BeEmpty();
         File.Exists(patch).Should().BeFalse();
+        File.Exists(provider.Store.PatchTempPath(runId)).Should().BeFalse("a park that died mid-export leaves a partial patch");
         (await _publish.FindAsync(runId, CancellationToken.None)).Should().BeNull();
         File.Exists(Path.Combine(SandboxesDirectory, $"{runId:D}.json")).Should().BeFalse();
         File.Exists(provider.Store.LockPath(runId)).Should().BeFalse();

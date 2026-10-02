@@ -10,7 +10,9 @@ namespace Thalos.Workflow;
 /// approval keeps its worktree for a human. Removed: <see cref="WorkflowStatus.Succeeded"/> runs, whether or not they
 /// were resumed, because <c>open-pull-request</c> has already pushed and opened the PR; Failed or Cancelled runs with
 /// no <see cref="WorkflowRun.LastResume"/>; and workspaces whose run row does not exist, once their
-/// <see cref="RunWorkspace.CreatedAt"/> is older than <see cref="OrphanGrace"/>.
+/// <see cref="RunWorkspace.CreatedAt"/> is older than <see cref="OrphanGrace"/>. Before that decision, a provider that
+/// is an <see cref="IParkableRunWorkspaceProvider"/> parks the workspace of every run that exists and is not
+/// <see cref="WorkflowStatus.Running"/>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -78,6 +80,7 @@ public sealed partial class RunWorkspaceSweeper(
         var removed = 0;
         foreach (var workspace in listed)
         {
+            await ParkIfNotRunningAsync(workspace.RunId, ct).ConfigureAwait(false);
             try
             {
                 if (!await NoLongerNeededAsync(workspace, ct).ConfigureAwait(false))
@@ -101,6 +104,38 @@ public sealed partial class RunWorkspaceSweeper(
         }
 
         return removed;
+    }
+
+    /// <summary>
+    /// Parks the workspace of a run that exists and is not <see cref="WorkflowStatus.Running"/>, when the provider can
+    /// park: a run at its gate, or ended, needs nothing its workspace runs. A failed park is logged and the sweep goes
+    /// on; the next sweep retries it. Whether the workspace is then removed is decided on run state alone, as before.
+    /// </summary>
+    private async ValueTask ParkIfNotRunningAsync(Guid runId, CancellationToken ct)
+    {
+        if (_workspaces is not IParkableRunWorkspaceProvider parkable)
+        {
+            return;
+        }
+
+        try
+        {
+            var run = await _store.FindAsync(runId, ct).ConfigureAwait(false);
+            if (run is null || run.Status == WorkflowStatus.Running)
+            {
+                return;
+            }
+
+            var parked = await parkable.ParkAsync(runId, ct).ConfigureAwait(false);
+            if (parked.IsFailure)
+            {
+                LogParkFailed(_logger, runId, parked.Error.ToString(), exception: null);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            LogParkFailed(_logger, runId, ex.Message, ex);
+        }
     }
 
     private async ValueTask<bool> NoLongerNeededAsync(RunWorkspace workspace, CancellationToken ct)
@@ -133,4 +168,10 @@ public sealed partial class RunWorkspaceSweeper(
         Level = LogLevel.Warning,
         Message = "Run workspace sweep: removing the workspace of run {RunId} failed. The next sweep retries it.")]
     private static partial void LogRemovalFailed(ILogger logger, Guid runId, Exception exception);
+
+    [LoggerMessage(
+        EventId = 912,
+        Level = LogLevel.Warning,
+        Message = "Run workspace sweep: parking the workspace of run {RunId} failed: {Error}. The next sweep retries it.")]
+    private static partial void LogParkFailed(ILogger logger, Guid runId, string error, Exception? exception);
 }

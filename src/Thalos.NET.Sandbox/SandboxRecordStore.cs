@@ -48,7 +48,10 @@ internal sealed partial class SandboxRecordStore(string dataRoot, TimeProvider c
     /// <summary>Where the run's exported patch is stored.</summary>
     public string PatchPath(Guid runId) => Path.Combine(Directory, runId.ToString("N") + ".patch");
 
-    /// <summary>The run's lock: held by a create, a remove or a park for its whole length.</summary>
+    /// <summary>Where a park streams the run's patch before moving it to <see cref="PatchPath"/>.</summary>
+    public string PatchTempPath(Guid runId) => PatchPath(runId) + ".tmp";
+
+    /// <summary>The run's lock: held by a create, a remove, a park or a checkout for its whole length.</summary>
     public string LockPath(Guid runId) => Path.Combine(Directory, "locks", runId.ToString("D") + ".lock");
 
     /// <summary>Creates the directory owner-only, or narrows an existing one, or says why it cannot be used.</summary>

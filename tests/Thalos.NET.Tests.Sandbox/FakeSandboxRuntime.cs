@@ -29,6 +29,12 @@ internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISan
     /// <summary>When set, <see cref="ListAsync"/> answers empty, as the runtime does when the engine cannot be asked.</summary>
     public bool ListNothing { get; set; }
 
+    /// <summary>When set, <see cref="GetAsync"/> answers null for every sandbox, as the runtime does when the engine cannot be asked.</summary>
+    public bool Unreachable { get; set; }
+
+    /// <summary>When set, a delete fails with this error and deletes nothing.</summary>
+    public AgentError? DeleteFailure { get; set; }
+
     /// <summary>Called once a create's host is running, with the create's token; a test cancels there to interrupt the create.</summary>
     public Action? AfterHostStarted { get; set; }
 
@@ -37,6 +43,20 @@ internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISan
 
     /// <summary>The work root of a sandbox's host.</summary>
     public string WorkRootOf(string sandboxId) => _sandboxes[sandboxId].WorkRoot;
+
+    /// <summary>The host of a sandbox, so a test can change how it answers.</summary>
+    public LoopbackSandbox HostOf(string sandboxId) => _sandboxes[sandboxId].Host!;
+
+    /// <summary>Reports a sandbox's container as missing and stops its host, as a container deleted behind the runtime's back.</summary>
+    public async Task LoseAsync(string sandboxId)
+    {
+        var entry = _sandboxes[sandboxId];
+        _sandboxes[sandboxId] = entry with { Handle = entry.Handle with { State = SandboxState.Missing } };
+        if (entry.Host is { } host)
+        {
+            await host.StopAsync();
+        }
+    }
 
     /// <summary>A sandbox with no host, as one from before a restart.</summary>
     public void Seed(Guid runId, DateTimeOffset createdAt) =>
@@ -79,7 +99,7 @@ internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISan
     }
 
     public ValueTask<SandboxHandle?> GetAsync(string sandboxId, CancellationToken ct) =>
-        ValueTask.FromResult(_sandboxes.TryGetValue(sandboxId, out var entry) ? entry.Handle : null);
+        ValueTask.FromResult(!Unreachable && _sandboxes.TryGetValue(sandboxId, out var entry) ? entry.Handle : null);
 
     public ValueTask<IReadOnlyList<SandboxHandle>> ListAsync(CancellationToken ct) =>
         ValueTask.FromResult<IReadOnlyList<SandboxHandle>>(ListNothing ? [] : [.. _sandboxes.Values.Select(e => e.Handle)]);
@@ -92,6 +112,11 @@ internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISan
         if (ThrowOnDelete.ContainsKey(sandboxId))
         {
             throw new InvalidOperationException($"the runtime failed deleting {sandboxId}");
+        }
+
+        if (DeleteFailure is { } failure)
+        {
+            return UnitResult<AgentError>.Failure(failure);
         }
 
         Deleted.Enqueue(sandboxId);

@@ -82,6 +82,13 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
         set => _hooks.OnHandshake = value;
     }
 
+    /// <summary>When set, <c>POST /control/export</c> is answered 503 ahead of the bearer check, as a failing export.</summary>
+    public bool RefuseExport
+    {
+        get => _hooks.RefuseExport;
+        set => _hooks.RefuseExport = value;
+    }
+
     /// <summary>How long a <c>dotnet build</c> takes; it honours the call's token.</summary>
     public TimeSpan BuildDelay
     {
@@ -124,6 +131,13 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
         var requests = new ConcurrentQueue<string>();
         app.Use(async (context, next) =>
         {
+            if (hooks.RefuseExport && context.Request.Path.Equals("/control/export", StringComparison.Ordinal))
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
+                await context.Response.WriteAsync("export refused by the test");
+                return;
+            }
+
             var (description, id, tool) = await DescribeAsync(context.Request);
             requests.Enqueue($"{context.Request.Path} {description}");
             if (description is "initialize" or "server/discover")
@@ -242,6 +256,8 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
         public Func<string, string?>? AnswerToolCall { get; set; }
 
         public TimeSpan BuildDelay { get; set; }
+
+        public bool RefuseExport { get; set; }
 
         public Action? OnHandshake { get; set; }
     }

@@ -34,11 +34,15 @@ public enum SandboxRecordState
 /// <param name="State">Where the record stands.</param>
 /// <param name="CreatedAt">When the record was claimed, and again when it turned ready.</param>
 /// <param name="PatchPath">Where the run's exported patch is stored, once parked.</param>
-/// <param name="PatchMissing">The export found no patch to store.</param>
+/// <param name="PatchMissing">The sandbox was gone before its patch was exported, so there is none to publish.</param>
+/// <param name="PatchApplied">
+/// The stored patch was applied to the run's publish worktree, which a later checkout then returns as it is. A publish
+/// worktree without it is one a checkout made but never finished, and is rebuilt.
+/// </param>
 public sealed record SandboxRecord(
     Guid RunId, string Repository, string Remote, string DefaultBranch, string Branch, string? Solution,
     string BaseCommit, string SandboxId, string Token, SandboxRecordState State, DateTimeOffset CreatedAt,
-    string? PatchPath = null, bool PatchMissing = false)
+    string? PatchPath = null, bool PatchMissing = false, bool PatchApplied = false)
 {
     /// <summary>The token is never printed, so the record's generated text leaves it out.</summary>
     public override string ToString() => $"SandboxRecord {{ RunId = {RunId}, SandboxId = {SandboxId}, State = {State} }}";
