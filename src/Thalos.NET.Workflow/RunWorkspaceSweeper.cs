@@ -49,9 +49,10 @@ public sealed partial class RunWorkspaceSweeper(
 {
     /// <summary>
     /// A workspace exists before its run row does: the host creates the worktree, then starts the run under its id.
-    /// A sweep inside that window must not remove it (ruling R9).
+    /// A sweep inside that window must not remove it (ruling R9). An alias of <see cref="RunWorkspaceGrace.Orphan"/>,
+    /// the one definition the sandbox provider's reconcile shares.
     /// </summary>
-    public static readonly TimeSpan OrphanGrace = TimeSpan.FromMinutes(10);
+    public static readonly TimeSpan OrphanGrace = RunWorkspaceGrace.Orphan;
 
     private readonly IRunWorkspaceProvider _workspaces = workspaces ?? throw new ArgumentNullException(nameof(workspaces));
     private readonly IWorkflowStore _store = store ?? throw new ArgumentNullException(nameof(store));

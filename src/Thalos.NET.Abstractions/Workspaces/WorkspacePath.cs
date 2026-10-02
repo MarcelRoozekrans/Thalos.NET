@@ -126,7 +126,9 @@ public static partial class WorkspacePath
         // Every failure from here on returns GenericRefusal, whatever its cause: the canonicalisation of a link's
         // outside target reports whether that host path exists or is readable, so no detail of it may reach the
         // message. WorkspacePath is static and has no logger, so that detail is dropped, not logged.
-        var root = Canonicalize(Path.GetFullPath(workspaceRoot));
+        // A root that is not a fully qualified host path, such as a sandboxed run's "sandbox://<id>", is not a
+        // directory on this host: GetFullPath would quietly turn it into one under the current directory.
+        var root = CanonicalizeRoot(workspaceRoot);
         if (root is null || !Directory.Exists(root))
             return GenericRefusal();
 
@@ -399,7 +401,10 @@ public static partial class WorkspacePath
     /// <see cref="Resolve"/> itself returns for a path inside it, and every comparison will wrongly fail.
     /// </summary>
     /// <param name="root">The workspace root to canonicalise.</param>
-    internal static string? CanonicalizeRoot(string root) => Canonicalize(Path.GetFullPath(root));
+    /// <returns>The canonical root, or <see langword="null"/> when it cannot be canonicalised or is not a fully
+    /// qualified host path, such as a sandboxed run's <c>sandbox://&lt;id&gt;</c>.</returns>
+    internal static string? CanonicalizeRoot(string root) =>
+        string.IsNullOrWhiteSpace(root) || !Path.IsPathFullyQualified(root) ? null : Canonicalize(Path.GetFullPath(root));
 
     private static Result<string, AgentError> Failure(string relativePath, string reason) =>
         Result<string, AgentError>.Failure(AgentError.Validation($"path '{relativePath}' {reason}."));

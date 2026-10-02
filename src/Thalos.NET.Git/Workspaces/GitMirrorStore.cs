@@ -30,6 +30,9 @@ public sealed record GitMirror(string Repository, string Directory);
 public sealed partial class GitMirrorStore(GitWorkspaceOptions options, ILogger<GitMirrorStore> logger, IGitCredentialSource? credentials = null)
 {
     private readonly GitCli _git = new(options);
+
+    /// <summary>The options this instance was built with, so a host can check that its git consumers share one.</summary>
+    internal GitWorkspaceOptions Options => options;
     private readonly string _dataRoot = Path.GetFullPath(options.DataRoot);
 
     /// <summary>

@@ -46,8 +46,9 @@ internal sealed partial class SandboxReconcileService(SandboxRunWorkspaceProvide
         {
             // The host is stopping.
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (Exception ex)
         {
+            // Includes a cancellation the host did not ask for, such as an HTTP or engine timeout surfacing as one.
             // Nothing awaits this task but shutdown: a failure is logged here or nowhere.
             LogReconcileFailed(logger, ex.Message);
         }

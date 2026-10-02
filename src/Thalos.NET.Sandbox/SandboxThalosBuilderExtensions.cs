@@ -30,6 +30,11 @@ public static class SandboxThalosBuilderExtensions
     /// <b>Not <c>UseRunWorkspaceTools</c>.</b> On the API the workspace tools are remote: registering the local ones
     /// would serve a run's file writes on the host.
     /// </para>
+    /// <para>
+    /// <b>No local run-scoped MCP server.</b> Building the provider, at the latest when the host starts its reconcile
+    /// service, throws <see cref="InvalidOperationException"/> if any run-scoped MCP server is not remote: the host would
+    /// start it for each run on the host, in a <c>sandbox://</c> root that is no host directory.
+    /// </para>
     /// </remarks>
     /// <param name="builder">The builder to register on.</param>
     /// <param name="configure">Sets <see cref="SandboxOptions"/>.</param>
@@ -47,22 +52,7 @@ public static class SandboxThalosBuilderExtensions
 
         var options = new SandboxOptions();
         configure(options);
-        if (string.IsNullOrWhiteSpace(options.DataRoot) || !Path.IsPathFullyQualified(options.DataRoot))
-        {
-            throw new ArgumentException($"SandboxOptions.DataRoot must be an absolute path (was '{options.DataRoot}').", nameof(configure));
-        }
-
-        if (string.IsNullOrWhiteSpace(options.Image))
-        {
-            throw new ArgumentException("SandboxOptions.Image must not be blank.", nameof(configure));
-        }
-
-        // Throws on a '..' entry; an empty set would leave .git/ and the CI files writable in the sandbox.
-        if (new ProtectedPathSet(options.ProtectedPaths).Entries.Count == 0)
-        {
-            throw new ArgumentException("SandboxOptions.ProtectedPaths must not be empty.", nameof(configure));
-        }
-
+        ThrowIfInvalid(options, nameof(configure));
         var publish = new GitWorkspaceOptions { DataRoot = Path.Combine(Path.GetFullPath(options.DataRoot), "publish") };
         var services = builder.Services;
         services.TryAddSingleton(TimeProvider.System);
@@ -75,9 +65,13 @@ public static class SandboxThalosBuilderExtensions
             sp.GetRequiredService<ILogger<GitWorktreeWorkspaceProvider>>(),
             sp.GetRequiredService<TimeProvider>(),
             sp.GetService<IGitCredentialSource>())));
-        services.AddHttpClient<SandboxControlClient>();
+        // The provider is a singleton and keeps its client for good, so the handler recycles its own connections rather
+        // than relying on the factory's handler rotation, which a kept client never sees.
+        services.AddHttpClient<SandboxControlClient>()
+            .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(2) })
+            .SetHandlerLifetime(Timeout.InfiniteTimeSpan);
         services.AddSingleton(sp => new SandboxRunWorkspaceProvider(
-            options,
+            ThrowIfLocalRunScopedServers(sp, options),
             sp.GetRequiredService<ISandboxRuntime>(),
             sp.GetRequiredService<GitMirrorStore>(),
             sp.GetRequiredService<SandboxPublishWorktrees>(),
@@ -100,5 +94,40 @@ public static class SandboxThalosBuilderExtensions
         builder.AddRemoteRunTools(RunWorkspaceToolOptions.SourceName, typeof(WorkspaceTools));
         builder.AddRemoteRunTools(SandboxToolOptions.SourceName, typeof(SandboxTools));
         return builder;
+    }
+
+    private static void ThrowIfInvalid(SandboxOptions options, string paramName)
+    {
+        if (string.IsNullOrWhiteSpace(options.DataRoot) || !Path.IsPathFullyQualified(options.DataRoot))
+        {
+            throw new ArgumentException($"SandboxOptions.DataRoot must be an absolute path (was '{options.DataRoot}').", paramName);
+        }
+
+        if (string.IsNullOrWhiteSpace(options.Image))
+        {
+            throw new ArgumentException("SandboxOptions.Image must not be blank.", paramName);
+        }
+
+        // Throws on a '..' entry; an empty set would leave .git/ and the CI files writable in the sandbox.
+        if (new ProtectedPathSet(options.ProtectedPaths).Entries.Count == 0)
+        {
+            throw new ArgumentException("SandboxOptions.ProtectedPaths must not be empty.", paramName);
+        }
+    }
+
+    /// <summary>
+    /// Refuses, when the provider is built, which the reconcile service does at boot, any run-scoped MCP server that is
+    /// not remote. The host would start it for each run with the run's workspace root, <c>sandbox://&lt;id&gt;</c>, as its
+    /// working directory and <c>${run.workspace.root}</c>: on the host, outside the sandbox. Checked here rather than in
+    /// <see cref="UseSandboxRunWorkspaces"/> so the order of registration does not matter.
+    /// </summary>
+    private static SandboxOptions ThrowIfLocalRunScopedServers(IServiceProvider services, SandboxOptions options)
+    {
+        var local = McpThalosBuilderExtensions.LocalRunScopedServerNames(services);
+        return local.Count == 0
+            ? options
+            : throw new InvalidOperationException(
+                $"Sandboxed runs need every run-scoped MCP server to be remote, served inside the run's sandbox; " +
+                $"set runScoped.remote for: {string.Join(", ", local.Order(StringComparer.Ordinal))}. A local one would be started on the host.");
     }
 }

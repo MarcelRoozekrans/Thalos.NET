@@ -85,6 +85,9 @@ public sealed partial class GitPatchApplier(GitWorkspaceOptions options, ILogger
 
     private readonly GitCli _git = new(options);
 
+    /// <summary>The options this instance was built with, so a host can check that its git consumers share one.</summary>
+    internal GitWorkspaceOptions Options => options;
+
     /// <summary>
     /// Applies the patch to the workspace's worktree with git apply --index --binary. Refuses, before anything is written, a patch
     /// over the limits or touching a protected path on either side of a rename; re-checks the staged names afterwards. Returns the

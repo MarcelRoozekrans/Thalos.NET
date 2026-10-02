@@ -21,7 +21,13 @@ public sealed class SandboxControlClient
     /// <summary>How long one <c>GET /control/ready</c> may take.</summary>
     public static readonly TimeSpan ReadyTimeout = TimeSpan.FromSeconds(10);
 
-    /// <summary>The most bytes of a response's text a failure carries.</summary>
+    /// <summary>The largest ready answer accepted: 64 KiB. The sandbox is untrusted, so nothing it sends is read whole.</summary>
+    internal const int MaxReadyBytes = 64 * 1024;
+
+    /// <summary>The most bytes of a refusal's body read: 4 KiB.</summary>
+    internal const int MaxRefusalBytes = 4 * 1024;
+
+    /// <summary>The most characters of a response's text a failure carries.</summary>
     private const int MaxDetailChars = 512;
 
     private readonly HttpClient _http;
@@ -79,20 +85,23 @@ public sealed class SandboxControlClient
         using var request = Request(HttpMethod.Get, sandbox, token, "control/ready", content: null);
         try
         {
-            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseContentRead, bounded.Token).ConfigureAwait(false);
+            // Headers only: the body is the untrusted sandbox's, and is read below up to a cap, never buffered whole.
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, bounded.Token).ConfigureAwait(false);
             if (response.StatusCode != HttpStatusCode.OK)
             {
                 return Result<SandboxReadiness, AgentError>.Failure(await RefusedAsync("ready", response, bounded.Token).ConfigureAwait(false));
             }
 
-            var stream = await response.Content.ReadAsStreamAsync(bounded.Token).ConfigureAwait(false);
-            await using (stream.ConfigureAwait(false))
+            var body = await ReadPrefixAsync(response.Content, MaxReadyBytes + 1, bounded.Token).ConfigureAwait(false);
+            if (body.Length > MaxReadyBytes)
             {
-                var readiness = await JsonSerializer.DeserializeAsync(stream, SandboxJsonContext.Default.SandboxReadiness, bounded.Token).ConfigureAwait(false);
-                return readiness is { Restore: not null, Roslyn: not null }
-                    ? Result<SandboxReadiness, AgentError>.Success(readiness)
-                    : Result<SandboxReadiness, AgentError>.Failure(AgentError.ProviderError("The sandbox's ready answer is incomplete."));
+                return Result<SandboxReadiness, AgentError>.Failure(AgentError.ProviderError($"The sandbox's ready answer is larger than {MaxReadyBytes} bytes."));
             }
+
+            var readiness = JsonSerializer.Deserialize(body, SandboxJsonContext.Default.SandboxReadiness);
+            return readiness is { Restore: not null, Roslyn: not null }
+                ? Result<SandboxReadiness, AgentError>.Success(readiness)
+                : Result<SandboxReadiness, AgentError>.Failure(AgentError.ProviderError("The sandbox's ready answer is incomplete."));
         }
         catch (JsonException ex)
         {
@@ -194,7 +203,8 @@ public sealed class SandboxControlClient
         string text;
         try
         {
-            text = await response.Content.ReadAsStringAsync(ct).ConfigureAwait(false);
+            // Only the first bytes: a refusal's body is the untrusted sandbox's, of any length.
+            text = System.Text.Encoding.UTF8.GetString(await ReadPrefixAsync(response.Content, MaxRefusalBytes, ct).ConfigureAwait(false));
         }
         catch (Exception ex) when (ex is HttpRequestException or IOException)
         {
@@ -204,6 +214,27 @@ public sealed class SandboxControlClient
         // The sandbox is untrusted: its text is cut short and stripped of control characters before it reaches a log.
         var detail = LogSanitizer.Clean(text, MaxDetailChars).Trim();
         return AgentError.ProviderError($"The sandbox refused the {route} request with {(int)response.StatusCode}.", detail.Length == 0 ? null : detail);
+    }
+
+    /// <summary>
+    /// Reads at most <paramref name="maxBytes"/> of <paramref name="content"/> and stops, whatever the body's length; a
+    /// caller that passes one more than it accepts can tell an oversized body from one that fits.
+    /// </summary>
+    internal static async Task<byte[]> ReadPrefixAsync(HttpContent content, int maxBytes, CancellationToken ct)
+    {
+        var stream = await content.ReadAsStreamAsync(ct).ConfigureAwait(false);
+        await using (stream.ConfigureAwait(false))
+        {
+            var buffer = new byte[maxBytes];
+            var total = 0;
+            int read;
+            while (total < maxBytes && (read = await stream.ReadAsync(buffer.AsMemory(total), ct).ConfigureAwait(false)) > 0)
+            {
+                total += read;
+            }
+
+            return total == maxBytes ? buffer : buffer[..total];
+        }
     }
 
     private static AgentError Unreachable(string route, Exception ex) =>

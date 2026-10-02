@@ -42,8 +42,8 @@ internal sealed partial class SandboxRecordStore(string dataRoot, TimeProvider c
     /// <summary>The run's record.</summary>
     public string RecordPath(Guid runId) => Path.Combine(Directory, runId.ToString("D") + RecordSuffix);
 
-    /// <summary>The bundle a create writes for <paramref name="sandboxId"/> and deletes once imported.</summary>
-    public string BundlePath(string sandboxId) => Path.Combine(Directory, sandboxId + ".bundle");
+    /// <summary>The bundle a create writes for the run and deletes once imported. Every path here comes from the run id, never from a record's fields.</summary>
+    public string BundlePath(Guid runId) => Path.Combine(Directory, runId.ToString("N") + ".bundle");
 
     /// <summary>Where the run's exported patch is stored.</summary>
     public string PatchPath(Guid runId) => Path.Combine(Directory, runId.ToString("N") + ".patch");
@@ -125,13 +125,42 @@ internal sealed partial class SandboxRecordStore(string dataRoot, TimeProvider c
         }
     }
 
-    /// <summary>Reads the run's record: absent, read, or unreadable with the reason. Never throws for the file.</summary>
+    /// <summary>
+    /// Reads the run's record: absent, read, or unreadable with the reason. Never throws for the file. A record that is
+    /// not well formed for this run, see <see cref="Malformed"/>, is unreadable: it fails closed, like a corrupt file.
+    /// </summary>
     public async Task<RecordRead> ReadAsync(Guid runId, CancellationToken ct)
     {
         var read = await ReadFileAsync(RecordPath(runId), ct).ConfigureAwait(false);
-        return read.Record is { } record && record.RunId != runId
-            ? new RecordRead(runId, null, $"The record names run '{record.RunId}'.")
+        return read.Record is { } record && Malformed(record, runId) is { } reason
+            ? new RecordRead(runId, null, reason)
             : read with { RunId = runId };
+    }
+
+    /// <summary>
+    /// Why <paramref name="record"/> cannot be trusted as the record of <paramref name="runId"/>, or null. The file sits
+    /// on the trusted side, but a damaged or hand-edited one must never steer a runtime call, a git read or a token at
+    /// another run's sandbox.
+    /// </summary>
+    internal static string? Malformed(SandboxRecord record, Guid runId)
+    {
+        if (record.RunId != runId)
+        {
+            return $"The record names run '{record.RunId}'.";
+        }
+
+        if (!string.Equals(record.SandboxId, runId.ToString("N"), StringComparison.Ordinal))
+        {
+            return "The record's sandbox id is not its run's.";
+        }
+
+        if (string.IsNullOrWhiteSpace(record.Token) || string.IsNullOrWhiteSpace(record.Repository) || string.IsNullOrWhiteSpace(record.Remote)
+            || string.IsNullOrWhiteSpace(record.DefaultBranch) || string.IsNullOrWhiteSpace(record.Branch))
+        {
+            return "The record is missing its token, repository, remote or a branch.";
+        }
+
+        return GitMirrorStore.IsFullSha(record.BaseCommit ?? "") ? null : "The record's base commit is not a full 40-character sha.";
     }
 
     /// <summary>

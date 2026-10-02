@@ -420,7 +420,8 @@ public sealed class SandboxRunWorkspaceProviderTests : IAsyncLifetime
     /// <summary>
     /// Red 1: drop the IRunToolServerReadiness registration; the MCP registry answers it. Red 2: register the provider
     /// with a second, separate instance for IRunToolEndpointResolver; it is no longer the same object. Red 3: drop the
-    /// ProtectedPaths check; an empty set is accepted.
+    /// ProtectedPaths check; an empty set is accepted. Red 4: drop the sandbox AddRemoteRunTools; its remote source is
+    /// missing. Red 5: give the patch applier its own GitWorkspaceOptions; it no longer shares the mirror's instance.
     /// </summary>
     [Fact]
     public async Task UseSandboxRunWorkspaces_maps_every_interface_to_one_provider_and_validates_its_options()
@@ -447,10 +448,176 @@ public sealed class SandboxRunWorkspaceProviderTests : IAsyncLifetime
         sp.GetRequiredService<IRunWorkspaceHandoff>().Should().BeSameAs(provider);
         sp.GetRequiredService<IRunToolServerReadiness>().Should().BeSameAs(provider);
         sp.GetServices<Microsoft.Extensions.Hosting.IHostedService>().Should().ContainSingle(s => s is SandboxReconcileService);
+        var sources = sp.GetServices<IToolSource>().ToList();
+        sources.OfType<RemoteRunToolSource>().Where(r => r.SchemaSource is not null).Select(r => r.Name)
+            .Should().BeEquivalentTo([RunWorkspaceToolOptions.SourceName, SandboxToolOptions.SourceName]);
+        sources.Where(t => t is not RemoteRunToolSource && t.Name is RunWorkspaceToolOptions.SourceName or SandboxToolOptions.SourceName)
+            .Should().BeEmpty("on the API the workspace and sandbox tools are remote, never local");
+        var shared = sp.GetRequiredService<GitMirrorStore>().Options;
+        shared.DataRoot.Should().Be(Path.Combine(DataRoot, "publish"));
+        sp.GetRequiredService<GitPatchApplier>().Options.Should().BeSameAs(shared);
+        sp.GetRequiredService<SandboxPublishWorktrees>().Inner.Options.Should().BeSameAs(shared);
         Invalid(o => o.DataRoot = "relative").Should().Throw<ArgumentException>().WithMessage("*DataRoot*");
         Invalid(o => o.Image = " ").Should().Throw<ArgumentException>().WithMessage("*Image*");
         Invalid(o => o.ProtectedPaths.Clear()).Should().Throw<ArgumentException>().WithMessage("*ProtectedPaths*");
     }
+
+    /// <summary>
+    /// I1: a run-scoped MCP server that is not remote would be started on the host, in a sandbox:// root. Red: drop
+    /// ThrowIfLocalRunScopedServers; the provider is built and the host would spawn the server.
+    /// </summary>
+    [Fact]
+    public async Task A_local_run_scoped_MCP_server_is_refused_when_the_provider_is_built()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddSingleton<ISandboxRuntime>(Runtime);
+        services.AddThalos(t => t
+            .UseSandboxRunWorkspaces(o =>
+            {
+                o.DataRoot = DataRoot;
+                o.Image = "thalos/sandbox:test";
+                o.ProtectedPaths.Add(".git/");
+            })
+            .AddMcpServer("roslyn", new McpServerDefinition { Type = "stdio", Command = "dotnet", Args = [LoopbackSandbox.ServerDll], RunScoped = new RunScopedMcpDefinition() }));
+        await using var sp = services.BuildServiceProvider();
+
+        var build = () => sp.GetRequiredService<IRunWorkspaceProvider>();
+
+        build.Should().Throw<InvalidOperationException>().WithMessage("*remote*roslyn*");
+    }
+
+    // ---------- record integrity ----------
+
+    /// <summary>
+    /// I2: a record that is not well formed for its run is treated as corrupt: not found, not resolved, not listed, and
+    /// not removed, so nothing acts on it. Red 1: drop the SandboxId check. Red 2: drop the blank-token check. Red 3:
+    /// drop the full-sha check on BaseCommit. Each red makes its case's record found and removable again.
+    /// </summary>
+    [Theory]
+    [InlineData("sandbox-id")]
+    [InlineData("token")]
+    [InlineData("base-commit")]
+    public async Task A_tampered_record_fails_closed(string tamper)
+    {
+        var provider = Provider();
+        var runId = Guid.NewGuid();
+        Runtime.Seed(runId, DateTimeOffset.UtcNow);
+        var record = Record(runId, SandboxRecordState.Ready, DateTimeOffset.UtcNow);
+        record = tamper switch
+        {
+            "sandbox-id" => record with { SandboxId = Guid.NewGuid().ToString("N") },
+            "token" => record with { Token = "" },
+            _ => record with { BaseCommit = record.BaseCommit[..12] },
+        };
+        provider.Store.EnsureDirectory().Should().BeNull();
+        (await provider.Store.WriteAsync(record, CancellationToken.None)).IsSuccess.Should().BeTrue();
+
+        var found = await provider.FindAsync(runId, CancellationToken.None);
+        var listed = await provider.ListAsync(CancellationToken.None);
+        var removed = await provider.RemoveAsync(runId, CancellationToken.None);
+
+        using var _ = new AssertionScope();
+        found.Should().BeNull();
+        listed.Should().BeEmpty();
+        removed.IsFailure.Should().BeTrue("an unreadable record is left for an operator, never acted on");
+        Runtime.Deleted.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// I2: a handle the runtime answers for this run's sandbox id but naming another run is never talked to. Red: drop
+    /// the RunId comparisons in ResolveAsync, WaitAllReadyAsync and ReadinessAsync; the endpoint resolves and the waits
+    /// succeed.
+    /// </summary>
+    [Fact]
+    public async Task A_handle_of_another_run_is_never_used()
+    {
+        var provider = Provider();
+        var runId = Guid.NewGuid();
+        (await provider.CreateAsync(Request(runId), CancellationToken.None)).IsSuccess.Should().BeTrue();
+        Runtime.Reassign(runId.ToString("N"), Guid.NewGuid());
+
+        var resolved = await provider.ResolveAsync(runId, "workspace", CancellationToken.None);
+        var waited = await provider.WaitAllReadyAsync(runId, TimeSpan.FromMinutes(2), CancellationToken.None);
+        var readiness = await provider.ReadinessAsync(runId, CancellationToken.None);
+
+        using var _ = new AssertionScope();
+        resolved.Should().BeNull();
+        waited.IsFailure.Should().BeTrue();
+        waited.Error.Message.Should().Contain("another run");
+        readiness.IsFailure.Should().BeTrue();
+        readiness.Error.Message.Should().Contain("another run");
+    }
+
+    // ---------- create races and cancellation ----------
+
+    /// <summary>
+    /// A create cancelled after its container started leaves nothing. Red: set SandboxAttempted only after the runtime
+    /// answered; the cancelled create's container is never deleted.
+    /// </summary>
+    [Fact]
+    public async Task A_create_cancelled_mid_way_cleans_up()
+    {
+        var provider = Provider();
+        var runId = Guid.NewGuid();
+        using var cts = new CancellationTokenSource();
+        Runtime.AfterHostStarted = cts.Cancel;
+
+        var create = async () => await provider.CreateAsync(Request(runId), cts.Token);
+
+        await create.Should().ThrowAsync<OperationCanceledException>();
+        using var _ = new AssertionScope();
+        Runtime.Ids.Should().BeEmpty();
+        Runtime.Deleted.Should().Equal(runId.ToString("N"));
+        File.Exists(Path.Combine(SandboxesDirectory, $"{runId:D}.json")).Should().BeFalse();
+        Directory.EnumerateFiles(SandboxesDirectory, "*.bundle").Should().BeEmpty();
+        _observer.Events.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// Two creates for one run: exactly one wins and only it reaches the runtime. Red: in CreateAsync, treat a held run
+    /// lock as free, skip the existing-record check, and write the claim with WriteAsync instead of TryClaimAsync; both
+    /// creates then reach the runtime.
+    /// </summary>
+    [Fact]
+    public async Task Concurrent_creates_for_one_run_have_one_winner()
+    {
+        var provider = Provider();
+        var runId = Guid.NewGuid();
+
+        var results = await Task.WhenAll(
+            provider.CreateAsync(Request(runId), CancellationToken.None).AsTask(),
+            provider.CreateAsync(Request(runId), CancellationToken.None).AsTask());
+
+        using var _ = new AssertionScope();
+        results.Count(r => r.IsSuccess).Should().Be(1);
+        results.Single(r => r.IsFailure).Error.Code.Should().Be(AgentErrorCode.Validation);
+        Runtime.Specs.Should().ContainSingle();
+        (await provider.FindAsync(runId, CancellationToken.None)).Should().NotBeNull();
+    }
+
+    /// <summary>
+    /// A removal that failed left its record removing; the next reconcile finishes it. Red: drop the Removing case in
+    /// ReconcileRecordAsync; the record and its sandbox stay.
+    /// </summary>
+    [Fact]
+    public async Task Reconcile_finishes_a_removing_record()
+    {
+        var provider = Provider();
+        var runId = Guid.NewGuid();
+        Runtime.Seed(runId, DateTimeOffset.UtcNow);
+        provider.Store.EnsureDirectory().Should().BeNull();
+        (await provider.Store.WriteAsync(Record(runId, SandboxRecordState.Removing, DateTimeOffset.UtcNow), CancellationToken.None)).IsSuccess.Should().BeTrue();
+
+        var deleted = await provider.ReconcileAsync(CancellationToken.None);
+
+        using var _ = new AssertionScope();
+        deleted.Should().Be(1);
+        Runtime.Ids.Should().BeEmpty();
+        File.Exists(Path.Combine(SandboxesDirectory, $"{runId:D}.json")).Should().BeFalse();
+        _observer.Events.Should().Equal($"removing {runId}");
+    }
+
 
     // ---------- plumbing ----------
 

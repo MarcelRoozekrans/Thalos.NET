@@ -161,6 +161,9 @@ public sealed partial class GitWorktreeWorkspaceProvider(
 
     private readonly GitCli _git = new(options);
 
+    /// <summary>The options this instance was built with, so a host can check that its git consumers share one.</summary>
+    internal GitWorkspaceOptions Options => options;
+
     /// <summary>
     /// The mirror handling: clone, fetch, validation and the per-repository lock. Built from the same options and
     /// credentials, and logging through this provider's own logger.
@@ -835,45 +838,7 @@ public sealed partial class GitWorktreeWorkspaceProvider(
         stdErr.Contains("is not a working tree", StringComparison.Ordinal);
     // ---------- validation ----------
 
-    private static AgentError? Validate(RunWorkspaceRequest request)
-    {
-        if (!GitMirrorStore.IsValidRepositoryName(request.Repository))
-        {
-            return AgentError.Validation($"Repository '{request.Repository}' is not a valid mirror directory name.");
-        }
-
-        if (string.IsNullOrWhiteSpace(request.Remote))
-        {
-            return AgentError.Validation("Remote must not be blank.");
-        }
-
-        if (request.Remote.StartsWith('-'))
-        {
-            return AgentError.Validation($"Remote '{request.Remote}' must not start with '-'.");
-        }
-
-        if (string.IsNullOrWhiteSpace(request.DefaultBranch))
-        {
-            return AgentError.Validation("DefaultBranch must not be blank.");
-        }
-
-        if (string.IsNullOrWhiteSpace(request.Branch))
-        {
-            return AgentError.Validation("Branch must not be blank.");
-        }
-
-        if (request.Branch.StartsWith('-'))
-        {
-            return AgentError.Validation($"Branch '{request.Branch}' must not start with '-'.");
-        }
-
-        if (request.StartPoint is not null && !GitMirrorStore.IsFullSha(request.StartPoint))
-        {
-            return AgentError.Validation("StartPoint must be a full 40-character commit sha.");
-        }
-
-        return null;
-    }
+    private static AgentError? Validate(RunWorkspaceRequest request) => RunWorkspaceRequestValidator.Validate(request);
 
     // ---------- paths ----------
 

@@ -16,5 +16,7 @@
     <InternalsVisibleTo Include="Thalos.NET.Sandbox.Host" />
     <!-- The sandbox's scratch copy reads a file's type through UnixLinkCount's statx, to skip FIFOs, sockets and devices. -->
     <InternalsVisibleTo Include="Thalos.NET.Sandbox" />
+    <!-- The sandbox registration test checks that one GitWorkspaceOptions instance is shared by the mirror, the patch applier and the publish worktrees. -->
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Sandbox" />
   </ItemGroup>
 </Project>

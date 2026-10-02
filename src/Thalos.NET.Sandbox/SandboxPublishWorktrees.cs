@@ -12,6 +12,9 @@ namespace Thalos.Sandbox;
 /// <param name="inner">The provider, sharing its <see cref="GitWorkspaceOptions"/> with the sandbox provider's mirror store.</param>
 public sealed class SandboxPublishWorktrees(GitWorktreeWorkspaceProvider inner)
 {
+    /// <summary>The wrapped provider.</summary>
+    internal GitWorktreeWorkspaceProvider Inner => inner;
+
     /// <inheritdoc cref="GitWorktreeWorkspaceProvider.CreateAsync"/>
     public ValueTask<Result<RunWorkspace, AgentError>> CreateAsync(RunWorkspaceRequest request, CancellationToken ct) => inner.CreateAsync(request, ct);
 

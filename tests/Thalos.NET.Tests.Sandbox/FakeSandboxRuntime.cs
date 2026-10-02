@@ -29,6 +29,9 @@ internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISan
     /// <summary>When set, <see cref="ListAsync"/> answers empty, as the runtime does when the engine cannot be asked.</summary>
     public bool ListNothing { get; set; }
 
+    /// <summary>Called once a create's host is running, with the create's token; a test cancels there to interrupt the create.</summary>
+    public Action? AfterHostStarted { get; set; }
+
     /// <summary>The sandboxes that exist.</summary>
     public IReadOnlyCollection<string> Ids => [.. _sandboxes.Keys];
 
@@ -38,6 +41,13 @@ internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISan
     /// <summary>A sandbox with no host, as one from before a restart.</summary>
     public void Seed(Guid runId, DateTimeOffset createdAt) =>
         _sandboxes[runId.ToString("N")] = new Entry(null, new SandboxHandle(runId.ToString("N"), runId, SandboxState.Running, new Uri("http://127.0.0.1:9/"), createdAt), "");
+
+    /// <summary>Answers for <paramref name="sandboxId"/> with a handle naming another run, as a confused or hostile engine might.</summary>
+    public void Reassign(string sandboxId, Guid otherRun)
+    {
+        var entry = _sandboxes[sandboxId];
+        _sandboxes[sandboxId] = entry with { Handle = entry.Handle with { RunId = otherRun } };
+    }
 
     /// <summary>Marks a sandbox's container exited and stops its host, so its port refuses connections as an exited container's does.</summary>
     public async Task ExitAsync(string sandboxId, int exitCode, bool oomKilled)
@@ -63,6 +73,8 @@ internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISan
         var host = await LoopbackSandbox.StartAsync(workRoot, spec.RunId, token);
         var handle = new SandboxHandle(spec.SandboxId, spec.RunId, SandboxState.Running, host.BaseAddress, clock.GetUtcNow());
         _sandboxes[spec.SandboxId] = new Entry(host, handle, workRoot);
+        AfterHostStarted?.Invoke();
+        ct.ThrowIfCancellationRequested();
         return Result<SandboxHandle, AgentError>.Success(handle);
     }
 
