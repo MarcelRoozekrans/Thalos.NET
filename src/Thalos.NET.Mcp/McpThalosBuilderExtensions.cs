@@ -23,10 +23,18 @@ public static class McpThalosBuilderExtensions
     /// the provider observes the registry; with none registered, run callers are refused and host callers served
     /// (ruling R7). Its clock is the registered <see cref="TimeProvider"/>, or <see cref="TimeProvider.System"/>.
     /// </para>
+    /// <para>
+    /// An entry whose <see cref="RunScopedMcpDefinition.Remote"/> is set is registered as a
+    /// <see cref="RemoteRunToolSource.ForMcpHost"/> source over the host-wide server instead, and does not join the
+    /// registry: a run's calls go to the endpoint the registered <see cref="IRunToolEndpointResolver"/> returns, bounded
+    /// by the registered <see cref="RemoteRunToolOptions"/> or its defaults, and each registered
+    /// <see cref="IRunToolCallObserver"/> is told of them. The source is also an <see cref="IRunWorkspaceObserver"/>.
+    /// </para>
     /// </remarks>
     /// <exception cref="ArgumentException">
     /// <paramref name="name"/> violates <see cref="ToolSourceName"/>, a run-scoped entry shares <paramref name="name"/> with an MCP
-    /// entry already added, in either order, or <paramref name="definition"/> is incomplete/unsupported.
+    /// entry already added, in either order, or <paramref name="definition"/> is incomplete/unsupported, or is remote and
+    /// also configures a local copy.
     /// </exception>
     public static ThalosBuilder AddMcpServer(this ThalosBuilder builder, string name, McpServerDefinition definition)
     {
@@ -50,6 +58,19 @@ public static class McpThalosBuilderExtensions
         {
             // works without AddLogging(): the MCP SDK and the source itself only need a factory, not a configured one
             return builder.AddToolSource(sp => new McpToolSource(name, definition, LoggerFactory(sp)));
+        }
+
+        if (runScoped.Remote)
+        {
+            runScoped.ThrowIfInvalidRemote(name, nameof(definition));
+            AddRemote(services, name, sp => RemoteRunToolSource.ForMcpHost(
+                new McpToolSource(name, definition, LoggerFactory(sp)),
+                new DeferredRunToolEndpointResolver(sp),
+                sp.GetService<RemoteRunToolOptions>() ?? new RemoteRunToolOptions(),
+                LoggerFactory(sp),
+                Clock(sp),
+                RunToolCallObservers(sp)));
+            return builder;
         }
 
         servers.Definitions.Add(name, definition);
@@ -97,9 +118,42 @@ public static class McpThalosBuilderExtensions
         return File.Exists(path) ? builder.AddMcpServers(McpConfigFile.Load(path)) : builder;
     }
 
-    private static ILoggerFactory LoggerFactory(IServiceProvider sp) => sp.GetService<ILoggerFactory>() ?? NullLoggerFactory.Instance;
+    /// <summary>
+    /// Registers one <see cref="RemoteRunToolSource"/>, made by <paramref name="factory"/> once, as the tool source named
+    /// <paramref name="name"/> and as an <see cref="IRunWorkspaceObserver"/>, so a removed run's client is dropped.
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <param name="name">The source's name, which keys the single instance.</param>
+    /// <param name="factory">Makes the source; it should resolve <see cref="IRunToolEndpointResolver"/> and the observers lazily, through
+    /// <see cref="DeferredRunToolEndpointResolver"/> and <see cref="RunToolCallObservers"/>, because the workspace provider that
+    /// resolves endpoints also observes this source.</param>
+    /// <exception cref="ArgumentException">A remote run tool source named <paramref name="name"/> was already added.</exception>
+    internal static void AddRemote(IServiceCollection services, string name, Func<IServiceProvider, RemoteRunToolSource> factory)
+    {
+        if (services.Any(d => d.IsKeyedService && d.ServiceType == typeof(RemoteRunToolSource) && Equals(d.ServiceKey, name)))
+        {
+            // Two registrations under one key would resolve to one instance listed twice as a tool source.
+            throw new ArgumentException($"A remote run tool source named '{name}' was already added.", nameof(name));
+        }
 
-    private static TimeProvider Clock(IServiceProvider sp) => sp.GetService<TimeProvider>() ?? TimeProvider.System;
+        services.AddKeyedSingleton(name, (sp, _) => factory(sp));
+        services.AddSingleton<IToolSource>(sp => sp.GetRequiredKeyedService<RemoteRunToolSource>(name));
+        services.AddSingleton<IRunWorkspaceObserver>(sp => sp.GetRequiredKeyedService<RemoteRunToolSource>(name));
+    }
+
+    /// <summary>The registered <see cref="IRunToolCallObserver"/>s, resolved each time the sequence is enumerated, not when the source is built.</summary>
+    /// <param name="sp">The container.</param>
+    internal static IEnumerable<IRunToolCallObserver> RunToolCallObservers(IServiceProvider sp)
+    {
+        foreach (var observer in sp.GetServices<IRunToolCallObserver>())
+        {
+            yield return observer;
+        }
+    }
+
+    internal static ILoggerFactory LoggerFactory(IServiceProvider sp) => sp.GetService<ILoggerFactory>() ?? NullLoggerFactory.Instance;
+
+    internal static TimeProvider Clock(IServiceProvider sp) => sp.GetService<TimeProvider>() ?? TimeProvider.System;
 
     /// <summary>The collection's MCP entries, gathered across <see cref="AddMcpServer"/> calls.</summary>
     private static McpServerSet McpServers(IServiceCollection services)

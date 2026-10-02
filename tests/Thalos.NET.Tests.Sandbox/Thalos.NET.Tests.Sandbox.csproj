@@ -1,7 +1,14 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <ProjectReference Include="..\..\src\Thalos.NET.Sandbox\Thalos.NET.Sandbox.csproj" />
+    <!-- RemoteRunToolSourceTests run a real SandboxHost on loopback Kestrel. -->
+    <ProjectReference Include="..\..\src\Thalos.NET.Sandbox.Host\Thalos.NET.Sandbox.Host.csproj" />
+    <!-- The host-wide MCP server and the sandbox's Roslyn stand-in: the stdio test server, built first and run with `dotnet <dll>`. -->
+    <ProjectReference Include="..\Thalos.NET.Tests.McpServer\Thalos.NET.Tests.McpServer.csproj" ReferenceOutputAssembly="false" />
     <PackageReference Include="Xunit.SkippableFact" />
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\Thalos.NET.Tests.Git\Workspaces\LocalGitRemote.cs" Link="LocalGitRemote.cs" />
   </ItemGroup>
 </Project>

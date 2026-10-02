@@ -71,4 +71,54 @@ public sealed class RunScopedMcpDefinition
     /// string. Must be positive and at most <see cref="int.MaxValue"/> milliseconds.
     /// </summary>
     public TimeSpan CallTimeout { get; set; } = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// When true, a run's copy of this server is not started on this host: a run's calls go to the run's own remote tool
+    /// endpoint, which <see cref="Thalos.Workspaces.IRunToolEndpointResolver"/> finds, through
+    /// <see cref="RemoteRunToolSource"/>. The host entry still supplies the tool schemas and serves callers with no run.
+    /// <see cref="Args"/>, <see cref="Env"/>, <see cref="Cwd"/> and <see cref="ReadyTool"/> must then be
+    /// <see langword="null"/> and <see cref="Reload"/> <c>"none"</c>: they describe a local copy, which a remote entry
+    /// does not have. <see cref="ReadyWaitTimeout"/> and <see cref="CallTimeout"/> are not used; a registered
+    /// <see cref="RemoteRunToolOptions"/> bounds a remote call. In <c>.mcp.json</c> this is <c>remote</c>.
+    /// </summary>
+    public bool Remote { get; set; }
+
+    /// <summary>Rejects a <see cref="Remote"/> entry that also describes a local copy.</summary>
+    /// <param name="name">The entry's name, for the message.</param>
+    /// <param name="paramName">The parameter to name in the exception.</param>
+    /// <exception cref="ArgumentException">One of the local-copy settings is set.</exception>
+    internal void ThrowIfInvalidRemote(string name, string paramName)
+    {
+        var local = new List<string>();
+        if (Args is not null)
+        {
+            local.Add("args");
+        }
+
+        if (Env is not null)
+        {
+            local.Add("env");
+        }
+
+        if (Cwd is not null)
+        {
+            local.Add("cwd");
+        }
+
+        if (ReadyTool is not null)
+        {
+            local.Add("readyTool");
+        }
+
+        if (!string.Equals(Reload, "none", StringComparison.Ordinal))
+        {
+            local.Add("reload");
+        }
+
+        if (local.Count > 0)
+        {
+            throw new ArgumentException(
+                $"Run-scoped MCP server '{name}' is remote, so it has no local copy to configure; remove {string.Join(", ", local)}.", paramName);
+        }
+    }
 }

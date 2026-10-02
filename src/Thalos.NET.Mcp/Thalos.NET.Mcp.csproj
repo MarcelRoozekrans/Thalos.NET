@@ -14,5 +14,9 @@
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Thalos.NET.Tests.Mcp" />
+    <!-- AddRemoteRunTools registers a RemoteRunToolSource the way AddMcpServer registers a remote entry. -->
+    <InternalsVisibleTo Include="Thalos.NET.Sandbox" />
+    <!-- RemoteRunToolSourceTests reach the local schema source, to prove its functions cannot act. -->
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Sandbox" />
   </ItemGroup>
 </Project>

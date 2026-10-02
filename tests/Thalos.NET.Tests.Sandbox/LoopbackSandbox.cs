@@ -1,0 +1,193 @@
+using System.Collections.Concurrent;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Text;
+using System.Text.Json;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Thalos.Git.Workspaces;
+using Thalos.Sandbox;
+using Thalos.Sandbox.Host;
+using Thalos.Tests.Git.Workspaces;
+using Thalos.Workspaces;
+
+namespace Thalos.Tests.Sandbox;
+
+/// <summary>
+/// One real sandbox host, run in-process on loopback Kestrel, so an <c>HttpClientTransport</c> reaches it over a real
+/// socket. Its settings are passed as <c>--KEY=value</c> arguments, which <see cref="SandboxHost.CreateBuilder"/> reads
+/// over the environment, so no test changes the process environment. Restore goes to a fake runner; the Roslyn server is
+/// the stdio test server. A middleware ahead of the bearer check records every request this sandbox receives.
+/// </summary>
+internal sealed class LoopbackSandbox : IAsyncDisposable
+{
+    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
+
+    private readonly WebApplication _app;
+    private readonly HttpClient _http = new();
+    private bool _stopped;
+
+    private LoopbackSandbox(WebApplication app, Guid runId, string token, Uri baseAddress, ConcurrentQueue<string> requests)
+    {
+        _app = app;
+        Requests = requests;
+        RunId = runId;
+        Token = token;
+        BaseAddress = baseAddress;
+    }
+
+    /// <summary>The stdio test server, built next to this test project.</summary>
+    public static string ServerDll => Path.GetFullPath(Path.Combine(
+        AppContext.BaseDirectory.Replace("Thalos.NET.Tests.Sandbox", "Thalos.NET.Tests.McpServer", StringComparison.Ordinal),
+        "Thalos.NET.Tests.McpServer.dll"));
+
+    public Guid RunId { get; }
+
+    public string Token { get; }
+
+    public Uri BaseAddress { get; }
+
+    /// <summary>Every request received, as <c>&lt;path&gt; &lt;JSON-RPC method or tool&gt;</c>, including those the bearer check refuses.</summary>
+    public ConcurrentQueue<string> Requests { get; }
+
+    /// <summary>
+    /// The MCP handshakes received, one per client connected: <c>initialize</c>, or <c>server/discover</c>, which the SDK
+    /// sends to a stateless server instead.
+    /// </summary>
+    public int Connects => Requests.Count(r => r.EndsWith(" initialize", StringComparison.Ordinal) || r.EndsWith(" server/discover", StringComparison.Ordinal));
+
+    /// <summary>The <c>tools/call</c> requests received, as tool names.</summary>
+    public IReadOnlyList<string> ToolCalls => [.. Requests.Where(r => r.Contains(" call:", StringComparison.Ordinal)).Select(r => r[(r.IndexOf(" call:", StringComparison.Ordinal) + 6)..])];
+
+    /// <summary>The endpoint of the sandbox's <c>/mcp/{source}</c> route, with its token or <paramref name="token"/>.</summary>
+    public RunToolEndpoint Endpoint(string source, string? token = null) => new(new Uri(BaseAddress, $"mcp/{source}"), token ?? Token);
+
+    public static async Task<LoopbackSandbox> StartAsync(string workRoot)
+    {
+        File.Exists(ServerDll).Should().BeTrue($"build tests/Thalos.NET.Tests.McpServer first ({ServerDll})");
+        var runId = Guid.NewGuid();
+        var token = $"sandbox-{runId:N}-token";
+        string[] args =
+        [
+            $"--{SandboxEnvironment.RunId}={runId:D}",
+            $"--{SandboxEnvironment.Token}={token}",
+            $"--{SandboxEnvironment.WriteExtensions}=*",
+            $"--{SandboxEnvironment.ProtectedPaths}=.git/;AGENT.md",
+            $"--{SandboxSettings.WorkRootKey}={workRoot}",
+            $"--{SandboxSettings.RoslynCommandKey}=dotnet",
+            $"--{SandboxSettings.RoslynArgsKey}={ServerDll};--ready-tool;list_solutions",
+            $"--{SandboxSettings.RoslynReloadKey}=none",
+        ];
+
+        var builder = SandboxHost.CreateBuilder(args);
+        builder.Logging.ClearProviders();
+        builder.Services.Replace(ServiceDescriptor.Singleton<ISandboxProcessRunner>(new RestoreOkRunner()));
+        var app = builder.Build();
+        app.Urls.Clear();
+        app.Urls.Add("http://127.0.0.1:0");
+        var requests = new ConcurrentQueue<string>();
+        app.Use(async (context, next) =>
+        {
+            requests.Enqueue($"{context.Request.Path} {await DescribeAsync(context.Request)}");
+            await next(context);
+        });
+        SandboxHost.Map(app);
+        await app.StartAsync();
+        return new LoopbackSandbox(app, runId, token, new Uri(app.Urls.Single().TrimEnd('/') + "/"), requests);
+    }
+
+    /// <summary>Imports <paramref name="remote"/>'s main and waits until Roslyn is ready.</summary>
+    public async Task ImportAsync(LocalGitRemote remote, string dataRoot)
+    {
+        var store = new GitMirrorStore(new GitWorkspaceOptions { DataRoot = dataRoot }, NullLogger<GitMirrorStore>.Instance);
+        var mirror = await store.PrepareAsync("repo", remote.Url, CancellationToken.None);
+        mirror.IsSuccess.Should().BeTrue(mirror.IsFailure ? mirror.Error.Message : "");
+        var commit = remote.HeadOf("main");
+        var bundle = Path.Combine(dataRoot, $"{Guid.NewGuid():N}.bundle");
+        (await store.CreateBundleAsync(mirror.Value, commit, bundle, CancellationToken.None)).IsSuccess.Should().BeTrue();
+
+        using (var content = new StreamContent(File.OpenRead(bundle)))
+        {
+            content.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+            using var import = await SendAsync(HttpMethod.Post, $"control/import?branch=run%2Ffeature&commit={commit}&solution=App.slnx", content);
+            import.StatusCode.Should().Be(System.Net.HttpStatusCode.Accepted);
+        }
+
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+        while (true)
+        {
+            using var response = await SendAsync(HttpMethod.Get, "control/ready");
+            var ready = await response.Content.ReadFromJsonAsync<JsonElement>(Json);
+            var roslyn = ready.GetProperty("roslyn").GetString();
+            if (!string.Equals(roslyn, "pending", StringComparison.Ordinal))
+            {
+                roslyn.Should().Be("ready", ready.ToString());
+                return;
+            }
+
+            timeout.IsCancellationRequested.Should().BeFalse("the import settles within two minutes");
+            await Task.Delay(200);
+        }
+    }
+
+    /// <summary>Stops the host, so its port refuses connections.</summary>
+    public async Task StopAsync()
+    {
+        if (!_stopped)
+        {
+            _stopped = true;
+            await _app.StopAsync();
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        _http.Dispose();
+        await StopAsync();
+        await _app.DisposeAsync();
+    }
+
+    private async Task<HttpResponseMessage> SendAsync(HttpMethod method, string path, HttpContent? content = null)
+    {
+        using var request = new HttpRequestMessage(method, new Uri(BaseAddress, path)) { Content = content };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", Token);
+        return await _http.SendAsync(request);
+    }
+
+    /// <summary>The JSON-RPC method of an MCP request, with the tool's name for a <c>tools/call</c>; empty for anything else.</summary>
+    private static async Task<string> DescribeAsync(HttpRequest request)
+    {
+        if (!HttpMethods.IsPost(request.Method) || !request.Path.StartsWithSegments("/mcp", StringComparison.Ordinal))
+        {
+            return string.Empty;
+        }
+
+        request.EnableBuffering();
+        using var reader = new StreamReader(request.Body, Encoding.UTF8, leaveOpen: true);
+        var body = await reader.ReadToEndAsync();
+        request.Body.Position = 0;
+        try
+        {
+            using var json = JsonDocument.Parse(body);
+            var method = json.RootElement.TryGetProperty("method", out var m) ? m.GetString() ?? "" : "";
+            return string.Equals(method, "tools/call", StringComparison.Ordinal)
+                ? "call:" + json.RootElement.GetProperty("params").GetProperty("name").GetString()
+                : method;
+        }
+        catch (JsonException)
+        {
+            return "unparsed";
+        }
+    }
+
+    /// <summary>Answers every restore as a success without running it.</summary>
+    private sealed class RestoreOkRunner : ISandboxProcessRunner
+    {
+        public Task<ProcessOutcome> RunAsync(ProcessSpec spec, CancellationToken ct) =>
+            Task.FromResult(new ProcessOutcome(0, TimedOut: false, "Restore complete.\n"));
+    }
+}

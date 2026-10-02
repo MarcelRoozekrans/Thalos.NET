@@ -5,7 +5,11 @@ namespace Thalos.Workspaces;
 /// <summary>Where a run's tools are served, and the token that authorises calls to them.</summary>
 /// <param name="Endpoint">The MCP endpoint.</param>
 /// <param name="BearerToken">The bearer token for the endpoint.</param>
-public sealed record RunToolEndpoint(Uri Endpoint, string BearerToken);
+public sealed record RunToolEndpoint(Uri Endpoint, string BearerToken)
+{
+    /// <summary>The token is never printed, so the record's generated text leaves it out.</summary>
+    public override string ToString() => $"RunToolEndpoint {{ Endpoint = {Endpoint} }}";
+}
 
 /// <summary>Resolves the MCP endpoint serving a run's tools.</summary>
 public interface IRunToolEndpointResolver

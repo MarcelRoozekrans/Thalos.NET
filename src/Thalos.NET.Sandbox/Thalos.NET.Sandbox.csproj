@@ -12,6 +12,8 @@
     <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />
     <ProjectReference Include="..\Thalos.NET.Git\Thalos.NET.Git.csproj" />
     <ProjectReference Include="..\Thalos.NET.Mcp\Thalos.NET.Mcp.csproj" />
+    <!-- AddRemoteRunTools builds the schema-only tool types from a private container of null objects. -->
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Thalos.NET.Tests.Sandbox" />
