@@ -284,7 +284,7 @@ public sealed class RunWorkspaceSweeperTests
 
     /// <summary>
     /// R37c. Red: start every sweep at the first workspace; each sweep parks the first run again and the tail is never
-    /// reached. Red 2: call ParkAsync without the budget; the provider is told nothing of it.
+    /// reached. Red 2: pass Timeout.InfiniteTimeSpan instead of the remaining budget; the provider is told no budget.
     /// </summary>
     [Fact]
     public async Task Each_sweep_starts_one_workspace_further_so_a_spent_budget_never_starves_the_tail()

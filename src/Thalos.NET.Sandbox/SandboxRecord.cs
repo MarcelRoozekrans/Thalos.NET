@@ -39,6 +39,10 @@ public enum SandboxRecordState
 /// How many restart attempts parks have made to export the exited sandbox: counted before each is made, given back when
 /// its caller cancels it. A park that dies midway leaves its attempt counted.
 /// </param>
+/// <param name="RestartedByPark">
+/// A park started the exited sandbox again. Such a sandbox stays under the restart rules once it runs, and a cancelled
+/// attempt, whose count is given back, does not clear it.
+/// </param>
 /// <param name="PatchMissingReason">Why there is no patch, when <paramref name="PatchMissing"/> is set.</param>
 /// <param name="PatchApplied">
 /// The stored patch was applied to the run's publish worktree, which a later checkout then returns as it is. A publish
@@ -47,7 +51,7 @@ public enum SandboxRecordState
 public sealed record SandboxRecord(
     Guid RunId, string Repository, string Remote, string DefaultBranch, string Branch, string? Solution,
     string BaseCommit, string SandboxId, string Token, SandboxRecordState State, DateTimeOffset CreatedAt,
-    string? PatchPath = null, bool PatchMissing = false, bool PatchApplied = false, int ExportAttempts = 0, string? PatchMissingReason = null)
+    string? PatchPath = null, bool PatchMissing = false, bool PatchApplied = false, int ExportAttempts = 0, string? PatchMissingReason = null, bool RestartedByPark = false)
 {
     /// <summary>The token is never printed, so the record's generated text leaves it out.</summary>
     public override string ToString() => $"SandboxRecord {{ RunId = {RunId}, SandboxId = {SandboxId}, State = {State} }}";

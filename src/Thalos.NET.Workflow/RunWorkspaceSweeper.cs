@@ -22,6 +22,12 @@ namespace Thalos.Workflow;
 /// Succeeded run's workspace goes at most one sweep interval later.
 /// </para>
 /// <para>
+/// <b>One long-lived instance.</b> Each sweep starts one workspace further on in the list than the last, so a park
+/// budget spent early never leaves the same runs over every time. That rotation lives in the instance, so the consumer
+/// registers the sweeper as a singleton and calls the same one on every tick; a new instance per tick always starts at
+/// the first workspace.
+/// </para>
+/// <para>
 /// <b>Decided on run state, never on the workspace record's state.</b> <see cref="IRunWorkspaceProvider.ListAsync"/>
 /// carries no record state, and the sweeper does not need any: <see cref="IRunWorkspaceProvider.RemoveAsync"/> is
 /// the authority that refuses an unsafe removal — a provisional record whose create is still live — and finishes one
