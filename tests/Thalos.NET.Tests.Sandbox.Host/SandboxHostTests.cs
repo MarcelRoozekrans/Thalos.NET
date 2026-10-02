@@ -37,6 +37,17 @@ public sealed partial class SandboxHostTests : IDisposable
     }
 
     /// <summary>
+    /// A sandbox__test call can wait for a restore and then copy and run the tests, each under the sandbox's own bound;
+    /// the host's call timeout must outlast both, so the sandbox, not the host, says what timed out. Red: set
+    /// RemoteRunToolOptions.CallTimeout's default back to 20 minutes.
+    /// </summary>
+    [Fact]
+    public void The_default_call_timeout_outlasts_a_restore_and_a_test_run()
+    {
+        new Thalos.Mcp.RemoteRunToolOptions().CallTimeout.Should().BeGreaterThan(RestoreService.Timeout + new SandboxToolOptions().TestTimeout);
+    }
+
+    /// <summary>
     /// Red: in SandboxHost.Map, skip BearerTokenMiddleware for paths under /mcp. The /mcp rows then reach the MCP
     /// endpoint and answer 400 or 405 instead of 401.
     /// </summary>

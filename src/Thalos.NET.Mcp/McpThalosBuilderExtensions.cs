@@ -167,6 +167,7 @@ public static class McpThalosBuilderExtensions
             ConnectTimeout = registered.ConnectTimeout,
             CallTimeout = callTimeout ?? registered.CallTimeout,
             ObserverTimeout = registered.ObserverTimeout,
+            MaxResultBytes = registered.MaxResultBytes,
         };
     }
 

@@ -281,6 +281,48 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
         a.Connects.Should().Be(connectsAfterMalformed + 1, "the client that read the malformed answer was dropped");
     }
 
+    /// <summary>
+    /// Red 1: in NewClient, pass long.MaxValue to the ResponseCap in place of MaxResultBytes; both oversized answers are
+    /// then read whole and returned. Red 2: drop the DropAsync in CallAsync's cap catch; the next call then reuses the
+    /// client and the sandbox sees no new handshake.
+    /// </summary>
+    [Fact]
+    public async Task An_answer_longer_than_the_cap_is_an_error_result_and_its_client_is_dropped()
+    {
+        var a = await SandboxAsync("a");
+        var oversized = JsonSerializer.Serialize(new string('x', 256 * 1024));
+        a.AnswerToolCall = _ => $"{{\"content\":[{{\"type\":\"text\",\"text\":{oversized}}}]}}";
+        await using var sp = Services(new RemoteRunToolOptions { MaxResultBytes = 64 * 1024 });
+
+        var local = await CallAsAsync(sp, a.RunId, "workspace", "list_files");
+        var host = await CallAsAsync(sp, a.RunId, "roslyn", "args");
+        var connectsAfterOversized = a.Connects;
+        a.AnswerToolCall = null;
+        var next = await CallAsAsync(sp, a.RunId, "workspace", "list_files");
+
+        using var _ = new AssertionScope();
+        local.Should().Be("error: the run's sandbox answered 'list_files' with more than 65536 bytes; the call did not complete.");
+        host.Should().Be("error: the run's sandbox answered 'args' with more than 65536 bytes; the call did not complete.");
+        next.Should().Be("error: this turn has no run workspace", "an answer under the cap, through a new client");
+        a.Connects.Should().Be(connectsAfterOversized + 1, "the client that read the oversized answer was dropped");
+        LogText.Should().Contain("with more than 65536 bytes");
+    }
+
+    /// <summary>Red: drop the MaxResultBytes check in the constructor; the source is then built with a cap of zero.</summary>
+    [Fact]
+    public void A_cap_that_is_not_positive_is_refused()
+    {
+        var act = () => RemoteRunToolSource.ForLocalSchemas(
+            "x",
+            new EmptySchemas(),
+            _resolver,
+            new RemoteRunToolOptions { MaxResultBytes = 0 },
+            Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance,
+            TimeProvider.System);
+
+        act.Should().Throw<ArgumentException>().WithMessage("*MaxResultBytes 0*");
+    }
+
     // ---------- clients a removal or the disposal could miss ----------
 
     /// <summary>
@@ -748,6 +790,14 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
         _remotes.Add(remote);
         await sandbox.ImportAsync(remote, Path.Combine(_temp, name + "-mirror"));
         return sandbox;
+    }
+
+    private sealed class EmptySchemas : IToolSource
+    {
+        public string Name => "x";
+
+        public ValueTask<Result<IReadOnlyList<AITool>, AgentError>> GetToolsAsync(CancellationToken ct) =>
+            ValueTask.FromResult(Result<IReadOnlyList<AITool>, AgentError>.Success([]));
     }
 
     private sealed class FakeResolver : IRunToolEndpointResolver

@@ -36,10 +36,12 @@ namespace Thalos.Mcp;
 /// </para>
 /// <para>
 /// <b>Bounds.</b> Resolving and connecting are bounded by <see cref="RemoteRunToolOptions.ConnectTimeout"/>, a call by
-/// <see cref="RemoteRunToolOptions.CallTimeout"/>. A run with no endpoint, a resolver failure, a failed connection, a
-/// timeout, a closed session, a failed request or an answer the client cannot read gives an <c>error:</c> result, never
-/// an exception: the endpoint runs agent-controlled code, so its answers are untrusted. Only the caller's own token
-/// cancelling makes a call throw <see cref="OperationCanceledException"/>.
+/// <see cref="RemoteRunToolOptions.CallTimeout"/>, and each response a run's client reads, such as a call's answer, by
+/// <see cref="RemoteRunToolOptions.MaxResultBytes"/>: the client's own HTTP handler faults the response's stream past
+/// it, so a longer answer is never held whole. A run with no endpoint, a resolver failure, a failed connection, a
+/// timeout, a closed session, a failed request, an answer longer than the cap or an answer the client cannot read gives
+/// an <c>error:</c> result, never an exception: the endpoint runs agent-controlled code, so its answers are untrusted.
+/// Only the caller's own token cancelling makes a call throw <see cref="OperationCanceledException"/>.
 /// </para>
 /// <para>
 /// <b>Observers.</b> Each <see cref="IRunToolCallObserver"/> is told of every call that was sent to a run's endpoint,
@@ -96,11 +98,22 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
             (nameof(options.ConnectTimeout), options.ConnectTimeout),
             (nameof(options.CallTimeout), options.CallTimeout),
             (nameof(options.ObserverTimeout), options.ObserverTimeout));
+        if (options.MaxResultBytes <= 0)
+        {
+            throw new ArgumentException($"Remote run tool source '{name}' has {nameof(options.MaxResultBytes)} {options.MaxResultBytes}; it must be positive.", nameof(options));
+        }
+
         Name = name;
         _host = host;
         _schemas = schemas;
         _endpoints = endpoints;
-        _options = new RemoteRunToolOptions { ConnectTimeout = options.ConnectTimeout, CallTimeout = options.CallTimeout, ObserverTimeout = options.ObserverTimeout };
+        _options = new RemoteRunToolOptions
+        {
+            ConnectTimeout = options.ConnectTimeout,
+            CallTimeout = options.CallTimeout,
+            ObserverTimeout = options.ObserverTimeout,
+            MaxResultBytes = options.MaxResultBytes,
+        };
         _loggers = loggers;
         _logger = loggers.CreateLogger<RemoteRunToolSource>();
         _clock = clock;
@@ -113,11 +126,13 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
     /// </summary>
     /// <param name="host">The host-wide server's source, owned and disposed by the new source; its name is the source's name.</param>
     /// <param name="endpoints">Finds a run's endpoint for each call.</param>
-    /// <param name="options">The connect and call timeouts, copied.</param>
+    /// <param name="options">The timeouts and the result cap, copied.</param>
     /// <param name="loggers">For the source's own log and the MCP clients'.</param>
     /// <param name="clock">Times both timeouts and each call's elapsed time.</param>
     /// <param name="callObservers">Told of each completed run call; enumerated per call, so it may be resolved lazily.</param>
-    /// <exception cref="ArgumentException">A timeout in <paramref name="options"/> is not positive or is too long for a timer.</exception>
+    /// <exception cref="ArgumentException">
+    /// A timeout in <paramref name="options"/> is not positive or is too long for a timer, or its result cap is not positive.
+    /// </exception>
     public static RemoteRunToolSource ForMcpHost(
         McpToolSource host,
         IRunToolEndpointResolver endpoints,
@@ -138,13 +153,13 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
     /// <param name="name">The source's name; the tools are exposed as <c>{name}__{tool}</c>.</param>
     /// <param name="schemaSource">Supplies the tool schemas; owned and disposed, if disposable, by the new source.</param>
     /// <param name="endpoints">Finds a run's endpoint for each call.</param>
-    /// <param name="options">The connect and call timeouts, copied.</param>
+    /// <param name="options">The timeouts and the result cap, copied.</param>
     /// <param name="loggers">For the source's own log and the MCP clients'.</param>
     /// <param name="clock">Times both timeouts and each call's elapsed time.</param>
     /// <param name="callObservers">Told of each completed run call; enumerated per call, so it may be resolved lazily.</param>
     /// <exception cref="ArgumentException">
-    /// <paramref name="name"/> violates <see cref="ToolSourceName"/>, or a timeout in <paramref name="options"/> is not
-    /// positive or is too long for a timer.
+    /// <paramref name="name"/> violates <see cref="ToolSourceName"/>, a timeout in <paramref name="options"/> is not
+    /// positive or is too long for a timer, or its result cap is not positive.
     /// </exception>
     public static RemoteRunToolSource ForLocalSchemas(
         string name,
@@ -328,6 +343,14 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
                 ? await CallUntilSessionEndsAsync(new McpClientTool(client, hostTool.ProtocolTool, hostTool.JsonSerializerOptions).InvokeAsync(arguments, call.Token).AsTask(), client, call).ConfigureAwait(false)
                 : TextResult(tool.Name, await CallUntilSessionEndsAsync(client.CallToolAsync(tool.Name, new Dictionary<string, object?>(arguments, StringComparer.Ordinal), cancellationToken: call.Token).AsTask(), client, call).ConfigureAwait(false));
         }
+        catch (Exception) when (entry.Cap.Exceeded && !ct.IsCancellationRequested)
+        {
+            // However the SDK surfaced the faulted read, the answer was longer than the cap: the client that read part of
+            // it is not reused.
+            LogAnswerTooLarge(_logger, Name, tool.Name, runId, _options.MaxResultBytes);
+            await DropAsync(runId, entry).ConfigureAwait(false);
+            return $"error: the run's sandbox answered '{tool.Name}' with more than {_options.MaxResultBytes} bytes; the call did not complete.";
+        }
         catch (OperationCanceledException) when (callTimeout.IsCancellationRequested && !ct.IsCancellationRequested)
         {
             LogCallTimedOut(_logger, Name, tool.Name, runId, _options.CallTimeout);
@@ -421,7 +444,11 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
             catch (Exception ex)
             {
                 LogConnectFailed(_logger, ex, Name, runId, ex.GetType().Name);
-                _clients.TryRemove(KeyValuePair.Create(runId, entry));
+                if (_clients.TryRemove(KeyValuePair.Create(runId, entry)))
+                {
+                    entry.Http?.Dispose();
+                }
+
                 return new Connection(ClientState.Failed, null, null);
             }
 
@@ -430,7 +457,7 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
             if (Gone(runId) is { } goneSince)
             {
                 _clients.TryRemove(KeyValuePair.Create(runId, entry));
-                await DisposeQuietlyAsync(runId, client).ConfigureAwait(false);
+                await DisposeQuietlyAsync(runId, client, entry).ConfigureAwait(false);
                 return new Connection(goneSince, null, null);
             }
 
@@ -461,12 +488,28 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
         }
     }
 
-    private CachedClient NewClient(Guid runId, RunToolEndpoint endpoint) =>
-        new(endpoint, new Lazy<Task<McpClient>>(() => ConnectAsync(runId, endpoint), LazyThreadSafetyMode.ExecutionAndPublication));
-
-    /// <summary>Connects to <paramref name="endpoint"/>, bounded by the connect timeout and the source's disposal, never by one caller's token.</summary>
-    private async Task<McpClient> ConnectAsync(Guid runId, RunToolEndpoint endpoint)
+    /// <summary>A cache entry whose client is made on first use; nothing disposable exists until then.</summary>
+    private CachedClient NewClient(Guid runId, RunToolEndpoint endpoint)
     {
+        CachedClient? entry = null;
+        entry = new CachedClient(
+            endpoint,
+            new ResponseCap(_options.MaxResultBytes),
+            new Lazy<Task<McpClient>>(() => ConnectAsync(runId, entry!), LazyThreadSafetyMode.ExecutionAndPublication));
+        return entry;
+    }
+
+    /// <summary>
+    /// Connects to <paramref name="entry"/>'s endpoint, bounded by the connect timeout and the source's disposal, never
+    /// by one caller's token. The transport uses an HTTP client of the entry's own, over a <see cref="ResponseByteCap"/>
+    /// on the entry's cap, so every response it reads is bounded; the HTTP client has no timeout of its own, because the
+    /// connect and call timeouts bound it, and it is disposed with the entry's client.
+    /// </summary>
+    private async Task<McpClient> ConnectAsync(Guid runId, CachedClient entry)
+    {
+        var endpoint = entry.Endpoint;
+        var http = new HttpClient(new ResponseByteCap(entry.Cap, new SocketsHttpHandler()), disposeHandler: true) { Timeout = Timeout.InfiniteTimeSpan };
+        entry.Http = http;
         using var timeout = new CancellationTokenSource(_options.ConnectTimeout, _clock);
         using var connect = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token, _disposing.Token);
         LogConnecting(_logger, Name, runId, endpoint.Endpoint);
@@ -482,7 +525,9 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
                 // The sandbox serves MCP statelessly; nothing is pushed outside a call's own response.
                 EnableStandaloneGetStream = false,
             },
-            _loggers);
+            http,
+            _loggers,
+            ownsHttpClient: false);
         return await McpClient.CreateAsync(transport, clientOptions: null, _loggers, connect.Token).ConfigureAwait(false);
     }
 
@@ -502,7 +547,10 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
         }
     }
 
-    /// <summary>Disposes the entry's client once its connection attempt, which is bounded by the connect timeout, has finished.</summary>
+    /// <summary>
+    /// Disposes the entry's client and HTTP client once its connection attempt, which is bounded by the connect timeout,
+    /// has finished.
+    /// </summary>
     private async ValueTask DisposeClientAsync(Guid runId, CachedClient entry)
     {
         if (!entry.Client.IsValueCreated)
@@ -517,13 +565,15 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
         }
         catch (Exception)
         {
-            return; // a failed connection has nothing to dispose; the call that made it logged why
+            // A failed connection has no client to dispose; the call that made it logged why.
+            entry.Http?.Dispose();
+            return;
         }
 
-        await DisposeQuietlyAsync(runId, client).ConfigureAwait(false);
+        await DisposeQuietlyAsync(runId, client, entry).ConfigureAwait(false);
     }
 
-    private async ValueTask DisposeQuietlyAsync(Guid runId, McpClient client)
+    private async ValueTask DisposeQuietlyAsync(Guid runId, McpClient client, CachedClient entry)
     {
         try
         {
@@ -533,6 +583,10 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
         catch (Exception ex)
         {
             LogDisposeFailed(_logger, ex, Name, ex.GetType().Name);
+        }
+        finally
+        {
+            entry.Http?.Dispose();
         }
     }
 
@@ -627,8 +681,12 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
     /// <summary>A client, and the cache entry holding it, when <paramref name="State"/> is <see cref="ClientState.Connected"/>.</summary>
     private readonly record struct Connection(ClientState State, McpClient? Client, CachedClient? Entry);
 
-    /// <summary>A run's client, and the endpoint it was made for.</summary>
-    private sealed record CachedClient(RunToolEndpoint Endpoint, Lazy<Task<McpClient>> Client);
+    /// <summary>A run's client, the endpoint it was made for, and the cap on what its responses may hold.</summary>
+    private sealed record CachedClient(RunToolEndpoint Endpoint, ResponseCap Cap, Lazy<Task<McpClient>> Client)
+    {
+        /// <summary>The client's HTTP client, set when its connection starts; disposed with the client, or when the connection fails.</summary>
+        public HttpClient? Http { get; set; }
+    }
 
     /// <summary>The wrapped tools and the schema list they were built from.</summary>
     private sealed record Routed(object Schemas, AITool[] Tools);
@@ -686,6 +744,9 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
 
     [LoggerMessage(EventId = 351, Level = LogLevel.Debug, Message = "Remote run tool source '{Source}' disposed a client of run {RunId}")]
     private static partial void LogClientDisposed(ILogger logger, string source, Guid runId);
+
+    [LoggerMessage(EventId = 352, Level = LogLevel.Warning, Message = "The sandbox of run {RunId} answered '{Tool}' on remote run tool source '{Source}' with more than {MaxBytes} bytes; the call was ended")]
+    private static partial void LogAnswerTooLarge(ILogger logger, string source, string tool, Guid runId, long maxBytes);
 
     [LoggerMessage(EventId = 347, Level = LogLevel.Warning, Message = "Disposing a client of remote run tool source '{Source}' failed: {ErrorType}")]
     private static partial void LogDisposeFailed(ILogger logger, Exception exception, string source, string errorType);
