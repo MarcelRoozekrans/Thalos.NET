@@ -37,7 +37,30 @@ internal static unsafe partial class UnixLinkCount
     /// FIFO, socket, device, directory or link. <see langword="null"/> when the type could not be read, for the same
     /// reasons as the link count. <c>stx_mode</c> is the 16-bit field at byte offset 28 of <c>struct statx</c>.
     /// </summary>
-    public static bool? IsRegularFile(string path)
+    public static bool? IsRegularFile(string path) => QueryRegular(AtFdCwd, path, AtSymlinkNoFollow);
+
+    /// <summary>
+    /// Whether the open file <paramref name="handle"/> refers to is a regular file, read from the handle itself, so the
+    /// answer describes exactly what was opened. <see langword="null"/> when the type could not be read.
+    /// </summary>
+    public static bool? IsRegularFile(SafeHandle handle)
+    {
+        var added = false;
+        try
+        {
+            handle.DangerousAddRef(ref added);
+            return QueryRegular((int)handle.DangerousGetHandle(), string.Empty, AtEmptyPath);
+        }
+        finally
+        {
+            if (added)
+            {
+                handle.DangerousRelease();
+            }
+        }
+    }
+
+    private static bool? QueryRegular(int directoryFd, string path, int flags)
     {
         if (!OperatingSystem.IsLinux())
         {
@@ -47,7 +70,7 @@ internal static unsafe partial class UnixLinkCount
         var buffer = stackalloc byte[BufferSize];
         try
         {
-            if (Statx(AtFdCwd, path, AtSymlinkNoFollow, StatxType, buffer) != 0)
+            if (Statx(directoryFd, path, flags, StatxType, buffer) != 0)
             {
                 return null;
             }

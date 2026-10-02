@@ -5,6 +5,8 @@
     <PackageId>Thalos.NET.Sandbox</PackageId>
     <Description>Run sandboxes for Thalos.NET: confine a workflow run's workspace, build and Roslyn to a per-run container.</Description>
     <PackageTags>agents;sandbox;container;workflow;microsoft-agent-framework;zeroalloc</PackageTags>
+    <!-- UnixRegularFileOpen P/Invokes open(2); LibraryImport's generated marshalling needs this. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />

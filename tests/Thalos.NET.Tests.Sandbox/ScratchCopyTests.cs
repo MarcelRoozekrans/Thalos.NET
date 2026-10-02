@@ -55,6 +55,38 @@ public sealed class ScratchCopyTests : IDisposable
         Path.Exists(Path.Combine(copy.Root, "pipe")).Should().BeFalse();
     }
 
+    /// <summary>
+    /// A file swapped for a FIFO after the listing, just before it is opened, fails the copy at once instead of blocking
+    /// in open(2). Red: open with a plain FileStream on Linux too; the open then blocks past the test's 30-second bound.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_file_swapped_for_a_fifo_before_its_open_fails_the_copy_without_blocking()
+    {
+        Skip.IfNot(OperatingSystem.IsLinux(), "a FIFO is a Linux file type here.");
+        Seed("App.slnx", "src/A.cs");
+        void SwapForFifo(string path)
+        {
+            if (!path.EndsWith("A.cs", StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            File.Delete(path);
+            using var mkfifo = Process.Start("mkfifo", [path]);
+            mkfifo!.WaitForExit();
+            mkfifo.ExitCode.Should().Be(0);
+        }
+
+        var create = ScratchCopy.CreateAsync(Source, Scratch, long.MaxValue, CancellationToken.None, SwapForFifo);
+        var finished = await Task.WhenAny(create, Task.Delay(TimeSpan.FromSeconds(30)));
+
+        finished.Should().BeSameAs(create, "opening the swapped-in FIFO must not block");
+        var created = await create;
+        created.IsFailure.Should().BeTrue();
+        created.Error.Message.Should().Contain("is no longer a regular file");
+        Directory.EnumerateFileSystemEntries(Scratch).Should().BeEmpty();
+    }
+
     /// <summary>Red: drop the ThrowIfCancellationRequested in ScratchCopy.CopyDirectoryAsync and pass no token to the reads; the copy then completes.</summary>
     [Fact]
     public async Task A_cancelled_copy_throws_and_leaves_nothing_behind()

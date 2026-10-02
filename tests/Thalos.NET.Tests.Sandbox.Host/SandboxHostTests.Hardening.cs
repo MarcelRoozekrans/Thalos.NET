@@ -230,8 +230,8 @@ public sealed partial class SandboxHostTests
 
     /// <summary>
     /// A copy that cannot be made, or not in time, is an error result, not a fault. Red 1: in SandboxTools.RunAsync, run in
-    /// the worktree when the copy fails; the build then answers exit 0. Red 2: drop the copy's timeout; the copy then
-    /// completes and the build answers exit 0.
+    /// the worktree when the copy fails; the build then answers exit 0. Red 2: drop the deadline from the copy's token
+    /// and the remaining-time check; the copy then completes and the build answers exit 0.
     /// </summary>
     [Fact]
     public async Task A_copy_that_fails_or_times_out_is_an_error_result()
@@ -243,7 +243,7 @@ public sealed partial class SandboxHostTests
         options.ScratchMaxBytes = 1;
         var oversized = await host.CallAsync("sandbox", "build");
         options.ScratchMaxBytes = long.MaxValue;
-        options.BuildTimeout = TimeSpan.FromTicks(1);
+        options.BuildTimeout = TimeSpan.Zero; // the deadline is spent before the copy starts: deterministic
         var timedOut = await host.CallAsync("sandbox", "build");
 
         oversized.Should().StartWith("error: could not copy the workspace to run in: the workspace holds more than 1 bytes");

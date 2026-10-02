@@ -11,11 +11,12 @@ namespace Thalos.Sandbox;
 /// deletes the copy.
 /// </summary>
 /// <remarks>
-/// The copy is bounded: by the caller's token, which the tool links to its own timeout; and by a byte budget, counted as
+/// The copy is bounded: by the caller's token, which the tool links to its own deadline; and by a byte budget, counted as
 /// the bytes are written, so a file that grows during the copy cannot exceed it. On Linux the file type comes from
-/// <c>statx</c>, because .NET reports a FIFO as an ordinary file; elsewhere the attributes decide. A file swapped for a
-/// FIFO between the type check and the open would still block that one open; agent code would have to race the copy
-/// to do it, and it gains nothing it could not do to its own run.
+/// <c>statx</c>, because .NET reports a FIFO as an ordinary file, and each file is opened through
+/// <see cref="UnixRegularFileOpen"/>: non-blocking, not following a link, and checked to be a regular file on the open
+/// handle itself. A file swapped for a FIFO or a link after the listing therefore fails the copy at once instead of
+/// blocking. Elsewhere the attributes decide.
 /// </remarks>
 internal sealed class ScratchCopy : IDisposable
 {
@@ -27,12 +28,14 @@ internal sealed class ScratchCopy : IDisposable
 
     private const int BufferSize = 81920;
 
+    private readonly Action<string>? _beforeOpen;
     private long _budget;
 
-    private ScratchCopy(string root, long maxBytes)
+    private ScratchCopy(string root, long maxBytes, Action<string>? beforeOpen)
     {
         Root = root;
         _budget = maxBytes;
+        _beforeOpen = beforeOpen;
     }
 
     /// <summary>The copy's root directory.</summary>
@@ -43,9 +46,15 @@ internal sealed class ScratchCopy : IDisposable
     /// copied, when the regular files hold more than <paramref name="maxBytes"/> or the file system refuses; a cancelled
     /// <paramref name="ct"/> deletes what was copied and throws.
     /// </summary>
-    public static async Task<Result<ScratchCopy, AgentError>> CreateAsync(string source, string scratchRoot, long maxBytes, CancellationToken ct)
+    /// <param name="source">The worktree.</param>
+    /// <param name="scratchRoot">Where copies are made.</param>
+    /// <param name="maxBytes">The byte budget.</param>
+    /// <param name="ct">Cancels the copy.</param>
+    /// <param name="beforeOpen">A test seam, called with each file's path just before it is opened.</param>
+    public static async Task<Result<ScratchCopy, AgentError>> CreateAsync(
+        string source, string scratchRoot, long maxBytes, CancellationToken ct, Action<string>? beforeOpen = null)
     {
-        var copy = new ScratchCopy(Path.Combine(scratchRoot, Guid.NewGuid().ToString("N")), maxBytes);
+        var copy = new ScratchCopy(Path.Combine(scratchRoot, Guid.NewGuid().ToString("N")), maxBytes, beforeOpen);
         var done = false;
         try
         {
@@ -136,7 +145,8 @@ internal sealed class ScratchCopy : IDisposable
 
     private async Task<bool> CopyFileAsync(FileInfo file, string destination, CancellationToken ct)
     {
-        var reader = new FileStream(file.FullName, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, BufferSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        _beforeOpen?.Invoke(file.FullName);
+        var reader = OpenForCopy(file.FullName);
         await using (reader.ConfigureAwait(false))
         {
             var writer = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None, BufferSize, FileOptions.Asynchronous);
@@ -158,6 +168,21 @@ internal sealed class ScratchCopy : IDisposable
         }
 
         return true;
+    }
+
+    /// <summary>On Linux through <see cref="UnixRegularFileOpen"/>, which never blocks and refuses anything but a regular file; elsewhere a plain open.</summary>
+    /// <exception cref="IOException">The file is no longer a regular file, or could not be opened; the copy fails.</exception>
+    private static FileStream OpenForCopy(string path)
+    {
+        if (!OperatingSystem.IsLinux())
+        {
+            return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete, BufferSize, FileOptions.Asynchronous | FileOptions.SequentialScan);
+        }
+
+        var opened = UnixRegularFileOpen.Open(path);
+        return opened.IsSuccess
+            ? new FileStream(opened.Value, FileAccess.Read, BufferSize)
+            : throw new IOException(opened.Error);
     }
 
     private static void ClearReadOnly(DirectoryInfo directory)

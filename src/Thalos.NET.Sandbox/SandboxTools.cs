@@ -19,8 +19,10 @@ namespace Thalos.Sandbox;
 /// <param name="runner">Runs the <c>dotnet</c> process.</param>
 /// <param name="options">Timeouts and output size.</param>
 /// <param name="logger">Logs refusals.</param>
+/// <param name="clock">Times the one deadline a call's copy and run share; <see cref="TimeProvider.System"/> when null.</param>
 [ThalosToolType]
-public sealed partial class SandboxTools(IRunWorkspaceProvider workspaces, ISandboxProcessRunner runner, SandboxToolOptions options, ILogger<SandboxTools> logger)
+public sealed partial class SandboxTools(
+    IRunWorkspaceProvider workspaces, ISandboxProcessRunner runner, SandboxToolOptions options, ILogger<SandboxTools> logger, TimeProvider? clock = null)
 {
     private const string NoWorkspace = "error: this turn has no run workspace";
     private const string FilterRefused = "error: filter refused";
@@ -86,6 +88,8 @@ public sealed partial class SandboxTools(IRunWorkspaceProvider workspaces, ISand
             ? await workspaces.FindAsync(runId, ct).ConfigureAwait(false)
             : null;
 
+    private TimeProvider Clock => clock ?? TimeProvider.System;
+
     private static string TargetOf(RunWorkspace workspace) => workspace.SolutionPath ?? workspace.Root;
 
     /// <summary>
@@ -99,16 +103,18 @@ public sealed partial class SandboxTools(IRunWorkspaceProvider workspaces, ISand
     {
         if (options.ScratchRoot is not { } scratchRoot)
         {
-            return await RunInAsync(workspace.Root, TargetOf(workspace)).ConfigureAwait(false);
+            return await RunInAsync(workspace.Root, TargetOf(workspace), timeout).ConfigureAwait(false);
         }
 
+        // One deadline for the whole call: the copy spends from it, and the run gets only what is left.
+        var started = Clock.GetUtcNow();
         Result<ScratchCopy, AgentError> created;
-        using (var copyTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct))
+        using (var deadline = new CancellationTokenSource(timeout, Clock))
+        using (var copyToken = CancellationTokenSource.CreateLinkedTokenSource(ct, deadline.Token))
         {
-            copyTimeout.CancelAfter(timeout);
             try
             {
-                created = await ScratchCopy.CreateAsync(workspace.Root, scratchRoot, options.ScratchMaxBytes, copyTimeout.Token).ConfigureAwait(false);
+                created = await ScratchCopy.CreateAsync(workspace.Root, scratchRoot, options.ScratchMaxBytes, copyToken.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
@@ -122,11 +128,17 @@ public sealed partial class SandboxTools(IRunWorkspaceProvider workspaces, ISand
         }
 
         using var copy = created.Value;
-        return await RunInAsync(copy.Root, copy.Map(workspace.Root, TargetOf(workspace))).ConfigureAwait(false);
-
-        async Task<string> RunInAsync(string directory, string target)
+        var remaining = timeout - (Clock.GetUtcNow() - started);
+        if (remaining <= TimeSpan.Zero)
         {
-            var spec = new ProcessSpec(DotNet, arguments(target), directory, timeout, Environment: environment);
+            return $"error: copying the workspace to run in timed out after {timeout:c}";
+        }
+
+        return await RunInAsync(copy.Root, copy.Map(workspace.Root, TargetOf(workspace)), remaining).ConfigureAwait(false);
+
+        async Task<string> RunInAsync(string directory, string target, TimeSpan runTimeout)
+        {
+            var spec = new ProcessSpec(DotNet, arguments(target), directory, runTimeout, Environment: environment);
             var outcome = await runner.RunAsync(spec, ct).ConfigureAwait(false);
             return Format(outcome, timeout, summary(outcome));
         }

@@ -61,7 +61,6 @@ internal sealed partial class ImportService(
     /// <summary>The largest bundle accepted: 512 MiB.</summary>
     public const long MaxBundleBytes = 512L * 1024 * 1024;
 
-
     private readonly CancellationTokenSource _stopping = new();
     private int _claimed;
     private Task _import = Task.CompletedTask;

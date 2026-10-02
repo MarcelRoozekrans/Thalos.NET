@@ -1,5 +1,6 @@
 using System.Text;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 using Thalos.Sandbox;
 using Thalos.Workspaces;
 using ZeroAlloc.Authorization;
@@ -179,6 +180,33 @@ public sealed class SandboxToolsTests
 
         result.Should().StartWith("exit: timed out after 00:01:30\n");
         result.Should().EndWith("partial");
+    }
+
+    /// <summary>
+    /// The copy and the run share one deadline: a copy that took three minutes of a ten-minute budget leaves the run seven.
+    /// The fake clock moves three minutes between the call's start and the copy's end. Red: give the run the full
+    /// BuildTimeout in SandboxTools.RunAsync instead of the remainder.
+    /// </summary>
+    [Fact]
+    public async Task The_copy_and_the_build_share_one_deadline()
+    {
+        var root = Directory.CreateTempSubdirectory("thalos-deadline-").FullName;
+        try
+        {
+            File.WriteAllText(Path.Combine(root, "app.slnx"), "<Solution />");
+            _workspaces.Workspace = new RunWorkspace(RunId, "repo", "remote", "main", "branch", root, Path.Combine(root, "app.slnx"));
+            var options = new SandboxToolOptions { BuildTimeout = TimeSpan.FromMinutes(10), ScratchRoot = Path.Combine(root, "..", Path.GetFileName(root) + "-scratch") };
+            var clock = new FakeTimeProvider { AutoAdvanceAmount = TimeSpan.FromMinutes(3) };
+            _runner.Next = new ProcessOutcome(0, false, "");
+
+            await new SandboxTools(_workspaces, _runner, options, NullLogger<SandboxTools>.Instance, clock).Build(Caller());
+
+            _runner.Specs.Should().ContainSingle().Which.Timeout.Should().Be(TimeSpan.FromMinutes(7));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
     }
 
     /// <summary>Red: stop using outcome.ErrorLineCount for the build summary, e.g. hardcode 0.</summary>
