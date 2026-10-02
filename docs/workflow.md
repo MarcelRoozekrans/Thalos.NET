@@ -552,6 +552,18 @@ a JWT, and never from a run variable: whoever controls `thalos.run_id` chooses w
 call reaches. A caller with no run claim is refused by the `workspace__*` tools and is served by the host-wide
 MCP server, not a run's.
 
+**Environment of stdio MCP servers.** From 0.13.0 a stdio server does not inherit the host's environment. It starts
+from ModelContextProtocol's curated defaults (PATH, HOME/USERPROFILE, TEMP and the like), then the host variables
+named in the entry's `passEnvironment` array, then its `env`, and for a run's copy `runScoped.env` last. A secret
+such as `GITHUB_TOKEN` or `ANTHROPIC_API_KEY` reaches a server only if the entry lists it:
+
+```jsonc
+"github": { "command": "npx", "args": ["-y", "some-github-mcp"], "passEnvironment": ["GITHUB_TOKEN"] }
+```
+
+A run-scoped copy uses the host entry's `passEnvironment`. A server that relied on an inherited variable, such as
+`DOTNET_ROOT` for `dnx`, must now list it.
+
 **Run-scoped MCP servers.** An `.mcp.json` stdio entry with a `runScoped` object gets one private copy of the
 server per run, started against that run's workspace. The host entry keeps serving callers with no run claim, and
 its `command`, `timeout` and `shutdownTimeout` are reused for the run's copies:

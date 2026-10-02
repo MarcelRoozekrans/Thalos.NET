@@ -721,7 +721,7 @@ public sealed partial class RunMcpServerRegistry(
             args.Add(substituted.Value);
         }
 
-        var env = new Dictionary<string, string?>(StringComparer.Ordinal);
+        var runEnv = new Dictionary<string, string?>(StringComparer.Ordinal);
         foreach (var layer in new[] { spec.Definition.Env, runScoped.Env })
         {
             foreach (var (key, value) in layer ?? new Dictionary<string, string>(StringComparer.Ordinal))
@@ -732,7 +732,7 @@ public sealed partial class RunMcpServerRegistry(
                     return Result<StdioClientTransportOptions, AgentError>.Failure(substituted.Error);
                 }
 
-                env[key] = substituted.Value;
+                runEnv[key] = substituted.Value;
             }
         }
 
@@ -747,7 +747,9 @@ public sealed partial class RunMcpServerRegistry(
             Name = spec.Name,
             Command = spec.Definition.Command!,
             Arguments = args,
-            EnvironmentVariables = env,
+            InheritEnvironmentVariables = false,
+            EnvironmentVariables = StdioEnvironment.Build(
+                new McpServerDefinition { PassEnvironment = spec.Definition.PassEnvironment }, runEnv, Environment.GetEnvironmentVariable),
             WorkingDirectory = cwd.Value,
             ShutdownTimeout = spec.Definition.ShutdownTimeout,
         });

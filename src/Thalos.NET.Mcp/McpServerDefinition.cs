@@ -15,6 +15,14 @@ public sealed class McpServerDefinition
     /// <summary>Extra environment variables for the child process (stdio).</summary>
     public IReadOnlyDictionary<string, string>? Env { get; set; }
 
+    /// <summary>
+    /// stdio only: names of host environment variables passed through to the child. A stdio server does not inherit the
+    /// host's environment: it starts from ModelContextProtocol's curated defaults
+    /// (<c>StdioClientTransportOptions.GetDefaultEnvironmentVariables()</c>: PATH, HOME/USERPROFILE, TEMP and the like),
+    /// then these, then <see cref="Env"/>. A secret such as GITHUB_TOKEN reaches a server only if it is listed here.
+    /// </summary>
+    public IReadOnlyList<string>? PassEnvironment { get; set; }
+
     /// <summary>Working directory for the child process (stdio).</summary>
     public string? Cwd { get; set; }
 
