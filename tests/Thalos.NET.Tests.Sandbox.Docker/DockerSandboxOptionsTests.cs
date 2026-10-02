@@ -220,7 +220,7 @@ public sealed class DockerSandboxOptionsTests
 
     /// <summary>
     /// Get and list go through the same check: they answer null and empty, and ask the engine nothing but its info.
-    /// Red: have <c>ListAsync</c> or <c>GetAsync</c> skip <c>EnsureAsync</c>.
+    /// Red, verified separately: make <c>ListAsync</c> ignore a failed <c>EnsureAsync</c>, which sends /containers/json, then <c>GetAsync</c>, which sends the container inspect.
     /// </summary>
     [Fact]
     public async Task Listing_and_getting_on_a_windows_container_engine_find_nothing_and_ask_only_for_info()
