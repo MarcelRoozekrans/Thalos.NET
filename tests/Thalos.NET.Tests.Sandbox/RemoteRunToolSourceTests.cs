@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using System.Text.Json;
 using AwesomeAssertions.Execution;
 using Microsoft.AspNetCore.Http;
@@ -395,16 +396,22 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
         await using var sp = Services(new RemoteRunToolOptions { MaxResultBytes = 64 * 1024, CallTimeout = TimeSpan.FromMinutes(2) });
 
         var waiting = CallAsAsync(sp, a.RunId, "workspace", "list_files");
-        using (var seen = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+        // Longer than the 30-second ConnectTimeout, so a slow connect ends the call with its own error, which the
+        // check below reports, before this wait gives up.
+        var seen = Stopwatch.StartNew();
+        while (!a.ToolCalls.Contains("list_files", StringComparer.Ordinal))
         {
-            while (!a.ToolCalls.Contains("list_files", StringComparer.Ordinal))
+            if (waiting.IsCompleted)
             {
-                await Task.Delay(50, seen.Token);
+                throw new InvalidOperationException($"the list_files call ended before the sandbox saw it: {await waiting}");
             }
+
+            seen.Elapsed.Should().BeLessThan(TimeSpan.FromMinutes(2), "the sandbox must see the list_files call");
+            await Task.Delay(50);
         }
 
         var oversizedCall = await CallAsAsync(sp, a.RunId, "workspace", "read_file", ("path", "a.cs"));
-        var cutOff = await waiting.WaitAsync(TimeSpan.FromSeconds(30));
+        var cutOff = await waiting.WaitAsync(TimeSpan.FromMinutes(2));
 
         using var _ = new AssertionScope();
         oversizedCall.Should().Be("error: the run's sandbox answered 'read_file' with more than 65536 bytes; the call did not complete.");
