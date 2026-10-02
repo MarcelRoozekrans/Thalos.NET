@@ -20,9 +20,10 @@ public sealed class SandboxProcessRunnerTests
         var clock = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
         // Far longer than any real wait here, so only the advance can time the run out.
         var spec = SpawnGrandchild(pidFile, dir) with { Timeout = TimeSpan.FromMinutes(10) };
+        using var stop = new CancellationTokenSource();
+        var run = new SandboxProcessRunner(clock).RunAsync(spec, stop.Token);
         try
         {
-            var run = new SandboxProcessRunner(clock).RunAsync(spec, CancellationToken.None);
             grandchildPid = await GrandchildPidAsync(pidFile, run, TimeSpan.FromMinutes(2));
             run.IsCompleted.Should().BeFalse("nothing times out before the clock is advanced");
 
@@ -37,7 +38,14 @@ public sealed class SandboxProcessRunnerTests
         }
         finally
         {
+            // A failure above can leave the tree running in dir; stop it first, or deleting dir fails and hides that failure.
+            await StopAsync(stop, run);
             KillQuietly(grandchildPid);
+            if (grandchildPid != 0)
+            {
+                await IsGoneWithin(grandchildPid, TimeSpan.FromSeconds(10));
+            }
+
             Directory.Delete(dir, recursive: true);
         }
     }
@@ -127,13 +135,22 @@ public sealed class SandboxProcessRunnerTests
         buffer.ToString().Length.Should().BeLessThanOrEqualTo(1000);
     }
 
+    /// <summary>
+    /// A child that starts a long-running grandchild and then writes its pid, through a temporary file and a rename so the
+    /// test never reads a partly written pid. On Windows the script calls .NET directly: cmdlets such as Start-Process
+    /// load their modules first, which on a busy machine has taken longer than the test's two-minute wait.
+    /// </summary>
     private static ProcessSpec SpawnGrandchild(string pidFile, string dir) => OperatingSystem.IsWindows()
         ? new ProcessSpec(
             "powershell",
-            ["-NoProfile", "-Command", $"$p = Start-Process powershell -ArgumentList '-NoProfile','-Command','Start-Sleep 60' -PassThru; Set-Content -Path '{pidFile}' -Value $p.Id; Start-Sleep 60"],
+            [
+                "-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
+                $"$i = [Diagnostics.ProcessStartInfo]::new('ping.exe', '-n 600 127.0.0.1'); $i.UseShellExecute = $false; $i.CreateNoWindow = $true; " +
+                $"$p = [Diagnostics.Process]::Start($i); [IO.File]::WriteAllText('{pidFile}.tmp', [string]$p.Id); [IO.File]::Move('{pidFile}.tmp', '{pidFile}'); $p.WaitForExit()",
+            ],
             dir,
             TimeSpan.FromSeconds(10))
-        : new ProcessSpec("sh", ["-c", $"sleep 60 & echo $! > '{pidFile}'; wait"], dir, TimeSpan.FromSeconds(3));
+        : new ProcessSpec("sh", ["-c", $"sleep 600 & echo $! > '{pidFile}.tmp' && mv '{pidFile}.tmp' '{pidFile}'; wait"], dir, TimeSpan.FromSeconds(3));
 
     /// <summary>Waits for the pid file the child writes once the grandchild runs, failing if the run ends first or the limit passes.</summary>
     private static async Task<int> GrandchildPidAsync(string pidFile, Task<ProcessOutcome> run, TimeSpan limit)
@@ -161,6 +178,20 @@ public sealed class SandboxProcessRunnerTests
         }
 
         throw new TimeoutException($"the child did not start its grandchild within {limit}");
+    }
+
+    /// <summary>Cancels <paramref name="run"/>, which kills its tree, and waits for it to return.</summary>
+    private static async Task StopAsync(CancellationTokenSource stop, Task<ProcessOutcome> run)
+    {
+        await stop.CancelAsync();
+        try
+        {
+            await run;
+        }
+        catch (OperationCanceledException)
+        {
+            // The expected end of a run cancelled before it finished.
+        }
     }
 
     private static async Task<bool> IsGoneWithin(int pid, TimeSpan limit)
