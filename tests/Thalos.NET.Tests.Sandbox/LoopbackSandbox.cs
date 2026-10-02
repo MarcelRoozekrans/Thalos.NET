@@ -92,11 +92,16 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
     /// <summary>The endpoint of the sandbox's <c>/mcp/{source}</c> route, with its token or <paramref name="token"/>.</summary>
     public RunToolEndpoint Endpoint(string source, string? token = null) => new(new Uri(BaseAddress, $"mcp/{source}"), token ?? Token);
 
-    public static async Task<LoopbackSandbox> StartAsync(string workRoot)
+    /// <summary>Starts a host for <paramref name="runId"/> with <paramref name="token"/>, or a new run and a token of its own.</summary>
+    public static async Task<LoopbackSandbox> StartAsync(string workRoot, Guid? runId = null, string? token = null)
     {
         File.Exists(ServerDll).Should().BeTrue($"build tests/Thalos.NET.Tests.McpServer first ({ServerDll})");
-        var runId = Guid.NewGuid();
-        var token = $"sandbox-{runId:N}-token";
+        var run = runId ?? Guid.NewGuid();
+        return await StartCoreAsync(workRoot, run, token ?? $"sandbox-{run:N}-token");
+    }
+
+    private static async Task<LoopbackSandbox> StartCoreAsync(string workRoot, Guid runId, string token)
+    {
         string[] args =
         [
             $"--{SandboxEnvironment.RunId}={runId:D}",

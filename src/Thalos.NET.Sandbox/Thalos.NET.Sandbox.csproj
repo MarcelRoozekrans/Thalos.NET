@@ -14,6 +14,9 @@
     <ProjectReference Include="..\Thalos.NET.Mcp\Thalos.NET.Mcp.csproj" />
     <!-- AddRemoteRunTools builds the schema-only tool types from a private container of null objects. -->
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <!-- SandboxReconcileService runs at boot; SandboxControlClient is a typed HttpClient. -->
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.Http" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Thalos.NET.Tests.Sandbox" />

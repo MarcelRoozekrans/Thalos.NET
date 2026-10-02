@@ -53,6 +53,8 @@
     <PackageVersion Include="Microsoft.Extensions.Configuration.Binder" Version="10.0.12" />
     <PackageVersion Include="Microsoft.Extensions.Configuration.Json" Version="10.0.12" />
     <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
+    <!-- the sandbox provider's typed control client -->
+    <PackageVersion Include="Microsoft.Extensions.Http" Version="10.0.12" />
     <!-- dotnet/extensions cadence (same as Microsoft.Extensions.AI), not the runtime 10.0.x line -->
     <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.10.0" />
 
