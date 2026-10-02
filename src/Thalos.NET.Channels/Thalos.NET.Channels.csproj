@@ -13,7 +13,6 @@
     <PackageReference Include="Microsoft.Extensions.Options" />
     <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" />
     <PackageReference Include="ZeroAlloc.Validation" />
-    <PackageReference Include="ZeroAlloc.Validation.Generator" PrivateAssets="all" />
     <PackageReference Include="ZeroAlloc.Telemetry" />
     <PackageReference Include="ZeroAlloc.Inject" />
     <PackageReference Include="ZeroAlloc.Inject.Generator" PrivateAssets="all" />
