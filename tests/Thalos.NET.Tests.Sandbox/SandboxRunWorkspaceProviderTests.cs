@@ -509,6 +509,46 @@ public sealed class SandboxRunWorkspaceProviderTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// Issue #250: a host that registers only <see cref="SandboxThalosBuilderExtensions.UseSandboxRunWorkspaces"/> and a
+    /// runtime can resolve <see cref="IRunWorkspaceGit"/>, to commit and push the publish worktrees the hand-off returns,
+    /// rooted at <c>&lt;DataRoot&gt;/publish</c> over the same options instance as the mirror.
+    /// </summary>
+    /// <remarks>
+    /// Setup guard, no isolation directory before the resolve: Red: resolve <see cref="GitMirrorStore"/> before the
+    /// guard; its GitCli prepares the same directory.
+    /// The type: Red: drop the <see cref="IRunWorkspaceGit"/> registration from UseSandboxRunWorkspaces; GetService
+    /// answers null.
+    /// The isolation directory under <c>&lt;DataRoot&gt;/publish</c>, the observable root: Red: build the
+    /// <see cref="GitCliRunWorkspaceGit"/> over <c>new GitWorkspaceOptions { DataRoot = &lt;DataRoot&gt;/git }</c>; its
+    /// GitCli prepares <c>.git-isolation</c> there instead.
+    /// The shared options instance: Red: build it over a new <see cref="GitWorkspaceOptions"/> with the same DataRoot as
+    /// the shared one; the root is right, the instance is not.
+    /// The singleton: Red: register it with <c>ServiceDescriptor.Transient</c>; the second resolve is another instance.
+    /// </remarks>
+    [Fact]
+    public async Task UseSandboxRunWorkspaces_alone_registers_IRunWorkspaceGit_rooted_at_the_publish_data_root()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddSingleton<ISandboxRuntime>(Runtime);
+        services.AddThalos(t => t.UseSandboxRunWorkspaces(o =>
+        {
+            o.DataRoot = DataRoot;
+            o.Image = "thalos/sandbox:test";
+        }));
+        await using var sp = services.BuildServiceProvider();
+        var isolation = Path.Combine(DataRoot, "publish", ".git-isolation");
+        Directory.Exists(isolation).Should().BeFalse("nothing has built a git consumer over the publish root yet");
+
+        var git = sp.GetService<IRunWorkspaceGit>();
+
+        git.Should().BeOfType<GitCliRunWorkspaceGit>();
+        Directory.Exists(isolation).Should().BeTrue("its GitCli prepares the isolation directory under its own data root");
+        ((GitCliRunWorkspaceGit)git!).Options.Should().BeSameAs(sp.GetRequiredService<GitMirrorStore>().Options);
+        sp.GetRequiredService<IRunWorkspaceGit>().Should().BeSameAs(git);
+    }
+
+    /// <summary>
     /// I1: a run-scoped MCP server that is not remote would be started on the host, in a sandbox:// root. Red: drop
     /// ThrowIfLocalRunScopedServers; the provider is built and the host would spawn the server.
     /// </summary>

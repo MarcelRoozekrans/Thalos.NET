@@ -758,6 +758,9 @@ await git.CommitAsync(ws, new GitCommitRequest { Message = "Standing instruction
 await git.PushAsync(ws, ct);
 ```
 
+`UseSandboxRunWorkspaces` registers that `IRunWorkspaceGit` too (since 0.14.1): a `GitCliRunWorkspaceGit` over the same
+`<DataRoot>/publish` options as the mirror and the publish worktrees, with the registered `IGitCredentialSource`.
+
 **A park is final (ruling R39).** Once a run is parked, nothing unparks it or creates its sandbox again before
 publish: its `workspace__*`, `sandbox__*` and remote `runScoped` tools all answer that the run has no sandbox. So in
 sandbox mode, a process may not run an agent node after the run is parked: none after an await gate, and no reject

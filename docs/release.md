@@ -158,6 +158,12 @@ returns with `GitCommitRequest.CommitStagedIndex = true`, and leave `Paths` null
   stands: no reset, no add, `ExcludePaths` still unstaged, and `Paths` refused with a validation error. With nothing
   staged it makes no commit, the same as before. With the option off, the default, `CommitAsync` behaves exactly as
   in 0.14.0, which local-worktree hosts rely on.
+- **`UseSandboxRunWorkspaces` registers `IRunWorkspaceGit`** (issue #250). In 0.14.0 only `UseGitWorktreeWorkspaces`
+  did, so a host that registered only the sandbox provider had nothing to commit and push the publish worktree with.
+  It now replaces `IRunWorkspaceGit` with a `GitCliRunWorkspaceGit` over the same `<DataRoot>/publish` options as the
+  mirror, the patch applier and the publish worktrees, using the registered `IGitCredentialSource`. A host that
+  registered its own `IRunWorkspaceGit` before calling `UseSandboxRunWorkspaces` must register it after the call
+  instead, since the call replaces it.
 
 **Breaking changes accumulated across the workflow-engine phase (2.2, Part A):**
 

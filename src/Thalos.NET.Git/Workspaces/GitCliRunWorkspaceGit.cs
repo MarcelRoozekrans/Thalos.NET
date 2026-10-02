@@ -105,6 +105,9 @@ public sealed partial class GitCliRunWorkspaceGit(
 {
     private readonly GitCli _git = new(options);
 
+    /// <summary>The options this instance was built with, so a host can check that its git consumers share one.</summary>
+    internal GitWorkspaceOptions Options => options;
+
     /// <inheritdoc />
     public async ValueTask<Result<GitCommitResult, AgentError>> CommitAsync(RunWorkspace workspace, GitCommitRequest request, CancellationToken ct)
     {
