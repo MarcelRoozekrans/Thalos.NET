@@ -58,10 +58,14 @@ public sealed partial class RunWorkspaceSweeper(
 
     /// <summary>
     /// The most time one sweep spends parking. Parks run one after another and each may take a sandbox export and a
-    /// lock wait, so once this is spent the park in progress is cancelled and the rest wait for the next sweep. Five
-    /// minutes.
+    /// lock wait, so once this is spent the park in progress is cancelled and the rest wait for the next sweep. Each park
+    /// is told what is left, so a provider does not begin one it cannot finish in time, and each sweep starts one
+    /// workspace further on in the list, so the same runs are not left over every time. Five minutes.
     /// </summary>
     public TimeSpan ParkBudget { get; init; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>How many sweeps have started, less one: where the next sweep starts in the list.</summary>
+    private int _sweeps = -1;
 
     private readonly IRunWorkspaceProvider _workspaces = workspaces ?? throw new ArgumentNullException(nameof(workspaces));
     private readonly IWorkflowStore _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -84,11 +88,14 @@ public sealed partial class RunWorkspaceSweeper(
     {
         var listed = await _workspaces.ListAsync(ct).ConfigureAwait(false);
 
+        // Each sweep starts one workspace further on, so a park budget spent early in the list never starves the same tail.
+        var start = listed.Count == 0 ? 0 : (int)((uint)Interlocked.Increment(ref _sweeps) % (uint)listed.Count);
         var removed = 0;
         var parkingStarted = _clock.GetTimestamp();
         var unparked = 0;
-        foreach (var workspace in listed)
+        for (var i = 0; i < listed.Count; i++)
         {
+            var workspace = listed[(start + i) % listed.Count];
             var parkBudget = ParkBudget - _clock.GetElapsedTime(parkingStarted);
             if (await ParkIfNotRunningAsync(workspace.RunId, parkBudget, ct).ConfigureAwait(false) == ParkOutcome.Skipped)
             {
@@ -153,7 +160,7 @@ public sealed partial class RunWorkspaceSweeper(
 
             using var remaining = new CancellationTokenSource(budget, _clock);
             using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct, remaining.Token);
-            var parked = await parkable.ParkAsync(runId, bounded.Token).ConfigureAwait(false);
+            var parked = await parkable.ParkAsync(runId, budget, bounded.Token).ConfigureAwait(false);
             if (parked.IsFailure)
             {
                 LogParkFailed(_logger, runId, parked.Error.ToString(), exception: null);

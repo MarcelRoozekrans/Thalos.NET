@@ -39,6 +39,9 @@ internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISan
     /// <summary>Every sandbox id started again, in order.</summary>
     public ConcurrentQueue<string> Started { get; } = new();
 
+    /// <summary>Called once a start's new host is running; a test cancels there to interrupt the park that started it.</summary>
+    public Action? AfterStart { get; set; }
+
     /// <summary>When set, a start fails with this error and starts nothing.</summary>
     public AgentError? StartFailure { get; set; }
 
@@ -148,6 +151,7 @@ internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISan
             Host = host,
             Handle = entry.Handle with { State = SandboxState.Running, BaseAddress = host.BaseAddress, ExitCode = null, OomKilled = false },
         };
+        AfterStart?.Invoke();
         return UnitResult<AgentError>.Success();
     }
 

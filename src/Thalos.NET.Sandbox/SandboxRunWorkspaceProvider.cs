@@ -30,7 +30,7 @@ namespace Thalos.Sandbox;
 /// re-created sandbox never accepts its predecessor's token.
 /// </para>
 /// <para>
-/// <b>One call per run at a time.</b> <see cref="CreateAsync"/>, <see cref="RemoveAsync"/>, <see cref="ParkAsync"/>
+/// <b>One call per run at a time.</b> <see cref="CreateAsync"/>, <see cref="RemoveAsync"/>, <see cref="ParkAsync(Guid, CancellationToken)"/>
 /// and <see cref="CheckoutForPublishAsync"/> hold the run's lock, <c>sandboxes/locks/&lt;run-id&gt;.lock</c>, for their
 /// whole length. A create or remove refuses at once when another call holds it; a park or checkout waits for it, for a
 /// bounded time.

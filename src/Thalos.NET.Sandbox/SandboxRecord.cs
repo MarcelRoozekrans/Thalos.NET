@@ -35,7 +35,10 @@ public enum SandboxRecordState
 /// <param name="CreatedAt">When the record was claimed, and again when it turned ready.</param>
 /// <param name="PatchPath">Where the run's exported patch is stored, once parked.</param>
 /// <param name="PatchMissing">The sandbox was gone before its patch was exported, so there is none to publish.</param>
-/// <param name="ExportAttempts">How many parks restarted the exited sandbox to export it and failed, or were cut short.</param>
+/// <param name="ExportAttempts">
+/// How many restart attempts parks have made to export the exited sandbox: counted before each is made, given back when
+/// its caller cancels it. A park that dies midway leaves its attempt counted.
+/// </param>
 /// <param name="PatchMissingReason">Why there is no patch, when <paramref name="PatchMissing"/> is set.</param>
 /// <param name="PatchApplied">
 /// The stored patch was applied to the run's publish worktree, which a later checkout then returns as it is. A publish

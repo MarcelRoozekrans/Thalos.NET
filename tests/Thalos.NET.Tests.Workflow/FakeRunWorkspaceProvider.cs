@@ -72,6 +72,15 @@ internal sealed class FakeParkableRunWorkspaceProvider : FakeRunWorkspaceProvide
     /// <summary>Awaited at the start of every <see cref="ParkAsync"/>, with its run id and token: a test hangs a park with it.</summary>
     public Func<Guid, CancellationToken, Task>? BeforePark { get; set; }
 
+    /// <summary>The budget each budgeted <see cref="ParkAsync(Guid, TimeSpan, CancellationToken)"/> was given, in order.</summary>
+    public List<TimeSpan> Budgets { get; } = [];
+
+    public ValueTask<UnitResult<AgentError>> ParkAsync(Guid runId, TimeSpan budget, CancellationToken ct)
+    {
+        Budgets.Add(budget);
+        return ParkAsync(runId, ct);
+    }
+
     public async ValueTask<UnitResult<AgentError>> ParkAsync(Guid runId, CancellationToken ct)
     {
         ParkAttempts.Add(runId);

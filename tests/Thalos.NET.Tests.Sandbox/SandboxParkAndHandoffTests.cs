@@ -399,6 +399,109 @@ public sealed class SandboxParkAndHandoffTests : IAsyncLifetime
         checkout.Error.Message.Should().Be("the run's sandbox was lost before its changes were exported: could not be restarted to export");
     }
 
+    /// <summary>
+    /// N1. Red: in StorePatchAsync, drop the stored-patch check on the attempt cap; the third park parks the run without a
+    /// patch although the second exported it.
+    /// </summary>
+    [Fact]
+    public async Task A_patch_the_last_restart_attempt_stored_is_kept_once_the_attempts_are_spent()
+    {
+        var (provider, runId) = await ReadyRunAsync(o => o.RestartTimeout = TimeSpan.FromSeconds(10));
+        var id = runId.ToString("N");
+        await File.WriteAllTextAsync(Path.Combine(RepoOf(runId), "Marker.cs"), Edited);
+        await Runtime.ExitAsync(id, 1, oomKilled: false);
+        Runtime.StartFailure = AgentError.ProviderError("the engine refused to start it");
+        var first = await provider.ParkAsync(runId, CancellationToken.None);
+        Runtime.StartFailure = null;
+        Runtime.DeleteFailure = AgentError.ProviderError("the engine is busy");
+        var second = await provider.ParkAsync(runId, CancellationToken.None);
+        var afterSecond = await RecordOf(provider, runId);
+        Runtime.DeleteFailure = null;
+
+        var third = await provider.ParkAsync(runId, CancellationToken.None);
+        var parked = await RecordOf(provider, runId);
+        var checkout = await provider.CheckoutForPublishAsync(runId, CancellationToken.None);
+
+        using var _ = new AssertionScope();
+        first.IsFailure.Should().BeTrue();
+        second.IsFailure.Should().BeTrue("the export succeeded but the delete failed");
+        afterSecond.ExportAttempts.Should().Be(2);
+        File.Exists(provider.Store.PatchPath(runId)).Should().BeTrue();
+        third.IsSuccess.Should().BeTrue(third.IsFailure ? third.Error.ToString() : "");
+        parked.PatchMissing.Should().BeFalse();
+        parked.PatchPath.Should().Be(provider.Store.PatchPath(runId));
+        checkout.IsSuccess.Should().BeTrue(checkout.IsFailure ? checkout.Error.ToString() : "");
+        File.ReadAllText(Path.Combine(checkout.Value.Root, "Marker.cs")).Should().Be(Edited);
+    }
+
+    /// <summary>
+    /// R37a. Red: in RestartAndExportAsync, drop the refund on the caller's cancellation; the cancelled attempt stays
+    /// counted.
+    /// </summary>
+    [Fact]
+    public async Task A_restart_attempt_the_caller_cancels_is_given_back()
+    {
+        var (provider, runId) = await ReadyRunAsync();
+        await Runtime.ExitAsync(runId.ToString("N"), 1, oomKilled: false);
+        using var cts = new CancellationTokenSource();
+        Runtime.AfterStart = cts.Cancel;
+
+        var park = async () => await provider.ParkAsync(runId, cts.Token);
+        await park.Should().ThrowAsync<OperationCanceledException>();
+        var record = await RecordOf(provider, runId);
+
+        using var _ = new AssertionScope();
+        Runtime.Started.Should().ContainSingle("the attempt was made");
+        record.State.Should().Be(SandboxRecordState.Exporting);
+        record.ExportAttempts.Should().Be(0, "a park its caller cancelled is not the sandbox's failure");
+    }
+
+    /// <summary>
+    /// R37b. Red: in StorePatchAsync, skip the deadline check; the short-budget park starts the sandbox and succeeds.
+    /// </summary>
+    [Fact]
+    public async Task A_budget_too_small_for_a_restart_begins_none_and_counts_none()
+    {
+        var (provider, runId) = await ReadyRunAsync(o => o.RestartTimeout = TimeSpan.FromSeconds(30));
+        await Runtime.ExitAsync(runId.ToString("N"), 1, oomKilled: false);
+
+        var short_ = await provider.ParkAsync(runId, TimeSpan.FromSeconds(5), CancellationToken.None);
+        var afterShort = await RecordOf(provider, runId);
+        var started = Runtime.Started.Count;
+        var ample = await provider.ParkAsync(runId, TimeSpan.FromHours(1), CancellationToken.None);
+
+        using var _ = new AssertionScope();
+        short_.IsFailure.Should().BeTrue();
+        short_.Error.Message.Should().Contain("must start its sandbox again");
+        started.Should().Be(0);
+        afterShort.ExportAttempts.Should().Be(0);
+        ample.IsSuccess.Should().BeTrue(ample.IsFailure ? ample.Error.ToString() : "");
+    }
+
+    /// <summary>Red: mark ExportAttempts [property: JsonRequired]; a record written before it existed is unreadable.</summary>
+    [Fact]
+    public async Task A_record_written_before_the_restart_fields_reads_with_their_defaults()
+    {
+        var (provider, runId) = await ReadyRunAsync();
+        var path = Path.Combine(DataRoot, "sandboxes", $"{runId:D}.json");
+        var json = await File.ReadAllTextAsync(path);
+        json.Should().Contain("\"exportAttempts\"").And.Contain("\"patchMissingReason\"");
+        var node = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+        node.Remove("exportAttempts");
+        node.Remove("patchMissingReason");
+        var old = node.ToJsonString();
+        await File.WriteAllTextAsync(path, old);
+
+        var read = await provider.Store.ReadAsync(runId, CancellationToken.None);
+
+        using var _ = new AssertionScope();
+        old.Should().NotContain("exportAttempts").And.NotContain("patchMissingReason");
+        read.Error.Should().BeNull();
+        read.Record!.State.Should().Be(SandboxRecordState.Ready);
+        read.Record.ExportAttempts.Should().Be(0);
+        read.Record.PatchMissingReason.Should().BeNull();
+    }
+
     // ---------- checkout hardening ----------
 
     /// <summary>Red: in ReadPublishableAsync, skip the PatchPath comparison; the checkout applies the derived patch and succeeds.</summary>

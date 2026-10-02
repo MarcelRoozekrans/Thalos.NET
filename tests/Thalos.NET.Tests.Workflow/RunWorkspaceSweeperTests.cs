@@ -282,6 +282,40 @@ public sealed class RunWorkspaceSweeperTests
         _log.Entries[^1].Message.Should().Contain("1 workspaces were not parked");
     }
 
+    /// <summary>
+    /// R37c. Red: start every sweep at the first workspace; each sweep parks the first run again and the tail is never
+    /// reached. Red 2: call ParkAsync without the budget; the provider is told nothing of it.
+    /// </summary>
+    [Fact]
+    public async Task Each_sweep_starts_one_workspace_further_so_a_spent_budget_never_starves_the_tail()
+    {
+        var third = Guid.NewGuid();
+        var provider = new FakeParkableRunWorkspaceProvider
+        {
+            // Each park uses up the whole budget, so a sweep parks exactly one run.
+            BeforePark = (_, _) =>
+            {
+                _clock.Advance(TimeSpan.FromMinutes(2));
+                return Task.CompletedTask;
+            },
+        };
+        foreach (var id in new[] { RunId, OtherRunId, third })
+        {
+            provider.Add(Workspace(id, Now - TimeSpan.FromHours(1)));
+            _store.Seed(Run(id, WorkflowStatus.Awaiting, resumed: false));
+        }
+
+        var sweeper = new RunWorkspaceSweeper(provider, _store, _clock, _log) { ParkBudget = TimeSpan.FromMinutes(1) };
+
+        for (var tick = 0; tick < 3; tick++)
+        {
+            await sweeper.SweepAsync(CancellationToken.None);
+        }
+
+        provider.ParkAttempts.Should().Equal(RunId, OtherRunId, third);
+        provider.Budgets.Should().AllBeEquivalentTo(TimeSpan.FromMinutes(1)).And.HaveCount(3);
+    }
+
     [Fact]
     public void Every_dependency_is_required()
     {

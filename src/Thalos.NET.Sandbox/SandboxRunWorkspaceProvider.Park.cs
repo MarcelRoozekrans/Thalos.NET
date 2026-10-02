@@ -9,11 +9,12 @@ public sealed partial class SandboxRunWorkspaceProvider
     // ---------- park, hand-off ----------
 
     /// <summary>
-    /// How long a park or checkout waits for another call that holds the run's lock: another park, whose export is
-    /// bounded by <see cref="SandboxOptions.ExportTimeout"/>, or a checkout, plus five minutes for their git work. Tests
+    /// How long a park or checkout waits for another call that holds the run's lock: another park, which may start the
+    /// sandbox again, bounded by <see cref="SandboxOptions.RestartTimeout"/>, and export it, bounded by
+    /// <see cref="SandboxOptions.ExportTimeout"/>, or a checkout; plus five minutes for their engine and git work. Tests
     /// shorten it.
     /// </summary>
-    internal TimeSpan RunLockWait { get; set; } = options.ExportTimeout + TimeSpan.FromMinutes(5);
+    internal TimeSpan RunLockWait { get; set; } = options.ExportTimeout + options.RestartTimeout + TimeSpan.FromMinutes(5);
 
     /// <summary>How many parks may start an exited sandbox again to export it before the run is parked without a patch.</summary>
     internal const int MaxRestartAttempts = 2;
@@ -46,12 +47,25 @@ public sealed partial class SandboxRunWorkspaceProvider
     /// <para>
     /// <b>An exited sandbox</b> is started again with <see cref="ISandboxRuntime.StartAsync"/>, waited for, up to
     /// <see cref="SandboxOptions.RestartTimeout"/>, until its host answers, then exported against the record's base
-    /// commit and deleted. Each such attempt is counted in <see cref="SandboxRecord.ExportAttempts"/> before it is made;
-    /// once <see cref="MaxRestartAttempts"/> have failed, the next park parks the run without a patch, with the reason
-    /// <see cref="RestartReason"/>, so no record stays exporting forever. The sandbox's volume is never read from the host.
+    /// commit and deleted. Each such attempt is counted in <see cref="SandboxRecord.ExportAttempts"/> before it is made,
+    /// and given back when the caller cancels it; once <see cref="MaxRestartAttempts"/> have been made, the next park
+    /// parks the run without a patch, with the reason <see cref="RestartReason"/>, unless an earlier attempt already
+    /// stored its patch, so no record stays exporting forever. The sandbox's volume is never read from the host.
     /// </para>
     /// </remarks>
-    public async ValueTask<UnitResult<AgentError>> ParkAsync(Guid runId, CancellationToken ct)
+    public ValueTask<UnitResult<AgentError>> ParkAsync(Guid runId, CancellationToken ct) => ParkCoreAsync(runId, deadline: null, ct);
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// As <see cref="ParkAsync(Guid, CancellationToken)"/>, except that a park that would start an exited sandbox again
+    /// is not begun unless <paramref name="budget"/>, less the wait for the run's lock, still covers
+    /// <see cref="SandboxOptions.RestartTimeout"/> plus <see cref="SandboxOptions.ExportTimeout"/>. It fails instead, with
+    /// no restart attempt counted, and a later park tries again.
+    /// </remarks>
+    public ValueTask<UnitResult<AgentError>> ParkAsync(Guid runId, TimeSpan budget, CancellationToken ct) =>
+        ParkCoreAsync(runId, budget < TimeSpan.FromDays(365) ? clock.GetUtcNow() + budget : null, ct);
+
+    private async ValueTask<UnitResult<AgentError>> ParkCoreAsync(Guid runId, DateTimeOffset? deadline, CancellationToken ct)
     {
         // Settled without the lock when there is nothing to do, so a sweep never waits on another call for these.
         var read = await _store.ReadAsync(runId, ct).ConfigureAwait(false);
@@ -78,7 +92,7 @@ public sealed partial class SandboxRunWorkspaceProvider
 
         try
         {
-            return await ParkLockedAsync(runId, ct).ConfigureAwait(false);
+            return await ParkLockedAsync(runId, deadline, ct).ConfigureAwait(false);
         }
         finally
         {
@@ -127,7 +141,7 @@ public sealed partial class SandboxRunWorkspaceProvider
         }
     }
 
-    private async Task<UnitResult<AgentError>> ParkLockedAsync(Guid runId, CancellationToken ct)
+    private async Task<UnitResult<AgentError>> ParkLockedAsync(Guid runId, DateTimeOffset? deadline, CancellationToken ct)
     {
         var read = await _store.ReadAsync(runId, ct).ConfigureAwait(false);
         if (read.Error is { } error)
@@ -161,7 +175,7 @@ public sealed partial class SandboxRunWorkspaceProvider
             }
         }
 
-        var stored = await StorePatchAsync(exporting, record.State == SandboxRecordState.Exporting, handle.Value, ct).ConfigureAwait(false);
+        var stored = await StorePatchAsync(exporting, record.State == SandboxRecordState.Exporting, handle.Value, deadline, ct).ConfigureAwait(false);
         if (stored.IsFailure)
         {
             return UnitResult<AgentError>.Failure(stored.Error);
@@ -212,15 +226,18 @@ public sealed partial class SandboxRunWorkspaceProvider
     /// <param name="record">The record, exporting.</param>
     /// <param name="wasExporting">The record was exporting before this park: an earlier park may have stored a patch.</param>
     /// <param name="handle">The sandbox.</param>
+    /// <param name="deadline">When the caller stops waiting, or null; a restart that may not finish by then is not begun.</param>
     /// <param name="ct">Cancellation token.</param>
     private async Task<Result<(SandboxRecord Record, string? MissingReason), AgentError>> StorePatchAsync(
-        SandboxRecord record, bool wasExporting, SandboxHandle handle, CancellationToken ct)
+        SandboxRecord record, bool wasExporting, SandboxHandle handle, DateTimeOffset? deadline, CancellationToken ct)
     {
+        // A stored patch under an exporting record is a finished export whose park stopped before the record was
+        // written; a ready record has none, since a remove deletes a run's patch before its record. It is kept whenever
+        // the sandbox can no longer be exported.
+        var stored = wasExporting && File.Exists(_store.PatchPath(record.RunId));
         if (handle.State == SandboxState.Missing)
         {
-            // A stored patch under an exporting record is a finished export whose park stopped before the record was
-            // written; a ready record has none, since a remove deletes a run's patch before its record.
-            if (wasExporting && File.Exists(_store.PatchPath(record.RunId)))
+            if (stored)
             {
                 return Result<(SandboxRecord, string?), AgentError>.Success((record, null));
             }
@@ -229,36 +246,74 @@ public sealed partial class SandboxRunWorkspaceProvider
             return Result<(SandboxRecord, string?), AgentError>.Success((record, LostReason));
         }
 
-        // An exited sandbox, or one an earlier park already started again, is a restart; each counts, before it is
-        // tried, so a park that dies midway counts too and no record stays exporting forever.
+        // An exited sandbox, or one an earlier park already started again, is a restart.
         if (handle.State == SandboxState.Exited || record.ExportAttempts > 0)
         {
             if (record.ExportAttempts >= MaxRestartAttempts)
             {
+                if (stored)
+                {
+                    return Result<(SandboxRecord, string?), AgentError>.Success((record, null));
+                }
+
                 LogRestartsExhausted(logger, record.RunId, record.SandboxId, record.ExportAttempts);
                 return Result<(SandboxRecord, string?), AgentError>.Success((record, RestartReason));
             }
 
-            record = record with { ExportAttempts = record.ExportAttempts + 1 };
-            var counted = await _store.WriteAsync(record, ct).ConfigureAwait(false);
-            if (counted.IsFailure)
+            var needed = options.RestartTimeout + options.ExportTimeout;
+            if (deadline is { } by && by - clock.GetUtcNow() < needed)
             {
-                return Result<(SandboxRecord, string?), AgentError>.Failure(counted.Error);
+                return Result<(SandboxRecord, string?), AgentError>.Failure(AgentError.ProviderError(
+                    $"The park of run '{record.RunId}' must start its sandbox again, which may take {needed}, more than the caller has left; a later park tries again."));
             }
 
-            var restarted = await RestartAsync(record, handle, ct).ConfigureAwait(false);
-            if (restarted.IsFailure)
-            {
-                return Result<(SandboxRecord, string?), AgentError>.Failure(restarted.Error);
-            }
-
-            handle = restarted.Value;
+            return await RestartAndExportAsync(record, handle, ct).ConfigureAwait(false);
         }
 
         var exported = await ExportAsync(handle, record, ct).ConfigureAwait(false);
         return exported.IsFailure
             ? Result<(SandboxRecord, string?), AgentError>.Failure(exported.Error)
             : Result<(SandboxRecord, string?), AgentError>.Success((record, null));
+    }
+
+    /// <summary>
+    /// One restart attempt: counted in <see cref="SandboxRecord.ExportAttempts"/> before it is made, so a park that dies
+    /// midway counts too and no record stays exporting forever; then the sandbox is started again and exported. An
+    /// attempt the caller cancels, such as a sweep whose park budget ran out, is not the sandbox's failure: its count is
+    /// given back.
+    /// </summary>
+    private async Task<Result<(SandboxRecord, string?), AgentError>> RestartAndExportAsync(SandboxRecord record, SandboxHandle handle, CancellationToken ct)
+    {
+        var counted = record with { ExportAttempts = record.ExportAttempts + 1 };
+        var written = await _store.WriteAsync(counted, ct).ConfigureAwait(false);
+        if (written.IsFailure)
+        {
+            return Result<(SandboxRecord, string?), AgentError>.Failure(written.Error);
+        }
+
+        try
+        {
+            var restarted = await RestartAsync(counted, handle, ct).ConfigureAwait(false);
+            if (restarted.IsFailure)
+            {
+                return Result<(SandboxRecord, string?), AgentError>.Failure(restarted.Error);
+            }
+
+            var exported = await ExportAsync(restarted.Value, counted, ct).ConfigureAwait(false);
+            return exported.IsFailure
+                ? Result<(SandboxRecord, string?), AgentError>.Failure(exported.Error)
+                : Result<(SandboxRecord, string?), AgentError>.Success((counted, null));
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            var refunded = await _store.WriteAsync(record, CancellationToken.None).ConfigureAwait(false);
+            if (refunded.IsFailure)
+            {
+                LogCleanupFailed(logger, $"give back the cancelled restart attempt of run '{record.RunId}'", refunded.Error.Message);
+            }
+
+            throw;
+        }
     }
 
     /// <summary>
@@ -345,7 +400,7 @@ public sealed partial class SandboxRunWorkspaceProvider
 
     private async Task<Result<RunWorkspace, AgentError>> CheckoutLockedAsync(Guid runId, CancellationToken ct)
     {
-        var parked = await ParkLockedAsync(runId, ct).ConfigureAwait(false);
+        var parked = await ParkLockedAsync(runId, deadline: null, ct).ConfigureAwait(false);
         if (parked.IsFailure)
         {
             return Result<RunWorkspace, AgentError>.Failure(parked.Error);
