@@ -32,8 +32,10 @@ public sealed class ScratchCopyTests : IDisposable
     }
 
     /// <summary>
-    /// A FIFO planted in the worktree is left out, and the copy does not block on it. Red: in ScratchCopy.IsRegularFile,
-    /// drop the statx check; opening the FIFO then blocks past the test's 30-second bound.
+    /// A FIFO planted in the worktree is left out, and the copy does not block on it. The copy starts on the thread pool,
+    /// so a blocking open cannot stall the test thread before the 30-second bound starts. Red: in ScratchCopy.IsRegularFile,
+    /// drop the statx check; the copy then fails on the FIFO instead of skipping it, so the success assertion fails. With
+    /// a plain blocking open as well, the open blocks and the test fails at the 30-second bound instead of hanging.
     /// </summary>
     [SkippableFact]
     public async Task A_fifo_in_the_worktree_is_skipped_without_blocking()
@@ -46,7 +48,7 @@ public sealed class ScratchCopyTests : IDisposable
             mkfifo.ExitCode.Should().Be(0);
         }
 
-        var create = ScratchCopy.CreateAsync(Source, Scratch, long.MaxValue, CancellationToken.None);
+        var create = Task.Run(() => ScratchCopy.CreateAsync(Source, Scratch, long.MaxValue, CancellationToken.None));
         var finished = await Task.WhenAny(create, Task.Delay(TimeSpan.FromSeconds(30)));
 
         finished.Should().BeSameAs(create, "the copy must not block on the FIFO");
@@ -57,7 +59,9 @@ public sealed class ScratchCopyTests : IDisposable
 
     /// <summary>
     /// A file swapped for a FIFO after the listing, just before it is opened, fails the copy at once instead of blocking
-    /// in open(2). Red: open with a plain FileStream on Linux too; the open then blocks past the test's 30-second bound.
+    /// in open(2). The copy starts on the thread pool, so the hook and a blocking open cannot stall the test thread before
+    /// the 30-second bound starts. Red: open with a plain FileStream on Linux too; the open then blocks and the test fails
+    /// at the 30-second bound instead of hanging.
     /// </summary>
     [SkippableFact]
     public async Task A_file_swapped_for_a_fifo_before_its_open_fails_the_copy_without_blocking()
@@ -77,7 +81,7 @@ public sealed class ScratchCopyTests : IDisposable
             mkfifo.ExitCode.Should().Be(0);
         }
 
-        var create = ScratchCopy.CreateAsync(Source, Scratch, long.MaxValue, CancellationToken.None, SwapForFifo);
+        var create = Task.Run(() => ScratchCopy.CreateAsync(Source, Scratch, long.MaxValue, CancellationToken.None, SwapForFifo));
         var finished = await Task.WhenAny(create, Task.Delay(TimeSpan.FromSeconds(30)));
 
         finished.Should().BeSameAs(create, "opening the swapped-in FIFO must not block");
