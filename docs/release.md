@@ -124,6 +124,26 @@ the `net10.0`-only branch of the TFM selection, and both package-count checks an
 The sandbox container image is not a package: a host builds it from `Thalos.NET.Sandbox.Host` (see
 `samples/Thalos.Sample.SandboxHost`). Behaviour and invariants: [workflow.md, Run sandboxes](workflow.md#run-sandboxes).
 
+**Behaviour changes in 0.14.0**, for hosts that do not use sandboxes too:
+
+- `WorkspacePath` refuses a workspace root that is not a fully qualified host path, such as a sandboxed run's
+  `sandbox://<id>`, with its generic refusal. Before, `Path.GetFullPath` quietly resolved such a root under the
+  current directory.
+- `ProtectedPathSet` entries that end in `/` protect that directory and everything under it, and paths are
+  canonicalised before comparing: `\` is read as `/`, empty and `.` segments are dropped, and trailing dots and
+  spaces are trimmed from each segment. An entry with a `..` segment, or a segment of only dots and spaces, throws
+  `ArgumentException`; `UseRunWorkspaceTools` and `UseSandboxRunWorkspaces` now throw it at registration rather than
+  on the first tool call. A path being checked with such a segment is reported protected.
+- `AddLocalTools` throws `ArgumentException` when a remote run tool source or a remote `runScoped` MCP entry already
+  has its name, and the remote registrations throw the same way when a local source has it: the tool catalog keeps
+  the first source of a name, so a run could otherwise be served by the wrong one.
+- `UseGitWorktreeWorkspaces` registers `IRunBaseFileReader` and `IRunWorkspaceHandoff` by casting the registered
+  `IRunWorkspaceProvider`. A host that replaces the provider after calling it must give a provider that implements
+  both, or replace those two registrations as well; otherwise resolving either throws `InvalidCastException`.
+- `RunWorkspaceSweeper` now parks the workspace of every run that is not `Running` when the provider is an
+  `IParkableRunWorkspaceProvider`, within its `ParkBudget`, before deciding what to remove. Its rotation lives in the
+  instance, so register the sweeper as a singleton and call the same one on every tick.
+
 **Breaking changes accumulated across the workflow-engine phase (2.2, Part A):**
 
 - `ThalosAgentRuntime`'s public constructor gained a required `IOutcomeToolFactory outcomeTools` parameter

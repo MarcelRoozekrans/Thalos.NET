@@ -699,14 +699,14 @@ thalos
         o.Image = "registry.example/thalos-sandbox@sha256:...";
         o.DataRoot = "/var/lib/app/sandboxes";             // absolute
         o.AllowedWriteExtensions = new HashSet<string> { ".cs", ".csproj", ".md" };   // null = any extension
-        o.ProtectedPaths.Add(".git/");                      // required: an empty list is refused at registration
+        o.ProtectedPaths.Add("AGENT.md");                   // extra entries, on top of the shipped defaults
     });
 ```
 
 **Invariants.** Each has a test that guards it.
 
-- **S1.** The container's environment holds only the keys `SandboxSpec.Environment` lists (run id, bearer token,
-  write extensions, protected paths, proxy variables). It never inherits the API's environment.
+- **S1.** The container's environment is the keys `SandboxSpec.Environment` lists (run id, bearer token, write
+  extensions, protected paths, proxy variables) plus the image's own `ENV`; nothing from the API's environment.
 - **S2.** The container reaches no host except through the egress proxy.
 - **S3.** MSBuild, restore and the tests run only inside the container, never on the host.
 - **S4.** The API never evaluates MSBuild, runs restore, or checks out a tree a sandboxed process touched. It
@@ -728,13 +728,28 @@ applies the stored patch with `GitPatchApplier`, which treats it as adversarial:
 no symlinks or submodules. The host then commits and publishes from that worktree. Both calls are idempotent, and a
 failed park keeps the sandbox and is retried by the next sweep.
 
+**A park is final (ruling R39).** Once a run is parked, nothing unparks it or creates its sandbox again before
+publish: its `workspace__*`, `sandbox__*` and remote `runScoped` tools all answer that the run has no sandbox. So in
+sandbox mode, a process may not run an agent node after the run is parked: none after an await gate, and no reject
+edge that loops back to an agent node. Such processes are not supported in sandbox mode yet; unparking or re-creating
+a parked run's sandbox is future work.
+
+**Bounds on a run's tool calls.** `RemoteRunToolOptions` bounds every call the host makes to a run's sandbox.
+`CallTimeout` (default 30 minutes) bounds one call; keep it above the sandbox's own bounds on a `sandbox__test` call,
+which can wait for a restore (10 minutes) and then copy the workspace and run the tests within
+`SandboxToolOptions.TestTimeout` (15 minutes by default), so the sandbox, not the host, reports what timed out.
+`MaxResultBytes` (default 4 MiB) caps each response read from the sandbox: a longer answer, which agent-controlled
+code such as an analyzer can make arbitrarily large, ends the call with an `error:` result and drops the run's client.
+
 **`passEnvironment` and `runScoped.remote`.** A sandboxed host has no local run-scoped servers. Registration fails
 at boot with an `InvalidOperationException` naming every `runScoped` entry that is not `"remote": true`, because
 the host would start it on the host against a `sandbox://` root. A remote entry keeps its schema and serves callers
 with no run on the host, but a run's calls go to the server in that run's container, found through
 `IRunToolEndpointResolver`. It must not set `args`, `env`, `cwd`, `readyTool`, `reload` or `readyWaitTimeout`;
-`callTimeout` still bounds each call. `passEnvironment` is unaffected and applies only to servers the host itself
-starts; it never reaches a container (S1).
+`callTimeout` still bounds each call. The entry must be named `roslyn`: a run's calls go to the sandbox's
+`mcp/{name}` route, and the sandbox host serves only `workspace`, `sandbox` and `roslyn`, so a remote entry by any
+other name is refused at boot with an `InvalidOperationException`. `passEnvironment` is unaffected and applies only
+to servers the host itself starts; it never reaches a container (S1).
 
 ```jsonc
 "roslyn": {
@@ -746,11 +761,14 @@ starts; it never reaches a container (S1).
 **`ProtectedPathSet`.** Repository-relative paths a run may read but never write; the same type backs the
 `workspace__*` tools, the sandbox host and the publish check. An entry ending in `/` protects that directory and
 everything under it (`.github/` covers `.github/workflows/ci.yml`); any other entry protects exactly that file.
-Matching is case-insensitive, `\` is read as `/`, and empty and `.` segments are dropped before comparing. A `..`
-segment in an entry throws `ArgumentException`; in a path being checked, `IsProtected` returns true, failing closed.
-The shipped defaults are `.git/`, the standing-instructions file (`AGENT.md`), `.gitattributes`, `.gitmodules`,
-`.github/`, `.gitlab-ci.yml`, `azure-pipelines.yml`, `.azure-pipelines/`, `.circleci/` and `Jenkinsfile`. Entries
-may not contain `;`, which joins them on the wire.
+Matching is case-insensitive, `\` is read as `/`, empty and `.` segments are dropped, and every other segment is
+compared without the trailing dots and spaces Windows drops from a name (`.github./x.yml` is under `.github/`). A
+`..` segment, or one of only dots and spaces, throws `ArgumentException` in an entry, at registration; in a path
+being checked, `IsProtected` returns true, failing closed. `SandboxOptions.DefaultProtectedPaths` ships the
+reviewed defaults (ruling R38), which every sandboxed run gets: `.git/`, `.gitattributes`, `.gitmodules`, `.github/`,
+`.gitlab-ci.yml`, `azure-pipelines.yml`, `.azure-pipelines/`, `.circleci/` and `Jenkinsfile`.
+`SandboxOptions.ProtectedPaths` holds extra entries, added to the defaults and de-duplicated; the standing-instructions
+file (`AGENT.md`) is the host's to add there. Entries may not contain `;`, which joins them on the wire.
 
 **Residual risks.**
 
@@ -762,6 +780,10 @@ may not contain `;`, which joins them on the wire.
 - `RepoConfigGuard` lists the git config before each git command that reads the worktree and refuses a tampered
   one, but a write between the check and the command it guards is a time-of-check race. The publish side treats the
   patch as adversarial regardless, and never runs git against the sandbox's tree.
+- Inside the container, the isolation `HOME`/`XDG_CONFIG_HOME` directory of the sandbox host's git commands is
+  agent-writable. Agent code can plant `git/attributes` or `git/ignore` there, which change how git reads the tree,
+  but not an execution path: filters and drivers are config, and git's config stays isolated. The publish side runs
+  git on the host, with its own isolation directory.
 
 ## Limits worth knowing before you author a process
 
