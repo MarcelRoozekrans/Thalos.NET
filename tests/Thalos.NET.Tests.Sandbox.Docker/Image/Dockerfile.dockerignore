@@ -1,0 +1,9 @@
+# Used when the image is built by hand from the repository root with -f; the tests send their own filtered context.
+*
+!global.json
+!Directory.Build.props
+!Directory.Packages.props
+!src/
+!samples/Thalos.Sample.SandboxHost/
+**/bin/
+**/obj/

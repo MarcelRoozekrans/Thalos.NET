@@ -341,6 +341,20 @@ public sealed class WorkspaceToolsTests : IDisposable
     }
 
     /// <summary>
+    /// A protected path entry with a '..' segment is refused when the tools are registered, not by the first tool call
+    /// that builds the set. Red: drop the ProtectedPathSet check from RunWorkspaceToolOptions.Validate.
+    /// </summary>
+    [Fact]
+    public void Registration_refuses_a_protected_path_with_a_parent_segment()
+    {
+        var extensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cs" };
+
+        var act = () => new ServiceCollection().AddThalos(t => t.UseRunWorkspaceTools(extensions, o => o.ProtectedPaths.Add("docs/../AGENT.md")));
+
+        act.Should().Throw<ArgumentException>().WithMessage("*ProtectedPaths*'..'*").Which.ParamName.Should().Be("configure");
+    }
+
+    /// <summary>
     /// Round-3 finding B2: on Windows, <c>list_files</c>' own directory opens requested <c>DELETE</c> access, so 36
     /// of 50 truly parallel listings of the same directory silently came back missing its contents — a second,
     /// concurrent pin's open collided with the first and <see cref="WorkspaceTools.ListFiles"/> caught the resulting
@@ -1091,6 +1105,65 @@ public sealed class WorkspaceToolsTests : IDisposable
         (await tools.WriteFile(caller, "notes.md", "x")).Should().StartWith("wrote");
     }
 
+    /// <summary>Red: keep the old exact-match IsProtected.</summary>
+    [Fact]
+    public async Task Write_is_refused_under_a_protected_directory_prefix()
+    {
+        var (tools, _, root) = Build(protectedPaths: [".github/"]);
+
+        var result = await tools.WriteFile(Caller(RunId), ".github/workflows/x.yml", "x");
+
+        result.Should().StartWith("error:").And.Contain("protected");
+        File.Exists(Path.Combine(root, ".github", "workflows", "x.yml")).Should().BeFalse();
+    }
+
+    /// <summary>Red: ignore AllowAnyWriteExtension.</summary>
+    [Fact]
+    public async Task Any_extension_is_writable_when_the_ceiling_allows_any()
+    {
+        var (tools, _, root) = Build(allowedWriteExtensions: new HashSet<string>(StringComparer.OrdinalIgnoreCase), allowAnyWriteExtension: true);
+
+        (await tools.WriteFile(Caller(RunId), "Lib.csproj", "<Project />")).Should().StartWith("wrote");
+        File.Exists(Path.Combine(root, "Lib.csproj")).Should().BeTrue();
+    }
+
+    /// <summary>Red: return early on AllowAnyWriteExtension before the claim check.</summary>
+    [Fact]
+    public async Task A_callers_extension_claim_still_narrows_an_any_ceiling()
+    {
+        var (tools, _, root) = Build(allowedWriteExtensions: new HashSet<string>(StringComparer.OrdinalIgnoreCase), allowAnyWriteExtension: true);
+
+        (await tools.WriteFile(Caller(RunId, writeExtensions: ".cs"), "Lib.csproj", "<Project />")).Should().StartWith("error: extension '.csproj'");
+        File.Exists(Path.Combine(root, "Lib.csproj")).Should().BeFalse();
+    }
+
+    /// <summary>Red: refuse whenever a claim is present, even when the claim lists the extension.</summary>
+    [Fact]
+    public async Task A_callers_extension_claim_still_permits_what_it_lists_under_an_any_ceiling()
+    {
+        var (tools, _, root) = Build(allowedWriteExtensions: new HashSet<string>(StringComparer.OrdinalIgnoreCase), allowAnyWriteExtension: true);
+
+        (await tools.WriteFile(Caller(RunId, writeExtensions: ".cs"), "Lib.cs", "class A {}")).Should().StartWith("wrote");
+        File.Exists(Path.Combine(root, "Lib.cs")).Should().BeTrue();
+    }
+
+    /// <summary>Red: the overload leaves AllowAnyWriteExtension false.</summary>
+    [Fact]
+    public async Task The_allowing_any_extension_overload_registers_an_any_ceiling()
+    {
+        var services = new ServiceCollection();
+        services.AddThalos(t => t.UseRunWorkspaceToolsAllowingAnyExtension(o => o.ProtectedPaths.Add(".github/")));
+        using var provider = services.BuildServiceProvider();
+        var options = provider.GetRequiredService<RunWorkspaceToolOptions>();
+        var root = NewTempDir("thalos-workspace-tools-");
+        var workspace = new RunWorkspace(RunId, "repo", "https://example.invalid/repo.git", "main", $"run/{RunId}", root, null);
+        var tools = new WorkspaceTools(new FakeRunWorkspaceProvider(workspace), options, [new FakeChangeListener()], NullLogger<WorkspaceTools>.Instance);
+
+        options.AllowAnyWriteExtension.Should().BeTrue();
+        (await tools.WriteFile(Caller(RunId), "Lib.csproj", "<Project />")).Should().StartWith("wrote");
+        (await tools.WriteFile(Caller(RunId), ".github/x.yml", "x")).Should().Contain("protected");
+    }
+
     /// <summary>A claim that is present but blank is a grant of zero extensions, not "no grant" — only an absent claim falls back to the ceiling.</summary>
     [Fact]
     public async Task A_blank_grant_claim_refuses_every_write()
@@ -1703,6 +1776,7 @@ public sealed class WorkspaceToolsTests : IDisposable
     private (WorkspaceTools Tools, FakeChangeListener Listener, string Root) Build(
         IReadOnlySet<string>? allowedWriteExtensions = null,
         IEnumerable<string>? protectedPaths = null,
+        bool allowAnyWriteExtension = false,
         int? maxReadBytes = null,
         int? maxListEntries = null,
         TimeSpan? contentionTimeout = null,
@@ -1716,6 +1790,7 @@ public sealed class WorkspaceToolsTests : IDisposable
         var options = new RunWorkspaceToolOptions
         {
             AllowedWriteExtensions = allowedWriteExtensions ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cs", ".md" },
+            AllowAnyWriteExtension = allowAnyWriteExtension,
         };
         if (maxReadBytes is { } bytes)
         {

@@ -14,7 +14,14 @@ public sealed class RunWorkspaceToolOptions
     /// </summary>
     public required IReadOnlySet<string> AllowedWriteExtensions { get; init; }
 
-    /// <summary>Repository-relative paths that may be read but never written, e.g. a host's standing-instructions file.</summary>
+    /// <summary>
+    /// When true, the host-wide ceiling allows every extension, and only a caller's
+    /// <c>thalos.workspace.write_extensions</c> claim narrows it. Only for workspaces whose build files are never evaluated
+    /// on the host, such as a run sandbox. A host that loads a run's solution in-process must keep an extension list.
+    /// </summary>
+    public bool AllowAnyWriteExtension { get; set; }
+
+    /// <summary>Repository-relative paths that may be read but never written, e.g. a host's standing-instructions file. An entry ending in <c>/</c> protects that directory and everything under it. The list is read once, on first tool use; later changes have no effect.</summary>
     public IList<string> ProtectedPaths { get; } = [];
 
     /// <summary><c>read_file</c> refuses a file larger than this many bytes. Default 256 KiB.</summary>
@@ -56,11 +63,21 @@ public sealed class RunWorkspaceToolOptions
     /// Throws <see cref="ArgumentException"/> naming the offending member when a value cannot work:
     /// <see cref="ContentionTimeout"/> outside <see cref="Timeout.InfiniteTimeSpan"/> or zero to
     /// <see cref="int.MaxValue"/> milliseconds, <see cref="MaxReadBytes"/> negative or too large to buffer, or
-    /// <see cref="MaxListEntries"/> negative. <paramref name="paramName"/> is the caller's parameter that produced
-    /// these options.
+    /// <see cref="MaxListEntries"/> negative, or a <see cref="ProtectedPaths"/> entry <see cref="ProtectedPathSet"/>
+    /// refuses, such as one with a <c>..</c> segment, which would otherwise fail the first tool call instead of the boot.
+    /// <paramref name="paramName"/> is the caller's parameter that produced these options.
     /// </summary>
     internal void Validate(string paramName)
     {
+        try
+        {
+            _ = new ProtectedPathSet(ProtectedPaths);
+        }
+        catch (ArgumentException ex)
+        {
+            throw new ArgumentException($"RunWorkspaceToolOptions.ProtectedPaths is invalid: {ex.Message}", paramName, ex);
+        }
+
         if (ContentionTimeout != Timeout.InfiniteTimeSpan
             && (ContentionTimeout < TimeSpan.Zero || ContentionTimeout.TotalMilliseconds > int.MaxValue))
         {

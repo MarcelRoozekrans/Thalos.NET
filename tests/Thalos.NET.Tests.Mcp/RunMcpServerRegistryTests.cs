@@ -5,6 +5,7 @@ using System.Runtime.Versioning;
 using AwesomeAssertions.Execution;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 using Thalos.Mcp;
@@ -230,10 +231,12 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
     [InlineData(null, "tool:no_such_tool", "reload tool 'no_such_tool'")]
     public async Task A_ready_or_reload_tool_the_server_does_not_offer_fails_the_start(string? readyTool, string reload, string expected)
     {
-        var registry = Registry(runScoped: new() { Args = ServerArgs, ReadyTool = readyTool, Reload = reload });
+        // The registry runs on a fake clock that never moves, so neither the readiness wait nor the connect timeout can
+        // end the start: only the start's own outcome does, however slow the machine is. The real 60 s bound is a hang guard.
+        var registry = Registry(runScoped: new() { Args = ServerArgs, ReadyTool = readyTool, Reload = reload }, new FakeProvider(null), clock: new FakeTimeProvider());
         await registry.OnReadyAsync(Workspace(), CancellationToken.None);
 
-        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(10), CancellationToken.None);
+        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(10), CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(60));
         waited.IsFailure.Should().BeTrue();
         waited.Error.Message.Should().Contain(expected);
     }
@@ -790,14 +793,14 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
 
     private RunMcpServerRegistry Registry(RunScopedMcpDefinition runScoped) => Registry(runScoped, new FakeProvider(null));
 
-    private RunMcpServerRegistry Registry(RunScopedMcpDefinition runScoped, IRunWorkspaceProvider? workspaces, IReadOnlyDictionary<string, string>? hostEnv = null, IReadOnlyList<string>? passEnvironment = null)
+    private RunMcpServerRegistry Registry(RunScopedMcpDefinition runScoped, IRunWorkspaceProvider? workspaces, IReadOnlyDictionary<string, string>? hostEnv = null, IReadOnlyList<string>? passEnvironment = null, TimeProvider? clock = null)
     {
         // The host entry's own args start a working server, so a registry that ignores runScoped.Args fails an assertion, not the start.
         var definition = McpServerFixture.Definition("--host");
         definition.Env = hostEnv;
         definition.PassEnvironment = passEnvironment;
         definition.RunScoped = runScoped;
-        var registry = new RunMcpServerRegistry(Servers(definition), () => workspaces, NullLoggerFactory.Instance, TimeProvider.System);
+        var registry = new RunMcpServerRegistry(Servers(definition), () => workspaces, NullLoggerFactory.Instance, clock ?? TimeProvider.System);
         _registries.Add(registry);
         return registry;
     }

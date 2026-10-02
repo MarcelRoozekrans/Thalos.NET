@@ -906,4 +906,41 @@ public sealed class WorkspacePathTests : IDisposable
         Directory.Delete(target);
     }
 
+    /// <summary>
+    /// A root that is not a fully qualified host path is never a workspace, even when a directory of that name exists
+    /// under the current directory, which is what GetFullPath would quietly resolve it to. A sandboxed run's
+    /// <c>sandbox://&lt;id&gt;</c> root is one. Red: drop the IsPathFullyQualified check in CanonicalizeRoot; the relative
+    /// root then resolves into the current directory, and CanonicalizeRoot returns a path for both roots.
+    /// </summary>
+    [Fact]
+    public void A_root_that_is_not_a_fully_qualified_path_is_refused()
+    {
+        var relative = "thalos-relative-root-" + Guid.NewGuid().ToString("N");
+        Directory.CreateDirectory(Path.Combine(Environment.CurrentDirectory, relative));
+        if (!OperatingSystem.IsWindows())
+        {
+            // On Unix "sandbox:" is a legal directory name, so the sandbox root would otherwise resolve here.
+            Directory.CreateDirectory(Path.Combine(Environment.CurrentDirectory, "sandbox:", relative));
+        }
+
+        try
+        {
+            File.WriteAllText(Path.Combine(Environment.CurrentDirectory, relative, "a.cs"), "class A { }");
+
+            using var _ = new AssertionScope();
+            WorkspacePath.Resolve(relative, "a.cs").IsFailure.Should().BeTrue();
+            WorkspacePath.Resolve($"sandbox://{relative}", "a.cs").IsFailure.Should().BeTrue();
+            WorkspacePath.CanonicalizeRoot(relative).Should().BeNull();
+            WorkspacePath.CanonicalizeRoot($"sandbox://{relative}").Should().BeNull();
+            WorkspacePath.Resolve(Path.Combine(Environment.CurrentDirectory, relative), "a.cs").IsSuccess.Should().BeTrue("the same directory, fully qualified, is a workspace");
+        }
+        finally
+        {
+            Directory.Delete(Path.Combine(Environment.CurrentDirectory, relative), recursive: true);
+            if (!OperatingSystem.IsWindows())
+            {
+                Directory.Delete(Path.Combine(Environment.CurrentDirectory, "sandbox:"), recursive: true);
+            }
+        }
+    }
 }

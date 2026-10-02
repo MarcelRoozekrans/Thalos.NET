@@ -874,6 +874,14 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
     private string? RefuseExtension(ISecurityContext caller, string realPath)
     {
         var extension = Path.GetExtension(realPath);
+        if (options.AllowAnyWriteExtension)
+        {
+            var claim = RunWorkspaceClaims.WriteExtensionsOf(caller);
+            return claim is null || claim.Contains(extension)
+                ? null
+                : $"error: extension '{extension}' is not writable in this run; allowed: {FormatAllowed(claim)}";
+        }
+
         var allowed = AllowedExtensionsFor(caller);
         return allowed.Contains(extension) ? null : $"error: extension '{extension}' is not writable in this run; allowed: {FormatAllowed(allowed)}";
     }
@@ -890,28 +898,15 @@ public sealed partial class WorkspaceTools(IRunWorkspaceProvider workspaces, Run
         return ceiling;
     }
 
-    private static string FormatAllowed(HashSet<string> allowed) =>
+    private static string FormatAllowed(IReadOnlySet<string> allowed) =>
         allowed.Count == 0 ? "(none)" : string.Join(", ", allowed.Order(StringComparer.OrdinalIgnoreCase));
 
     /// <summary>Compares <paramref name="candidate"/>'s path relative to <paramref name="canonicalRoot"/> against <see cref="RunWorkspaceToolOptions.ProtectedPaths"/>, case-insensitively — never the raw input a model supplied.</summary>
-    private bool IsProtected(string canonicalRoot, string candidate)
-    {
-        if (options.ProtectedPaths.Count == 0)
-        {
-            return false;
-        }
+    private bool IsProtected(string canonicalRoot, string candidate) => ProtectedSet.IsProtected(RelativeToRoot(canonicalRoot, candidate));
 
-        var relative = RelativeToRoot(canonicalRoot, candidate);
-        foreach (var protectedPath in options.ProtectedPaths)
-        {
-            if (string.Equals(relative, NormalizeSeparators(protectedPath), StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-        }
+    private ProtectedPathSet? _protected;
 
-        return false;
-    }
+    private ProtectedPathSet ProtectedSet => _protected ??= new ProtectedPathSet(options.ProtectedPaths);
 
     private static string RelativeToRoot(string canonicalRoot, string realPath) => NormalizeSeparators(Path.GetRelativePath(canonicalRoot, realPath));
 

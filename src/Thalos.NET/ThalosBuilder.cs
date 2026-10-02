@@ -97,7 +97,11 @@ public sealed class ThalosBuilder
     }
 
     /// <summary>In-process tools from <see cref="ThalosToolTypeAttribute"/> classes, exposed as <c>{sourceName}__{tool}</c>.</summary>
-    /// <exception cref="ArgumentException">A type in <paramref name="toolTypes"/> is not marked <see cref="ThalosToolTypeAttribute"/>.</exception>
+    /// <exception cref="ArgumentException">
+    /// A type in <paramref name="toolTypes"/> is not marked <see cref="ThalosToolTypeAttribute"/>, or a remote run tool
+    /// source named <paramref name="sourceName"/> was already added, such as Thalos.NET.Sandbox's <c>AddRemoteRunTools</c>
+    /// or a remote MCP entry: the catalog keeps the first source of a name, so the two must never share one.
+    /// </exception>
     /// <remarks>
     /// <see cref="LocalToolSource"/>'s own construction-time guard — which rejects a <see cref="ThalosToolAttribute"/>
     /// parameter whose shape carries a type assignable to <see cref="ISecurityContext"/> anywhere other than an
@@ -119,6 +123,7 @@ public sealed class ThalosBuilder
             }
         }
 
+        ToolSourceNames.Of(Services).AddLocal(sourceName, nameof(sourceName));
         Services.AddSingleton<IToolSource>(sp => new LocalToolSource(sourceName, sp, toolTypes));
         return this;
     }

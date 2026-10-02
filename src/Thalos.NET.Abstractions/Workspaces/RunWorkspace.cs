@@ -41,4 +41,7 @@ public sealed record RunWorkspace(Guid RunId, string Repository, string Remote, 
     /// <see cref="IRunWorkspaceProvider.RemoveAsync"/> decides whether that removal goes ahead.
     /// </summary>
     public DateTimeOffset CreatedAt { get; init; }
+
+    /// <summary>The full sha the run branch was cut from. Null only for records written before 0.13.0.</summary>
+    public string? BaseCommit { get; init; }
 }

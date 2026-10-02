@@ -38,6 +38,8 @@ public static class GitWorkspaceThalosBuilderExtensions
             sp.GetRequiredService<ILogger<GitWorktreeWorkspaceProvider>>(),
             sp.GetRequiredService<TimeProvider>(),
             sp.GetService<IGitCredentialSource>())));
+        builder.Services.Replace(ServiceDescriptor.Singleton<IRunBaseFileReader>(sp => (IRunBaseFileReader)sp.GetRequiredService<IRunWorkspaceProvider>()));
+        builder.Services.Replace(ServiceDescriptor.Singleton<IRunWorkspaceHandoff>(sp => (IRunWorkspaceHandoff)sp.GetRequiredService<IRunWorkspaceProvider>()));
         builder.Services.Replace(ServiceDescriptor.Singleton<IRunWorkspaceGit>(sp => new GitCliRunWorkspaceGit(
             options,
             sp.GetRequiredService<ILogger<GitCliRunWorkspaceGit>>(),

@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net10.0</TargetFrameworks>
+    <RootNamespace>Thalos.Sandbox.Host</RootNamespace>
+    <PackageId>Thalos.NET.Sandbox.Host</PackageId>
+    <Description>The in-container host for Thalos.NET run sandboxes: workspace, build and Roslyn tools over MCP.</Description>
+    <PackageTags>agents;sandbox;container;mcp;workflow;microsoft-agent-framework;zeroalloc</PackageTags>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <ProjectReference Include="..\Thalos.NET.Sandbox\Thalos.NET.Sandbox.csproj" />
+    <PackageReference Include="ModelContextProtocol.AspNetCore" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Sandbox.Host" />
+  </ItemGroup>
+</Project>

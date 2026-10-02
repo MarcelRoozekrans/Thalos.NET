@@ -10,7 +10,9 @@ namespace Thalos.Workflow;
 /// approval keeps its worktree for a human. Removed: <see cref="WorkflowStatus.Succeeded"/> runs, whether or not they
 /// were resumed, because <c>open-pull-request</c> has already pushed and opened the PR; Failed or Cancelled runs with
 /// no <see cref="WorkflowRun.LastResume"/>; and workspaces whose run row does not exist, once their
-/// <see cref="RunWorkspace.CreatedAt"/> is older than <see cref="OrphanGrace"/>.
+/// <see cref="RunWorkspace.CreatedAt"/> is older than <see cref="OrphanGrace"/>. Before that decision, a provider that
+/// is an <see cref="IParkableRunWorkspaceProvider"/> parks the workspace of every run that exists and is not
+/// <see cref="WorkflowStatus.Running"/>.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -18,6 +20,12 @@ namespace Thalos.Workflow;
 /// <see cref="SweepAsync"/> on a schedule is the consumer's job. <c>open-pull-request</c> never removes the workspace
 /// itself — a crash between its PR and the run's advance would otherwise leave a redelivery with no workspace — so a
 /// Succeeded run's workspace goes at most one sweep interval later.
+/// </para>
+/// <para>
+/// <b>One long-lived instance.</b> Each sweep starts one workspace further on in the list than the last, so a park
+/// budget spent early never leaves the same runs over every time. That rotation lives in the instance, so the consumer
+/// registers the sweeper as a singleton and calls the same one on every tick; a new instance per tick always starts at
+/// the first workspace.
 /// </para>
 /// <para>
 /// <b>Decided on run state, never on the workspace record's state.</b> <see cref="IRunWorkspaceProvider.ListAsync"/>
@@ -49,9 +57,21 @@ public sealed partial class RunWorkspaceSweeper(
 {
     /// <summary>
     /// A workspace exists before its run row does: the host creates the worktree, then starts the run under its id.
-    /// A sweep inside that window must not remove it (ruling R9).
+    /// A sweep inside that window must not remove it (ruling R9). An alias of <see cref="RunWorkspaceGrace.Orphan"/>,
+    /// the one definition the sandbox provider's reconcile shares.
     /// </summary>
-    public static readonly TimeSpan OrphanGrace = TimeSpan.FromMinutes(10);
+    public static readonly TimeSpan OrphanGrace = RunWorkspaceGrace.Orphan;
+
+    /// <summary>
+    /// The most time one sweep spends parking. Parks run one after another and each may take a sandbox export and a
+    /// lock wait, so once this is spent the park in progress is cancelled and the rest wait for the next sweep. Each park
+    /// is told what is left, so a provider does not begin one it cannot finish in time, and each sweep starts one
+    /// workspace further on in the list, so the same runs are not left over every time. Five minutes.
+    /// </summary>
+    public TimeSpan ParkBudget { get; init; } = TimeSpan.FromMinutes(5);
+
+    /// <summary>How many sweeps have started, less one: where the next sweep starts in the list.</summary>
+    private int _sweeps = -1;
 
     private readonly IRunWorkspaceProvider _workspaces = workspaces ?? throw new ArgumentNullException(nameof(workspaces));
     private readonly IWorkflowStore _store = store ?? throw new ArgumentNullException(nameof(store));
@@ -74,9 +94,20 @@ public sealed partial class RunWorkspaceSweeper(
     {
         var listed = await _workspaces.ListAsync(ct).ConfigureAwait(false);
 
+        // Each sweep starts one workspace further on, so a park budget spent early in the list never starves the same tail.
+        var start = listed.Count == 0 ? 0 : (int)((uint)Interlocked.Increment(ref _sweeps) % (uint)listed.Count);
         var removed = 0;
-        foreach (var workspace in listed)
+        var parkingStarted = _clock.GetTimestamp();
+        var unparked = 0;
+        for (var i = 0; i < listed.Count; i++)
         {
+            var workspace = listed[(start + i) % listed.Count];
+            var parkBudget = ParkBudget - _clock.GetElapsedTime(parkingStarted);
+            if (await ParkIfNotRunningAsync(workspace.RunId, parkBudget, ct).ConfigureAwait(false) == ParkOutcome.Skipped)
+            {
+                unparked++;
+            }
+
             try
             {
                 if (!await NoLongerNeededAsync(workspace, ct).ConfigureAwait(false))
@@ -99,7 +130,54 @@ public sealed partial class RunWorkspaceSweeper(
             }
         }
 
+        if (unparked > 0)
+        {
+            LogParkBudgetSpent(_logger, ParkBudget, unparked);
+        }
+
         return removed;
+    }
+
+    /// <summary>
+    /// Parks the workspace of a run that exists and is not <see cref="WorkflowStatus.Running"/>, when the provider can
+    /// park: a run at its gate, or ended, needs nothing its workspace runs. A failed park is logged and the sweep goes
+    /// on; the next sweep retries it. Whether the workspace is then removed is decided on run state alone, as before.
+    /// The park is cancelled once <paramref name="budget"/> runs out, and not started when none is left.
+    /// </summary>
+    private async ValueTask<ParkOutcome> ParkIfNotRunningAsync(Guid runId, TimeSpan budget, CancellationToken ct)
+    {
+        if (_workspaces is not IParkableRunWorkspaceProvider parkable)
+        {
+            return ParkOutcome.NotNeeded;
+        }
+
+        try
+        {
+            var run = await _store.FindAsync(runId, ct).ConfigureAwait(false);
+            if (run is null || run.Status == WorkflowStatus.Running)
+            {
+                return ParkOutcome.NotNeeded;
+            }
+
+            if (budget <= TimeSpan.Zero)
+            {
+                return ParkOutcome.Skipped;
+            }
+
+            using var remaining = new CancellationTokenSource(budget, _clock);
+            using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct, remaining.Token);
+            var parked = await parkable.ParkAsync(runId, budget, bounded.Token).ConfigureAwait(false);
+            if (parked.IsFailure)
+            {
+                LogParkFailed(_logger, runId, parked.Error.ToString(), exception: null);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            LogParkFailed(_logger, runId, ex.Message, ex);
+        }
+
+        return ParkOutcome.Attempted;
     }
 
     private async ValueTask<bool> NoLongerNeededAsync(RunWorkspace workspace, CancellationToken ct)
@@ -132,4 +210,29 @@ public sealed partial class RunWorkspaceSweeper(
         Level = LogLevel.Warning,
         Message = "Run workspace sweep: removing the workspace of run {RunId} failed. The next sweep retries it.")]
     private static partial void LogRemovalFailed(ILogger logger, Guid runId, Exception exception);
+
+    [LoggerMessage(
+        EventId = 912,
+        Level = LogLevel.Warning,
+        Message = "Run workspace sweep: parking the workspace of run {RunId} failed: {Error}. The next sweep retries it.")]
+    private static partial void LogParkFailed(ILogger logger, Guid runId, string error, Exception? exception);
+
+    [LoggerMessage(
+        EventId = 913,
+        Level = LogLevel.Warning,
+        Message = "Run workspace sweep: the park budget of {Budget} was spent; {Count} workspaces were not parked and wait for the next sweep.")]
+    private static partial void LogParkBudgetSpent(ILogger logger, TimeSpan budget, int count);
+
+    /// <summary>What the park step did for one workspace.</summary>
+    private enum ParkOutcome
+    {
+        /// <summary>The provider cannot park, or the run is running or has no row.</summary>
+        NotNeeded,
+
+        /// <summary>A park was made, whatever its outcome.</summary>
+        Attempted,
+
+        /// <summary>A park was needed but the sweep's park budget was spent.</summary>
+        Skipped,
+    }
 }

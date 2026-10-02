@@ -19,6 +19,7 @@ public sealed class RunWorkspaceSweeperTests
     private readonly FakeRunWorkspaceProvider _provider = new();
     private readonly FakeWorkflowStore _store = new(new InMemoryProcessDefinitionStore());
     private readonly CapturingLogger _log = new();
+    private readonly FakeTimeProvider _clock = new(Now);
 
     [Theory]
     [InlineData(WorkflowStatus.Failed, false, true)]
@@ -163,6 +164,158 @@ public sealed class RunWorkspaceSweeperTests
         _provider.Removed.Should().BeEquivalentTo([RunId]);
     }
 
+    // ---------- park (phase 2.6, A11) ----------
+
+    /// <summary>
+    /// Red: park only runs that are Running instead of every run that is not; the awaiting run is not parked. Red 2:
+    /// remove a parked run's workspace; Removed holds the awaiting run.
+    /// </summary>
+    [Fact]
+    public async Task An_awaiting_run_is_parked_and_kept()
+    {
+        var provider = new FakeParkableRunWorkspaceProvider();
+        provider.Add(Workspace(RunId, Now - TimeSpan.FromHours(1)));
+        _store.Seed(Run(RunId, WorkflowStatus.Awaiting, resumed: false));
+
+        var removed = await Sweeper(provider).SweepAsync(CancellationToken.None);
+
+        removed.Should().Be(0);
+        provider.Parked.Should().Equal(RunId);
+        provider.Removed.Should().BeEmpty();
+    }
+
+    /// <summary>Red: park every run, whatever its status; both running runs are parked.</summary>
+    [Fact]
+    public async Task A_running_run_is_never_parked()
+    {
+        var provider = new FakeParkableRunWorkspaceProvider();
+        provider.Add(Workspace(RunId, Now - TimeSpan.FromHours(1)));
+        provider.Add(Workspace(OtherRunId, Now - TimeSpan.FromHours(1)));
+        _store.Seed(Run(RunId, WorkflowStatus.Running, resumed: false));
+        _store.Seed(Run(OtherRunId, WorkflowStatus.Running, resumed: true));
+
+        await Sweeper(provider).SweepAsync(CancellationToken.None);
+
+        provider.Parked.Should().BeEmpty();
+        provider.Removed.Should().BeEmpty();
+    }
+
+    /// <summary>Red: park a workspace whose run row does not exist; the young orphan is parked.</summary>
+    [Fact]
+    public async Task A_workspace_with_no_run_row_is_never_parked()
+    {
+        var provider = new FakeParkableRunWorkspaceProvider();
+        provider.Add(Workspace(RunId, Now - TimeSpan.FromMinutes(1)));
+
+        await Sweeper(provider).SweepAsync(CancellationToken.None);
+
+        provider.Parked.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// Red 1: drop the 912 log of a refused park; no warning names the run. Red 2: skip the removal decision after a
+    /// failed park; the ended run's workspace is kept. Red 3: stop the sweep at a failed park; the other run is not parked.
+    /// </summary>
+    [Fact]
+    public async Task A_failed_park_is_logged_and_the_sweep_goes_on()
+    {
+        var provider = new FakeParkableRunWorkspaceProvider { FailParkFor = RunId };
+        provider.Add(Workspace(RunId, Now - TimeSpan.FromHours(1)));
+        provider.Add(Workspace(OtherRunId, Now - TimeSpan.FromHours(1)));
+        _store.Seed(Run(RunId, WorkflowStatus.Failed, resumed: false));
+        _store.Seed(Run(OtherRunId, WorkflowStatus.Awaiting, resumed: false));
+
+        var removed = await Sweeper(provider).SweepAsync(CancellationToken.None);
+
+        removed.Should().Be(1);
+        provider.Removed.Should().Equal(RunId);
+        provider.Parked.Should().Equal(OtherRunId);
+        _log.Entries.Should().ContainSingle(e => e.Level == LogLevel.Warning)
+            .Which.Should().Match<(LogLevel Level, string Message, Exception? Exception, int EventId)>(e =>
+                e.EventId == 912 && e.Message.Contains(RunId.ToString()) && e.Message.Contains("the fake could not export"));
+    }
+
+    /// <summary>Red: rethrow from the park step's catch; the exception escapes the sweep.</summary>
+    [Fact]
+    public async Task A_park_whose_run_cannot_be_read_is_logged_as_a_park_failure()
+    {
+        var provider = new FakeParkableRunWorkspaceProvider();
+        provider.Add(Workspace(RunId, Now - TimeSpan.FromHours(1)));
+        _store.Seed(Run(RunId, WorkflowStatus.Awaiting, resumed: false));
+        _store.ThrowOnFindFor = RunId;
+
+        var sweep = async () => await Sweeper(provider).SweepAsync(CancellationToken.None);
+
+        await sweep.Should().NotThrowAsync();
+        _log.Entries.Select(e => e.EventId).Should().Equal(912, 911);
+    }
+
+    /// <summary>
+    /// Red: pass the sweep's own token to ParkAsync instead of the budget-bounded one; the first park hangs and the sweep
+    /// never ends. Red 2: park whatever budget is left; the second hanging park is attempted too and no 913 is logged.
+    /// Red 3: drop the 913 log; no warning says parks were left for the next sweep.
+    /// </summary>
+    [Fact]
+    public async Task A_sweep_stops_parking_once_its_park_budget_is_spent()
+    {
+        var provider = new FakeParkableRunWorkspaceProvider
+        {
+            // A hanging export: the fake clock passes the budget, then the park waits until it is cancelled.
+            BeforePark = async (_, ct) =>
+            {
+                _clock.Advance(TimeSpan.FromMinutes(2));
+                await Task.Delay(Timeout.Infinite, ct);
+            },
+        };
+        provider.Add(Workspace(RunId, Now - TimeSpan.FromHours(1)));
+        provider.Add(Workspace(OtherRunId, Now - TimeSpan.FromHours(1)));
+        _store.Seed(Run(RunId, WorkflowStatus.Awaiting, resumed: false));
+        _store.Seed(Run(OtherRunId, WorkflowStatus.Awaiting, resumed: false));
+        var sweeper = new RunWorkspaceSweeper(provider, _store, _clock, _log) { ParkBudget = TimeSpan.FromMinutes(1) };
+
+        var removed = await sweeper.SweepAsync(CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(30));
+
+        removed.Should().Be(0);
+        provider.ParkAttempts.Should().Equal(RunId);
+        provider.Parked.Should().BeEmpty();
+        _log.Entries.Select(e => e.EventId).Should().Equal(912, 913);
+        _log.Entries[^1].Message.Should().Contain("1 workspaces were not parked");
+    }
+
+    /// <summary>
+    /// R37c. Red: start every sweep at the first workspace; each sweep parks the first run again and the tail is never
+    /// reached. Red 2: pass Timeout.InfiniteTimeSpan instead of the remaining budget; the provider is told no budget.
+    /// </summary>
+    [Fact]
+    public async Task Each_sweep_starts_one_workspace_further_so_a_spent_budget_never_starves_the_tail()
+    {
+        var third = Guid.NewGuid();
+        var provider = new FakeParkableRunWorkspaceProvider
+        {
+            // Each park uses up the whole budget, so a sweep parks exactly one run.
+            BeforePark = (_, _) =>
+            {
+                _clock.Advance(TimeSpan.FromMinutes(2));
+                return Task.CompletedTask;
+            },
+        };
+        foreach (var id in new[] { RunId, OtherRunId, third })
+        {
+            provider.Add(Workspace(id, Now - TimeSpan.FromHours(1)));
+            _store.Seed(Run(id, WorkflowStatus.Awaiting, resumed: false));
+        }
+
+        var sweeper = new RunWorkspaceSweeper(provider, _store, _clock, _log) { ParkBudget = TimeSpan.FromMinutes(1) };
+
+        for (var tick = 0; tick < 3; tick++)
+        {
+            await sweeper.SweepAsync(CancellationToken.None);
+        }
+
+        provider.ParkAttempts.Should().Equal(RunId, OtherRunId, third);
+        provider.Budgets.Should().AllBeEquivalentTo(TimeSpan.FromMinutes(1)).And.HaveCount(3);
+    }
+
     [Fact]
     public void Every_dependency_is_required()
     {
@@ -209,7 +362,7 @@ public sealed class RunWorkspaceSweeperTests
         return (Sweeper(), _provider);
     }
 
-    private RunWorkspaceSweeper Sweeper() => new(_provider, _store, new FakeTimeProvider(Now), _log);
+    private RunWorkspaceSweeper Sweeper(IRunWorkspaceProvider? provider = null) => new(provider ?? _provider, _store, _clock, _log);
 
     private static RunWorkspace Workspace(Guid runId, DateTimeOffset createdAt) =>
         new(runId, "repo", "https://example.invalid/repo.git", "main", $"run/{runId}", $"/runs/{runId}", SolutionPath: null)
@@ -234,13 +387,13 @@ public sealed class RunWorkspaceSweeperTests
     /// <summary>Records what the sweeper logged, so a test can assert a skipped removal is visible to an operator.</summary>
     private sealed class CapturingLogger : ILogger<RunWorkspaceSweeper>
     {
-        public List<(LogLevel Level, string Message, Exception? Exception)> Entries { get; } = [];
+        public List<(LogLevel Level, string Message, Exception? Exception, int EventId)> Entries { get; } = [];
 
         public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
 
         public bool IsEnabled(LogLevel logLevel) => true;
 
         public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter) =>
-            Entries.Add((logLevel, formatter(state, exception), exception));
+            Entries.Add((logLevel, formatter(state, exception), exception, eventId.Id));
     }
 }

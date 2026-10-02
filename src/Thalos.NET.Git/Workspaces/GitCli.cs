@@ -70,7 +70,8 @@ internal readonly record struct GitCliResult(int ExitCode, string StdOut, string
 /// on Windows; the environment block of a child process this one starts is not.
 /// </para>
 /// <para>
-/// <b>Other environment isolation.</b> The child starts from the host process's own environment — so <c>PATH</c>,
+/// <b>Other environment isolation.</b> The child starts from the host process's own environment, or from
+/// <see cref="GitWorkspaceOptions.BaseEnvironment"/> instead when a host sets one — so <c>PATH</c>,
 /// <c>TEMP</c>, and on Windows <c>SYSTEMROOT</c>, everything the git executable itself needs to run, are inherited
 /// — and then every inherited <c>GIT_*</c> variable is stripped: any one of them (<c>GIT_DIR</c>,
 /// <c>GIT_WORK_TREE</c>, <c>GIT_SSH_COMMAND</c>, a stray <c>GIT_CONFIG_GLOBAL</c> pointing somewhere else, ...)
@@ -78,7 +79,8 @@ internal readonly record struct GitCliResult(int ExitCode, string StdOut, string
 /// <c>workingDirectory</c>. <c>SSH_ASKPASS</c> is stripped too, since it names an external program git will launch
 /// the same way a terminal prompt would ask. This type's own <c>GIT_*</c> variables (<c>GIT_TERMINAL_PROMPT</c>,
 /// <c>GIT_CONFIG_NOSYSTEM</c>, <c>GIT_CONFIG_GLOBAL</c>, and <c>GIT_CONFIG_COUNT</c>/<c>KEY_n</c>/<c>VALUE_n</c>
-/// when <c>secretConfig</c> is given) are set after the strip, so they are never accidentally removed by it.
+/// when <c>secretConfig</c> is given, and <c>GIT_INDEX_FILE</c> when a caller names a private index) are set after
+/// the strip, so they are never accidentally removed by it.
 /// <c>GIT_TERMINAL_PROMPT=0</c> means a missing credential fails the command instead of blocking indefinitely on a
 /// prompt that never comes; <c>GCM_INTERACTIVE=Never</c> is set because Git Credential Manager — the default
 /// credential helper on Git for Windows — can still raise its own GUI prompt even with terminal prompting off; and
@@ -349,11 +351,33 @@ internal sealed partial class GitCli
     /// and never disk. <see langword="null"/> or empty passes none.
     /// </param>
     /// <param name="ct">Cancellation token.</param>
-    public async Task<GitCliResult> RunAsync(
+    public Task<GitCliResult> RunAsync(
         string workingDirectory,
         IReadOnlyList<string> args,
         IReadOnlyList<string>? extraConfig,
         IReadOnlyList<(string Key, string Value)>? secretConfig,
+        CancellationToken ct) =>
+        RunWithIndexFileAsync(workingDirectory, args, extraConfig, secretConfig, indexFile: null, ct);
+
+    /// <summary>
+    /// Runs <c>git [-c &lt;extraConfig&gt;]* &lt;args&gt;</c> in <paramref name="workingDirectory"/> against the index
+    /// file <paramref name="indexFile"/> instead of the repository's own.
+    /// </summary>
+    /// <param name="workingDirectory">The directory git runs in.</param>
+    /// <param name="args">The subcommand and its arguments.</param>
+    /// <param name="extraConfig">Non-secret <c>-c</c> overrides; see <see cref="RunAsync"/>.</param>
+    /// <param name="secretConfig">Secret config overrides; see <see cref="RunAsync"/>.</param>
+    /// <param name="indexFile">
+    /// An absolute path git uses as its index, passed as <c>GIT_INDEX_FILE</c> in the child's environment after every
+    /// inherited <c>GIT_*</c> variable is stripped — never on argv. <see langword="null"/> uses the repository's own index.
+    /// </param>
+    /// <param name="ct">Cancellation token.</param>
+    public async Task<GitCliResult> RunWithIndexFileAsync(
+        string workingDirectory,
+        IReadOnlyList<string> args,
+        IReadOnlyList<string>? extraConfig,
+        IReadOnlyList<(string Key, string Value)>? secretConfig,
+        string? indexFile,
         CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workingDirectory);
@@ -365,7 +389,7 @@ internal sealed partial class GitCli
             return new GitCliResult(1, string.Empty, versionProblem);
         }
 
-        return await ExecuteAsync(workingDirectory, args, extraConfig, secretConfig, ct).ConfigureAwait(false);
+        return await ExecuteAsync(workingDirectory, args, extraConfig, secretConfig, indexFile, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -396,7 +420,7 @@ internal sealed partial class GitCli
 
     private async Task<string?> CheckVersionAsync(CancellationToken ct)
     {
-        var result = await ExecuteAsync(Directory.GetCurrentDirectory(), ["--version"], null, null, ct).ConfigureAwait(false);
+        var result = await ExecuteAsync(Directory.GetCurrentDirectory(), ["--version"], null, null, null, ct).ConfigureAwait(false);
         if (!result.Succeeded)
         {
             return $"Could not determine the git version: 'git --version' {(result.TimedOut ? "timed out" : $"exited {result.ExitCode}: {result.StdErr.Trim()}")}.";
@@ -422,9 +446,10 @@ internal sealed partial class GitCli
         IReadOnlyList<string> args,
         IReadOnlyList<string>? extraConfig,
         IReadOnlyList<(string Key, string Value)>? secretConfig,
+        string? indexFile,
         CancellationToken ct)
     {
-        var startInfo = BuildStartInfo(workingDirectory, args, extraConfig, secretConfig);
+        var startInfo = BuildStartInfo(workingDirectory, args, extraConfig, secretConfig, indexFile);
 
         using var process = new Process { StartInfo = startInfo };
         var stdOut = new StringBuilder();
@@ -453,7 +478,8 @@ internal sealed partial class GitCli
         string workingDirectory,
         IReadOnlyList<string> args,
         IReadOnlyList<string>? extraConfig,
-        IReadOnlyList<(string Key, string Value)>? secretConfig)
+        IReadOnlyList<(string Key, string Value)>? secretConfig,
+        string? indexFile)
     {
         var startInfo = new ProcessStartInfo(_options.GitExecutable)
         {
@@ -467,7 +493,16 @@ internal sealed partial class GitCli
             StandardErrorEncoding = Encoding.UTF8,
         };
 
-        Sanitize(startInfo.Environment, secretConfig);
+        if (_options.BaseEnvironment is { } baseEnvironment)
+        {
+            startInfo.Environment.Clear();
+            foreach (var (key, value) in baseEnvironment)
+            {
+                startInfo.Environment[key] = value;
+            }
+        }
+
+        Sanitize(startInfo.Environment, secretConfig, indexFile);
 
         // Isolation flags come first, so a caller-supplied extraConfig (or, for a same key, nothing here) can never
         // be shadowed by them, and so they apply identically to every invocation regardless of caller.
@@ -567,7 +602,7 @@ internal sealed partial class GitCli
         }
     }
 
-    private void Sanitize(IDictionary<string, string?> environment, IReadOnlyList<(string Key, string Value)>? secretConfig)
+    private void Sanitize(IDictionary<string, string?> environment, IReadOnlyList<(string Key, string Value)>? secretConfig, string? indexFile)
     {
         List<string>? gitVariables = null;
         foreach (var key in environment.Keys)
@@ -595,6 +630,10 @@ internal sealed partial class GitCli
         environment["GIT_CONFIG_GLOBAL"] = _globalConfigPath;
         environment["HOME"] = _homeDirectory;
         environment["XDG_CONFIG_HOME"] = _homeDirectory;
+        if (indexFile is not null)
+        {
+            environment["GIT_INDEX_FILE"] = indexFile;
+        }
 
         if (secretConfig is not { Count: > 0 })
         {

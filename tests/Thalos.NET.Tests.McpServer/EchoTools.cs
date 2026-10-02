@@ -23,6 +23,12 @@ public static class EchoTools
     /// <summary>How long <c>reload_count</c> takes after counting; set from <c>--reload-delay-ms</c>.</summary>
     public static TimeSpan ReloadDelay { get; set; }
 
+    /// <summary>A file <c>reload_count</c> waits for, after counting, before it answers; set from <c>--reload-when</c>.</summary>
+    public static string? ReloadWhen { get; set; }
+
+    /// <summary>The longest <c>reload_count</c> waits for the <see cref="ReloadWhen"/> file before it fails.</summary>
+    private static readonly TimeSpan ReloadGateLimit = TimeSpan.FromSeconds(60);
+
     /// <summary>A file <c>ready_after</c>, <c>reload_count</c> and <c>slow</c> append their name to when called; set from <c>--call-log</c>.</summary>
     public static string? CallLog { get; set; }
 
@@ -53,7 +59,7 @@ public static class EchoTools
     }
 
     [McpServerTool(Name = "reload_count"), Description("Counts its own calls and returns the count; records an overlap with a running slow call")]
-    public static async Task<string> ReloadCount()
+    public static async Task<string> ReloadCount(CancellationToken ct)
     {
         Interlocked.Increment(ref s_reloading);
         try
@@ -65,7 +71,19 @@ public static class EchoTools
 
             var count = Interlocked.Increment(ref s_reloads).ToString(CultureInfo.InvariantCulture);
             await LogCallAsync("reload_count");
-            await Task.Delay(ReloadDelay);
+            await Task.Delay(ReloadDelay, ct);
+            var held = Stopwatch.StartNew();
+            while (ReloadWhen is { } gate && !File.Exists(gate))
+            {
+                // Bounded, so a test that fails before opening the gate never leaves this call holding the server.
+                if (held.Elapsed > ReloadGateLimit)
+                {
+                    throw new TimeoutException($"the reload gate '{gate}' was not opened within {ReloadGateLimit}");
+                }
+
+                await Task.Delay(20, ct);
+            }
+
             return count;
         }
         finally

@@ -8,7 +8,7 @@ namespace Thalos.Tests.Workflow;
 /// what <see cref="Add"/> stored, lists it in insertion order, and records every successful removal; it creates
 /// nothing. <c>GitWorktreeWorkspaceProvider</c>'s own suite proves the real removal's refusals and retries.
 /// </summary>
-internal sealed class FakeRunWorkspaceProvider : IRunWorkspaceProvider
+internal class FakeRunWorkspaceProvider : IRunWorkspaceProvider
 {
     private readonly List<RunWorkspace> _workspaces = [];
 
@@ -50,6 +50,46 @@ internal sealed class FakeRunWorkspaceProvider : IRunWorkspaceProvider
 
         _workspaces.RemoveAll(w => w.RunId == runId);
         Removed.Add(runId);
+        return UnitResult<AgentError>.Success();
+    }
+}
+
+/// <summary>
+/// A <see cref="FakeRunWorkspaceProvider"/> that can park, for the sweeper's park step: it records every park, and
+/// refuses one for <see cref="FailParkFor"/>.
+/// </summary>
+internal sealed class FakeParkableRunWorkspaceProvider : FakeRunWorkspaceProvider, IParkableRunWorkspaceProvider
+{
+    /// <summary>The run ids <see cref="ParkAsync"/> parked, in order.</summary>
+    public List<Guid> Parked { get; } = [];
+
+    /// <summary>Every run id <see cref="ParkAsync"/> was called for, in order, whatever came of it.</summary>
+    public List<Guid> ParkAttempts { get; } = [];
+
+    /// <summary><see cref="ParkAsync"/> returns a failure for this run id and parks nothing.</summary>
+    public Guid? FailParkFor { get; set; }
+
+    /// <summary>Awaited at the start of every <see cref="ParkAsync"/>, with its run id and token: a test hangs a park with it.</summary>
+    public Func<Guid, CancellationToken, Task>? BeforePark { get; set; }
+
+    /// <summary>The budget each <see cref="ParkAsync"/> was given, in order.</summary>
+    public List<TimeSpan> Budgets { get; } = [];
+
+    public async ValueTask<UnitResult<AgentError>> ParkAsync(Guid runId, TimeSpan budget, CancellationToken ct)
+    {
+        Budgets.Add(budget);
+        ParkAttempts.Add(runId);
+        if (BeforePark is { } before)
+        {
+            await before(runId, ct);
+        }
+
+        if (runId == FailParkFor)
+        {
+            return UnitResult<AgentError>.Failure(AgentError.ProviderError("the fake could not export"));
+        }
+
+        Parked.Add(runId);
         return UnitResult<AgentError>.Success();
     }
 }

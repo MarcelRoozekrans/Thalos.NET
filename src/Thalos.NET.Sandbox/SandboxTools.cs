@@ -1,0 +1,204 @@
+using System.ComponentModel;
+using System.Globalization;
+using System.Text;
+using System.Text.RegularExpressions;
+using Microsoft.Extensions.Logging;
+using Thalos.Workspaces;
+using ZeroAlloc.Authorization;
+using ZeroAlloc.Results;
+
+namespace Thalos.Sandbox;
+
+/// <summary>
+/// The <c>sandbox</c> tool source's methods: <c>sandbox__build</c> and <c>sandbox__test</c>. They run inside a run's
+/// sandbox container against the run's workspace. The command lines are fixed argument lists passed through
+/// <see cref="ProcessSpec.Arguments"/>, never a shell string, and the only agent-controlled value, the test filter,
+/// is validated against a strict allow-list and refused when it could be read as an option.
+/// </summary>
+/// <param name="workspaces">Looks up the calling run's workspace.</param>
+/// <param name="runner">Runs the <c>dotnet</c> process.</param>
+/// <param name="options">Timeouts and output size.</param>
+/// <param name="logger">Logs refusals.</param>
+/// <param name="clock">Times the one deadline a call's copy and run share; <see cref="TimeProvider.System"/> when null.</param>
+[ThalosToolType]
+public sealed partial class SandboxTools(
+    IRunWorkspaceProvider workspaces, ISandboxProcessRunner runner, SandboxToolOptions options, ILogger<SandboxTools> logger, TimeProvider? clock = null)
+{
+    private const string NoWorkspace = "error: this turn has no run workspace";
+    private const string FilterRefused = "error: filter refused";
+    private const string DotNet = "dotnet";
+
+    /// <summary><c>sandbox__build</c>: runs <c>dotnet build</c> on the run's solution.</summary>
+    [ThalosTool("build")]
+    [Description("Build the run's solution with `dotnet build`. Returns the exit code, a summary and the tail of the output.")]
+    public async Task<string> Build(ISecurityContext caller, CancellationToken ct = default)
+    {
+        var workspace = await FindWorkspaceAsync(caller, ct).ConfigureAwait(false);
+        if (workspace is null)
+        {
+            return NoWorkspace;
+        }
+
+        return await RunAsync(
+            workspace,
+            target => ["build", target, "--nologo", "-v:q", "-clp:ErrorsOnly"],
+            options.BuildTimeout,
+            SandboxChildEnvironment.Curated(),
+            outcome => $"errors: {outcome.ErrorLineCount}",
+            ct).ConfigureAwait(false);
+    }
+
+    /// <summary><c>sandbox__test</c>: runs <c>dotnet test</c> on the run's solution, optionally filtered.</summary>
+    [ThalosTool("test")]
+    [Description("Run the run's tests with `dotnet test`, optionally filtered. Returns the exit code, a pass/fail summary and the tail of the output.")]
+    public async Task<string> Test(ISecurityContext caller, [Description("Optional `dotnet test --filter` expression, e.g. `FullyQualifiedName~Orders`.")] string? filter = null, CancellationToken ct = default)
+    {
+        if (filter is not null && !IsValidFilter(filter))
+        {
+            LogFilterRefused(logger, filter.Length);
+            return FilterRefused;
+        }
+
+        var workspace = await FindWorkspaceAsync(caller, ct).ConfigureAwait(false);
+        if (workspace is null)
+        {
+            return NoWorkspace;
+        }
+
+        return await RunAsync(
+            workspace,
+            target => filter is null ? ["test", target, "--nologo", "-v:q"] : ["test", target, "--nologo", "-v:q", "--filter", filter],
+            options.TestTimeout,
+            SandboxChildEnvironment.Curated(),
+            outcome => TestSummary(outcome.FullOutput),
+            ct).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The allow-list for a filter: 1 to 256 characters of the listed set, and no leading <c>-</c>. The pattern ends
+    /// in <c>\z</c>, not <c>$</c>, because <c>$</c> also matches before a trailing newline.
+    /// </summary>
+    [GeneratedRegex(@"^[A-Za-z0-9_.~=!&|()\-,: ]{1,256}\z", RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 1000)]
+    private static partial Regex FilterPattern();
+
+    internal static bool IsValidFilter(string filter) => !filter.StartsWith('-') && FilterPattern().IsMatch(filter);
+
+    private async Task<RunWorkspace?> FindWorkspaceAsync(ISecurityContext caller, CancellationToken ct) =>
+        RunWorkspaceClaims.RunIdOf(caller) is { } runId
+            ? await workspaces.FindAsync(runId, ct).ConfigureAwait(false)
+            : null;
+
+    private TimeProvider Clock => clock ?? TimeProvider.System;
+
+    private static string TargetOf(RunWorkspace workspace) => workspace.SolutionPath ?? workspace.Root;
+
+    /// <summary>
+    /// Runs <c>dotnet</c> with the arguments <paramref name="arguments"/> builds for the target, in the worktree, or, when
+    /// <see cref="SandboxToolOptions.ScratchRoot"/> is set, in a <see cref="ScratchCopy"/> of it deleted afterwards. The
+    /// process starts from <paramref name="environment"/>, which each tool passes as <see cref="SandboxChildEnvironment.Curated"/>.
+    /// </summary>
+    private async Task<string> RunAsync(
+        RunWorkspace workspace, Func<string, List<string>> arguments, TimeSpan timeout, IReadOnlyDictionary<string, string> environment,
+        Func<ProcessOutcome, string> summary, CancellationToken ct)
+    {
+        if (options.ScratchRoot is not { } scratchRoot)
+        {
+            return await RunInAsync(workspace.Root, TargetOf(workspace), timeout).ConfigureAwait(false);
+        }
+
+        // One deadline for the whole call: the copy spends from it, and the run gets only what is left.
+        var started = Clock.GetUtcNow();
+        Result<ScratchCopy, AgentError> created;
+        using (var deadline = new CancellationTokenSource(timeout, Clock))
+        using (var copyToken = CancellationTokenSource.CreateLinkedTokenSource(ct, deadline.Token))
+        {
+            try
+            {
+                created = await ScratchCopy.CreateAsync(workspace.Root, scratchRoot, options.ScratchMaxBytes, copyToken.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                return $"error: copying the workspace to run in timed out after {timeout:c}";
+            }
+        }
+
+        if (created.IsFailure)
+        {
+            return $"error: could not copy the workspace to run in: {created.Error.Message}";
+        }
+
+        using var copy = created.Value;
+        var remaining = timeout - (Clock.GetUtcNow() - started);
+        if (remaining <= TimeSpan.Zero)
+        {
+            return $"error: copying the workspace to run in timed out after {timeout:c}";
+        }
+
+        return await RunInAsync(copy.Root, copy.Map(workspace.Root, TargetOf(workspace)), remaining).ConfigureAwait(false);
+
+        async Task<string> RunInAsync(string directory, string target, TimeSpan runTimeout)
+        {
+            var spec = new ProcessSpec(DotNet, arguments(target), directory, runTimeout, Environment: environment);
+            var outcome = await runner.RunAsync(spec, ct).ConfigureAwait(false);
+            return Format(outcome, timeout, summary(outcome));
+        }
+    }
+
+    private string Format(ProcessOutcome outcome, TimeSpan timeout, string summary)
+    {
+        if (outcome.StartError is not null)
+        {
+            return $"error: could not start {DotNet}: {outcome.StartError}";
+        }
+
+        var exit = outcome.TimedOut ? $"timed out after {timeout:c}" : outcome.ExitCode!.Value.ToString(CultureInfo.InvariantCulture);
+        var tail = Tail(outcome.FullOutput, options.OutputTailBytes);
+        return $"exit: {exit}\n{summary}\n--- output (last {Encoding.UTF8.GetByteCount(tail)} bytes) ---\n{tail}";
+    }
+
+    /// <summary>The last <paramref name="maxBytes"/> bytes of <paramref name="text"/> as UTF-8, without starting mid-character.</summary>
+    private static string Tail(string text, int maxBytes)
+    {
+        // The last maxBytes characters hold at least maxBytes bytes, so only that part is ever encoded.
+        var candidate = text.Length > maxBytes ? text[^maxBytes..] : text;
+        var bytes = Encoding.UTF8.GetBytes(candidate);
+        if (bytes.Length <= maxBytes)
+        {
+            return candidate;
+        }
+
+        var start = bytes.Length - maxBytes;
+        while (start < bytes.Length && (bytes[start] & 0xC0) == 0x80)
+        {
+            start++;
+        }
+
+        return Encoding.UTF8.GetString(bytes, start, bytes.Length - start);
+    }
+
+    /// <summary>The <c>Passed!</c> or <c>Failed!</c> line, or the <c>Total tests:</c> block, from the full output.</summary>
+    private static string TestSummary(string output)
+    {
+        var lines = Lines(output).ToList();
+        var result = lines.FindLast(l => l.StartsWith("Passed!", StringComparison.Ordinal) || l.StartsWith("Failed!", StringComparison.Ordinal));
+        if (result is not null)
+        {
+            return result;
+        }
+
+        var total = lines.FindLastIndex(l => l.StartsWith("Total tests:", StringComparison.Ordinal));
+        if (total < 0)
+        {
+            return "(no test summary found)";
+        }
+
+        var block = lines.Skip(total).Take(4).Select(l => l.Trim());
+        return string.Join("; ", block);
+    }
+
+    private static IEnumerable<string> Lines(string output) =>
+        output.Split('\n').Select(l => l.TrimEnd('\r').TrimStart());
+
+    [LoggerMessage(EventId = 5901, Level = LogLevel.Warning, Message = "A sandbox test filter of {Length} characters was refused.")]
+    private static partial void LogFilterRefused(ILogger logger, int length);
+}

@@ -5,6 +5,7 @@ using System.Text.Json.Serialization;
 using AwesomeAssertions.Execution;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 using ModelContextProtocol.Protocol;
 using Thalos.Mcp;
 using Thalos.Workspaces;
@@ -153,33 +154,41 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
     [Fact]
     public async Task A_call_past_the_call_timeout_is_cancelled_and_its_lease_is_released()
     {
-        var runScoped = RunScoped();
+        // Both timeouts run on a fake clock: the call timeout fires when this test moves the clock, and the ready wait of
+        // the call after the reload never does, so that call waits for the reload however slow the machine is.
+        var log = Path.Combine(_root, "calls.log");
+        var runScoped = RunScoped("--call-log", log);
         runScoped.Reload = "tool:reload_count";
         runScoped.CallTimeout = TimeSpan.FromSeconds(1);
         runScoped.ReadyWaitTimeout = TimeSpan.FromSeconds(5);
-        var (slow, registry) = await RoutedToolAsync("slow", runScoped, ready: [RunId]);
+        var clock = new FakeTimeProvider();
+        var (slow, registry) = await RoutedToolAsync("slow", runScoped, ready: [RunId], clock: clock);
         var reloadCount = await ToolAsync(slow, "reload_count");
 
         using var _turn = BeginTurn(RunCaller(RunId));
         var sw = Stopwatch.StartNew();
-        var timedOut = await InvokeAsync(slow, Args("ms", 20000));
+        var call = InvokeAsync(slow, Args("ms", 20000));
+        await UntilAsync(() => CallLog.Read(log).Contains("slow", StringComparison.Ordinal), "the slow call to reach the run's server"); // its call timeout has started
+        clock.Advance(runScoped.CallTimeout);
+        var timedOut = await call.WaitAsync(TimeSpan.FromSeconds(15));
         var elapsed = sw.Elapsed;
 
         using var _scope = new AssertionScope();
         timedOut.Should().Be($"error: run tool server 'roslyn' did not answer 'slow' within {TimeSpan.FromSeconds(1)} for this run; the call was cancelled.");
-        elapsed.Should().BeLessThan(TimeSpan.FromSeconds(10), "the call is cancelled at the timeout, not reported after it finished");
+        elapsed.Should().BeLessThan(TimeSpan.FromSeconds(15), "the call is cancelled at the timeout, not reported after the server's 20 s");
 
-        registry.OnFilesChanged(RunId, ["a.cs"]); // the reload waits for every lease: a leaked one would hold it past the ready wait
-        (await InvokeAsync(reloadCount)).Should().Be("2", "the reload ran, so the timed-out call's lease was released");
+        registry.OnFilesChanged(RunId, ["a.cs"]); // the reload waits for every lease: a leaked one would hold it forever
+        (await InvokeAsync(reloadCount).WaitAsync(TimeSpan.FromSeconds(30))).Should().Be("2", "the reload ran, so the timed-out call's lease was released");
     }
 
     [Fact]
     public async Task A_call_cancelled_by_its_caller_throws_and_releases_its_lease()
     {
+        // The routed calls' timeouts run on a fake clock that never moves: the call after the reload waits for it however
+        // slow the machine is, and only the caller's own cancellation ends the slow call.
         var runScoped = RunScoped();
         runScoped.Reload = "tool:reload_count";
-        runScoped.ReadyWaitTimeout = TimeSpan.FromSeconds(5);
-        var (slow, registry) = await RoutedToolAsync("slow", runScoped, ready: [RunId]);
+        var (slow, registry) = await RoutedToolAsync("slow", runScoped, ready: [RunId], clock: new FakeTimeProvider());
         var reloadCount = await ToolAsync(slow, "reload_count");
 
         using var _turn = BeginTurn(RunCaller(RunId));
@@ -188,7 +197,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         await call.Should().ThrowAsync<OperationCanceledException>("the caller's own cancellation is not turned into a result");
 
         registry.OnFilesChanged(RunId, ["a.cs"]);
-        (await InvokeAsync(reloadCount)).Should().Be("2", "the reload ran, so the cancelled call's lease was released");
+        (await InvokeAsync(reloadCount).WaitAsync(TimeSpan.FromSeconds(30))).Should().Be("2", "the reload ran, so the cancelled call's lease was released");
     }
 
     [Fact]
@@ -269,26 +278,31 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
     [Fact]
     public async Task A_reload_slower_than_the_ready_wait_still_completes_and_a_later_call_is_served()
     {
+        // The ready wait runs on a fake clock and the reload ends only when the gate file exists, so which calls overlap
+        // the reload is decided by this test, not by how fast a loaded machine runs it.
         var log = Path.Combine(_root, "calls.log");
-        var runScoped = RunScoped("--reload-delay-ms", "4000", "--call-log", log);
+        var gate = Path.Combine(_root, "reload-gate");
+        var runScoped = RunScoped("--reload-when", gate, "--call-log", log);
         runScoped.Reload = "tool:reload_count";
         runScoped.ReadyWaitTimeout = TimeSpan.FromSeconds(1);
-        var (args, registry) = await RoutedToolAsync("args", runScoped, ready: [RunId]);
+        var clock = new FakeTimeProvider();
+        var (args, registry) = await RoutedToolAsync("args", runScoped, ready: [RunId], clock: clock);
         var reloadCount = await ToolAsync(args, "reload_count");
 
         registry.OnFilesChanged(RunId, ["a.cs"]);
         using var _turn = BeginTurn(RunCaller(RunId));
-        var during = await InvokeAsync(args); // gives up after 1 s; the reload takes 4 s
-        await Task.Delay(TimeSpan.FromMilliseconds(500));
-        var stillDuring = await InvokeAsync(args); // from about 1.5 s to 2.5 s: the reload is still running
-        await Task.Delay(TimeSpan.FromSeconds(3)); // the reload, if it was left running, is done by now
-        var after = await InvokeAsync(args);
+        var first = InvokeAsync(args);
+        await UntilAsync(() => CallLog.Read(log).Contains("reload_count", StringComparison.Ordinal), "the first call's reload to reach the run's server");
+        var during = await PastTheReadyWaitAsync(first, clock); // began the reload, then gives up
+        var stillDuring = await PastTheReadyWaitAsync(InvokeAsync(args), clock); // the reload is still held at the gate
+        await File.WriteAllTextAsync(gate, "");
+        var after = await InvokeAsync(args).WaitAsync(TimeSpan.FromSeconds(30)); // waits for the reload, on a clock that no longer moves
         var count = await InvokeAsync(reloadCount);
         var logged = CallLog.Lines(log);
 
         using var _scope = new AssertionScope();
         during.Should().Be($"error: run tool server 'roslyn' is not available for this run: its server was not ready within {TimeSpan.FromSeconds(1)}.");
-        stillDuring.Should().Be($"error: run tool server 'roslyn' is not available for this run: its server was not ready within {TimeSpan.FromSeconds(1)}.", "the reload the first waiter began is still running; it was not cancelled when that waiter gave up");
+        stillDuring.Should().Be($"error: run tool server 'roslyn' is not available for this run: its server was not ready within {TimeSpan.FromSeconds(1)}.", "the reload the first waiter began is still running, and a later caller waits for it instead of being served");
         after.Should().Contain($"--id {RunId:D}", "the reload completed, so the next call is served");
         count.Should().Be("2", "one reload, not restarted by each waiter, plus this call");
         logged.Should().Equal(["reload_count", "reload_count"], "the server ran the reload once, then this test's own call");
@@ -612,11 +626,11 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
 
     /// <summary>The routed tool <paramref name="toolName"/>, with a server started and ready for each run in <paramref name="ready"/>.</summary>
     private async Task<(AIFunction Tool, RunMcpServerRegistry Registry)> RoutedToolAsync(
-        string toolName, RunScopedMcpDefinition? runScoped = null, Guid[]? ready = null, TimeSpan? shutdownTimeout = null)
+        string toolName, RunScopedMcpDefinition? runScoped = null, Guid[]? ready = null, TimeSpan? shutdownTimeout = null, TimeProvider? clock = null)
     {
         runScoped ??= RunScoped();
         var registry = Registry(runScoped, shutdownTimeout);
-        var source = Source(runScoped, registry);
+        var source = Source(runScoped, registry, clock);
 
         foreach (var runId in ready ?? [])
         {
@@ -630,12 +644,16 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         return (tools.Value.OfType<AIFunction>().Where(t => string.Equals(t.Name, toolName, StringComparison.Ordinal)).Should().ContainSingle().Subject, registry);
     }
 
-    private RunScopedMcpToolSource Source(RunScopedMcpDefinition runScoped, RunMcpServerRegistry registry)
+    /// <summary>The routed source over <paramref name="registry"/>.</summary>
+    /// <param name="runScoped">The run-scoped definition the source routes by.</param>
+    /// <param name="registry">The registry that hands out the run servers' leases.</param>
+    /// <param name="clock">Times the source's ready wait and call timeout; the registry keeps the system clock.</param>
+    private RunScopedMcpToolSource Source(RunScopedMcpDefinition runScoped, RunMcpServerRegistry registry, TimeProvider? clock = null)
     {
         var definition = McpServerFixture.Definition("--host");
         definition.RunScoped = runScoped;
         var source = new RunScopedMcpToolSource(
-            new McpToolSource("roslyn", definition, NullLoggerFactory.Instance), runScoped, registry, TimeProvider.System, NullLogger<RunScopedMcpToolSource>.Instance);
+            new McpToolSource("roslyn", definition, NullLoggerFactory.Instance), runScoped, registry, clock ?? TimeProvider.System, NullLogger<RunScopedMcpToolSource>.Instance);
         _disposables.Add(source);
         return source;
     }
@@ -718,6 +736,24 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         {
             return false; // no process has that id any more
         }
+    }
+
+    /// <summary>
+    /// The outcome of <paramref name="call"/>, a routed call that waits on a reload held at its gate, once its ready wait
+    /// is over: <paramref name="clock"/> is moved on until the call gives up. The call's timer starts when the call
+    /// does, which this test cannot observe, so the clock is moved on again until it has.
+    /// </summary>
+    private static async Task<string> PastTheReadyWaitAsync(Task<string> call, FakeTimeProvider clock)
+    {
+        var sw = Stopwatch.StartNew();
+        while (!call.IsCompleted)
+        {
+            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(30), "the call gives up once its ready wait is over");
+            clock.Advance(TimeSpan.FromSeconds(1));
+            await Task.WhenAny(call, Task.Delay(50));
+        }
+
+        return await call;
     }
 
     private static async Task UntilAsync(Func<bool> condition, string what)
