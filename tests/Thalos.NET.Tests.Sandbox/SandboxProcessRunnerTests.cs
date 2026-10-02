@@ -5,25 +5,34 @@ namespace Thalos.Tests.Sandbox;
 
 public sealed class SandboxProcessRunnerTests
 {
-    /// <summary>Red: in SandboxProcessRunner.Kill call process.Kill() without entireProcessTree, so the grandchild survives and the pid is still alive.</summary>
+    /// <summary>
+    /// The timeout runs on a fake clock, advanced only once the grandchild's pid file exists, so however slowly the
+    /// child starts under load, the tree is complete when it times out. Red 1: in SandboxProcessRunner.Kill call
+    /// process.Kill() without entireProcessTree, so the grandchild survives and the pid is still alive. Red 2: time the
+    /// run with CancelAfter on the system clock again; the advance then times nothing out and the 30-second bound fails.
+    /// </summary>
     [Fact]
     public async Task A_timed_out_process_tree_is_killed()
     {
         var dir = Directory.CreateTempSubdirectory("sandbox-runner").FullName;
         var pidFile = Path.Combine(dir, "grandchild.pid");
         var grandchildPid = 0;
+        var clock = new Microsoft.Extensions.Time.Testing.FakeTimeProvider();
+        // Far longer than any real wait here, so only the advance can time the run out.
+        var spec = SpawnGrandchild(pidFile, dir) with { Timeout = TimeSpan.FromMinutes(10) };
         try
         {
-            var run = new SandboxProcessRunner().RunAsync(SpawnGrandchild(pidFile, dir), CancellationToken.None);
-            var finished = await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(60)));
-            finished.Should().BeSameAs(run, "the runner must return after the timeout");
+            var run = new SandboxProcessRunner(clock).RunAsync(spec, CancellationToken.None);
+            grandchildPid = await GrandchildPidAsync(pidFile, run, TimeSpan.FromMinutes(2));
+            run.IsCompleted.Should().BeFalse("nothing times out before the clock is advanced");
+
+            clock.Advance(spec.Timeout + TimeSpan.FromSeconds(1));
+            var finished = await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(30)));
+            finished.Should().BeSameAs(run, "the runner must return once the timeout passes");
 
             var outcome = await run;
             outcome.TimedOut.Should().BeTrue();
             outcome.ExitCode.Should().BeNull();
-
-            File.Exists(pidFile).Should().BeTrue("the child must have started its grandchild before the timeout");
-            grandchildPid = int.Parse((await File.ReadAllTextAsync(pidFile)).Trim(), System.Globalization.CultureInfo.InvariantCulture);
             (await IsGoneWithin(grandchildPid, TimeSpan.FromSeconds(10))).Should().BeTrue("the grandchild must be killed with the tree");
         }
         finally
@@ -76,7 +85,7 @@ public sealed class SandboxProcessRunnerTests
     }
 
     /// <summary>
-    /// 20000 error lines then a summary line, with a 10000 character cap. Red: make OutputBuffer.ToString return the first
+    /// 2000 error lines then a summary line, with a 10000 character cap. Red: make OutputBuffer.ToString return the first
     /// max characters instead of the last, which turns the EndWith and newest-lines assertions red; count error lines from
     /// the retained text instead of as lines arrive, which turns the ErrorLineCount assertion red. The memory bound itself
     /// is asserted by <see cref="The_buffer_never_holds_more_than_twice_the_cap"/>, not here, because ToString trims on read.
@@ -84,10 +93,11 @@ public sealed class SandboxProcessRunnerTests
     [Fact]
     public async Task Output_beyond_the_cap_is_bounded_keeps_the_end_and_still_counts_dropped_errors()
     {
-        const int lines = 20000;
+        // About 40000 characters, four times the cap. The ten-minute limit is only a safety bound: the run takes seconds.
+        const int lines = 2000;
         var spec = OperatingSystem.IsWindows()
-            ? new ProcessSpec("cmd", ["/c", $"(for /L %i in (1,1,{lines}) do @echo f.cs: error E %i) & echo Passed!"], Path.GetTempPath(), TimeSpan.FromMinutes(2), MaxOutputChars: 10000)
-            : new ProcessSpec("sh", ["-c", $"i=1; while [ $i -le {lines} ]; do echo \"f.cs: error E $i\"; i=$((i+1)); done; echo Passed!"], Path.GetTempPath(), TimeSpan.FromMinutes(2), MaxOutputChars: 10000);
+            ? new ProcessSpec("cmd", ["/c", $"(for /L %i in (1,1,{lines}) do @echo f.cs: error E %i) & echo Passed!"], Path.GetTempPath(), TimeSpan.FromMinutes(10), MaxOutputChars: 10000)
+            : new ProcessSpec("sh", ["-c", $"i=1; while [ $i -le {lines} ]; do echo \"f.cs: error E $i\"; i=$((i+1)); done; echo Passed!"], Path.GetTempPath(), TimeSpan.FromMinutes(10), MaxOutputChars: 10000);
 
         var outcome = await new SandboxProcessRunner().RunAsync(spec, CancellationToken.None);
 
@@ -124,6 +134,34 @@ public sealed class SandboxProcessRunnerTests
             dir,
             TimeSpan.FromSeconds(10))
         : new ProcessSpec("sh", ["-c", $"sleep 60 & echo $! > '{pidFile}'; wait"], dir, TimeSpan.FromSeconds(3));
+
+    /// <summary>Waits for the pid file the child writes once the grandchild runs, failing if the run ends first or the limit passes.</summary>
+    private static async Task<int> GrandchildPidAsync(string pidFile, Task<ProcessOutcome> run, TimeSpan limit)
+    {
+        var waited = Stopwatch.StartNew();
+        while (waited.Elapsed < limit)
+        {
+            run.IsCompleted.Should().BeFalse("the run ended before its child started the grandchild");
+            if (File.Exists(pidFile))
+            {
+                try
+                {
+                    if (int.TryParse((await File.ReadAllTextAsync(pidFile)).Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var pid) && pid > 0)
+                    {
+                        return pid;
+                    }
+                }
+                catch (IOException)
+                {
+                    // Still being written.
+                }
+            }
+
+            await Task.Delay(100);
+        }
+
+        throw new TimeoutException($"the child did not start its grandchild within {limit}");
+    }
 
     private static async Task<bool> IsGoneWithin(int pid, TimeSpan limit)
     {

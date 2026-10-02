@@ -10,6 +10,21 @@ public sealed class SandboxProcessRunner : ISandboxProcessRunner
     /// <summary>How long to wait for output pipes to drain after the tree was killed, so a survivor holding a pipe cannot hang the caller.</summary>
     private static readonly TimeSpan DrainGrace = TimeSpan.FromSeconds(5);
 
+    private readonly TimeProvider _clock;
+
+    /// <summary>A runner whose timeouts run on the system clock.</summary>
+    public SandboxProcessRunner()
+        : this(TimeProvider.System)
+    {
+    }
+
+    /// <summary>A runner whose <see cref="ProcessSpec.Timeout"/> runs on <paramref name="clock"/>; tests pass a fake one.</summary>
+    internal SandboxProcessRunner(TimeProvider clock)
+    {
+        ArgumentNullException.ThrowIfNull(clock);
+        _clock = clock;
+    }
+
     /// <inheritdoc />
     public async Task<ProcessOutcome> RunAsync(ProcessSpec spec, CancellationToken ct)
     {
@@ -27,8 +42,8 @@ public sealed class SandboxProcessRunner : ISandboxProcessRunner
         }
 
         using var owned = process;
-        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        timeout.CancelAfter(spec.Timeout);
+        using var deadline = new CancellationTokenSource(spec.Timeout, _clock);
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, deadline.Token);
         try
         {
             await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
