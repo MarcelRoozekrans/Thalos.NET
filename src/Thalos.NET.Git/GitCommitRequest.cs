@@ -31,6 +31,13 @@ public sealed record GitCommitRequest
     /// committed; the file on disk is left as it is. An entry that is neither on disk nor tracked excludes nothing
     /// and is not an error.
     /// </summary>
+    /// <remarks>
+    /// With <see cref="CommitStagedIndex"/>, a path the host excludes because it writes that file itself must also be
+    /// protected from the staged change, for a sandboxed run by listing it in the sandbox's protected paths, so the
+    /// patch applier refuses a patch that touches it. Otherwise a change the patch made to it is dropped from this
+    /// commit but left on disk, and the host's later <see cref="Paths"/> commit of that file publishes the patch's
+    /// version under the host's message.
+    /// </remarks>
     public IReadOnlyList<string>? ExcludePaths { get; init; }
 
     /// <summary>

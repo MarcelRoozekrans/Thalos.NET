@@ -90,8 +90,11 @@ public sealed class GitPatchApplierTests : IDisposable
     /// What is committed is exactly the index the applier checked.
     /// </summary>
     /// <remarks>
+    /// The applier accepts the patch: Red: add run.sh to the applier's protected set in this test.
     /// Setup guard, the applier staged both changes: Red: drop the <c>add -f out.gen</c> or the
     /// <c>update-index --chmod=+x</c> from the patch.
+    /// The commit succeeds: Red: make <c>GitCliRunWorkspaceGit.ValidateRequest</c> refuse CommitStagedIndex
+    /// unconditionally.
     /// The commit's tree is the applier's index tree: Red: route CommitStagedIndex through the old reset-plus-add path,
     /// <c>if (!request.CommitStagedIndex)</c> made always true in <c>GitCliRunWorkspaceGit.StageAsync</c>.
     /// </remarks>

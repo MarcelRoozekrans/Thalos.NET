@@ -130,7 +130,10 @@ public sealed partial class SandboxRunWorkspaceProvider
     /// <see cref="Thalos.Git.GitCommitRequest.ExcludePaths"/>. A commit that stages from disk again would drop an added
     /// file the worktree's <c>.gitignore</c> matches and, under <c>core.fileMode=false</c>, a mode change. A file the host
     /// writes into the worktree afterwards, such as standing instructions, is not staged by that commit; a later
-    /// path-scoped commit can take it.
+    /// path-scoped commit can take it. List such a file in <see cref="SandboxOptions.ProtectedPaths"/> too, so the
+    /// applier refuses a patch that touches it: an excluded path the patch changed is otherwise dropped from the first
+    /// commit but left on disk, and the host's path-scoped commit then publishes the patch's version under the host's
+    /// message.
     /// </para>
     /// <para>
     /// <b>Idempotent.</b> A worktree this call finished before is returned as it is, so a file written in it since, such

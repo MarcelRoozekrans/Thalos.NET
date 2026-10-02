@@ -21,8 +21,9 @@ public interface IRunWorkspaceGit
     /// disk is not absent: its deletion is staged. Any other git failure still fails the call.
     /// With <see cref="GitCommitRequest.CommitStagedIndex"/>, nothing is staged from disk: the index is committed as it
     /// stands, less <see cref="GitCommitRequest.ExcludePaths"/>, and <see cref="GitCommitRequest.Paths"/> must be
-    /// <see langword="null"/>, or the call fails with <see cref="AgentErrorCode.Validation"/>. A sandboxed run's
-    /// publish worktree must be committed this way.
+    /// <see langword="null"/>, or the call fails with <see cref="AgentErrorCode.Validation"/>. The run's change in a
+    /// sandboxed run's publish worktree must be committed this way; a file the host writes there afterwards is
+    /// committed with <see cref="GitCommitRequest.Paths"/>.
     /// </summary>
     /// <param name="workspace">The run's worktree; the commit runs in <see cref="RunWorkspace.Root"/>.</param>
     /// <param name="request">The commit's message, identity and path scope.</param>

@@ -743,7 +743,10 @@ resets the index and restages the worktree from disk with `git add -A`, which is
 silently loses part of a sandboxed run's change: a file the patch adds that the worktree's `.gitignore` matches, and,
 under `core.fileMode=false` (the Windows default), a mode change. What was published would then differ from what was
 checked. A file the host writes into the publish worktree itself, such as standing instructions, is not part of that
-commit; exclude it there and commit it afterwards with `Paths`.
+commit; exclude it there and commit it afterwards with `Paths`. List that file in `SandboxOptions.ProtectedPaths` as
+well, so `GitPatchApplier` refuses a patch that touches it. Otherwise an excluded path the patch changed is dropped
+from the first commit but left on disk, and the host's `Paths` commit then publishes the patch's version under the
+host's message.
 
 ```csharp
 var ws = (await handoff.CheckoutForPublishAsync(runId, ct)).Value;
@@ -752,7 +755,7 @@ await git.CommitAsync(ws, new GitCommitRequest
     Message = "Run changes",
     Author = author,
     CommitStagedIndex = true,          // the index the S5 check passed, as it stands
-    ExcludePaths = ["AGENT.md"],
+    ExcludePaths = ["AGENT.md"],       // also listed in SandboxOptions.ProtectedPaths
 }, ct);
 await git.CommitAsync(ws, new GitCommitRequest { Message = "Standing instructions", Author = author, Paths = ["AGENT.md"] }, ct);
 await git.PushAsync(ws, ct);

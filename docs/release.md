@@ -163,7 +163,8 @@ returns with `GitCommitRequest.CommitStagedIndex = true`, and leave `Paths` null
   It now replaces `IRunWorkspaceGit` with a `GitCliRunWorkspaceGit` over the same `<DataRoot>/publish` options as the
   mirror, the patch applier and the publish worktrees, using the registered `IGitCredentialSource`. A host that
   registered its own `IRunWorkspaceGit` before calling `UseSandboxRunWorkspaces` must register it after the call
-  instead, since the call replaces it.
+  instead, since the call replaces it. A host that registered its own only to work around #250 can now remove that
+  registration.
 
 **Breaking changes accumulated across the workflow-engine phase (2.2, Part A):**
 

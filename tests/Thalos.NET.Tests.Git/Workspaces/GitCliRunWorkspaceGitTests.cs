@@ -472,6 +472,7 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
     /// <remarks>
     /// Setup guard, the applied index holds the mode change: Red: drop the <c>update-index --chmod=+x</c> from the patch.
     /// Setup guard, the applied index holds out.gen: Red: drop the <c>add -f out.gen</c> from the patch.
+    /// The commit succeeds: Red: make <c>ValidateRequest</c> refuse CommitStagedIndex unconditionally.
     /// The excluded host file is not in the commit: Red: drop the ExcludePaths unstaging from the CommitStagedIndex path
     /// of <c>StageAsync</c>.
     /// The commit's tree is the applier's index tree: Red: route CommitStagedIndex through the old reset-plus-add path,
@@ -522,8 +523,9 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
     /// <c>HEAD</c>'s unchanged sha, and the changes stay unstaged.
     /// </summary>
     /// <remarks>
-    /// Every assertion: Red: route CommitStagedIndex through the old reset-plus-add path; <c>add -A</c> stages and
-    /// commits tracked.txt and other.cs.
+    /// The call succeeds: Red: make <c>ValidateRequest</c> refuse CommitStagedIndex unconditionally.
+    /// Every assertion in the scope after it: Red: route CommitStagedIndex through the old reset-plus-add path;
+    /// <c>add -A</c> stages and commits tracked.txt and other.cs. That change leaves the success line green.
     /// </remarks>
     [Fact]
     public async Task A_staged_index_commit_with_nothing_staged_commits_nothing_and_stages_nothing()
