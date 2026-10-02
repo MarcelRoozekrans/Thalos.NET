@@ -207,15 +207,75 @@ public sealed class DockerSandboxOptionsTests
     [Fact]
     public async Task A_windows_container_engine_is_refused_before_anything_is_created()
     {
-        var paths = new List<string>();
-        using var listener = new System.Net.HttpListener();
-        var port = System.Net.Sockets.TcpListener.Create(0);
-        port.Start();
-        var number = ((System.Net.IPEndPoint)port.LocalEndpoint).Port;
-        port.Stop();
-        listener.Prefixes.Add($"http://127.0.0.1:{number}/");
-        listener.Start();
-        var serving = Task.Run(async () =>
+        await using var engine = new WindowsEngineStub();
+        using var docker = new global::Docker.DotNet.DockerClientBuilder().WithEndpoint(engine.Options.Endpoint!).WithTimeout(engine.Options.EngineTimeout).Build();
+        using var infrastructure = new DockerSandboxInfrastructure(docker, engine.Options, TimeProvider.System, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+
+        var result = await infrastructure.EnsureAsync(CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(30));
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Message.Should().Be("run sandboxes need a Linux container engine; this engine runs windows containers");
+        engine.Paths.Should().OnlyContain(p => p.EndsWith("/info", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// Get and list go through the same check: they answer null and empty, and ask the engine nothing but its info.
+    /// Red: have <c>ListAsync</c> or <c>GetAsync</c> skip <c>EnsureAsync</c>.
+    /// </summary>
+    [Fact]
+    public async Task Listing_and_getting_on_a_windows_container_engine_find_nothing_and_ask_only_for_info()
+    {
+        await using var engine = new WindowsEngineStub();
+        await using var runtime = new DockerSandboxRuntime(engine.Options, TimeProvider.System, Microsoft.Extensions.Logging.Abstractions.NullLogger<DockerSandboxRuntime>.Instance);
+
+        var listed = await runtime.ListAsync(CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(30));
+        var got = await runtime.GetAsync(new string('a', 32), CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(30));
+
+        listed.Should().BeEmpty();
+        got.Should().BeNull();
+        engine.Paths.Should().NotBeEmpty().And.OnlyContain(p => p.EndsWith("/info", StringComparison.Ordinal));
+    }
+
+    /// <summary>A local HTTP engine that answers every call as a Windows-container engine and records the paths asked.</summary>
+    private sealed class WindowsEngineStub : IAsyncDisposable
+    {
+        private readonly System.Net.HttpListener listener = new();
+        private readonly Task serving;
+        private readonly List<string> paths = [];
+
+        public WindowsEngineStub()
+        {
+            var probe = System.Net.Sockets.TcpListener.Create(0);
+            probe.Start();
+            var port = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+            probe.Stop();
+            listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+            listener.Start();
+            Options = new DockerSandboxOptions { Endpoint = new Uri($"http://127.0.0.1:{port}"), EngineTimeout = TimeSpan.FromSeconds(5) };
+            serving = Task.Run(ServeAsync);
+        }
+
+        public DockerSandboxOptions Options { get; }
+
+        public IReadOnlyList<string> Paths
+        {
+            get
+            {
+                lock (paths)
+                {
+                    return [.. paths];
+                }
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            listener.Stop();
+            await serving;
+            listener.Close();
+        }
+
+        private async Task ServeAsync()
         {
             try
             {
@@ -237,18 +297,7 @@ public sealed class DockerSandboxOptionsTests
             {
                 // the listener stopped
             }
-        });
-        var options = new DockerSandboxOptions { Endpoint = new Uri($"http://127.0.0.1:{number}"), EngineTimeout = TimeSpan.FromSeconds(5) };
-        using var docker = new global::Docker.DotNet.DockerClientBuilder().WithEndpoint(options.Endpoint).WithTimeout(options.EngineTimeout).Build();
-        using var infrastructure = new DockerSandboxInfrastructure(docker, options, TimeProvider.System, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
-
-        var result = await infrastructure.EnsureAsync(CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(30));
-
-        listener.Stop();
-        await serving;
-        result.IsFailure.Should().BeTrue();
-        result.Error.Message.Should().Be("run sandboxes need a Linux container engine; this engine runs windows containers");
-        paths.Should().OnlyContain(p => p.EndsWith("/info", StringComparison.Ordinal));
+        }
     }
 
     /// <summary>Red: never remove an entry, or release the gate without leaving.</summary>

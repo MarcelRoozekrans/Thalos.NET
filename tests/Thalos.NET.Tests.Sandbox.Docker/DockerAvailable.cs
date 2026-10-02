@@ -14,7 +14,7 @@ internal static class DockerAvailable
     public static bool Value => Probe.Value;
 
     /// <summary>The reason to skip, for messages: the engine is missing or is not a Linux container engine.</summary>
-    public const string SkipReason = "Docker engine is not a Linux container engine";
+    public const string SkipReason = "no Docker engine running Linux containers";
 
     private static bool ProbeEngine()
     {
