@@ -14,7 +14,6 @@
     <PackageReference Include="ZeroAlloc.Mediator" />
     <PackageReference Include="ZeroAlloc.Authorization" />
     <PackageReference Include="ZeroAlloc.Validation" />
-    <PackageReference Include="ZeroAlloc.Validation.Generator" PrivateAssets="all" />
     <PackageReference Include="ZeroAlloc.Telemetry" />
     <PackageReference Include="Microsoft.Extensions.AI.Abstractions" />
   </ItemGroup>
