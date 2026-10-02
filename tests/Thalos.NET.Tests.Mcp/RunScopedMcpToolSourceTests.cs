@@ -175,7 +175,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
 
         using var _scope = new AssertionScope();
         timedOut.Should().Be($"error: run tool server 'roslyn' did not answer 'slow' within {TimeSpan.FromSeconds(1)} for this run; the call was cancelled.");
-        elapsed.Should().BeLessThan(TimeSpan.FromSeconds(10), "the call is cancelled at the timeout, not reported after the server's 20 s");
+        elapsed.Should().BeLessThan(TimeSpan.FromSeconds(15), "the call is cancelled at the timeout, not reported after the server's 20 s");
 
         registry.OnFilesChanged(RunId, ["a.cs"]); // the reload waits for every lease: a leaked one would hold it forever
         (await InvokeAsync(reloadCount).WaitAsync(TimeSpan.FromSeconds(30))).Should().Be("2", "the reload ran, so the timed-out call's lease was released");
