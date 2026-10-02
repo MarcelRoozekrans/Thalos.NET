@@ -6,7 +6,7 @@ namespace Thalos.Sandbox.Host;
 /// <summary>
 /// Exports the run's changes as one binary patch against the imported commit: <c>git add -A</c>, then
 /// <c>git diff --cached --binary --full-index &lt;commit&gt;</c>. An empty patch means no change. <c>bin</c> and <c>obj</c>
-/// directories at any depth are never staged, whatever <c>.gitignore</c> says, and <see cref="RepoConfigGuard"/> checks the
+/// directories at any depth are never staged nor diffed, whatever <c>.gitignore</c> or an index agent code wrote says, and <see cref="RepoConfigGuard"/> checks the
 /// repository's config before each git command, because agent-run code can write it. The trusted side applies
 /// it to its own clean worktree with <c>GitPatchApplier</c>, which treats every byte of it as adversarial; nothing here
 /// is a control.
@@ -52,7 +52,7 @@ internal sealed class ExportService(SandboxSettings settings, GitCli git, LocalR
                 return Result<string, AgentError>.Failure(AgentError.ProviderError("Export refused.", refused));
             }
 
-            var staged = await git.RunAsync(workspace.Root, ["add", "-A", "--", ".", .. BuildOutputExcludes], null, null, ct).ConfigureAwait(false);
+            var staged = await git.RunAsync(workspace.Root, ["add", "-A", "--", ".", .. BuildOutputExcludes], RepoConfigGuard.CommandConfig, null, ct).ConfigureAwait(false);
             if (!staged.Succeeded)
             {
                 return Failed("git add", staged, patch);
@@ -65,8 +65,8 @@ internal sealed class ExportService(SandboxSettings settings, GitCli git, LocalR
 
             var diffed = await git.RunAsync(
                 workspace.Root,
-                ["diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", $"--output={patch}", commit],
-                null,
+                ["diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", $"--output={patch}", commit, "--", ".", .. BuildOutputExcludes],
+                RepoConfigGuard.CommandConfig,
                 null,
                 ct).ConfigureAwait(false);
             return diffed.Succeeded ? Result<string, AgentError>.Success(patch) : Failed("git diff", diffed, patch);

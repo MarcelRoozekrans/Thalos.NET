@@ -5,6 +5,7 @@ using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Thalos.Workspaces;
 using ZeroAlloc.Authorization;
+using ZeroAlloc.Results;
 
 namespace Thalos.Sandbox;
 
@@ -101,20 +102,27 @@ public sealed partial class SandboxTools(IRunWorkspaceProvider workspaces, ISand
             return await RunInAsync(workspace.Root, TargetOf(workspace)).ConfigureAwait(false);
         }
 
-        ScratchCopy copy;
-        try
+        Result<ScratchCopy, AgentError> created;
+        using (var copyTimeout = CancellationTokenSource.CreateLinkedTokenSource(ct))
         {
-            copy = ScratchCopy.Create(workspace.Root, scratchRoot);
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-        {
-            return $"error: could not copy the workspace to run in: {ex.Message}";
+            copyTimeout.CancelAfter(timeout);
+            try
+            {
+                created = await ScratchCopy.CreateAsync(workspace.Root, scratchRoot, options.ScratchMaxBytes, copyTimeout.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+            {
+                return $"error: copying the workspace to run in timed out after {timeout:c}";
+            }
         }
 
-        using (copy)
+        if (created.IsFailure)
         {
-            return await RunInAsync(copy.Root, copy.Map(workspace.Root, TargetOf(workspace))).ConfigureAwait(false);
+            return $"error: could not copy the workspace to run in: {created.Error.Message}";
         }
+
+        using var copy = created.Value;
+        return await RunInAsync(copy.Root, copy.Map(workspace.Root, TargetOf(workspace))).ConfigureAwait(false);
 
         async Task<string> RunInAsync(string directory, string target)
         {

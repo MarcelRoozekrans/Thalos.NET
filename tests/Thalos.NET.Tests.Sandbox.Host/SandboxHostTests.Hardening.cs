@@ -131,20 +131,126 @@ public sealed partial class SandboxHostTests
     }
 
     /// <summary>
-    /// The clone's real keys pass, a planted one does not. Red: make RepoConfigGuard.IsAllowed accept every key.
+    /// What clone writes, and GitCli's own -c flags, pass; a planted key, or any key from another scope, does not.
+    /// Red 1: make RepoConfigGuard.IsAllowed accept every local key. Red 2: accept every scope.
     /// </summary>
     [Theory]
-    [InlineData("core.repositoryformatversion", true)]
-    [InlineData("remote.origin.fetch", true)]
-    [InlineData("branch.run/x.merge", true)]
-    [InlineData("filter.x.clean", false)]
-    [InlineData("include.path", false)]
-    [InlineData("core.fsmonitor", false)]
-    [InlineData("diff.external", false)]
-    [InlineData("extensions.worktreeconfig", false)]
-    [InlineData("core.hookspath", false)]
-    public void The_config_allow_list_holds_only_what_clone_writes(string key, bool allowed) =>
-        RepoConfigGuard.IsAllowed(key).Should().Be(allowed);
+    [InlineData("local", "core.repositoryformatversion", true)]
+    [InlineData("local", "remote.origin.fetch", true)]
+    [InlineData("local", "branch.run/x.merge", true)]
+    [InlineData("local", "filter.x.clean", false)]
+    [InlineData("local", "include.path", false)]
+    [InlineData("local", "core.fsmonitor", false)]
+    [InlineData("local", "diff.external", false)]
+    [InlineData("local", "extensions.worktreeconfig", false)]
+    [InlineData("local", "core.hookspath", false)]
+    [InlineData("command", "core.hookspath", true)]
+    [InlineData("command", "protocol.file.allow", true)]
+    [InlineData("command", "filter.x.clean", false)]
+    [InlineData("global", "core.repositoryformatversion", false)]
+    [InlineData("global", "filter.x.clean", false)]
+    [InlineData("system", "core.bare", false)]
+    [InlineData("worktree", "core.bare", false)]
+    public void The_config_allow_list_holds_only_what_clone_and_GitCli_write(string scope, string key, bool allowed) =>
+        RepoConfigGuard.IsAllowed(scope, key).Should().Be(allowed);
+
+    /// <summary>
+    /// GitCli's global config file lives on the work volume, writable by agent code like the repository's own config.
+    /// Red: list only the local config in RepoConfigGuard.CheckAsync (add --local); git add then runs the planted
+    /// global filter, which writes the marker.
+    /// </summary>
+    [Fact]
+    public async Task Export_refuses_a_filter_planted_in_the_global_git_config()
+    {
+        await using var host = await HostHarness.StartAsync(WorkRoot());
+        await host.ImportAndSettleAsync(Remote(), MirrorData);
+        var marker = Path.Combine(host.WorkRoot, "filter-ran.txt");
+        var global = Path.Combine(host.WorkRoot, "git", ".git-isolation", "global.config");
+        File.Exists(global).Should().BeTrue("the planted file must be the one GitCli points GIT_CONFIG_GLOBAL at");
+        File.AppendAllText(global, "[filter \"x\"]\n\tclean = echo ran > ../filter-ran.txt; cat\n");
+        File.WriteAllText(Path.Combine(host.RepoRoot, ".gitattributes"), "* filter=x\n");
+
+        using var response = await host.SendAsync(HttpMethod.Post, "/control/export");
+
+        response.StatusCode.Should().Be(HttpStatusCode.InternalServerError);
+        (await response.Content.ReadAsStringAsync()).Should().Contain("global key 'filter.x.clean'");
+        File.Exists(marker).Should().BeFalse("no git command ran over the planted config");
+    }
+
+    /// <summary>
+    /// GitCli's hooks directory is on the work volume too; the sandbox's git points core.hooksPath at /dev/null instead.
+    /// Red: drop core.hooksPath=/dev/null from RepoConfigGuard.CommandConfig; the import's checkout then runs the
+    /// planted post-checkout hook, which writes the marker.
+    /// </summary>
+    [Fact]
+    public async Task A_hook_planted_in_the_isolation_hooks_directory_never_runs()
+    {
+        await using var host = await HostHarness.StartAsync(WorkRoot());
+        var remote = Remote();
+        var (bundle, commit) = await HostHarness.BundleAsync(remote, MirrorData);
+        using (var refused = await host.ImportAsync(bundle, "a..b", commit))
+        {
+            refused.StatusCode.Should().Be(HttpStatusCode.BadRequest, "a refused import still starts GitCli, which creates its hooks directory");
+        }
+
+        var hooks = Path.Combine(host.WorkRoot, "git", ".git-isolation", "hooks");
+        Directory.Exists(hooks).Should().BeTrue("the planted hook must be in the directory GitCli points core.hooksPath at");
+        var hook = Path.Combine(hooks, "post-checkout");
+        File.WriteAllText(hook, "#!/bin/sh\necho ran > ../hook-ran.txt\n");
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(hook, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        using (var accepted = await host.ImportAsync(bundle, "run/x", commit))
+        {
+            accepted.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        }
+
+        (await host.WaitSettledAsync()).Imported.Should().BeTrue();
+        File.Exists(Path.Combine(host.WorkRoot, "hook-ran.txt")).Should().BeFalse();
+    }
+
+    /// <summary>Red: drop the bin and obj exclude pathspecs from ExportService's git diff; the staged obj file is then in the patch.</summary>
+    [Fact]
+    public async Task Export_leaves_out_an_obj_file_agent_code_staged_directly()
+    {
+        await using var host = await HostHarness.StartAsync(WorkRoot());
+        await host.ImportAndSettleAsync(Remote(), MirrorData);
+        Directory.CreateDirectory(Path.Combine(host.RepoRoot, "Lib", "obj"));
+        File.WriteAllText(Path.Combine(host.RepoRoot, "Lib", "obj", "staged.json"), "{}\n");
+        File.WriteAllText(Path.Combine(host.RepoRoot, "Keep.cs"), "class Keep { }\n");
+        LocalGitRemote.RunGit(host.RepoRoot, "add", "Lib/obj/staged.json");
+
+        var patch = Encoding.UTF8.GetString(await ExportAsync(host));
+
+        var files = patch.Split('\n').Where(l => l.StartsWith("diff --git ", StringComparison.Ordinal)).ToList();
+        files.Should().ContainSingle().Which.Should().Be("diff --git a/Keep.cs b/Keep.cs");
+    }
+
+    /// <summary>
+    /// A copy that cannot be made, or not in time, is an error result, not a fault. Red 1: in SandboxTools.RunAsync, run in
+    /// the worktree when the copy fails; the build then answers exit 0. Red 2: drop the copy's timeout; the copy then
+    /// completes and the build answers exit 0.
+    /// </summary>
+    [Fact]
+    public async Task A_copy_that_fails_or_times_out_is_an_error_result()
+    {
+        await using var host = await HostHarness.StartAsync(WorkRoot());
+        await host.ImportAndSettleAsync(Remote(), MirrorData);
+        var options = host.Services.GetRequiredService<SandboxToolOptions>();
+
+        options.ScratchMaxBytes = 1;
+        var oversized = await host.CallAsync("sandbox", "build");
+        options.ScratchMaxBytes = long.MaxValue;
+        options.BuildTimeout = TimeSpan.FromTicks(1);
+        var timedOut = await host.CallAsync("sandbox", "build");
+
+        oversized.Should().StartWith("error: could not copy the workspace to run in: the workspace holds more than 1 bytes");
+        timedOut.Should().StartWith("error: copying the workspace to run in timed out");
+        host.Runner.Specs.Should().NotContain(s => s.Arguments[0] == "build", "no build ran without its copy");
+        Directory.EnumerateFileSystemEntries(Path.Combine(host.WorkRoot, "scratch")).Should().BeEmpty();
+    }
 
     /// <summary>
     /// A symlink in the bundle arrives as a regular file holding the target's path. Meaningful on Linux, where real links

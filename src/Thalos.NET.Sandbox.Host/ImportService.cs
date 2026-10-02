@@ -61,7 +61,6 @@ internal sealed partial class ImportService(
     /// <summary>The largest bundle accepted: 512 MiB.</summary>
     public const long MaxBundleBytes = 512L * 1024 * 1024;
 
-    private static readonly string[] CheckoutConfig = ["core.symlinks=false"];
 
     private readonly CancellationTokenSource _stopping = new();
     private int _claimed;
@@ -202,7 +201,7 @@ internal sealed partial class ImportService(
     {
         var repo = settings.RepoRoot;
         Directory.CreateDirectory(repo);
-        var cloned = await git.RunAsync(settings.WorkRoot, ["clone", "--no-checkout", "--config", "core.symlinks=false", "--", bundle, repo], CheckoutConfig, null, ct).ConfigureAwait(false);
+        var cloned = await git.RunAsync(settings.WorkRoot, ["clone", "--no-checkout", "--config", "core.symlinks=false", "--", bundle, repo], RepoConfigGuard.CommandConfig, null, ct).ConfigureAwait(false);
         if (!cloned.Succeeded)
         {
             return Describe("git clone", cloned);
@@ -213,7 +212,7 @@ internal sealed partial class ImportService(
             return refused;
         }
 
-        var checkedOut = await git.RunAsync(repo, ["checkout", "-b", branch, commit], CheckoutConfig, null, ct).ConfigureAwait(false);
+        var checkedOut = await git.RunAsync(repo, ["checkout", "-b", branch, commit], RepoConfigGuard.CommandConfig, null, ct).ConfigureAwait(false);
         if (!checkedOut.Succeeded)
         {
             return Describe("git checkout", checkedOut);

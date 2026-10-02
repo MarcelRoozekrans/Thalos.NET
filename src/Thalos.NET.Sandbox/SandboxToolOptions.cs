@@ -19,6 +19,9 @@ public sealed class SandboxToolOptions
     /// </summary>
     public string? ScratchRoot { get; set; }
 
+    /// <summary>The most bytes of regular files the scratch copy holds; a larger workspace makes the tool answer with an error. Default 4 GiB.</summary>
+    public long ScratchMaxBytes { get; set; } = 4L * 1024 * 1024 * 1024;
+
     /// <summary>How many bytes of the end of the output a tool result carries.</summary>
     public int OutputTailBytes { get; set; } = 16 * 1024;
 }

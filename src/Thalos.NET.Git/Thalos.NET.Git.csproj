@@ -14,5 +14,7 @@
     <InternalsVisibleTo Include="Thalos.NET.Tests.Git" />
     <!-- The sandbox host runs its import and export git commands through GitCli's isolation rather than a second copy of it. -->
     <InternalsVisibleTo Include="Thalos.NET.Sandbox.Host" />
+    <!-- The sandbox's scratch copy reads a file's type through UnixLinkCount's statx, to skip FIFOs, sockets and devices. -->
+    <InternalsVisibleTo Include="Thalos.NET.Sandbox" />
   </ItemGroup>
 </Project>
