@@ -238,7 +238,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
             .Should().ThrowAsync<DockerContainerNotFoundException>();
         await FluentActions.Awaiting(() => fixture.Docker.Volumes.InspectAsync(DockerSandboxRuntime.VolumeName(handle.SandboxId), Ct))
             .Should().ThrowAsync<DockerApiException>().Where(e => e.StatusCode == HttpStatusCode.NotFound);
-        (await fixture.Runtime.GetAsync(handle.SandboxId, Ct)).Should().BeNull();
+        (await fixture.Runtime.GetAsync(handle.SandboxId, Ct))!.State.Should().Be(SandboxState.Missing);
 
         (await fixture.Runtime.DeleteAsync(handle.SandboxId, Ct)).IsSuccess.Should().BeTrue();
     }
@@ -545,6 +545,85 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
         var result = await runtime.CreateAsync(spec, Ct);
 
         result.Error.Code.Should().Be(AgentErrorCode.Validation);
+    }
+
+    /// <summary>
+    /// R35. Red: in GetAsync, return null when the engine answers 404, as before; a deleted container is not reported
+    /// missing. Red 2: give the missing handle Guid.Empty as its run; the run id differs, and a park would refuse it.
+    /// </summary>
+    [SkippableFact]
+    public async Task A_container_deleted_behind_the_runtimes_back_is_reported_missing_with_its_run()
+    {
+        Skip.IfNot(DockerAvailable.Value);
+        var spec = DockerSandboxFixture.Spec(fixture.CurlImage);
+        var handle = await CreateAsync(spec);
+        await fixture.Docker.Containers.RemoveContainerAsync(DockerSandboxRuntime.ContainerName(handle.SandboxId), new ContainerRemoveParameters { Force = true }, Ct);
+
+        var found = await fixture.Runtime.GetAsync(handle.SandboxId, Ct);
+
+        found.Should().NotBeNull("the engine's 404 is a verdict, not a failure to ask");
+        found!.State.Should().Be(SandboxState.Missing);
+        found.RunId.Should().Be(spec.RunId);
+        found.SandboxId.Should().Be(handle.SandboxId);
+        (await fixture.Runtime.DeleteAsync(handle.SandboxId, Ct)).IsSuccess.Should().BeTrue("its volume is still there to delete");
+    }
+
+    /// <summary>
+    /// R36. Red: in StartAsync, skip StartContainerAsync; the sandbox stays exited. Red 2: in StartAsync, fail a container
+    /// that is already running; the second start fails.
+    /// </summary>
+    [SkippableFact]
+    public async Task An_exited_sandbox_is_started_again_and_a_running_one_is_left_alone()
+    {
+        Skip.IfNot(DockerAvailable.Value);
+        var handle = await CreateAsync(DockerSandboxFixture.Spec(fixture.CurlImage));
+        await fixture.Docker.Containers.StopContainerAsync(DockerSandboxRuntime.ContainerName(handle.SandboxId), new ContainerStopParameters { WaitBeforeKillSeconds = 1 }, Ct);
+        var exited = await fixture.Runtime.GetAsync(handle.SandboxId, Ct);
+
+        var started = await fixture.Runtime.StartAsync(handle.SandboxId, Ct);
+        var running = await fixture.Runtime.GetAsync(handle.SandboxId, Ct);
+        var again = await fixture.Runtime.StartAsync(handle.SandboxId, Ct);
+
+        exited!.State.Should().Be(SandboxState.Exited);
+        started.IsSuccess.Should().BeTrue(started.IsFailure ? started.Error.ToString() : "");
+        running!.State.Should().Be(SandboxState.Running);
+        running.BaseAddress.Should().Be(handle.BaseAddress, "the gateway address does not change with a restart");
+        again.IsSuccess.Should().BeTrue(again.IsFailure ? again.Error.ToString() : "");
+    }
+
+    /// <summary>
+    /// R36. Red: in StartAsync, drop the ownership check; the other network's container is started. Red 2: treat an
+    /// absent container as started; the start of a sandbox that does not exist succeeds.
+    /// </summary>
+    [SkippableFact]
+    public async Task Start_refuses_a_container_of_another_network_and_one_that_does_not_exist()
+    {
+        Skip.IfNot(DockerAvailable.Value);
+        var runId = Guid.NewGuid();
+        var sandboxId = runId.ToString("N");
+        await fixture.Docker.Containers.CreateContainerAsync(new CreateContainerParameters
+        {
+            Name = DockerSandboxRuntime.ContainerName(sandboxId),
+            Image = fixture.CurlImage,
+            Labels = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["thalos.sandbox"] = "true",
+                ["thalos.sandbox.role"] = "run",
+                ["thalos.run_id"] = runId.ToString("D"),
+                ["thalos.sandbox.network"] = $"{fixture.Network}-elsewhere",
+                [DockerSandboxFixture.TestLabel] = fixture.Suffix,
+            },
+        }, Ct);
+
+        var foreign = await fixture.Runtime.StartAsync(sandboxId, Ct);
+        var absent = await fixture.Runtime.StartAsync(Guid.NewGuid().ToString("N"), Ct);
+        var inspect = await fixture.Docker.Containers.InspectContainerAsync(DockerSandboxRuntime.ContainerName(sandboxId), Ct);
+
+        foreign.IsFailure.Should().BeTrue();
+        foreign.Error.Code.Should().Be(AgentErrorCode.Validation);
+        inspect.State!.Running.Should().BeFalse("a container this runtime does not own is never started");
+        absent.IsFailure.Should().BeTrue();
+        absent.Error.Message.Should().Contain("does not exist");
     }
 
     /// <summary>Creates a sandbox, failing with the runtime's own error rather than a bare Value access.</summary>

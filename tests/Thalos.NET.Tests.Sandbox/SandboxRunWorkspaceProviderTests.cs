@@ -407,8 +407,8 @@ public sealed class SandboxRunWorkspaceProviderTests : IAsyncLifetime
         var small = Path.Combine(_temp, "small.patch");
         var large = Path.Combine(_temp, "large.patch");
 
-        var refused = await control.ExportToFileAsync(handle, token, small, 100, CancellationToken.None);
-        var stored = await control.ExportToFileAsync(handle, token, large, 1024 * 1024, CancellationToken.None);
+        var refused = await control.ExportToFileAsync(handle, token, _remote.HeadOf("main"), small, 100, CancellationToken.None);
+        var stored = await control.ExportToFileAsync(handle, token, _remote.HeadOf("main"), large, 1024 * 1024, CancellationToken.None);
 
         using var _ = new AssertionScope();
         refused.IsFailure.Should().BeTrue();

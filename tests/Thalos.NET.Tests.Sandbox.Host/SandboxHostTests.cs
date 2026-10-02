@@ -1,4 +1,5 @@
 using System.Net;
+using AwesomeAssertions.Execution;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol;
@@ -399,6 +400,38 @@ public sealed partial class SandboxHostTests : IDisposable
         }
 
         Directory.Delete(_temp, recursive: true);
+    }
+
+    /// <summary>
+    /// R36. Red: in ExportService.Target, refuse when nothing is imported in memory, whatever commit is named; the
+    /// restarted host answers 409. Red 2: drop the check that a named commit is the imported one; the first host
+    /// exports against the wrong commit and answers 500 from git instead of 409.
+    /// </summary>
+    [Fact]
+    public async Task After_a_restart_export_diffs_against_the_commit_the_trusted_side_names()
+    {
+        var workRoot = WorkRoot();
+        var remote = Remote();
+        string commit;
+        await using (var first = await HostHarness.StartAsync(workRoot))
+        {
+            commit = (await first.ImportAndSettleAsync(remote, MirrorData)).Commit;
+            using var wrong = await first.SendAsync(HttpMethod.Post, $"/control/export?commit={new string('a', 40)}");
+            wrong.StatusCode.Should().Be(HttpStatusCode.Conflict, "a named commit must be the imported one");
+            await File.WriteAllTextAsync(Path.Combine(first.RepoRoot, "A.cs"), "class Restarted { }\n");
+        }
+
+        await using var restarted = await HostHarness.StartAsync(workRoot);
+        using var unnamed = await restarted.SendAsync(HttpMethod.Post, "/control/export");
+        using var malformed = await restarted.SendAsync(HttpMethod.Post, "/control/export?commit=HEAD");
+        using var named = await restarted.SendAsync(HttpMethod.Post, $"/control/export?commit={commit}");
+        var patch = await named.Content.ReadAsStringAsync();
+
+        using var _ = new AssertionScope();
+        unnamed.StatusCode.Should().Be(HttpStatusCode.Conflict, "nothing is imported in the restarted host's memory");
+        malformed.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        named.StatusCode.Should().Be(HttpStatusCode.OK, patch);
+        patch.Should().Contain("+class Restarted { }").And.Contain("-class A { }");
     }
 
     private static async Task<string[]> ToolNamesAsync(HostHarness host, string source)

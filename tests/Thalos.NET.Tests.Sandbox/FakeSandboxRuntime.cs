@@ -8,10 +8,14 @@ namespace Thalos.Tests.Sandbox;
 /// An <see cref="ISandboxRuntime"/> whose every sandbox is a real <see cref="LoopbackSandbox"/> host on loopback Kestrel,
 /// started with the spec's run id and token and a work root of its own, so the provider talks to a genuine sandbox host.
 /// A test can also seed a handle with no host, mark a sandbox exited, fail a create, or make the list come back empty.
+/// Like the Docker runtime, <see cref="GetAsync"/> answers <see cref="SandboxState.Missing"/> for a sandbox it does not
+/// have, and null only while <see cref="Unreachable"/>. A start of an exited sandbox runs a new host on its work root, as
+/// a restarted container runs its host again on its volume, with nothing of the old host's memory.
 /// </summary>
 internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISandboxRuntime, IAsyncDisposable
 {
     private readonly ConcurrentDictionary<string, Entry> _sandboxes = new(StringComparer.Ordinal);
+    private readonly ConcurrentQueue<LoopbackSandbox> _stopped = new();
     private int _created;
 
     /// <summary>Every spec the provider asked to create, in order.</summary>
@@ -32,6 +36,12 @@ internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISan
     /// <summary>When set, <see cref="GetAsync"/> answers null for every sandbox, as the runtime does when the engine cannot be asked.</summary>
     public bool Unreachable { get; set; }
 
+    /// <summary>Every sandbox id started again, in order.</summary>
+    public ConcurrentQueue<string> Started { get; } = new();
+
+    /// <summary>When set, a start fails with this error and starts nothing.</summary>
+    public AgentError? StartFailure { get; set; }
+
     /// <summary>When set, a delete fails with this error and deletes nothing.</summary>
     public AgentError? DeleteFailure { get; set; }
 
@@ -47,20 +57,19 @@ internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISan
     /// <summary>The host of a sandbox, so a test can change how it answers.</summary>
     public LoopbackSandbox HostOf(string sandboxId) => _sandboxes[sandboxId].Host!;
 
-    /// <summary>Reports a sandbox's container as missing and stops its host, as a container deleted behind the runtime's back.</summary>
+    /// <summary>Forgets a sandbox and stops its host, as a container deleted behind the runtime's back: it is reported missing.</summary>
     public async Task LoseAsync(string sandboxId)
     {
-        var entry = _sandboxes[sandboxId];
-        _sandboxes[sandboxId] = entry with { Handle = entry.Handle with { State = SandboxState.Missing } };
-        if (entry.Host is { } host)
+        if (_sandboxes.TryRemove(sandboxId, out var entry) && entry.Host is { } host)
         {
             await host.StopAsync();
+            _stopped.Enqueue(host);
         }
     }
 
     /// <summary>A sandbox with no host, as one from before a restart.</summary>
     public void Seed(Guid runId, DateTimeOffset createdAt) =>
-        _sandboxes[runId.ToString("N")] = new Entry(null, new SandboxHandle(runId.ToString("N"), runId, SandboxState.Running, new Uri("http://127.0.0.1:9/"), createdAt), "");
+        _sandboxes[runId.ToString("N")] = new Entry(null, new SandboxHandle(runId.ToString("N"), runId, SandboxState.Running, new Uri("http://127.0.0.1:9/"), createdAt), "", "");
 
     /// <summary>Answers for <paramref name="sandboxId"/> with a handle naming another run, as a confused or hostile engine might.</summary>
     public void Reassign(string sandboxId, Guid otherRun)
@@ -92,14 +101,55 @@ internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISan
         var token = StartWithWrongToken ? new string('w', 43) : spec.Token;
         var host = await LoopbackSandbox.StartAsync(workRoot, spec.RunId, token);
         var handle = new SandboxHandle(spec.SandboxId, spec.RunId, SandboxState.Running, host.BaseAddress, clock.GetUtcNow());
-        _sandboxes[spec.SandboxId] = new Entry(host, handle, workRoot);
+        _sandboxes[spec.SandboxId] = new Entry(host, handle, workRoot, token);
         AfterHostStarted?.Invoke();
         ct.ThrowIfCancellationRequested();
         return Result<SandboxHandle, AgentError>.Success(handle);
     }
 
-    public ValueTask<SandboxHandle?> GetAsync(string sandboxId, CancellationToken ct) =>
-        ValueTask.FromResult(!Unreachable && _sandboxes.TryGetValue(sandboxId, out var entry) ? entry.Handle : null);
+    public ValueTask<SandboxHandle?> GetAsync(string sandboxId, CancellationToken ct)
+    {
+        if (Unreachable)
+        {
+            return ValueTask.FromResult<SandboxHandle?>(null);
+        }
+
+        return ValueTask.FromResult<SandboxHandle?>(_sandboxes.TryGetValue(sandboxId, out var entry)
+            ? entry.Handle
+            : new SandboxHandle(sandboxId, Guid.ParseExact(sandboxId, "N"), SandboxState.Missing, new Uri("http://127.0.0.1:9/"), DateTimeOffset.UnixEpoch));
+    }
+
+    public async ValueTask<UnitResult<AgentError>> StartAsync(string sandboxId, CancellationToken ct)
+    {
+        if (StartFailure is { } failure)
+        {
+            return UnitResult<AgentError>.Failure(failure);
+        }
+
+        if (!_sandboxes.TryGetValue(sandboxId, out var entry))
+        {
+            return UnitResult<AgentError>.Failure(AgentError.ProviderError($"could not start the sandbox '{sandboxId}': it does not exist"));
+        }
+
+        if (entry.Handle.State == SandboxState.Running)
+        {
+            return UnitResult<AgentError>.Success();
+        }
+
+        Started.Enqueue(sandboxId);
+        if (entry.Host is { } old)
+        {
+            _stopped.Enqueue(old);
+        }
+
+        var host = await LoopbackSandbox.StartAsync(entry.WorkRoot, entry.Handle.RunId, entry.Token);
+        _sandboxes[sandboxId] = entry with
+        {
+            Host = host,
+            Handle = entry.Handle with { State = SandboxState.Running, BaseAddress = host.BaseAddress, ExitCode = null, OomKilled = false },
+        };
+        return UnitResult<AgentError>.Success();
+    }
 
     public ValueTask<IReadOnlyList<SandboxHandle>> ListAsync(CancellationToken ct) =>
         ValueTask.FromResult<IReadOnlyList<SandboxHandle>>(ListNothing ? [] : [.. _sandboxes.Values.Select(e => e.Handle)]);
@@ -130,6 +180,11 @@ internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISan
 
     public async ValueTask DisposeAsync()
     {
+        while (_stopped.TryDequeue(out var stopped))
+        {
+            await stopped.DisposeAsync();
+        }
+
         foreach (var entry in _sandboxes.Values)
         {
             if (entry.Host is { } host)
@@ -139,5 +194,5 @@ internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISan
         }
     }
 
-    private sealed record Entry(LoopbackSandbox? Host, SandboxHandle Handle, string WorkRoot);
+    private sealed record Entry(LoopbackSandbox? Host, SandboxHandle Handle, string WorkRoot, string Token);
 }

@@ -301,4 +301,7 @@ public sealed partial class SandboxRunWorkspaceProvider(
 
     [LoggerMessage(EventId = 2110, Level = LogLevel.Error, Message = "SandboxLost: the sandbox {SandboxId} of run {RunId} was gone before its patch was exported; the run is parked with no patch to publish")]
     private static partial void LogLostBeforeExport(ILogger logger, Guid runId, string sandboxId);
+
+    [LoggerMessage(EventId = 2111, Level = LogLevel.Error, Message = "SandboxLost: the exited sandbox {SandboxId} of run {RunId} failed {Attempts} restarts to export; the run is parked with no patch to publish")]
+    private static partial void LogRestartsExhausted(ILogger logger, Guid runId, string sandboxId, int attempts);
 }

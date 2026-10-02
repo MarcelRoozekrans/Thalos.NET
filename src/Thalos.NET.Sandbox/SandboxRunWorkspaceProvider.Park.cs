@@ -10,9 +10,19 @@ public sealed partial class SandboxRunWorkspaceProvider
 
     /// <summary>
     /// How long a park or checkout waits for another call that holds the run's lock: another park, whose export is
-    /// bounded by <see cref="SandboxOptions.ExportTimeout"/>, or a checkout, plus five minutes for their git work.
+    /// bounded by <see cref="SandboxOptions.ExportTimeout"/>, or a checkout, plus five minutes for their git work. Tests
+    /// shorten it.
     /// </summary>
-    private TimeSpan RunLockWait => options.ExportTimeout + TimeSpan.FromMinutes(5);
+    internal TimeSpan RunLockWait { get; set; } = options.ExportTimeout + TimeSpan.FromMinutes(5);
+
+    /// <summary>How many parks may start an exited sandbox again to export it before the run is parked without a patch.</summary>
+    internal const int MaxRestartAttempts = 2;
+
+    /// <summary>The reason a run is parked without a patch when its sandbox was gone.</summary>
+    internal const string LostReason = "it no longer existed";
+
+    /// <summary>The reason a run is parked without a patch when its exited sandbox could not be exported.</summary>
+    internal const string RestartReason = "could not be restarted to export";
 
     /// <inheritdoc />
     /// <remarks>
@@ -32,6 +42,13 @@ public sealed partial class SandboxRunWorkspaceProvider
     /// parked with <see cref="SandboxRecord.PatchMissing"/>, unless an earlier park of this record already stored its
     /// patch. A null answer is not a verdict, since the runtime answers null when its engine cannot be asked too; it
     /// fails the park, which the next one retries.
+    /// </para>
+    /// <para>
+    /// <b>An exited sandbox</b> is started again with <see cref="ISandboxRuntime.StartAsync"/>, waited for, up to
+    /// <see cref="SandboxOptions.RestartTimeout"/>, until its host answers, then exported against the record's base
+    /// commit and deleted. Each such attempt is counted in <see cref="SandboxRecord.ExportAttempts"/> before it is made;
+    /// once <see cref="MaxRestartAttempts"/> have failed, the next park parks the run without a patch, with the reason
+    /// <see cref="RestartReason"/>, so no record stays exporting forever. The sandbox's volume is never read from the host.
     /// </para>
     /// </remarks>
     public async ValueTask<UnitResult<AgentError>> ParkAsync(Guid runId, CancellationToken ct)
@@ -65,7 +82,7 @@ public sealed partial class SandboxRunWorkspaceProvider
         }
         finally
         {
-            ReleaseRunLock(runLock.Value, runId, deleteFile: false);
+            ReleaseRunLock(runLock.Value, runId, deleteFile: !File.Exists(_store.RecordPath(runId)));
         }
     }
 
@@ -104,7 +121,9 @@ public sealed partial class SandboxRunWorkspaceProvider
         }
         finally
         {
-            ReleaseRunLock(runLock.Value, runId, deleteFile: false);
+            // Still under the lock: a remove that ran while this call waited took the record, and its lock file, with it;
+            // the file this call opened again goes too.
+            ReleaseRunLock(runLock.Value, runId, deleteFile: !File.Exists(_store.RecordPath(runId)));
         }
     }
 
@@ -142,7 +161,7 @@ public sealed partial class SandboxRunWorkspaceProvider
             }
         }
 
-        var stored = await StorePatchAsync(record, handle.Value, ct).ConfigureAwait(false);
+        var stored = await StorePatchAsync(exporting, record.State == SandboxRecordState.Exporting, handle.Value, ct).ConfigureAwait(false);
         if (stored.IsFailure)
         {
             return UnitResult<AgentError>.Failure(stored.Error);
@@ -155,8 +174,15 @@ public sealed partial class SandboxRunWorkspaceProvider
         }
 
         await NotifyObserversAsync(Workspace(exporting), removing: true, ct).ConfigureAwait(false);
+        var (current, missing) = stored.Value;
         return await _store.WriteAsync(
-            exporting with { State = SandboxRecordState.Parked, PatchPath = stored.Value ? _store.PatchPath(runId) : null, PatchMissing = !stored.Value },
+            current with
+            {
+                State = SandboxRecordState.Parked,
+                PatchPath = missing is null ? _store.PatchPath(runId) : null,
+                PatchMissing = missing is not null,
+                PatchMissingReason = missing,
+            },
             ct).ConfigureAwait(false);
     }
 
@@ -179,26 +205,98 @@ public sealed partial class SandboxRunWorkspaceProvider
     }
 
     /// <summary>
-    /// Exports the sandbox's patch to the run's stored patch or, for a missing sandbox, settles whether one is stored
-    /// already. Reports whether the run has a stored patch.
+    /// Stores the run's patch, or settles that there is none. Succeeds with the record as it now stands and, when there is
+    /// no patch, why: <see cref="LostReason"/> for a missing sandbox with no stored patch, <see cref="RestartReason"/>
+    /// once <see cref="MaxRestartAttempts"/> restarts failed. Fails, for the next park to retry, when an export fails.
     /// </summary>
-    private async Task<Result<bool, AgentError>> StorePatchAsync(SandboxRecord record, SandboxHandle handle, CancellationToken ct)
+    /// <param name="record">The record, exporting.</param>
+    /// <param name="wasExporting">The record was exporting before this park: an earlier park may have stored a patch.</param>
+    /// <param name="handle">The sandbox.</param>
+    /// <param name="ct">Cancellation token.</param>
+    private async Task<Result<(SandboxRecord Record, string? MissingReason), AgentError>> StorePatchAsync(
+        SandboxRecord record, bool wasExporting, SandboxHandle handle, CancellationToken ct)
     {
-        if (handle.State != SandboxState.Missing)
+        if (handle.State == SandboxState.Missing)
         {
-            var exported = await ExportAsync(handle, record, ct).ConfigureAwait(false);
-            return exported.IsFailure ? Result<bool, AgentError>.Failure(exported.Error) : Result<bool, AgentError>.Success(true);
-        }
+            // A stored patch under an exporting record is a finished export whose park stopped before the record was
+            // written; a ready record has none, since a remove deletes a run's patch before its record.
+            if (wasExporting && File.Exists(_store.PatchPath(record.RunId)))
+            {
+                return Result<(SandboxRecord, string?), AgentError>.Success((record, null));
+            }
 
-        // A stored patch under an exporting record is a finished export whose park stopped before the record was
-        // written; a ready record has none, since a remove deletes a run's patch before its record.
-        var stored = record.State == SandboxRecordState.Exporting && File.Exists(_store.PatchPath(record.RunId));
-        if (!stored)
-        {
             LogLostBeforeExport(logger, record.RunId, record.SandboxId);
+            return Result<(SandboxRecord, string?), AgentError>.Success((record, LostReason));
         }
 
-        return Result<bool, AgentError>.Success(stored);
+        // An exited sandbox, or one an earlier park already started again, is a restart; each counts, before it is
+        // tried, so a park that dies midway counts too and no record stays exporting forever.
+        if (handle.State == SandboxState.Exited || record.ExportAttempts > 0)
+        {
+            if (record.ExportAttempts >= MaxRestartAttempts)
+            {
+                LogRestartsExhausted(logger, record.RunId, record.SandboxId, record.ExportAttempts);
+                return Result<(SandboxRecord, string?), AgentError>.Success((record, RestartReason));
+            }
+
+            record = record with { ExportAttempts = record.ExportAttempts + 1 };
+            var counted = await _store.WriteAsync(record, ct).ConfigureAwait(false);
+            if (counted.IsFailure)
+            {
+                return Result<(SandboxRecord, string?), AgentError>.Failure(counted.Error);
+            }
+
+            var restarted = await RestartAsync(record, handle, ct).ConfigureAwait(false);
+            if (restarted.IsFailure)
+            {
+                return Result<(SandboxRecord, string?), AgentError>.Failure(restarted.Error);
+            }
+
+            handle = restarted.Value;
+        }
+
+        var exported = await ExportAsync(handle, record, ct).ConfigureAwait(false);
+        return exported.IsFailure
+            ? Result<(SandboxRecord, string?), AgentError>.Failure(exported.Error)
+            : Result<(SandboxRecord, string?), AgentError>.Success((record, null));
+    }
+
+    /// <summary>
+    /// Starts the sandbox again unless it runs, then waits, up to <see cref="SandboxOptions.RestartTimeout"/>, until its
+    /// host answers <c>/control/ready</c>. Returns the running sandbox. Nothing on its volume is read from the host.
+    /// </summary>
+    private async Task<Result<SandboxHandle, AgentError>> RestartAsync(SandboxRecord record, SandboxHandle handle, CancellationToken ct)
+    {
+        if (handle.State != SandboxState.Running)
+        {
+            var started = await runtime.StartAsync(record.SandboxId, ct).ConfigureAwait(false);
+            if (started.IsFailure)
+            {
+                return Result<SandboxHandle, AgentError>.Failure(started.Error);
+            }
+        }
+
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        bounded.CancelAfter(options.RestartTimeout);
+        try
+        {
+            while (true)
+            {
+                if (await runtime.GetAsync(record.SandboxId, bounded.Token).ConfigureAwait(false) is { State: SandboxState.Running } running
+                    && running.RunId == record.RunId
+                    && (await control.ReadyAsync(running, record.Token, bounded.Token).ConfigureAwait(false)).IsSuccess)
+                {
+                    return Result<SandboxHandle, AgentError>.Success(running);
+                }
+
+                await Task.Delay(ReadyPollInterval, clock, bounded.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            return Result<SandboxHandle, AgentError>.Failure(AgentError.ProviderError(
+                $"The sandbox of run '{record.RunId}' did not answer within {options.RestartTimeout} of being started again."));
+        }
     }
 
     /// <summary>
@@ -220,7 +318,7 @@ public sealed partial class SandboxRunWorkspaceProvider
             bounded.CancelAfter(options.ExportTimeout);
             try
             {
-                var exported = await control.ExportToFileAsync(handle, record.Token, temp, options.PatchLimits.MaxPatchBytes, bounded.Token).ConfigureAwait(false);
+                var exported = await control.ExportToFileAsync(handle, record.Token, record.BaseCommit, temp, options.PatchLimits.MaxPatchBytes, bounded.Token).ConfigureAwait(false);
                 if (exported.IsFailure)
                 {
                     return exported;
@@ -302,12 +400,12 @@ public sealed partial class SandboxRunWorkspaceProvider
 
         if (record.PatchMissing)
         {
-            return Result<SandboxRecord, AgentError>.Failure(AgentError.ProviderError("the run's sandbox was lost before its changes were exported"));
+            return Result<SandboxRecord, AgentError>.Failure(AgentError.ProviderError(
+                $"the run's sandbox was lost before its changes were exported: {record.PatchMissingReason ?? LostReason}"));
         }
 
         var patch = _store.PatchPath(runId);
         return string.Equals(record.PatchPath, patch, StringComparison.Ordinal)
-            && string.Equals(Path.GetDirectoryName(patch), _store.Directory, StringComparison.Ordinal)
             ? Result<SandboxRecord, AgentError>.Success(record)
             : Result<SandboxRecord, AgentError>.Failure(AgentError.Validation($"The sandbox record of run '{runId}' does not name its stored patch; publish refused."));
     }
@@ -361,7 +459,7 @@ public sealed partial class SandboxRunWorkspaceProvider
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            return Result<FileStream, AgentError>.Failure(AgentError.Validation(
+            return Result<FileStream, AgentError>.Failure(AgentError.ProviderError(
                 $"The sandbox of run '{runId}' was held by another call for longer than {RunLockWait}."));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)

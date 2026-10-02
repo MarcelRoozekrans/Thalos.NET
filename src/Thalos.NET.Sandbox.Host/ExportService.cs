@@ -12,10 +12,18 @@ namespace Thalos.Sandbox.Host;
 /// is a control.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>After a restart.</b> The import's state lives in memory, so a container started again after it exited has a
+/// checkout under <see cref="SandboxSettings.RepoRoot"/> but no imported workspace. The trusted side then names the
+/// commit, which it recorded at the import, and the diff runs against it; nothing is read back from a file under the
+/// work volume, which agent-run code can write. Before a restart, a named commit must be the imported one.
+/// </para>
+/// <para>
 /// The patch is written by git itself with <c>--output</c> to a file under the work volume, never read through
 /// <see cref="GitCli"/>'s line-based capture, which would turn a carriage return into a line feed and corrupt binary and
 /// CRLF content. External diff drivers and textconv filters are switched off, so the patch is git's own. Exports run
 /// one at a time, since each stages the whole tree.
+/// </para>
 /// </remarks>
 /// <param name="settings">The work root.</param>
 /// <param name="git">Runs git in isolation.</param>
@@ -32,14 +40,17 @@ internal sealed class ExportService(SandboxSettings settings, GitCli git, LocalR
     /// Fails with <see cref="AgentErrorCode.Validation"/> before the import, and with
     /// <see cref="AgentErrorCode.ProviderError"/> when git fails.
     /// </summary>
+    /// <param name="commit">The commit the trusted side imported, or null; see the remarks.</param>
     /// <param name="ct">Cancellation token.</param>
-    public async Task<Result<string, AgentError>> ExportAsync(CancellationToken ct)
+    public async Task<Result<string, AgentError>> ExportAsync(string? commit, CancellationToken ct)
     {
-        if (workspaces.Current is not { BaseCommit: { } commit } workspace)
+        var target = Target(commit);
+        if (target.IsFailure)
         {
-            return Result<string, AgentError>.Failure(AgentError.Validation("Nothing has been imported."));
+            return Result<string, AgentError>.Failure(target.Error);
         }
 
+        var (root, baseCommit) = target.Value;
         var directory = Path.Combine(settings.WorkRoot, "export");
         Directory.CreateDirectory(directory);
         var patch = Path.Combine(directory, $"{Guid.NewGuid():N}.patch");
@@ -47,25 +58,25 @@ internal sealed class ExportService(SandboxSettings settings, GitCli git, LocalR
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            if (await RepoConfigGuard.CheckAsync(git, workspace.Root, ct).ConfigureAwait(false) is { } refused)
+            if (await RepoConfigGuard.CheckAsync(git, root, ct).ConfigureAwait(false) is { } refused)
             {
                 return Result<string, AgentError>.Failure(AgentError.ProviderError("Export refused.", refused));
             }
 
-            var staged = await git.RunAsync(workspace.Root, ["add", "-A", "--", ".", .. BuildOutputExcludes], RepoConfigGuard.CommandConfig, null, ct).ConfigureAwait(false);
+            var staged = await git.RunAsync(root, ["add", "-A", "--", ".", .. BuildOutputExcludes], RepoConfigGuard.CommandConfig, null, ct).ConfigureAwait(false);
             if (!staged.Succeeded)
             {
                 return Failed("git add", staged, patch);
             }
 
-            if (await RepoConfigGuard.CheckAsync(git, workspace.Root, ct).ConfigureAwait(false) is { } changed)
+            if (await RepoConfigGuard.CheckAsync(git, root, ct).ConfigureAwait(false) is { } changed)
             {
                 return Result<string, AgentError>.Failure(AgentError.ProviderError("Export refused.", changed));
             }
 
             var diffed = await git.RunAsync(
-                workspace.Root,
-                ["diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", $"--output={patch}", commit, "--", ".", .. BuildOutputExcludes],
+                root,
+                ["diff", "--cached", "--binary", "--full-index", "--no-ext-diff", "--no-textconv", $"--output={patch}", baseCommit, "--", ".", .. BuildOutputExcludes],
                 RepoConfigGuard.CommandConfig,
                 null,
                 ct).ConfigureAwait(false);
@@ -79,6 +90,29 @@ internal sealed class ExportService(SandboxSettings settings, GitCli git, LocalR
 
     /// <inheritdoc />
     public void Dispose() => _gate.Dispose();
+
+    /// <summary>
+    /// The checkout and the commit to diff against: the imported workspace, whose commit a named one must equal; or,
+    /// after a restart, the checkout under <see cref="SandboxSettings.RepoRoot"/> and the named commit.
+    /// </summary>
+    private Result<(string Root, string Commit), AgentError> Target(string? commit)
+    {
+        if (commit is not null && !GitMirrorStore.IsFullSha(commit))
+        {
+            return Result<(string, string), AgentError>.Failure(AgentError.Validation("The commit is not a full 40-character sha."));
+        }
+
+        if (workspaces.Current is { BaseCommit: { } imported } workspace)
+        {
+            return commit is null || string.Equals(commit, imported, StringComparison.Ordinal)
+                ? Result<(string, string), AgentError>.Success((workspace.Root, imported))
+                : Result<(string, string), AgentError>.Failure(AgentError.Validation("The commit is not the imported one."));
+        }
+
+        return commit is not null && Directory.Exists(Path.Combine(settings.RepoRoot, ".git"))
+            ? Result<(string, string), AgentError>.Success((settings.RepoRoot, commit))
+            : Result<(string, string), AgentError>.Failure(AgentError.Validation("Nothing has been imported."));
+    }
 
     private static Result<string, AgentError> Failed(string command, GitCliResult result, string patch)
     {

@@ -7,6 +7,7 @@ using Thalos.Git.Workspaces;
 using Thalos.Sandbox;
 using Thalos.Tests.Git.Workspaces;
 using Thalos.Workspaces;
+using ZeroAlloc.Results;
 
 namespace Thalos.Tests.Sandbox;
 
@@ -150,6 +151,7 @@ public sealed class SandboxParkAndHandoffTests : IAsyncLifetime
     /// <summary>
     /// Red: in StorePatchAsync, take a missing sandbox as unreachable and fail; the park fails. Red 2: in
     /// ReadPublishableAsync, skip the PatchMissing check; the checkout fails on a patch path instead, with another message.
+    /// The sandbox is lost as the Docker runtime reports a container the engine answers 404 for: a Missing handle.
     /// </summary>
     [Fact]
     public async Task A_lost_sandbox_parks_with_no_patch_and_publish_says_so()
@@ -169,7 +171,7 @@ public sealed class SandboxParkAndHandoffTests : IAsyncLifetime
         _observer.Events.Should().Equal($"ready {runId}", $"removing {runId}");
         _log.Should().Contain(l => l.Contains("SandboxLost", StringComparison.Ordinal) && l.Contains(runId.ToString(), StringComparison.Ordinal));
         checkout.IsFailure.Should().BeTrue();
-        checkout.Error.Message.Should().Be("the run's sandbox was lost before its changes were exported");
+        checkout.Error.Message.Should().Be("the run's sandbox was lost before its changes were exported: it no longer existed");
         (await Publish.FindAsync(runId, CancellationToken.None)).Should().BeNull();
     }
 
@@ -330,7 +332,184 @@ public sealed class SandboxParkAndHandoffTests : IAsyncLifetime
         File.Exists(provider.Store.LockPath(runId)).Should().BeFalse();
     }
 
+    // ---------- exited sandboxes (R36) ----------
+
+    /// <summary>
+    /// Red: in RestartAsync, skip runtime.StartAsync; the sandbox never answers, the park fails after RestartTimeout and
+    /// nothing is started. Red 2: in ExportToFileAsync, drop the commit query; the restarted host has no import
+    /// in memory and refuses the export with 409.
+    /// </summary>
+    [Fact]
+    public async Task An_exited_sandbox_is_started_again_exported_and_deleted()
+    {
+        var (provider, runId) = await ReadyRunAsync(o => o.RestartTimeout = TimeSpan.FromSeconds(5));
+        var id = runId.ToString("N");
+        await File.WriteAllTextAsync(Path.Combine(RepoOf(runId), "Marker.cs"), Edited);
+        await Runtime.ExitAsync(id, 137, oomKilled: true);
+
+        var parked = await provider.ParkAsync(runId, CancellationToken.None);
+        var record = await RecordOf(provider, runId);
+        var checkout = await provider.CheckoutForPublishAsync(runId, CancellationToken.None);
+
+        using var _ = new AssertionScope();
+        parked.IsSuccess.Should().BeTrue(parked.IsFailure ? parked.Error.ToString() : "");
+        Runtime.Started.Should().Equal(id);
+        Runtime.Ids.Should().BeEmpty("the restarted sandbox is deleted once exported");
+        record.State.Should().Be(SandboxRecordState.Parked);
+        record.PatchMissing.Should().BeFalse();
+        record.ExportAttempts.Should().Be(1);
+        File.ReadAllText(provider.Store.PatchPath(runId)).Should().Contain("+class Edited { }");
+        checkout.IsSuccess.Should().BeTrue(checkout.IsFailure ? checkout.Error.ToString() : "");
+        File.ReadAllText(Path.Combine(checkout.Value.Root, "Marker.cs")).Should().Be(Edited);
+    }
+
+    /// <summary>
+    /// Red: in StorePatchAsync, drop the MaxRestartAttempts check; the third park tries again, fails, and the record
+    /// stays exporting. Red 2: in ReadPublishableAsync, leave the reason out of the message; it no longer names it.
+    /// </summary>
+    [Fact]
+    public async Task An_exited_sandbox_that_cannot_be_restarted_parks_without_a_patch_after_two_attempts()
+    {
+        var (provider, runId) = await ReadyRunAsync();
+        var id = runId.ToString("N");
+        await Runtime.ExitAsync(id, 1, oomKilled: false);
+        Runtime.StartFailure = AgentError.ProviderError("the engine refused to start it");
+
+        var first = await provider.ParkAsync(runId, CancellationToken.None);
+        var afterFirst = await RecordOf(provider, runId);
+        var second = await provider.ParkAsync(runId, CancellationToken.None);
+        var afterSecond = await RecordOf(provider, runId);
+        var third = await provider.ParkAsync(runId, CancellationToken.None);
+        var parked = await RecordOf(provider, runId);
+        var checkout = await provider.CheckoutForPublishAsync(runId, CancellationToken.None);
+
+        using var _ = new AssertionScope();
+        first.IsFailure.Should().BeTrue();
+        afterFirst.State.Should().Be(SandboxRecordState.Exporting);
+        afterFirst.ExportAttempts.Should().Be(1);
+        second.IsFailure.Should().BeTrue();
+        afterSecond.ExportAttempts.Should().Be(2);
+        third.IsSuccess.Should().BeTrue(third.IsFailure ? third.Error.ToString() : "");
+        parked.State.Should().Be(SandboxRecordState.Parked);
+        parked.PatchMissing.Should().BeTrue();
+        parked.PatchMissingReason.Should().Be("could not be restarted to export");
+        Runtime.Ids.Should().BeEmpty("the exited sandbox is deleted once given up on");
+        _log.Should().Contain(l => l.Contains("SandboxLost", StringComparison.Ordinal) && l.Contains("2 restarts", StringComparison.Ordinal));
+        checkout.IsFailure.Should().BeTrue();
+        checkout.Error.Message.Should().Be("the run's sandbox was lost before its changes were exported: could not be restarted to export");
+    }
+
+    // ---------- checkout hardening ----------
+
+    /// <summary>Red: in ReadPublishableAsync, skip the PatchPath comparison; the checkout applies the derived patch and succeeds.</summary>
+    [Fact]
+    public async Task A_record_naming_a_foreign_patch_path_is_refused()
+    {
+        var (provider, runId) = await ReadyRunAsync();
+        await File.WriteAllTextAsync(Path.Combine(RepoOf(runId), "Marker.cs"), Edited);
+        (await provider.ParkAsync(runId, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        var record = await RecordOf(provider, runId);
+        (await provider.Store.WriteAsync(record with { PatchPath = Path.Combine(_temp, "elsewhere.patch") }, CancellationToken.None)).IsSuccess.Should().BeTrue();
+
+        var checkout = await provider.CheckoutForPublishAsync(runId, CancellationToken.None);
+
+        using var _ = new AssertionScope();
+        checkout.IsFailure.Should().BeTrue();
+        checkout.Error.Message.Should().Contain("does not name its stored patch");
+        (await Publish.FindAsync(runId, CancellationToken.None)).Should().BeNull();
+    }
+
+    /// <summary>
+    /// Red: in LockRunAsync, give up at once when the lock is held, as a create does; the checkout fails while the park
+    /// is still in progress.
+    /// </summary>
+    [Fact]
+    public async Task A_checkout_waits_for_a_park_in_progress()
+    {
+        var (provider, runId) = await ReadyRunAsync();
+        await File.WriteAllTextAsync(Path.Combine(RepoOf(runId), "Marker.cs"), Edited);
+        var (entered, release) = BlockRemoval();
+
+        var park = provider.ParkAsync(runId, CancellationToken.None).AsTask();
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        var checkout = provider.CheckoutForPublishAsync(runId, CancellationToken.None).AsTask();
+        await Task.Delay(TimeSpan.FromMilliseconds(500));
+        var waited = !checkout.IsCompleted;
+        release.SetResult();
+        var parked = await park.WaitAsync(TimeSpan.FromSeconds(60));
+        var done = await checkout.WaitAsync(TimeSpan.FromSeconds(60));
+
+        using var _ = new AssertionScope();
+        waited.Should().BeTrue("the checkout waits while the park holds the run's lock");
+        parked.IsSuccess.Should().BeTrue();
+        done.IsSuccess.Should().BeTrue(done.IsFailure ? done.Error.ToString() : "");
+        File.ReadAllText(Path.Combine(done.Value.Root, "Marker.cs")).Should().Be(Edited);
+    }
+
+    /// <summary>
+    /// Red: in LockRunAsync, drop the OperationCanceledException catch; the bounded wait throws out of the checkout
+    /// instead of returning a failure. Red 2: return the timeout as Validation again; the code differs.
+    /// </summary>
+    [Fact]
+    public async Task A_lock_wait_that_runs_out_returns_a_failure()
+    {
+        var (provider, runId) = await ReadyRunAsync();
+        provider.RunLockWait = TimeSpan.FromMilliseconds(300);
+        var (entered, release) = BlockRemoval();
+        var park = provider.ParkAsync(runId, CancellationToken.None).AsTask();
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+        Result<RunWorkspace, AgentError>? checkout = null;
+        var act = async () => checkout = await provider.CheckoutForPublishAsync(runId, CancellationToken.None);
+        await act.Should().NotThrowAsync();
+        release.SetResult();
+        await park.WaitAsync(TimeSpan.FromSeconds(60));
+
+        using var _ = new AssertionScope();
+        checkout!.Value.IsFailure.Should().BeTrue();
+        checkout.Value.Error.Code.Should().Be(AgentErrorCode.ProviderError);
+        checkout.Value.Error.Message.Should().Contain("held by another call");
+    }
+
+    /// <summary>
+    /// Red: in CheckoutForPublishAsync, release the lock with deleteFile false; the lock file the waiting checkout opened
+    /// again outlives the removed run.
+    /// </summary>
+    [Fact]
+    public async Task A_checkout_that_waited_on_a_remove_leaves_no_lock_file()
+    {
+        var (provider, runId) = await ReadyRunAsync();
+        var (entered, release) = BlockRemoval();
+        var remove = provider.RemoveAsync(runId, CancellationToken.None).AsTask();
+        await entered.Task.WaitAsync(TimeSpan.FromSeconds(30));
+
+        var checkout = provider.CheckoutForPublishAsync(runId, CancellationToken.None).AsTask();
+        await Task.Delay(TimeSpan.FromMilliseconds(300));
+        release.SetResult();
+        var removed = await remove.WaitAsync(TimeSpan.FromSeconds(60));
+        var done = await checkout.WaitAsync(TimeSpan.FromSeconds(60));
+
+        using var _ = new AssertionScope();
+        removed.IsSuccess.Should().BeTrue(removed.IsFailure ? removed.Error.ToString() : "");
+        done.IsFailure.Should().BeTrue();
+        File.Exists(provider.Store.LockPath(runId)).Should().BeFalse();
+    }
+
     // ---------- harness ----------
+
+    /// <summary>Makes the next removal notice wait, under the run's lock, until released; signals once it is waiting.</summary>
+    private (TaskCompletionSource Entered, TaskCompletionSource Release) BlockRemoval()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _observer.BeforeRemoving = async () =>
+        {
+            _observer.BeforeRemoving = null;
+            entered.SetResult();
+            await release.Task;
+        };
+        return (entered, release);
+    }
 
     public Task InitializeAsync() => Task.CompletedTask;
 
@@ -448,16 +627,23 @@ public sealed class SandboxParkAndHandoffTests : IAsyncLifetime
 
         public IReadOnlyList<string> Events => [.. _events];
 
+        /// <summary>Awaited before a removal notice is recorded; a test holds a park or remove under the run's lock with it.</summary>
+        public Func<Task>? BeforeRemoving { get; set; }
+
         public ValueTask OnReadyAsync(RunWorkspace workspace, CancellationToken ct)
         {
             _events.Enqueue($"ready {workspace.RunId}");
             return ValueTask.CompletedTask;
         }
 
-        public ValueTask OnRemovingAsync(RunWorkspace workspace, CancellationToken ct)
+        public async ValueTask OnRemovingAsync(RunWorkspace workspace, CancellationToken ct)
         {
+            if (BeforeRemoving is { } before)
+            {
+                await before();
+            }
+
             _events.Enqueue($"removing {workspace.RunId}");
-            return ValueTask.CompletedTask;
         }
     }
 

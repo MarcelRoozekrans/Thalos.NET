@@ -114,19 +114,21 @@ public sealed class SandboxControlClient
     }
 
     /// <summary>
-    /// <c>POST /control/export</c>, streamed to a new file at <paramref name="path"/>, owner-only on Unix. Stops reading
+    /// <c>POST /control/export?commit=</c>, streamed to a new file at <paramref name="path"/>, owner-only on Unix. Stops reading
     /// and fails once more than <paramref name="maxBytes"/> have arrived; a failure deletes the partial file.
     /// </summary>
     /// <param name="sandbox">The sandbox.</param>
     /// <param name="token">Its bearer token.</param>
+    /// <param name="commit">The commit the run imported: the sandbox diffs against it, also after a restart.</param>
     /// <param name="path">Where to store the patch; must not exist.</param>
     /// <param name="maxBytes">The largest patch accepted.</param>
     /// <param name="ct">Bounds the call.</param>
-    public async Task<UnitResult<AgentError>> ExportToFileAsync(SandboxHandle sandbox, string token, string path, long maxBytes, CancellationToken ct)
+    public async Task<UnitResult<AgentError>> ExportToFileAsync(SandboxHandle sandbox, string token, string commit, string path, long maxBytes, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(sandbox);
+        ArgumentException.ThrowIfNullOrWhiteSpace(commit);
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        using var request = Request(HttpMethod.Post, sandbox, token, "control/export", content: null);
+        using var request = Request(HttpMethod.Post, sandbox, token, $"control/export?commit={Uri.EscapeDataString(commit)}", content: null);
         var created = false;
         var stored = false;
         try

@@ -23,6 +23,9 @@ public sealed class SandboxOptions
     /// <summary>How long exporting a patch may take.</summary>
     public TimeSpan ExportTimeout { get; set; } = TimeSpan.FromMinutes(2);
 
+    /// <summary>How long an exited sandbox restarted for its export may take to answer again.</summary>
+    public TimeSpan RestartTimeout { get; set; } = TimeSpan.FromMinutes(2);
+
     /// <summary>Bounds on an exported patch.</summary>
     public PatchApplyLimits PatchLimits { get; set; } = new();
 

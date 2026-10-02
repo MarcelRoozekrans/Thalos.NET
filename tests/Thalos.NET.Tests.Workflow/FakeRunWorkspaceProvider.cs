@@ -63,17 +63,29 @@ internal sealed class FakeParkableRunWorkspaceProvider : FakeRunWorkspaceProvide
     /// <summary>The run ids <see cref="ParkAsync"/> parked, in order.</summary>
     public List<Guid> Parked { get; } = [];
 
+    /// <summary>Every run id <see cref="ParkAsync"/> was called for, in order, whatever came of it.</summary>
+    public List<Guid> ParkAttempts { get; } = [];
+
     /// <summary><see cref="ParkAsync"/> returns a failure for this run id and parks nothing.</summary>
     public Guid? FailParkFor { get; set; }
 
-    public ValueTask<UnitResult<AgentError>> ParkAsync(Guid runId, CancellationToken ct)
+    /// <summary>Awaited at the start of every <see cref="ParkAsync"/>, with its run id and token: a test hangs a park with it.</summary>
+    public Func<Guid, CancellationToken, Task>? BeforePark { get; set; }
+
+    public async ValueTask<UnitResult<AgentError>> ParkAsync(Guid runId, CancellationToken ct)
     {
+        ParkAttempts.Add(runId);
+        if (BeforePark is { } before)
+        {
+            await before(runId, ct);
+        }
+
         if (runId == FailParkFor)
         {
-            return ValueTask.FromResult(UnitResult<AgentError>.Failure(AgentError.ProviderError("the fake could not export")));
+            return UnitResult<AgentError>.Failure(AgentError.ProviderError("the fake could not export"));
         }
 
         Parked.Add(runId);
-        return ValueTask.FromResult(UnitResult<AgentError>.Success());
+        return UnitResult<AgentError>.Success();
     }
 }

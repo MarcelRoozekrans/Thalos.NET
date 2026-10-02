@@ -23,7 +23,9 @@ namespace Thalos.Sandbox.Docker;
 /// </para>
 /// <para>
 /// <see cref="GetAsync"/> and <see cref="ListAsync"/> have no error channel: when the engine fails they log it and
-/// return null or an empty list, which callers already treat as "no sandbox", never as a reason to delete one.
+/// return null or an empty list, which callers treat as "cannot tell", never as a reason to delete one. Only the
+/// engine's own 404 for the run's container is a verdict: <see cref="GetAsync"/> then answers
+/// <see cref="SandboxState.Missing"/>.
 /// </para>
 /// </remarks>
 public sealed partial class DockerSandboxRuntime(DockerSandboxOptions options, TimeProvider clock, ILogger<DockerSandboxRuntime> logger) : ISandboxRuntime, IAsyncDisposable
@@ -93,7 +95,14 @@ public sealed partial class DockerSandboxRuntime(DockerSandboxOptions options, T
         try
         {
             var inspect = await DockerErrors.TryInspectContainerAsync(Docker, ContainerName(sandboxId), ct).ConfigureAwait(false);
-            return inspect is not null && IsOwnRun(inspect.Config?.Labels, sandboxId, out var runId)
+            if (inspect is null)
+            {
+                // The engine answered 404: the run's container is gone. Its run is the one the id names.
+                return Missing(sandboxId, infra.Value.GatewayPort);
+            }
+
+            // A container of this name that is not this runtime's is not a verdict on the run's own.
+            return IsOwnRun(inspect.Config?.Labels, sandboxId, out var runId)
                 ? ToHandle(sandboxId, runId, inspect, infra.Value.GatewayPort)
                 : null;
         }
@@ -153,6 +162,54 @@ public sealed partial class DockerSandboxRuntime(DockerSandboxOptions options, T
         {
             LogListFailed(logger, DockerErrors.Describe(ex, options.EngineTimeout));
             return [];
+        }
+    }
+
+    /// <inheritdoc />
+    /// <remarks>
+    /// Serialised with creates and deletes of the same sandbox, and refuses a container that does not carry this
+    /// runtime's labels for the run, like <see cref="DeleteAsync"/>. Each engine call is bounded by
+    /// <see cref="DockerSandboxOptions.EngineTimeout"/>.
+    /// </remarks>
+    public async ValueTask<UnitResult<AgentError>> StartAsync(string sandboxId, CancellationToken ct)
+    {
+        if (!IsSandboxId(sandboxId))
+        {
+            return UnitResult<AgentError>.Failure(AgentError.Validation($"'{sandboxId}' is not a sandbox id."));
+        }
+
+        using var held = await perSandbox.TryAcquireAsync(sandboxId, LockTimeout, ct).ConfigureAwait(false);
+        if (held is null)
+        {
+            return UnitResult<AgentError>.Failure(AgentError.ProviderError($"could not start the sandbox '{sandboxId}': another create or delete of it is still in progress"));
+        }
+
+        try
+        {
+            var container = await DockerErrors.TryInspectContainerAsync(Docker, ContainerName(sandboxId), ct).ConfigureAwait(false);
+            if (container is null)
+            {
+                return UnitResult<AgentError>.Failure(AgentError.ProviderError($"could not start the sandbox '{sandboxId}': it does not exist"));
+            }
+
+            if (!IsOwnRun(container.Config?.Labels, sandboxId, out _))
+            {
+                return UnitResult<AgentError>.Failure(AgentError.Validation($"container '{ContainerName(sandboxId)}' is not a sandbox of network '{options.InternalNetwork}'; refusing to start it"));
+            }
+
+            if (container.State?.Running != true)
+            {
+                await Docker.Containers.StartContainerAsync(container.ID, new ContainerStartParameters(), ct).ConfigureAwait(false);
+                LogStarted(logger, sandboxId);
+            }
+
+            return UnitResult<AgentError>.Success();
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            var error = DockerErrors.Describe(ex, options.EngineTimeout);
+            LogStartFailed(logger, sandboxId, error);
+            return UnitResult<AgentError>.Failure(AgentError.ProviderError($"could not start the sandbox '{sandboxId}': {error}"));
         }
     }
 
@@ -341,6 +398,14 @@ public sealed partial class DockerSandboxRuntime(DockerSandboxOptions options, T
             inspect.State?.OOMKilled == true);
     }
 
+    /// <summary>The handle of a run container the engine reported absent; its run is the one the sandbox id names.</summary>
+    private static SandboxHandle Missing(string sandboxId, int gatewayPort) => new(
+        sandboxId,
+        Guid.ParseExact(sandboxId, "N"),
+        SandboxState.Missing,
+        new Uri($"http://127.0.0.1:{gatewayPort.ToString(CultureInfo.InvariantCulture)}/sandboxes/{sandboxId}/"),
+        DateTimeOffset.UnixEpoch);
+
     private Dictionary<string, string> RunLabels(Guid runId) => new(StringComparer.Ordinal)
     {
         [SandboxLabels.Sandbox] = "true",
@@ -460,6 +525,12 @@ public sealed partial class DockerSandboxRuntime(DockerSandboxOptions options, T
 
     [LoggerMessage(EventId = 1217, Level = LogLevel.Warning, Message = "Replacing the leftover work volume of sandbox {SandboxId}, which has no container")]
     private static partial void LogReplacingLeftoverVolume(ILogger logger, string sandboxId);
+
+    [LoggerMessage(EventId = 1218, Level = LogLevel.Information, Message = "Started sandbox {SandboxId} again")]
+    private static partial void LogStarted(ILogger logger, string sandboxId);
+
+    [LoggerMessage(EventId = 1219, Level = LogLevel.Warning, Message = "Could not start sandbox {SandboxId}: {Error}")]
+    private static partial void LogStartFailed(ILogger logger, string sandboxId, string error);
 
     [LoggerMessage(EventId = 1216, Level = LogLevel.Warning, Message = "Could not list sandboxes; returning none: {Error}")]
     private static partial void LogListFailed(ILogger logger, string error);

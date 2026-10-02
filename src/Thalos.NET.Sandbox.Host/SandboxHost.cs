@@ -22,7 +22,7 @@ namespace Thalos.Sandbox.Host;
 /// <list type="bullet">
 /// <item><c>POST /control/import?branch=&amp;commit=&amp;solution=</c>: the body is the run's bundle. 202, or 400, 409, 413.</item>
 /// <item><c>GET /control/ready</c>: the import, restore and Roslyn state as JSON.</item>
-/// <item><c>POST /control/export</c>: the run's changes as a binary patch against the imported commit. 409 before the import.</item>
+/// <item><c>POST /control/export?commit=</c>: the run's changes as a binary patch against the imported commit. 409 before the import, or for a commit that is not the imported one; after a restart, against the named commit.</item>
 /// <item><c>/mcp/workspace</c>, <c>/mcp/sandbox</c>, <c>/mcp/roslyn</c>: MCP, each with only its own tools.</item>
 /// </list>
 /// <para>
@@ -205,9 +205,9 @@ public static class SandboxHost
         return Results.Json(report, ReadyJsonContext.Default.ReadyReport);
     }
 
-    private static async Task<IResult> ExportAsync(ExportService exports, CancellationToken ct)
+    private static async Task<IResult> ExportAsync(ExportService exports, string? commit, CancellationToken ct)
     {
-        var exported = await exports.ExportAsync(ct).ConfigureAwait(false);
+        var exported = await exports.ExportAsync(commit, ct).ConfigureAwait(false);
         if (exported.IsFailure)
         {
             return exported.Error.Code == AgentErrorCode.Validation
