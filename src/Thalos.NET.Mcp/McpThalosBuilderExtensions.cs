@@ -61,6 +61,7 @@ public static class McpThalosBuilderExtensions
             // Checked before the name is recorded, so a refused entry leaves no trace.
             runScoped.ThrowIfInvalidRemote(name, nameof(definition));
             ToolSourceNames.Of(services).AddRemote(name, nameof(name));
+            servers.RemoteNames.Add(name);
         }
 
         servers.McpNames.TryAdd(name, runScoped is not null);
@@ -210,6 +211,14 @@ public static class McpThalosBuilderExtensions
     internal static IReadOnlyCollection<string> LocalRunScopedServerNames(IServiceProvider services) =>
         services.GetService<McpServerSet>() is { } set ? [.. set.Definitions.Keys] : [];
 
+    /// <summary>
+    /// The names of the run-scoped MCP entries that are remote, whose run calls go to the run's own endpoint for that
+    /// name. A provider whose endpoints serve only some names, such as Thalos.NET.Sandbox's, refuses any other.
+    /// </summary>
+    /// <param name="services">The built container.</param>
+    internal static IReadOnlyCollection<string> RemoteRunScopedServerNames(IServiceProvider services) =>
+        services.GetService<McpServerSet>() is { } set ? [.. set.RemoteNames] : [];
+
     /// <summary>The collection's MCP entries, gathered across <see cref="AddMcpServer"/> calls.</summary>
     private static McpServerSet McpServers(IServiceCollection services)
     {
@@ -231,5 +240,8 @@ public static class McpThalosBuilderExtensions
 
         /// <summary>The run-scoped entries, keyed by source name, for the one registry.</summary>
         public Dictionary<string, McpServerDefinition> Definitions { get; } = new(StringComparer.Ordinal);
+
+        /// <summary>The remote run-scoped entries' source names.</summary>
+        public HashSet<string> RemoteNames { get; } = new(StringComparer.Ordinal);
     }
 }

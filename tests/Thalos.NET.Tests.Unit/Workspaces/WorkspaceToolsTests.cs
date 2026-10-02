@@ -341,6 +341,20 @@ public sealed class WorkspaceToolsTests : IDisposable
     }
 
     /// <summary>
+    /// A protected path entry with a '..' segment is refused when the tools are registered, not by the first tool call
+    /// that builds the set. Red: drop the ProtectedPathSet check from RunWorkspaceToolOptions.Validate.
+    /// </summary>
+    [Fact]
+    public void Registration_refuses_a_protected_path_with_a_parent_segment()
+    {
+        var extensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cs" };
+
+        var act = () => new ServiceCollection().AddThalos(t => t.UseRunWorkspaceTools(extensions, o => o.ProtectedPaths.Add("docs/../AGENT.md")));
+
+        act.Should().Throw<ArgumentException>().WithMessage("*ProtectedPaths*'..'*").Which.ParamName.Should().Be("configure");
+    }
+
+    /// <summary>
     /// Round-3 finding B2: on Windows, <c>list_files</c>' own directory opens requested <c>DELETE</c> access, so 36
     /// of 50 truly parallel listings of the same directory silently came back missing its contents — a second,
     /// concurrent pin's open collided with the first and <see cref="WorkspaceTools.ListFiles"/> caught the resulting

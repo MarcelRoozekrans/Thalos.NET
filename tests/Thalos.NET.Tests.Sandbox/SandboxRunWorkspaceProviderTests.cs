@@ -75,7 +75,7 @@ public sealed class SandboxRunWorkspaceProviderTests : IAsyncLifetime
         readiness.Value.Roslyn.Should().Be("ready");
         head.Trim().Should().Be("ref: refs/heads/run/feature");
         spec.Token.Should().HaveLength(43).And.MatchRegex("^[A-Za-z0-9_-]+$");
-        spec.ProtectedPaths.Entries.Should().Equal(".git/", "AGENT.md");
+        spec.ProtectedPaths.Entries.Should().Equal([.. SandboxOptions.DefaultProtectedPaths, "AGENT.md"], "the defaults, then the extras, with the repeated .git/ once");
         spec.Image.Should().Be("thalos/sandbox:test");
         (await provider.ListAsync(CancellationToken.None)).Should().Equal(found);
     }
@@ -465,7 +465,7 @@ public sealed class SandboxRunWorkspaceProviderTests : IAsyncLifetime
     /// <summary>
     /// Red 1: drop the IRunToolServerReadiness registration; the MCP registry answers it. Red 2: register the provider
     /// with a second, separate instance for IRunToolEndpointResolver; it is no longer the same object. Red 3: drop the
-    /// ProtectedPaths check; an empty set is accepted. Red 4: drop the sandbox AddRemoteRunTools; its remote source is
+    /// ProtectedPaths check; a '..' entry is accepted. Red 4: drop the sandbox AddRemoteRunTools; its remote source is
     /// missing. Red 5: give the patch applier its own GitWorkspaceOptions; it no longer shares the mirror's instance.
     /// </summary>
     [Fact]
@@ -504,7 +504,8 @@ public sealed class SandboxRunWorkspaceProviderTests : IAsyncLifetime
         sp.GetRequiredService<SandboxPublishWorktrees>().Inner.Options.Should().BeSameAs(shared);
         Invalid(o => o.DataRoot = "relative").Should().Throw<ArgumentException>().WithMessage("*DataRoot*");
         Invalid(o => o.Image = " ").Should().Throw<ArgumentException>().WithMessage("*Image*");
-        Invalid(o => o.ProtectedPaths.Clear()).Should().Throw<ArgumentException>().WithMessage("*ProtectedPaths*");
+        Invalid(o => o.ProtectedPaths.Add("docs/../x")).Should().Throw<ArgumentException>().WithMessage("*ProtectedPaths*'..'*");
+        Invalid(o => o.ProtectedPaths.Clear()).Should().NotThrow("the shipped defaults protect a run with no extras");
     }
 
     /// <summary>
@@ -532,13 +533,38 @@ public sealed class SandboxRunWorkspaceProviderTests : IAsyncLifetime
         build.Should().Throw<InvalidOperationException>().WithMessage("*remote*roslyn*");
     }
 
+    /// <summary>
+    /// The sandbox host serves one remote MCP route, mcp/roslyn, so a remote entry by any other name would fail every
+    /// run call. Red: in ThrowIfUnservableRunScopedServers, drop the remote-name check; the provider is then built.
+    /// </summary>
+    [Fact]
+    public async Task A_remote_run_scoped_MCP_server_not_named_roslyn_is_refused_when_the_provider_is_built()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddSingleton<ISandboxRuntime>(Runtime);
+        services.AddThalos(t => t
+            .UseSandboxRunWorkspaces(o =>
+            {
+                o.DataRoot = DataRoot;
+                o.Image = "thalos/sandbox:test";
+            })
+            .AddMcpServer("codelens", new McpServerDefinition { Type = "stdio", Command = "dotnet", Args = [LoopbackSandbox.ServerDll, "--host"], RunScoped = new RunScopedMcpDefinition { Remote = true } }));
+        await using var sp = services.BuildServiceProvider();
+
+        var build = () => sp.GetRequiredService<IRunWorkspaceProvider>();
+
+        build.Should().Throw<InvalidOperationException>().WithMessage("*named 'roslyn'*codelens*");
+    }
+
     // ---------- record integrity ----------
 
     /// <summary>
     /// I2: a record that is not well formed for its run is treated as corrupt: not found, not resolved, not listed, and
     /// not removed, so nothing acts on it. Red 1: drop the SandboxId check. Red 2: drop the blank-token check. Red 3:
-    /// drop the full-sha check on BaseCommit. Reds 4 to 7: drop Repository, Remote, DefaultBranch or Branch from the
-    /// blank-field condition. Each red makes its case's record found and removable again.
+    /// drop the full-sha check on BaseCommit. Reds 4 to 8: drop Repository, Remote, DefaultBranch, Branch or Solution
+    /// from the blank-field condition. Reds 9 and 10: drop the Remote or the Branch leading-dash check. Each red makes
+    /// its case's record found and removable again.
     /// </summary>
     [Theory]
     [InlineData("sandbox-id")]
@@ -548,6 +574,10 @@ public sealed class SandboxRunWorkspaceProviderTests : IAsyncLifetime
     [InlineData("remote")]
     [InlineData("default-branch")]
     [InlineData("branch")]
+    [InlineData("solution-null")]
+    [InlineData("solution-blank")]
+    [InlineData("remote-dash")]
+    [InlineData("branch-dash")]
     public async Task A_tampered_record_fails_closed(string tamper)
     {
         var provider = Provider();
@@ -562,6 +592,10 @@ public sealed class SandboxRunWorkspaceProviderTests : IAsyncLifetime
             "remote" => record with { Remote = " " },
             "default-branch" => record with { DefaultBranch = " " },
             "branch" => record with { Branch = " " },
+            "solution-null" => record with { Solution = null },
+            "solution-blank" => record with { Solution = " " },
+            "remote-dash" => record with { Remote = "--upload-pack=x" },
+            "branch-dash" => record with { Branch = "-b" },
             _ => record with { BaseCommit = record.BaseCommit[..12] },
         };
         provider.Store.EnsureDirectory().Should().BeNull();
@@ -671,7 +705,6 @@ public sealed class SandboxRunWorkspaceProviderTests : IAsyncLifetime
         File.Exists(Path.Combine(SandboxesDirectory, $"{runId:D}.json")).Should().BeFalse();
         _observer.Events.Should().Equal($"removing {runId}");
     }
-
 
     /// <summary>
     /// A record whose processing throws is logged and the pass goes on to the other records and the orphans. Red: remove

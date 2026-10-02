@@ -146,12 +146,16 @@ public sealed partial class GitMirrorStore(GitWorkspaceOptions options, ILogger<
         var temporaryRef = $"refs/heads/thalos-bundle/{Guid.NewGuid():N}";
         using (await LockRepositoryAsync(mirror.Repository, ct).ConfigureAwait(false))
         {
+            // Until update-ref says it wrote nothing, the ref may exist, so an exception still reaches the delete.
+            var refMayExist = true;
             try
             {
                 // Inside the try, uncancelled: a cancellation after the ref is written must still reach the delete.
                 var created = await _git.RunAsync(mirror.Directory, ["update-ref", temporaryRef, commit], null, null, CancellationToken.None).ConfigureAwait(false);
                 if (!created.Succeeded)
                 {
+                    // update-ref writes the ref atomically or not at all: there is nothing to delete, and no clean-up to fail.
+                    refMayExist = false;
                     return UnitResult<AgentError>.Failure(GitFailure("git update-ref of the bundle ref failed.", created, secret: null));
                 }
 
@@ -162,11 +166,14 @@ public sealed partial class GitMirrorStore(GitWorkspaceOptions options, ILogger<
             }
             finally
             {
-                // In every case, cancellation included: a leftover ref would pin the objects forever.
-                var deleted = await _git.RunAsync(mirror.Directory, ["update-ref", "-d", temporaryRef], null, null, CancellationToken.None).ConfigureAwait(false);
-                if (!deleted.Succeeded)
+                // In every case the ref may exist, cancellation included: a leftover ref would pin the objects forever.
+                if (refMayExist)
                 {
-                    LogCleanupFailed(logger, "delete the temporary bundle ref", ExtractErrorDetail(deleted.StdErr));
+                    var deleted = await _git.RunAsync(mirror.Directory, ["update-ref", "-d", temporaryRef], null, null, CancellationToken.None).ConfigureAwait(false);
+                    if (!deleted.Succeeded)
+                    {
+                        LogCleanupFailed(logger, "delete the temporary bundle ref", ExtractErrorDetail(deleted.StdErr));
+                    }
                 }
             }
         }

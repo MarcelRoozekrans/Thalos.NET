@@ -130,7 +130,11 @@ public sealed class SandboxProcessRunner : ISandboxProcessRunner
         private readonly Lock _gate = new();
         private int _errorLines;
 
-        /// <summary>How many characters are held right now, before <see cref="ToString"/> trims to the cap. Never more than twice the cap, which is the memory bound.</summary>
+        /// <summary>
+        /// How many characters are held right now, before <see cref="ToString"/> trims to the cap. Never more than twice
+        /// the cap once an append returns, which is the memory bound; inside one append it briefly holds that plus the
+        /// appended line.
+        /// </summary>
         internal int RetainedLength
         {
             get

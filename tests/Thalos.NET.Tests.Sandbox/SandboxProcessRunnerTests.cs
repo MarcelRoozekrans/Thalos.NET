@@ -98,7 +98,11 @@ public sealed class SandboxProcessRunnerTests
         outcome.ErrorLineCount.Should().Be(lines);
     }
 
-    /// <summary>Red: remove the Remove call that trims in OutputBuffer.AppendLine, so the buffer grows without bound.</summary>
+    /// <summary>
+    /// Once each append returns, the buffer holds at most twice the cap, as RetainedLength documents. Red 1: remove the
+    /// Remove call that trims in OutputBuffer.AppendLine, so the buffer grows without bound. Red 2: trim only past twice
+    /// the cap plus 100, so an append can return holding more than twice the cap.
+    /// </summary>
     [Fact]
     public void The_buffer_never_holds_more_than_twice_the_cap()
     {
@@ -107,7 +111,7 @@ public sealed class SandboxProcessRunnerTests
         for (var i = 0; i < 5000; i++)
         {
             buffer.AppendLine(new string('x', 99));
-            buffer.RetainedLength.Should().BeLessThanOrEqualTo(2 * 1000 + 100);
+            buffer.RetainedLength.Should().BeLessThanOrEqualTo(2 * 1000);
         }
 
         buffer.ToString().Length.Should().BeLessThanOrEqualTo(1000);

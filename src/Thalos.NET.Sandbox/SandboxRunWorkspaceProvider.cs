@@ -68,7 +68,7 @@ public sealed partial class SandboxRunWorkspaceProvider(
     internal static readonly TimeSpan ProvisionalGrace = TimeSpan.FromMinutes(10);
 
     private readonly SandboxRecordStore _store = new(options.DataRoot, clock, logger);
-    private readonly ProtectedPathSet _protected = new(options.ProtectedPaths);
+    private readonly ProtectedPathSet _protected = options.EffectiveProtectedPaths();
 
     /// <summary>How often <see cref="WaitAllReadyAsync"/> asks the sandbox. Two seconds; tests shorten it.</summary>
     internal TimeSpan ReadyPollInterval { get; set; } = TimeSpan.FromSeconds(2);
@@ -212,7 +212,6 @@ public sealed partial class SandboxRunWorkspaceProvider(
     private static AgentError AlreadyExists(Guid runId) =>
         AgentError.Validation($"Run '{runId}' already has a sandbox.");
 
-
     private async Task<Result<FileStream?, AgentError>> TryLockRunAsync(Guid runId, CancellationToken ct)
     {
         // First, so the lock's own directory is never what creates the state directory with default permissions.
@@ -270,7 +269,6 @@ public sealed partial class SandboxRunWorkspaceProvider(
             }
         }
     }
-
 
     [LoggerMessage(EventId = 2101, Level = LogLevel.Warning, Message = "Could not {What}: {Error}")]
     private static partial void LogCleanupFailed(ILogger logger, string what, string error);

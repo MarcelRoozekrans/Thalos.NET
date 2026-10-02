@@ -39,11 +39,15 @@ public sealed class SandboxSpecTests
     public void An_extension_list_is_semicolon_joined() =>
         Spec(new HashSet<string>(StringComparer.Ordinal) { ".csproj", ".cs" }).Environment(new Uri("http://e:1"))[SandboxEnvironment.WriteExtensions].Should().Be(".cs;.csproj");
 
-    /// <summary>Red: drop the Distinct, or Distinct before Order. The set holds ".cs" first, so Distinct-then-Order keeps ".cs" and fails.</summary>
+    /// <summary>
+    /// Red: drop the Distinct, or Distinct before Order. The set enumerates ".cs" first, by construction rather than by a
+    /// HashSet's bucket order, so Distinct-then-Order keeps ".cs" and fails.
+    /// </summary>
     [Fact]
     public void Extensions_are_deduplicated_ignoring_case_and_ordered()
     {
-        var ext = new HashSet<string>(StringComparer.Ordinal) { ".cs", ".CS", ".csproj" };
+        var ext = new InsertionOrderedSet(".cs", ".CS", ".csproj");
+        ext.Should().Equal([".cs", ".CS", ".csproj"], "the red depends on this enumeration order");
         Spec(ext).Environment(new Uri("http://e:1"))[SandboxEnvironment.WriteExtensions].Should().Be(".CS;.csproj");
     }
 
@@ -97,4 +101,43 @@ public sealed class SandboxSpecTests
     /// <summary>Gateway route and container name depend on it. Red: use "D".</summary>
     [Fact]
     public void The_sandbox_id_is_32_lowercase_hex() => Spec().SandboxId.Should().MatchRegex("^[0-9a-f]{32}$");
+
+    /// <summary>
+    /// Red: drop SandboxSpec's ToString override; the generated record text then prints the token.
+    /// </summary>
+    [Fact]
+    public void The_text_of_a_spec_leaves_the_token_out()
+    {
+        var spec = Spec() with { Token = "secret-sandbox-token" };
+
+        var text = spec.ToString();
+
+        text.Should().NotContain("secret-sandbox-token").And.Contain(spec.RunId.ToString()).And.Contain("img:1");
+    }
+
+    /// <summary>A read-only set that enumerates in insertion order, so a test's input order does not depend on hashing.</summary>
+    private sealed class InsertionOrderedSet(params string[] items) : IReadOnlySet<string>
+    {
+        private readonly List<string> _items = [.. items.Distinct(StringComparer.Ordinal)];
+
+        public int Count => _items.Count;
+
+        public bool Contains(string item) => _items.Contains(item, StringComparer.Ordinal);
+
+        public IEnumerator<string> GetEnumerator() => _items.GetEnumerator();
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+
+        public bool IsProperSubsetOf(IEnumerable<string> other) => throw new NotSupportedException();
+
+        public bool IsProperSupersetOf(IEnumerable<string> other) => throw new NotSupportedException();
+
+        public bool IsSubsetOf(IEnumerable<string> other) => throw new NotSupportedException();
+
+        public bool IsSupersetOf(IEnumerable<string> other) => throw new NotSupportedException();
+
+        public bool Overlaps(IEnumerable<string> other) => throw new NotSupportedException();
+
+        public bool SetEquals(IEnumerable<string> other) => throw new NotSupportedException();
+    }
 }

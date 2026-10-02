@@ -253,7 +253,6 @@ public sealed partial class SandboxRunWorkspaceProvider
         return true;
     }
 
-
     /// <summary>32 bytes from <see cref="RandomNumberGenerator"/>, as base64url: 43 characters.</summary>
     private static string NewToken() => Base64Url.EncodeToString(RandomNumberGenerator.GetBytes(32));
 

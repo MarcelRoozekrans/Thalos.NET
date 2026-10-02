@@ -27,9 +27,8 @@ namespace Thalos.Tests.Sandbox.Docker;
 /// </summary>
 public sealed class SandboxEndToEndFixture : IAsyncLifetime
 {
-    /// <summary>The shipped default protected paths, with <c>AGENT.md</c> as the standing instructions.</summary>
-    public static readonly string[] ShippedProtectedPaths =
-        [".git/", "AGENT.md", ".gitattributes", ".gitmodules", ".github/", ".gitlab-ci.yml", "azure-pipelines.yml", ".azure-pipelines/", ".circleci/", "Jenkinsfile"];
+    /// <summary>The host's own protected path, the standing instructions; the shipped defaults come with the options.</summary>
+    public static readonly string[] HostProtectedPaths = ["AGENT.md"];
 
     private readonly ConcurrentQueue<string> log = new();
     private readonly List<TrustedSide> stacks = [];
@@ -124,7 +123,7 @@ public sealed class SandboxEndToEndFixture : IAsyncLifetime
         {
             o.DataRoot = dataRoot;
             o.Image = Image;
-            foreach (var entry in ShippedProtectedPaths)
+            foreach (var entry in HostProtectedPaths)
             {
                 o.ProtectedPaths.Add(entry);
             }
@@ -475,8 +474,15 @@ public sealed class TrustedSide(ServiceProvider services, DockerSandboxRuntime r
 
     public async ValueTask DisposeAsync()
     {
-        await roslyn.DisposeAsync();
-        await services.DisposeAsync();
+        try
+        {
+            await roslyn.DisposeAsync();
+        }
+        finally
+        {
+            // The container owns the provider and its sandboxes' clients; it is disposed even if Roslyn's source throws.
+            await services.DisposeAsync();
+        }
     }
 }
 

@@ -158,9 +158,15 @@ internal sealed partial class SandboxRecordStore(string dataRoot, TimeProvider c
         }
 
         if (string.IsNullOrWhiteSpace(record.Token) || string.IsNullOrWhiteSpace(record.Repository) || string.IsNullOrWhiteSpace(record.Remote)
-            || string.IsNullOrWhiteSpace(record.DefaultBranch) || string.IsNullOrWhiteSpace(record.Branch))
+            || string.IsNullOrWhiteSpace(record.DefaultBranch) || string.IsNullOrWhiteSpace(record.Branch) || string.IsNullOrWhiteSpace(record.Solution))
         {
-            return "The record is missing its token, repository, remote or a branch.";
+            return "The record is missing its token, repository, remote, a branch or its solution.";
+        }
+
+        // A create refuses these, and git would read them as options.
+        if (record.Remote.StartsWith('-') || record.Branch.StartsWith('-'))
+        {
+            return "The record's remote or branch starts with '-'.";
         }
 
         return GitMirrorStore.IsFullSha(record.BaseCommit ?? "") ? null : "The record's base commit is not a full 40-character sha.";

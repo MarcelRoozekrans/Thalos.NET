@@ -170,7 +170,6 @@ public sealed partial class SandboxRunWorkspaceProvider
         return await mirrors.ReadFileAsync(new GitMirror(record.Repository, mirrors.MirrorPath(record.Repository)), record.BaseCommit, relativePath, ct).ConfigureAwait(false);
     }
 
-
     /// <summary>The runtime answered for this run's sandbox id with a sandbox of another run: it is never talked to.</summary>
     private const string OtherRun = "The sandbox under this run's id belongs to another run.";
 

@@ -63,11 +63,21 @@ public sealed class RunWorkspaceToolOptions
     /// Throws <see cref="ArgumentException"/> naming the offending member when a value cannot work:
     /// <see cref="ContentionTimeout"/> outside <see cref="Timeout.InfiniteTimeSpan"/> or zero to
     /// <see cref="int.MaxValue"/> milliseconds, <see cref="MaxReadBytes"/> negative or too large to buffer, or
-    /// <see cref="MaxListEntries"/> negative. <paramref name="paramName"/> is the caller's parameter that produced
-    /// these options.
+    /// <see cref="MaxListEntries"/> negative, or a <see cref="ProtectedPaths"/> entry <see cref="ProtectedPathSet"/>
+    /// refuses, such as one with a <c>..</c> segment, which would otherwise fail the first tool call instead of the boot.
+    /// <paramref name="paramName"/> is the caller's parameter that produced these options.
     /// </summary>
     internal void Validate(string paramName)
     {
+        try
+        {
+            _ = new ProtectedPathSet(ProtectedPaths);
+        }
+        catch (ArgumentException ex)
+        {
+            throw new ArgumentException($"RunWorkspaceToolOptions.ProtectedPaths is invalid: {ex.Message}", paramName, ex);
+        }
+
         if (ContentionTimeout != Timeout.InfiniteTimeSpan
             && (ContentionTimeout < TimeSpan.Zero || ContentionTimeout.TotalMilliseconds > int.MaxValue))
         {

@@ -437,6 +437,28 @@ public sealed class GitPatchApplierTests : IDisposable
     }
 
     /// <summary>
+    /// Windows drops a name's trailing dots and spaces, so each path writes under .github/ on a Windows checkout.
+    /// Red: in ProtectedPathSet.Normalize, add each segment untrimmed; git then reports each path differently, or
+    /// applies it.
+    /// </summary>
+    [Theory]
+    [InlineData(".github./x.yml")]
+    [InlineData(".github /x.yml")]
+    public async Task A_protected_directory_spelled_with_trailing_dots_or_spaces_is_refused(string path)
+    {
+        using var remote = SeededRemote();
+        var ws = await WorkspaceAsync(remote);
+        var patch = WritePatch(CreationPatch(path));
+        Freeze(ws);
+
+        var result = await Applier().ApplyAsync(ws, patch, Defaults, new PatchApplyLimits(), CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Message.Should().Be($"the change touches protected path '{path}'; publish refused");
+        AssertUntouched(ws);
+    }
+
+    /// <summary>
     /// Important 2: a write beyond a symlink the base already holds is refused before git runs. The base symlink is
     /// committed as a git object, so the test needs no filesystem symlink and runs on every OS; the worktree holds it
     /// as a plain file because the provider checks out with core.symlinks=false.

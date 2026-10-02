@@ -96,6 +96,30 @@ public sealed class GitMirrorStoreTests : IDisposable
         LocalGitRemote.RunGit(mirror.Directory, "for-each-ref", "refs/heads/thalos-bundle").Should().BeEmpty();
     }
 
+    /// <summary>
+    /// A commit the mirror does not hold makes update-ref fail and write nothing, so no clean-up delete runs, and none
+    /// can fail and log a warning. Red: in CreateBundleAsync, leave refMayExist true after the failed create; the spy
+    /// then records an update-ref -d of the ref that was never written.
+    /// </summary>
+    [Fact]
+    public async Task A_failed_bundle_ref_create_runs_no_clean_up_delete()
+    {
+        using var remote = LocalGitRemote.Create();
+        var mirror = (await Store().PrepareAsync("repo", remote.Url, CancellationToken.None)).Value;
+        var captureFile = Path.Combine(_temp, "bundle-argv.log");
+        File.WriteAllText(captureFile, string.Empty);
+        var store = Store(gitExecutable: WriteSpyGit(_temp, captureFile));
+        var bundle = Path.Combine(_temp, "never.bundle");
+
+        var written = await store.CreateBundleAsync(mirror, new string('1', 40), bundle, CancellationToken.None);
+
+        var calls = File.ReadAllLines(captureFile).Where(l => l.Contains("update-ref", StringComparison.Ordinal)).ToList();
+        written.IsFailure.Should().BeTrue();
+        written.Error.Message.Should().Contain("update-ref");
+        calls.Should().ContainSingle("only the failed create, no delete").Which.Should().NotContain(" -d ");
+        File.Exists(bundle).Should().BeFalse();
+    }
+
     /// <summary>Red: skip the IsFullSha check in CreateBundleAsync, so a ref name reaches update-ref and a bundle is written.</summary>
     [Fact]
     public async Task A_bundle_refuses_anything_but_a_full_sha()
@@ -276,5 +300,31 @@ public sealed class GitMirrorStoreTests : IDisposable
         {
             File.Delete(expected);
         }
+    }
+
+    /// <summary>Writes a "spy" git executable that appends its full argv to <paramref name="captureFile"/> and then runs the real git with the same arguments.</summary>
+    private static string WriteSpyGit(string dir, string captureFile)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            var path = Path.Combine(dir, "spy-git-" + Guid.NewGuid().ToString("N") + ".cmd");
+            File.WriteAllText(path,
+                "@echo off\r\n" +
+                $"echo %* >> \"{captureFile}\"\r\n" +
+                "git %*\r\n" +
+                "exit /b %errorlevel%\r\n");
+            return path;
+        }
+
+        var scriptPath = Path.Combine(dir, "spy-git-" + Guid.NewGuid().ToString("N") + ".sh");
+        File.WriteAllText(scriptPath,
+            "#!/bin/sh\n" +
+            $"echo \"$@\" >> \"{captureFile}\"\n" +
+            "exec git \"$@\"\n");
+        File.SetUnixFileMode(scriptPath,
+            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
+            UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
+            UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+        return scriptPath;
     }
 }

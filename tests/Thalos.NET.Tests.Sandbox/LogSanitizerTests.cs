@@ -19,4 +19,16 @@ public sealed class LogSanitizerTests
         LogSanitizer.Clean("short").Should().Be("short");
         LogSanitizer.Clean(null).Should().BeEmpty();
     }
+
+    /// <summary>
+    /// U+2028 and U+2029 are not control characters, but some log viewers break lines at them. Red: replace only
+    /// char.IsControl characters; both separators then survive.
+    /// </summary>
+    [Fact]
+    public void Unicode_line_and_paragraph_separators_become_spaces()
+    {
+        var clean = LogSanitizer.Clean("a\u2028forged\u2029line");
+
+        clean.Should().Be("a forged line");
+    }
 }

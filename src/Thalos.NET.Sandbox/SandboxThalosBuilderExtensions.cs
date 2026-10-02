@@ -12,6 +12,9 @@ namespace Thalos.Sandbox;
 /// <summary>Registers <see cref="SandboxRunWorkspaceProvider"/> on a <see cref="ThalosBuilder"/>.</summary>
 public static class SandboxThalosBuilderExtensions
 {
+    /// <summary>The one remote run-scoped MCP entry name a sandbox serves, at its <c>mcp/roslyn</c> route.</summary>
+    internal const string RemoteMcpServerName = "roslyn";
+
     /// <summary>
     /// Makes every run sandboxed: <see cref="SandboxRunWorkspaceProvider"/> replaces the run workspace provider, the base
     /// file reader, the tool endpoint resolver, the parkable provider, the hand-off and the run tool server readiness,
@@ -33,7 +36,9 @@ public static class SandboxThalosBuilderExtensions
     /// <para>
     /// <b>No local run-scoped MCP server.</b> Building the provider, at the latest when the host starts its reconcile
     /// service, throws <see cref="InvalidOperationException"/> if any run-scoped MCP server is not remote: the host would
-    /// start it for each run on the host, in a <c>sandbox://</c> root that is no host directory.
+    /// start it for each run on the host, in a <c>sandbox://</c> root that is no host directory. It throws too if a remote
+    /// run-scoped MCP server is not named <c>roslyn</c>: a run's calls go to the sandbox's <c>mcp/{name}</c> route, and
+    /// the sandbox host serves only <c>workspace</c>, <c>sandbox</c> and <c>roslyn</c>.
     /// </para>
     /// </remarks>
     /// <param name="builder">The builder to register on.</param>
@@ -41,7 +46,7 @@ public static class SandboxThalosBuilderExtensions
     /// <returns><paramref name="builder"/>.</returns>
     /// <exception cref="ArgumentException">
     /// <see cref="SandboxOptions.DataRoot"/> is not absolute, <see cref="SandboxOptions.Image"/> is blank, or
-    /// <see cref="SandboxOptions.ProtectedPaths"/> is empty or holds a <c>..</c> segment.
+    /// <see cref="SandboxOptions.ProtectedPaths"/> holds a <c>..</c> segment.
     /// </exception>
     [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
     [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
@@ -71,7 +76,7 @@ public static class SandboxThalosBuilderExtensions
             .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler { PooledConnectionLifetime = TimeSpan.FromMinutes(2) })
             .SetHandlerLifetime(Timeout.InfiniteTimeSpan);
         services.AddSingleton(sp => new SandboxRunWorkspaceProvider(
-            ThrowIfLocalRunScopedServers(sp, options),
+            ThrowIfUnservableRunScopedServers(sp, options),
             sp.GetRequiredService<ISandboxRuntime>(),
             sp.GetRequiredService<GitMirrorStore>(),
             sp.GetRequiredService<SandboxPublishWorktrees>(),
@@ -108,26 +113,42 @@ public static class SandboxThalosBuilderExtensions
             throw new ArgumentException("SandboxOptions.Image must not be blank.", paramName);
         }
 
-        // Throws on a '..' entry; an empty set would leave .git/ and the CI files writable in the sandbox.
-        if (new ProtectedPathSet(options.ProtectedPaths).Entries.Count == 0)
+        try
         {
-            throw new ArgumentException("SandboxOptions.ProtectedPaths must not be empty.", paramName);
+            _ = options.EffectiveProtectedPaths();
+        }
+        catch (ArgumentException ex)
+        {
+            throw new ArgumentException($"SandboxOptions.ProtectedPaths is invalid: {ex.Message}", paramName, ex);
         }
     }
 
     /// <summary>
     /// Refuses, when the provider is built, which the reconcile service does at boot, any run-scoped MCP server that is
     /// not remote. The host would start it for each run with the run's workspace root, <c>sandbox://&lt;id&gt;</c>, as its
-    /// working directory and <c>${run.workspace.root}</c>: on the host, outside the sandbox. Checked here rather than in
-    /// <see cref="UseSandboxRunWorkspaces"/> so the order of registration does not matter.
+    /// working directory and <c>${run.workspace.root}</c>: on the host, outside the sandbox. Also refuses a remote one not
+    /// named <see cref="RemoteMcpServerName"/>: its run calls go to the sandbox's <c>mcp/{name}</c> route, and the sandbox
+    /// host serves only <c>workspace</c>, <c>sandbox</c> and <c>roslyn</c>, so every call would fail. Checked here rather
+    /// than in <see cref="UseSandboxRunWorkspaces"/> so the order of registration does not matter.
     /// </summary>
-    private static SandboxOptions ThrowIfLocalRunScopedServers(IServiceProvider services, SandboxOptions options)
+    private static SandboxOptions ThrowIfUnservableRunScopedServers(IServiceProvider services, SandboxOptions options)
     {
         var local = McpThalosBuilderExtensions.LocalRunScopedServerNames(services);
-        return local.Count == 0
-            ? options
-            : throw new InvalidOperationException(
+        if (local.Count > 0)
+        {
+            throw new InvalidOperationException(
                 $"Sandboxed runs need every run-scoped MCP server to be remote, served inside the run's sandbox; " +
                 $"set runScoped.remote for: {string.Join(", ", local.Order(StringComparer.Ordinal))}. A local one would be started on the host.");
+        }
+
+        var unserved = McpThalosBuilderExtensions.RemoteRunScopedServerNames(services)
+            .Where(name => !string.Equals(name, RemoteMcpServerName, StringComparison.Ordinal))
+            .Order(StringComparer.Ordinal)
+            .ToList();
+        return unserved.Count == 0
+            ? options
+            : throw new InvalidOperationException(
+                $"A sandbox serves one remote run-scoped MCP server, named '{RemoteMcpServerName}'; " +
+                $"rename or remove: {string.Join(", ", unserved)}. Its run calls would go to a route the sandbox does not serve.");
     }
 }

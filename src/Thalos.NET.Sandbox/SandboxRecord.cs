@@ -3,7 +3,7 @@ using System.Text.Json.Serialization;
 namespace Thalos.Sandbox;
 
 /// <summary>Where a sandboxed run's record stands.</summary>
-public enum SandboxRecordState
+internal enum SandboxRecordState
 {
     /// <summary>Claimed by a create that has not finished: no container yet, or one still importing.</summary>
     Provisional,
@@ -48,7 +48,7 @@ public enum SandboxRecordState
 /// The stored patch was applied to the run's publish worktree, which a later checkout then returns as it is. A publish
 /// worktree without it is one a checkout made but never finished, and is rebuilt.
 /// </param>
-public sealed record SandboxRecord(
+internal sealed record SandboxRecord(
     Guid RunId, string Repository, string Remote, string DefaultBranch, string Branch, string? Solution,
     string BaseCommit, string SandboxId, string Token, SandboxRecordState State, DateTimeOffset CreatedAt,
     string? PatchPath = null, bool PatchMissing = false, bool PatchApplied = false, int ExportAttempts = 0, string? PatchMissingReason = null, bool RestartedByPark = false)

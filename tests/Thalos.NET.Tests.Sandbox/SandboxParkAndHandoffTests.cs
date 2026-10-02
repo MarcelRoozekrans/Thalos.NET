@@ -230,14 +230,15 @@ public sealed class SandboxParkAndHandoffTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// S5. Red: in ApplyToNewWorktreeAsync, pass an empty ProtectedPathSet instead of the options'; the checkout
-    /// succeeds and the workflow file is staged for publishing. Red 2: skip the RemoveAsync after a refused apply; the
-    /// worktree is left.
+    /// S5, with options that add no protected path of their own: R38's shipped defaults protect .github/. Red 1: in
+    /// ApplyToNewWorktreeAsync, pass an empty ProtectedPathSet instead of the options'; the checkout succeeds and the
+    /// workflow file is staged for publishing. Red 2: skip the RemoveAsync after a refused apply; the worktree is left.
+    /// Red 3: make SandboxOptions.DefaultProtectedPaths empty; the checkout succeeds.
     /// </summary>
     [Fact]
     public async Task Checkout_refuses_a_dot_github_change_written_around_the_tools_and_leaves_no_worktree()
     {
-        var (provider, runId) = await ReadyRunAsync(o => o.ProtectedPaths.Add(".github/"));
+        var (provider, runId) = await ReadyRunAsync(o => o.ProtectedPaths.Clear());
         var repo = RepoOf(runId);
         Directory.CreateDirectory(Path.Combine(repo, ".github", "workflows"));
         await File.WriteAllTextAsync(Path.Combine(repo, ".github", "workflows", "evil.yml"), "on: push\n");

@@ -63,6 +63,24 @@ public sealed class ProtectedPathSetTests
     [InlineData(@"a\..\b")]
     public void A_path_with_a_parent_segment_fails_closed(string path) => Set.IsProtected(path).Should().BeTrue();
 
+    /// <summary>
+    /// Windows drops a name's trailing dots and spaces, so these open the protected directory or file. Red: in Normalize,
+    /// add each segment untrimmed.
+    /// </summary>
+    [Theory]
+    [InlineData(".github./x.yml")]
+    [InlineData(".github /x.yml")]
+    [InlineData(".github. . /x.yml")]
+    [InlineData("AGENT.md.")]
+    [InlineData("docs/ci /a.md")]
+    public void A_segment_with_trailing_dots_or_spaces_is_still_protected(string path) => Set.IsProtected(path).Should().BeTrue();
+
+    /// <summary>Red: in Normalize, treat a segment of only dots and spaces like any other, so it is kept and does not match.</summary>
+    [Theory]
+    [InlineData(".../.github/x.yml")]
+    [InlineData("src/ /x")]
+    public void A_segment_of_only_dots_and_spaces_fails_closed(string path) => Set.IsProtected(path).Should().BeTrue();
+
     /// <summary>Red: skip the ".." check when normalising an entry.</summary>
     [Fact]
     public void An_entry_with_a_parent_segment_is_refused() =>

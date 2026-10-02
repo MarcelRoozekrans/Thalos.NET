@@ -27,6 +27,9 @@ public sealed record SandboxSpec
     /// <summary>The run id in "N" format.</summary>
     public string SandboxId => RunId.ToString("N");
 
+    /// <summary>The token is never printed, so the record's generated text leaves it out.</summary>
+    public override string ToString() => $"SandboxSpec {{ RunId = {RunId}, Image = {Image}, SandboxId = {SandboxId} }}";
+
     /// <summary>Checks that nothing in the spec can corrupt the semicolon-joined environment values.</summary>
     /// <returns>Success, or a validation error naming the offending entry.</returns>
     public UnitResult<AgentError> Validate()
