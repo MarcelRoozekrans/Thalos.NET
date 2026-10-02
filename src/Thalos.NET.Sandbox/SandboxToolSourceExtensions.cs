@@ -41,8 +41,11 @@ public static class SandboxToolSourceExtensions
     /// <param name="toolType">A <see cref="ThalosToolTypeAttribute"/> class, e.g. <see cref="WorkspaceTools"/> or <see cref="SandboxTools"/>.</param>
     /// <returns><paramref name="builder"/>.</returns>
     /// <exception cref="ArgumentException">
-    /// <paramref name="sourceName"/> violates <see cref="ToolSourceName"/>, or <paramref name="toolType"/> is not marked
-    /// <see cref="ThalosToolTypeAttribute"/>.
+    /// <paramref name="sourceName"/> violates <see cref="ToolSourceName"/>, <paramref name="toolType"/> is not marked
+    /// <see cref="ThalosToolTypeAttribute"/>, or an MCP entry, a local tool source such as <c>UseRunWorkspaceTools</c>'s,
+    /// or another remote run tool source already has <paramref name="sourceName"/>. The check holds in either order: a
+    /// later local source or MCP entry by this name is refused too, because the tool catalog keeps the first source of a
+    /// name and a local one would serve a run's calls on the host.
     /// </exception>
     [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
     [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
@@ -61,7 +64,7 @@ public static class SandboxToolSourceExtensions
             sourceName,
             new SchemaToolSource(sourceName, toolType),
             new DeferredRunToolEndpointResolver(sp),
-            sp.GetService<RemoteRunToolOptions>() ?? new RemoteRunToolOptions(),
+            McpThalosBuilderExtensions.RemoteOptions(sp),
             McpThalosBuilderExtensions.LoggerFactory(sp),
             McpThalosBuilderExtensions.Clock(sp),
             McpThalosBuilderExtensions.RunToolCallObservers(sp)));

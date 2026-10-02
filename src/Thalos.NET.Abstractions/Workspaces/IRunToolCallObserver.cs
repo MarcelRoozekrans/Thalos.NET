@@ -20,6 +20,11 @@ public sealed record RunToolCall(Guid RunId, string Source, string Tool, ISecuri
 /// An exception from an observer, including an <see cref="OperationCanceledException"/> of its own, is logged and
 /// changes neither the call's result nor whether later observers are told; only the cancellation of the call's own
 /// token stops it, as for <see cref="IRunWorkspaceObserver"/>.
+/// <para>
+/// The call waits for each observer, so an observer must finish quickly. The caller bounds the wait (Thalos.NET.Mcp's
+/// <c>RemoteRunToolOptions.ObserverTimeout</c>); past it, the observer's token is cancelled, the delay is logged, and the
+/// call goes on while the observer is left to finish on its own.
+/// </para>
 /// </remarks>
 public interface IRunToolCallObserver
 {

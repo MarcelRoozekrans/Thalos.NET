@@ -30,6 +30,8 @@
     <InternalsVisibleTo Include="Thalos.NET.Tests.Mcp" />
     <!-- The sandbox host begins a TurnScope around each MCP call, as the turn runner does, so tools see its SandboxCaller. -->
     <InternalsVisibleTo Include="Thalos.NET.Sandbox.Host" />
+    <!-- AddRemoteRunTools and remote MCP entries record their names in ToolSourceNames, so no local source shares one. -->
+    <InternalsVisibleTo Include="Thalos.NET.Mcp" />
     <!-- RemoteRunToolSourceTests begin a TurnScope to call a routed tool as a run's caller. -->
     <InternalsVisibleTo Include="Thalos.NET.Tests.Sandbox" />
   </ItemGroup>

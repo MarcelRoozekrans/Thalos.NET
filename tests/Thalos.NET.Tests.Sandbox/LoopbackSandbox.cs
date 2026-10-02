@@ -29,12 +29,14 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
 
     private readonly WebApplication _app;
     private readonly HttpClient _http = new();
+    private readonly Hooks _hooks;
     private bool _stopped;
 
-    private LoopbackSandbox(WebApplication app, Guid runId, string token, Uri baseAddress, ConcurrentQueue<string> requests)
+    private LoopbackSandbox(WebApplication app, Guid runId, string token, Uri baseAddress, ConcurrentQueue<string> requests, Hooks hooks)
     {
         _app = app;
         Requests = requests;
+        _hooks = hooks;
         RunId = runId;
         Token = token;
         BaseAddress = baseAddress;
@@ -63,6 +65,30 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
     /// <summary>The <c>tools/call</c> requests received, as tool names.</summary>
     public IReadOnlyList<string> ToolCalls => [.. Requests.Where(r => r.Contains(" call:", StringComparison.Ordinal)).Select(r => r[(r.IndexOf(" call:", StringComparison.Ordinal) + 6)..])];
 
+    /// <summary>
+    /// When set, a <c>tools/call</c> of a tool it returns a value for is answered, ahead of the bearer check and the MCP
+    /// endpoint, with a JSON-RPC response whose <c>result</c> is that raw JSON: an untrusted sandbox's malformed answer.
+    /// </summary>
+    public Func<string, string?>? AnswerToolCall
+    {
+        get => _hooks.AnswerToolCall;
+        set => _hooks.AnswerToolCall = value;
+    }
+
+    /// <summary>Called, ahead of the bearer check, when an MCP handshake arrives: while a client is connecting.</summary>
+    public Action? OnHandshake
+    {
+        get => _hooks.OnHandshake;
+        set => _hooks.OnHandshake = value;
+    }
+
+    /// <summary>How long a <c>dotnet build</c> takes; it honours the call's token.</summary>
+    public TimeSpan BuildDelay
+    {
+        get => _hooks.BuildDelay;
+        set => _hooks.BuildDelay = value;
+    }
+
     /// <summary>The endpoint of the sandbox's <c>/mcp/{source}</c> route, with its token or <paramref name="token"/>.</summary>
     public RunToolEndpoint Endpoint(string source, string? token = null) => new(new Uri(BaseAddress, $"mcp/{source}"), token ?? Token);
 
@@ -85,19 +111,32 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
 
         var builder = SandboxHost.CreateBuilder(args);
         builder.Logging.ClearProviders();
-        builder.Services.Replace(ServiceDescriptor.Singleton<ISandboxProcessRunner>(new RestoreOkRunner()));
+        var hooks = new Hooks();
+        builder.Services.Replace(ServiceDescriptor.Singleton<ISandboxProcessRunner>(new FakeRunner(hooks)));
         var app = builder.Build();
         app.Urls.Clear();
         app.Urls.Add("http://127.0.0.1:0");
         var requests = new ConcurrentQueue<string>();
         app.Use(async (context, next) =>
         {
-            requests.Enqueue($"{context.Request.Path} {await DescribeAsync(context.Request)}");
+            var (description, id, tool) = await DescribeAsync(context.Request);
+            requests.Enqueue($"{context.Request.Path} {description}");
+            if (description is "initialize" or "server/discover")
+            {
+                hooks.OnHandshake?.Invoke();
+            }
+            if (tool is not null && id is not null && hooks.AnswerToolCall?.Invoke(tool) is { } result)
+            {
+                context.Response.ContentType = "application/json";
+                await context.Response.WriteAsync($"{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{result}}}");
+                return;
+            }
+
             await next(context);
         });
         SandboxHost.Map(app);
         await app.StartAsync();
-        return new LoopbackSandbox(app, runId, token, new Uri(app.Urls.Single().TrimEnd('/') + "/"), requests);
+        return new LoopbackSandbox(app, runId, token, new Uri(app.Urls.Single().TrimEnd('/') + "/"), requests, hooks);
     }
 
     /// <summary>Imports <paramref name="remote"/>'s main and waits until Roslyn is ready.</summary>
@@ -158,12 +197,15 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
         return await _http.SendAsync(request);
     }
 
-    /// <summary>The JSON-RPC method of an MCP request, with the tool's name for a <c>tools/call</c>; empty for anything else.</summary>
-    private static async Task<string> DescribeAsync(HttpRequest request)
+    /// <summary>
+    /// The JSON-RPC method of an MCP request, with the tool's name for a <c>tools/call</c>, and the request's raw id and
+    /// tool name; an empty description for anything else.
+    /// </summary>
+    private static async Task<(string Description, string? Id, string? Tool)> DescribeAsync(HttpRequest request)
     {
         if (!HttpMethods.IsPost(request.Method) || !request.Path.StartsWithSegments("/mcp", StringComparison.Ordinal))
         {
-            return string.Empty;
+            return (string.Empty, null, null);
         }
 
         request.EnableBuffering();
@@ -174,20 +216,42 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
         {
             using var json = JsonDocument.Parse(body);
             var method = json.RootElement.TryGetProperty("method", out var m) ? m.GetString() ?? "" : "";
-            return string.Equals(method, "tools/call", StringComparison.Ordinal)
-                ? "call:" + json.RootElement.GetProperty("params").GetProperty("name").GetString()
-                : method;
+            var id = json.RootElement.TryGetProperty("id", out var i) ? i.GetRawText() : null;
+            if (!string.Equals(method, "tools/call", StringComparison.Ordinal))
+            {
+                return (method, id, null);
+            }
+
+            var tool = json.RootElement.GetProperty("params").GetProperty("name").GetString();
+            return ("call:" + tool, id, tool);
         }
         catch (JsonException)
         {
-            return "unparsed";
+            return ("unparsed", null, null);
         }
     }
 
-    /// <summary>Answers every restore as a success without running it.</summary>
-    private sealed class RestoreOkRunner : ISandboxProcessRunner
+    /// <summary>What a test changes in a running sandbox.</summary>
+    private sealed class Hooks
     {
-        public Task<ProcessOutcome> RunAsync(ProcessSpec spec, CancellationToken ct) =>
-            Task.FromResult(new ProcessOutcome(0, TimedOut: false, "Restore complete.\n"));
+        public Func<string, string?>? AnswerToolCall { get; set; }
+
+        public TimeSpan BuildDelay { get; set; }
+
+        public Action? OnHandshake { get; set; }
+    }
+
+    /// <summary>Answers every process as a success without running it, a build after <see cref="Hooks.BuildDelay"/>.</summary>
+    private sealed class FakeRunner(Hooks hooks) : ISandboxProcessRunner
+    {
+        public async Task<ProcessOutcome> RunAsync(ProcessSpec spec, CancellationToken ct)
+        {
+            if (spec.Arguments.Count > 0 && string.Equals(spec.Arguments[0], "build", StringComparison.Ordinal) && hooks.BuildDelay > TimeSpan.Zero)
+            {
+                await Task.Delay(hooks.BuildDelay, ct);
+            }
+
+            return new ProcessOutcome(0, TimedOut: false, "Restore complete.\n");
+        }
     }
 }

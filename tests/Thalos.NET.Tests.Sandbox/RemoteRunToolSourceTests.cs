@@ -164,8 +164,8 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// Red 1: make OnRemovingAsync a no-op; the call after the removal then reuses the client, and the sandbox sees one
-    /// handshake. Red 2: in McpThalosBuilderExtensions.AddRemote, do not register the source as an
+    /// Red 1: in OnRemovingAsync, remember the run as removed but do not take its client out; the call after the run is
+    /// ready again then reuses the client, and the sandbox sees one handshake. Red 2: in McpThalosBuilderExtensions.AddRemote, do not register the source as an
     /// IRunWorkspaceObserver; the test then finds no observer for it.
     /// </summary>
     [Fact]
@@ -178,12 +178,16 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
         a.Connects.Should().Be(1, "the run's client is cached");
 
         var observer = sp.GetServices<IRunWorkspaceObserver>().OfType<RemoteRunToolSource>().Should().ContainSingle(s => string.Equals(s.Name, "workspace", StringComparison.Ordinal)).Subject;
-        var workspace = new RunWorkspace(a.RunId, "repo", "remote", "main", "run/feature", "sandbox://a", "App.slnx");
+        var workspace = Workspace(a);
         await observer.OnRemovingAsync(workspace, CancellationToken.None);
         await observer.OnRemovingAsync(workspace, CancellationToken.None); // a repeat is a no-op
+        var removed = await CallAsAsync(sp, a.RunId, "workspace", "list_files");
+        await observer.OnReadyAsync(workspace, CancellationToken.None);
         await CallAsAsync(sp, a.RunId, "workspace", "list_files");
 
-        a.Connects.Should().Be(2, "the removal dropped the client, so the next call connected again");
+        using var _ = new AssertionScope();
+        removed.Should().EndWith("the run has no sandbox (it may be parked or removed).", "a removed run is refused until it is ready again");
+        a.Connects.Should().Be(2, "the removal dropped the client, so the call after the run was ready again connected anew");
     }
 
     /// <summary>
@@ -202,12 +206,16 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
 
     // ---------- bounds ----------
 
-    /// <summary>Red: in CallAsync, link the call to the caller's token only, not to the call timeout; slow then answers after its 30 seconds.</summary>
+    /// <summary>
+    /// Red 1: in CallAsync, link the call to the caller's token only, not to the call timeout; slow then answers after its
+    /// 30 seconds. Red 2: in AddMcpServer, build the remote entry's options without its CallTimeout; the registered 20
+    /// minutes then apply, and slow answers after its 30 seconds.
+    /// </summary>
     [Fact]
-    public async Task A_call_past_the_call_timeout_is_an_error_result()
+    public async Task A_remote_MCP_call_past_its_entrys_call_timeout_is_an_error_result()
     {
         var a = await ImportedSandboxAsync("a");
-        await using var sp = Services(new RemoteRunToolOptions { CallTimeout = TimeSpan.FromSeconds(2) });
+        await using var sp = Services(roslyn: new RunScopedMcpDefinition { Remote = true, CallTimeout = TimeSpan.FromSeconds(2) });
 
         var result = await CallAsAsync(sp, a.RunId, "roslyn", "slow", ("ms", 30_000));
 
@@ -215,8 +223,162 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// Red 1: in CallAsync, drop HttpRequestException from the closed-transport catch; the call to the stopped sandbox then
-    /// throws. Red 2: in StoppedDuringAsync, do not drop the client; the next call then reuses the dead client and is
+    /// Red: in AddRemoteRunTools, build the options without the registered ones, as new RemoteRunToolOptions; the 20-minute
+    /// default then applies, and the build answers after its 30 seconds.
+    /// </summary>
+    [Fact]
+    public async Task A_local_schema_call_past_the_registered_call_timeout_is_an_error_result()
+    {
+        var a = await ImportedSandboxAsync("a");
+        a.BuildDelay = TimeSpan.FromSeconds(30);
+        await using var sp = Services(new RemoteRunToolOptions { CallTimeout = TimeSpan.FromSeconds(2) });
+
+        var result = await CallAsAsync(sp, a.RunId, "sandbox", "build");
+
+        result.Should().Be("error: the run's sandbox did not answer 'build' within 00:00:02; the call was cancelled.");
+    }
+
+    // ---------- untrusted answers, failing resolvers ----------
+
+    /// <summary>Red: in InvokeForRunAsync, remove the resolve path's final catch; the resolver's exception then escapes.</summary>
+    [Fact]
+    public async Task A_throwing_resolver_is_an_error_result_not_an_exception()
+    {
+        var runId = Guid.NewGuid();
+        _resolver.Map[runId] = _ => throw new InvalidOperationException("resolver boom");
+        await using var sp = Services();
+
+        var result = await CallAsAsync(sp, runId, "workspace", "list_files");
+
+        using var _ = new AssertionScope();
+        result.Should().Be("error: run tool server 'workspace' is not available for this run: its endpoint could not be resolved.");
+        LogText.Should().Contain("could not resolve the endpoint").And.Contain("InvalidOperationException");
+    }
+
+    /// <summary>
+    /// Red 1: in CallAsync, remove the final catch; the JsonException of reading a result that is not a call result then
+    /// escapes. Red 2: keep the catch but do not drop the client; the next call then reuses it and the sandbox sees one
+    /// handshake.
+    /// </summary>
+    [Fact]
+    public async Task A_malformed_answer_is_an_error_result_and_its_client_is_dropped()
+    {
+        var a = await SandboxAsync("a");
+        a.AnswerToolCall = _ => "42";
+        await using var sp = Services();
+
+        var local = await CallAsAsync(sp, a.RunId, "workspace", "list_files");
+        var host = await CallAsAsync(sp, a.RunId, "roslyn", "args");
+        var connectsAfterMalformed = a.Connects;
+        a.AnswerToolCall = null;
+        var next = await CallAsAsync(sp, a.RunId, "workspace", "list_files");
+
+        using var _ = new AssertionScope();
+        local.Should().Be("error: the run's sandbox gave no usable answer to 'list_files'; the call did not complete.");
+        host.Should().Be("error: the run's sandbox gave no usable answer to 'args'; the call did not complete.");
+        next.Should().Be("error: this turn has no run workspace", "the sandbox's own answer, through a new client");
+        a.Connects.Should().Be(connectsAfterMalformed + 1, "the client that read the malformed answer was dropped");
+    }
+
+    // ---------- clients a removal or the disposal could miss ----------
+
+    /// <summary>
+    /// Red 1: in OnRemovingAsync, do not remember the run as removed; the call then connects and is answered. Red 2: in
+    /// ClientForAsync, skip the check before GetOrAdd; the call then connects before the check after it drops the client.
+    /// Red 3: make OnReadyAsync a no-op; the run then stays refused after it is ready again.
+    /// </summary>
+    [Fact]
+    public async Task A_run_removed_while_its_endpoint_resolves_is_refused_and_connects_nothing()
+    {
+        var a = await SandboxAsync("a");
+        await using var sp = Services();
+        var source = Source(sp, "workspace");
+        var workspace = Workspace(a);
+        _resolver.BeforeAnswer = async runId => await source.OnRemovingAsync(workspace, CancellationToken.None);
+
+        var removed = await CallAsAsync(sp, a.RunId, "workspace", "list_files");
+        var connectsWhileRemoved = a.Connects;
+        _resolver.BeforeAnswer = null;
+        await source.OnReadyAsync(workspace, CancellationToken.None);
+        var ready = await CallAsAsync(sp, a.RunId, "workspace", "list_files");
+
+        using var _ = new AssertionScope();
+        removed.Should().Be("error: run tool server 'workspace' is not available for this run: the run has no sandbox (it may be parked or removed).");
+        connectsWhileRemoved.Should().Be(0);
+        ready.Should().Be("error: this turn has no run workspace", "a run made ready again is served again");
+    }
+
+    /// <summary>
+    /// Red: in ClientForAsync, skip the check after the client exists; the call then goes on with the client the removal
+    /// disposed, and is not refused as removed.
+    /// </summary>
+    [Fact]
+    public async Task A_run_removed_while_its_client_connects_drops_that_client()
+    {
+        var a = await SandboxAsync("a");
+        await using var sp = Services();
+        var source = Source(sp, "workspace");
+        Task? removal = null;
+        a.OnHandshake = () => removal ??= source.OnRemovingAsync(Workspace(a), CancellationToken.None).AsTask();
+
+        var result = await CallAsAsync(sp, a.RunId, "workspace", "list_files");
+        await removal!;
+
+        using var _ = new AssertionScope();
+        result.Should().Be("error: run tool server 'workspace' is not available for this run: the run has no sandbox (it may be parked or removed).");
+        a.ToolCalls.Should().BeEmpty();
+        LogText.Should().Contain($"disposed a client of run {a.RunId}");
+    }
+
+    /// <summary>Red: in Gone, drop the disposed check; the call then tries to connect and fails as a connection error.</summary>
+    [Fact]
+    public async Task A_call_after_the_source_is_disposed_is_refused_without_connecting()
+    {
+        var a = await SandboxAsync("a");
+        await using var sp = Services();
+        var source = Source(sp, "workspace");
+        var tools = (await source.GetToolsAsync(CancellationToken.None)).Value.Cast<AIFunction>().ToDictionary(f => f.Name, StringComparer.Ordinal);
+        await source.DisposeAsync();
+
+        string result;
+        using (BeginTurn(RunCaller(a.RunId)))
+        {
+            result = (await tools["list_files"].InvokeAsync(Arguments()))!.ToString()!;
+        }
+
+        using var _ = new AssertionScope();
+        result.Should().Be("error: run tool server 'workspace' is not available for this run: the tool source has been shut down.");
+        a.Connects.Should().Be(0);
+    }
+
+    /// <summary>
+    /// Red: in ClientForAsync, drop the endpoint comparison; the second call then goes to the first sandbox with the old
+    /// client, and nothing is disposed.
+    /// </summary>
+    [Fact]
+    public async Task A_rotated_endpoint_uses_a_new_client_and_disposes_the_old_one()
+    {
+        var first = await SandboxAsync("first");
+        var second = await SandboxAsync("second");
+        var runId = Guid.NewGuid();
+        _resolver.Map[runId] = source => first.Endpoint(source);
+        await using var sp = Services();
+
+        await CallAsAsync(sp, runId, "workspace", "list_files");
+        LogText.Should().NotContain($"disposed a client of run {runId}");
+        _resolver.Map[runId] = source => second.Endpoint(source);
+        await CallAsAsync(sp, runId, "workspace", "list_files");
+
+        using var _ = new AssertionScope();
+        first.ToolCalls.Should().Equal("list_files");
+        second.ToolCalls.Should().Equal("list_files");
+        second.Connects.Should().Be(1);
+        LogText.Should().Contain($"disposed a client of run {runId}", "the first sandbox's client was disposed");
+    }
+
+    /// <summary>
+    /// Red 1: in CallAsync, drop HttpRequestException from the closed-transport catch; the call to the stopped sandbox is
+    /// then reported as an unusable answer, not as stopped. Red 2: in StoppedDuringAsync, do not drop the client; the next call then reuses the dead client and is
     /// reported as stopped again rather than as unable to connect.
     /// </summary>
     [Fact]
@@ -252,7 +414,9 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
     /// <summary>
     /// Red 1: in NotifyAsync, let the observer's exception propagate; the call then throws. Red 2: notify the observers
     /// on the no-sandbox refusal too; the recorder then sees two calls. Red 3: do not notify; the recorder sees nothing.
-    /// Red 4: do not log an observer's failure; the log then lacks it.
+    /// Red 4: do not log an observer's failure; the log then lacks it. Reds 5 to 9, one at a time in the RunToolCall that
+    /// InvokeForRunAsync builds: pass Guid.Empty as RunId, "x" as Source, tool.Name + "x" as Tool, a new caller as Caller,
+    /// TimeSpan.Zero as Elapsed; the matching assertion then fails.
     /// </summary>
     [Fact]
     public async Task An_observer_sees_each_completed_call_and_cannot_change_its_result()
@@ -283,6 +447,25 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
         call.ResultText.Should().Be(result);
         call.Elapsed.Should().BePositive();
         LogText.Should().Contain("observer failed");
+    }
+
+    /// <summary>
+    /// Red: in NotifyAsync, await the observer without the WaitAsync bound; the call then waits for the hanging observer
+    /// forever, and the test's own 30-second bound fails it.
+    /// </summary>
+    [Fact]
+    public async Task A_hanging_observer_delays_a_call_only_by_the_observer_timeout()
+    {
+        var a = await SandboxAsync("a");
+        var recorder = new RecordingObserver();
+        await using var sp = Services(new RemoteRunToolOptions { ObserverTimeout = TimeSpan.FromMilliseconds(300) }, observers: [new HangingObserver(), recorder]);
+
+        var result = await CallAsAsync(sp, a.RunId, "workspace", "list_files").WaitAsync(TimeSpan.FromSeconds(30));
+
+        using var _ = new AssertionScope();
+        result.Should().Be("error: this turn has no run workspace");
+        recorder.Calls.Should().ContainSingle("the observer after the hanging one is still told");
+        LogText.Should().Contain("did not finish within 00:00:00.3000000");
     }
 
     // ---------- the schema-only tool types ----------
@@ -347,6 +530,7 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
             new() { Remote = true, Cwd = "x" },
             new() { Remote = true, ReadyTool = "x" },
             new() { Remote = true, Reload = "restart" },
+            new() { Remote = true, ReadyWaitTimeout = TimeSpan.FromMinutes(5) },
         ])
         {
             var act = () => new ServiceCollection().AddThalos(t => t.AddMcpServer("roslyn", HostDefinition(local)));
@@ -356,7 +540,39 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
         var twice = () => new ServiceCollection().AddThalos(t => t
             .AddMcpServer("roslyn", HostDefinition(new RunScopedMcpDefinition { Remote = true }))
             .AddRemoteRunTools("roslyn", typeof(WorkspaceTools)));
-        twice.Should().Throw<ArgumentException>().WithMessage("*remote run tool source named 'roslyn' was already added*");
+        twice.Should().Throw<ArgumentException>().WithMessage("*'roslyn' was already added*");
+    }
+
+    /// <summary>
+    /// Ruling R32. Red 1: in ThalosBuilder.AddLocalTools, drop the ToolSourceNames.AddLocal call; a local source after a
+    /// remote one is then accepted. Red 2: in ToolSourceNames.AddRemote, drop the local-name check; a remote source after
+    /// a local one is then accepted. Red 3: in McpThalosBuilderExtensions.AddRemote, drop the McpNames check; a remote
+    /// source after a plain MCP entry is then accepted. Red 4: in AddRemote, do not record the name in McpNames; a plain
+    /// MCP entry after a remote source is then accepted. Red 5: in AddMcpServer, drop the ToolSourceNames.AddRemote call
+    /// for a remote entry; a local source after it, and a remote entry after a local source, are then accepted.
+    /// </summary>
+    [Fact]
+    public void A_remote_source_never_shares_its_name_with_a_local_or_MCP_source_in_either_order()
+    {
+        var any = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".cs" };
+        (string Case, Action<ThalosBuilder> Configure)[] clashes =
+        [
+            ("local workspace, then remote", t => t.UseRunWorkspaceTools(any).AddRemoteRunTools("workspace", typeof(WorkspaceTools))),
+            ("remote workspace, then local", t => t.AddRemoteRunTools("workspace", typeof(WorkspaceTools)).UseRunWorkspaceTools(any)),
+            ("local roslyn, then remote MCP entry", t => t.AddLocalTools("roslyn", typeof(WorkspaceTools)).AddMcpServer("roslyn", HostDefinition(new RunScopedMcpDefinition { Remote = true }))),
+            ("remote MCP entry, then local roslyn", t => t.AddMcpServer("roslyn", HostDefinition(new RunScopedMcpDefinition { Remote = true })).AddLocalTools("roslyn", typeof(WorkspaceTools))),
+            ("plain MCP entry, then remote tools", t => t.AddMcpServer("roslyn", PlainDefinition()).AddRemoteRunTools("roslyn", typeof(WorkspaceTools))),
+            ("remote tools, then plain MCP entry", t => t.AddRemoteRunTools("roslyn", typeof(WorkspaceTools)).AddMcpServer("roslyn", PlainDefinition())),
+            ("plain MCP entry, then remote MCP entry", t => t.AddMcpServer("roslyn", PlainDefinition()).AddMcpServer("roslyn", HostDefinition(new RunScopedMcpDefinition { Remote = true }))),
+            ("remote MCP entry, then plain MCP entry", t => t.AddMcpServer("roslyn", HostDefinition(new RunScopedMcpDefinition { Remote = true })).AddMcpServer("roslyn", PlainDefinition())),
+        ];
+
+        using var _ = new AssertionScope();
+        foreach (var (name, configure) in clashes)
+        {
+            var act = () => new ServiceCollection().AddThalos(configure);
+            act.Should().Throw<ArgumentException>(name).WithMessage("*already added*");
+        }
     }
 
     // ---------- helpers ----------
@@ -391,7 +607,11 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
 
     private string LogText => string.Join('\n', _logLines);
 
-    private static McpServerDefinition HostDefinition(RunScopedMcpDefinition runScoped) => new()
+    private static McpServerDefinition PlainDefinition() => HostDefinition(null);
+
+    private static RunWorkspace Workspace(LoopbackSandbox sandbox) => new(sandbox.RunId, "repo", "remote", "main", "run/feature", "sandbox://a", "App.slnx");
+
+    private static McpServerDefinition HostDefinition(RunScopedMcpDefinition? runScoped) => new()
     {
         Type = "stdio",
         Command = "dotnet",
@@ -432,7 +652,11 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
         }
     }
 
-    private ServiceProvider Services(RemoteRunToolOptions? options = null, IRunToolCallObserver[]? observers = null, IRunWorkspaceProvider? provider = null)
+    private ServiceProvider Services(
+        RemoteRunToolOptions? options = null,
+        IRunToolCallObserver[]? observers = null,
+        IRunWorkspaceProvider? provider = null,
+        RunScopedMcpDefinition? roslyn = null)
     {
         var services = new ServiceCollection();
         services.AddSingleton<ILoggerFactory>(_ => LoggerFactory.Create(b => b.SetMinimumLevel(LogLevel.Trace).AddProvider(new CapturingLoggers(_logLines)))); // owned by the container
@@ -455,7 +679,7 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
         services.AddThalos(t => t
             .AddRemoteRunTools(RunWorkspaceToolOptions.SourceName, typeof(WorkspaceTools))
             .AddRemoteRunTools(SandboxToolOptions.SourceName, typeof(SandboxTools))
-            .AddMcpServer("roslyn", HostDefinition(new RunScopedMcpDefinition { Remote = true })));
+            .AddMcpServer("roslyn", HostDefinition(roslyn ?? new RunScopedMcpDefinition { Remote = true })));
         return services.BuildServiceProvider();
     }
 
@@ -525,10 +749,19 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
 
         public IReadOnlyList<(Guid RunId, string Source)> Resolved => [.. ResolvedQueue];
 
-        public ValueTask<RunToolEndpoint?> ResolveAsync(Guid runId, string source, CancellationToken ct)
+        /// <summary>Run before each answer, as a removal racing the resolve would.</summary>
+        public Func<Guid, ValueTask>? BeforeAnswer { get; set; }
+
+        public async ValueTask<RunToolEndpoint?> ResolveAsync(Guid runId, string source, CancellationToken ct)
         {
             ResolvedQueue.Enqueue((runId, source));
-            return ValueTask.FromResult(Map.TryGetValue(runId, out var endpoint) ? endpoint(source) : null);
+            var endpoint = Map.TryGetValue(runId, out var map) ? map(source) : null;
+            if (BeforeAnswer is { } before)
+            {
+                await before(runId);
+            }
+
+            return endpoint;
         }
     }
 
@@ -554,6 +787,14 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
             Calls.Enqueue(completed);
             return ValueTask.CompletedTask;
         }
+    }
+
+    private sealed class HangingObserver : IRunToolCallObserver
+    {
+        private readonly TaskCompletionSource _never = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>Never completes, and ignores its token.</summary>
+        public ValueTask OnCompletedAsync(RunToolCall completed, CancellationToken ct) => new(_never.Task);
     }
 
     private sealed class ThrowingObserver : IRunToolCallObserver

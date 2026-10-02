@@ -15,4 +15,11 @@ public sealed class RemoteRunToolOptions
     /// most <see cref="int.MaxValue"/> milliseconds.
     /// </summary>
     public TimeSpan CallTimeout { get; set; } = TimeSpan.FromMinutes(20);
+
+    /// <summary>
+    /// How long a call waits for each <see cref="Thalos.Workspaces.IRunToolCallObserver"/> before it logs the observer as
+    /// late and goes on; the observer's token is cancelled then and it is left to finish on its own. Default 10 seconds.
+    /// Must be positive and at most <see cref="int.MaxValue"/> milliseconds.
+    /// </summary>
+    public TimeSpan ObserverTimeout { get; set; } = TimeSpan.FromSeconds(10);
 }

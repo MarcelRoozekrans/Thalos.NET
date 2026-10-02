@@ -2,6 +2,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Thalos.Tools;
 using Thalos.Workspaces;
 
 namespace Thalos.Mcp;
@@ -26,15 +27,17 @@ public static class McpThalosBuilderExtensions
     /// <para>
     /// An entry whose <see cref="RunScopedMcpDefinition.Remote"/> is set is registered as a
     /// <see cref="RemoteRunToolSource.ForMcpHost"/> source over the host-wide server instead, and does not join the
-    /// registry: a run's calls go to the endpoint the registered <see cref="IRunToolEndpointResolver"/> returns, bounded
-    /// by the registered <see cref="RemoteRunToolOptions"/> or its defaults, and each registered
+    /// registry: a run's calls go to the endpoint the registered <see cref="IRunToolEndpointResolver"/> returns, each
+    /// bounded by the entry's <see cref="RunScopedMcpDefinition.CallTimeout"/> and otherwise by the registered
+    /// <see cref="RemoteRunToolOptions"/> or its defaults, and each registered
     /// <see cref="IRunToolCallObserver"/> is told of them. The source is also an <see cref="IRunWorkspaceObserver"/>.
     /// </para>
     /// </remarks>
     /// <exception cref="ArgumentException">
     /// <paramref name="name"/> violates <see cref="ToolSourceName"/>, a run-scoped entry shares <paramref name="name"/> with an MCP
-    /// entry already added, in either order, or <paramref name="definition"/> is incomplete/unsupported, or is remote and
-    /// also configures a local copy.
+    /// entry already added, in either order; a remote entry shares it with a local tool source or a remote run tool source,
+    /// in either order; or <paramref name="definition"/> is incomplete/unsupported, or is remote and also configures a
+    /// local copy.
     /// </exception>
     public static ThalosBuilder AddMcpServer(this ThalosBuilder builder, string name, McpServerDefinition definition)
     {
@@ -53,6 +56,13 @@ public static class McpThalosBuilderExtensions
                 $"An MCP server named '{name}' was already added; a run-scoped entry cannot share its name with another MCP entry.", nameof(name));
         }
 
+        if (runScoped?.Remote == true)
+        {
+            // Checked before the name is recorded, so a refused entry leaves no trace.
+            runScoped.ThrowIfInvalidRemote(name, nameof(definition));
+            ToolSourceNames.Of(services).AddRemote(name, nameof(name));
+        }
+
         servers.McpNames.TryAdd(name, runScoped is not null);
         if (runScoped is null)
         {
@@ -62,11 +72,10 @@ public static class McpThalosBuilderExtensions
 
         if (runScoped.Remote)
         {
-            runScoped.ThrowIfInvalidRemote(name, nameof(definition));
-            AddRemote(services, name, sp => RemoteRunToolSource.ForMcpHost(
+            RegisterRemote(services, name, sp => RemoteRunToolSource.ForMcpHost(
                 new McpToolSource(name, definition, LoggerFactory(sp)),
                 new DeferredRunToolEndpointResolver(sp),
-                sp.GetService<RemoteRunToolOptions>() ?? new RemoteRunToolOptions(),
+                RemoteOptions(sp, runScoped.CallTimeout),
                 LoggerFactory(sp),
                 Clock(sp),
                 RunToolCallObservers(sp)));
@@ -119,6 +128,47 @@ public static class McpThalosBuilderExtensions
     }
 
     /// <summary>
+    /// Adds a <see cref="RemoteRunToolSource"/> that is not an <c>.mcp.json</c> entry, such as Thalos.NET.Sandbox's
+    /// <c>AddRemoteRunTools</c>. It registers it as <see cref="AddMcpServer"/> registers a remote entry, after checking
+    /// that no MCP entry, local tool source or other remote source has <paramref name="name"/>, and records the name so a
+    /// later one cannot take it either.
+    /// </summary>
+    /// <param name="services">The service collection.</param>
+    /// <param name="name">The source's name.</param>
+    /// <param name="factory">Makes the source; see <see cref="RegisterRemote"/>.</param>
+    /// <exception cref="ArgumentException">An MCP entry, a local tool source or a remote run tool source already has <paramref name="name"/>.</exception>
+    internal static void AddRemote(IServiceCollection services, string name, Func<IServiceProvider, RemoteRunToolSource> factory)
+    {
+        var servers = McpServers(services);
+        if (servers.McpNames.ContainsKey(name))
+        {
+            throw new ArgumentException(
+                $"An MCP server named '{name}' was already added; a remote run tool source cannot share its name.", nameof(name));
+        }
+
+        ToolSourceNames.Of(services).AddRemote(name, nameof(name));
+        servers.McpNames.Add(name, true); // as a run-scoped entry, so a later MCP entry by this name is refused
+        RegisterRemote(services, name, factory);
+    }
+
+    /// <summary>
+    /// The registered <see cref="RemoteRunToolOptions"/>, or the defaults, copied; with <paramref name="callTimeout"/>, a
+    /// remote MCP entry's own call timeout, in place of the registered one.
+    /// </summary>
+    /// <param name="sp">The container.</param>
+    /// <param name="callTimeout">The entry's call timeout, or null to keep the registered one.</param>
+    internal static RemoteRunToolOptions RemoteOptions(IServiceProvider sp, TimeSpan? callTimeout = null)
+    {
+        var registered = sp.GetService<RemoteRunToolOptions>() ?? new RemoteRunToolOptions();
+        return new RemoteRunToolOptions
+        {
+            ConnectTimeout = registered.ConnectTimeout,
+            CallTimeout = callTimeout ?? registered.CallTimeout,
+            ObserverTimeout = registered.ObserverTimeout,
+        };
+    }
+
+    /// <summary>
     /// Registers one <see cref="RemoteRunToolSource"/>, made by <paramref name="factory"/> once, as the tool source named
     /// <paramref name="name"/> and as an <see cref="IRunWorkspaceObserver"/>, so a removed run's client is dropped.
     /// </summary>
@@ -127,15 +177,8 @@ public static class McpThalosBuilderExtensions
     /// <param name="factory">Makes the source; it should resolve <see cref="IRunToolEndpointResolver"/> and the observers lazily, through
     /// <see cref="DeferredRunToolEndpointResolver"/> and <see cref="RunToolCallObservers"/>, because the workspace provider that
     /// resolves endpoints also observes this source.</param>
-    /// <exception cref="ArgumentException">A remote run tool source named <paramref name="name"/> was already added.</exception>
-    internal static void AddRemote(IServiceCollection services, string name, Func<IServiceProvider, RemoteRunToolSource> factory)
+    private static void RegisterRemote(IServiceCollection services, string name, Func<IServiceProvider, RemoteRunToolSource> factory)
     {
-        if (services.Any(d => d.IsKeyedService && d.ServiceType == typeof(RemoteRunToolSource) && Equals(d.ServiceKey, name)))
-        {
-            // Two registrations under one key would resolve to one instance listed twice as a tool source.
-            throw new ArgumentException($"A remote run tool source named '{name}' was already added.", nameof(name));
-        }
-
         services.AddKeyedSingleton(name, (sp, _) => factory(sp));
         services.AddSingleton<IToolSource>(sp => sp.GetRequiredKeyedService<RemoteRunToolSource>(name));
         services.AddSingleton<IRunWorkspaceObserver>(sp => sp.GetRequiredKeyedService<RemoteRunToolSource>(name));
