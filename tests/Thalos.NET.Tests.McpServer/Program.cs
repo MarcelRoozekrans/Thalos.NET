@@ -16,6 +16,15 @@ if (builder.Configuration["pid-file"] is { Length: > 0 } pidFile)
     await File.WriteAllTextAsync(pidFile, Environment.ProcessId.ToString(CultureInfo.InvariantCulture));
 }
 
+// `--dump-env PATH`: write this process's whole environment to PATH as NAME=value lines and exit, without speaking MCP,
+// so a test can stand this program in for any child process and see exactly what it was started with.
+if (builder.Configuration["dump-env"] is { Length: > 0 } envFile)
+{
+    var lines = Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>().Select(e => $"{e.Key}={e.Value}");
+    await File.WriteAllLinesAsync(envFile, lines);
+    return 0;
+}
+
 // `--fail-first-start PATH`: exit at once, before speaking MCP, unless PATH exists; creates PATH, so only the first start fails.
 if (builder.Configuration["fail-first-start"] is { Length: > 0 } failMarker && !File.Exists(failMarker))
 {

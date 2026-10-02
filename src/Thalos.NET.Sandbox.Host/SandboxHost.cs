@@ -29,6 +29,19 @@ namespace Thalos.Sandbox.Host;
 /// The MCP transport is stateless, so the route of each request decides the tool set; in stateful mode a session
 /// begun on one route would be served on another.
 /// </para>
+/// <para>
+/// <b>Child processes.</b> git, restore, build, test and the Roslyn server each start from
+/// <see cref="SandboxChildEnvironment.Curated"/> or the Roslyn server's own curated set, never from this host's
+/// environment, which holds the token. <c>sandbox__build</c> and <c>sandbox__test</c> run in a throwaway copy of the
+/// worktree under <c>/work/scratch</c>, so what they write never reaches the export; restore and Roslyn run on the
+/// worktree itself.
+/// </para>
+/// <para>
+/// <b>Residual risk.</b> Code an agent controls runs as the same user as this host, so it can still change
+/// <c>/work/repo</c> on purpose, from a build in the copy or from Roslyn's evaluation of the worktree. The export then
+/// carries that change. It is the run's own change, reviewed like any other: the human gate before publish and the pull
+/// request review are the backstop, and the publish side refuses protected paths whatever the sandbox did.
+/// </para>
 /// </remarks>
 public static class SandboxHost
 {
@@ -63,8 +76,8 @@ public static class SandboxHost
         services.AddSingleton(settings);
         services.AddSingleton(new SandboxCaller(settings.RunId));
         services.AddSingleton<ISandboxProcessRunner, SandboxProcessRunner>();
-        services.AddSingleton(new SandboxToolOptions());
-        services.AddSingleton(new GitWorkspaceOptions { DataRoot = Path.Combine(settings.WorkRoot, "git") });
+        services.AddSingleton(new SandboxToolOptions { ScratchRoot = Path.Combine(settings.WorkRoot, "scratch") });
+        services.AddSingleton(new GitWorkspaceOptions { DataRoot = Path.Combine(settings.WorkRoot, "git"), BaseEnvironment = SandboxChildEnvironment.Curated() });
         services.AddSingleton(sp => new GitCli(sp.GetRequiredService<GitWorkspaceOptions>()));
 
         services.AddSingleton<LocalRunWorkspace>();
@@ -144,7 +157,7 @@ public static class SandboxHost
     /// <summary>The work volume hides the image's <c>/work</c>, so its directories are created at every start.</summary>
     private static void CreateWorkDirectories(SandboxSettings settings)
     {
-        foreach (var name in (string[])["home", "nuget", "repo"])
+        foreach (var name in (string[])["home", "nuget", "repo", "scratch"])
         {
             Directory.CreateDirectory(Path.Combine(settings.WorkRoot, name));
         }

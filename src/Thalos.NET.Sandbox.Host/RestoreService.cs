@@ -1,5 +1,6 @@
 using System.Globalization;
 using Microsoft.Extensions.Logging;
+using Thalos.Mcp;
 using Thalos.Workspaces;
 
 namespace Thalos.Sandbox.Host;
@@ -26,13 +27,16 @@ internal enum RestoreState
 /// name matches, case-insensitively, <c>*.csproj</c>, <c>*.props</c>, <c>*.targets</c>, <c>global.json</c> or
 /// <c>NuGet.config</c> marks restore dirty, and <see cref="EnsureRestoredAsync"/> restores again before the call it
 /// guards. Restores never overlap. A restore that a caller's cancellation cut short leaves restore dirty, so the next
-/// call restores again.
+/// call restores again. Every finished restore marks the Roslyn server for a reload, so the server's next lease loads
+/// what the restore produced. Restore runs from <see cref="SandboxChildEnvironment.Curated"/>.
 /// </remarks>
 /// <param name="settings">The run id.</param>
 /// <param name="workspaces">The run's workspace.</param>
 /// <param name="runner">Runs <c>dotnet</c>.</param>
+/// <param name="roslyn">Marked for a reload after every restore.</param>
 /// <param name="logger">Logs each restore's outcome.</param>
-internal sealed partial class RestoreService(SandboxSettings settings, LocalRunWorkspace workspaces, ISandboxProcessRunner runner, ILogger<RestoreService> logger)
+internal sealed partial class RestoreService(
+    SandboxSettings settings, LocalRunWorkspace workspaces, ISandboxProcessRunner runner, RunMcpServerRegistry roslyn, ILogger<RestoreService> logger)
     : IRunWorkspaceChangeListener, IDisposable
 {
     /// <summary>How long one restore may run.</summary>
@@ -43,6 +47,7 @@ internal sealed partial class RestoreService(SandboxSettings settings, LocalRunW
 
     private static readonly string[] BuildFileSuffixes = [".csproj", ".props", ".targets"];
     private static readonly string[] BuildFileNames = ["global.json", "NuGet.config"];
+    private static readonly string[] RestoredMarker = ["(restore)"];
 
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly object _sync = new();
@@ -128,7 +133,8 @@ internal sealed partial class RestoreService(SandboxSettings settings, LocalRunW
         ProcessOutcome outcome;
         try
         {
-            outcome = await runner.RunAsync(new ProcessSpec("dotnet", arguments, workspace.Root, Timeout), ct).ConfigureAwait(false);
+            outcome = await runner.RunAsync(
+                new ProcessSpec("dotnet", arguments, workspace.Root, Timeout, Environment: SandboxChildEnvironment.Curated()), ct).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -144,6 +150,10 @@ internal sealed partial class RestoreService(SandboxSettings settings, LocalRunW
         }
 
         LogRestored(logger, state);
+
+        // A build file written after a call's restore check but before its lease is reloaded by that lease, ahead of
+        // this restore; marking the server again makes the next lease reload it over what this restore produced.
+        roslyn.OnFilesChanged(settings.RunId, RestoredMarker);
     }
 
     private static (RestoreState State, string Detail) Describe(ProcessOutcome outcome)

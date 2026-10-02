@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using ModelContextProtocol;
 using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using Thalos.Mcp;
@@ -120,16 +121,10 @@ internal sealed partial class RoslynProxyTools(SandboxSettings settings, RunMcpS
                 return [];
             }
 
-            var lease = await registry.GetReadyClientAsync(ServerName, settings.RunId, ct).ConfigureAwait(false);
-            if (lease.IsFailure)
+            listed = await ListAsync(ct).ConfigureAwait(false);
+            if (listed is null)
             {
                 return [];
-            }
-
-            await using (lease.Value.ConfigureAwait(false))
-            {
-                var tools = await lease.Value.Client.ListToolsAsync(cancellationToken: ct).ConfigureAwait(false);
-                listed = [.. tools.Select(t => t.ProtocolTool)];
             }
 
             Volatile.Write(ref _tools, listed);
@@ -184,6 +179,38 @@ internal sealed partial class RoslynProxyTools(SandboxSettings settings, RunMcpS
         }
     }
 
+    /// <summary>
+    /// The server's tools, or null when it could not be listed now: not ready within <see cref="ReadyWaitTimeout"/>, not
+    /// answering within <see cref="CallTimeout"/>, or failed. The list is asked for while a session is set up, so a
+    /// failure here leaves the route without tools rather than failing the request.
+    /// </summary>
+    private async Task<IReadOnlyList<Tool>?> ListAsync(CancellationToken ct)
+    {
+        using var timeout = new CancellationTokenSource(ReadyWaitTimeout + CallTimeout);
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+        try
+        {
+            var lease = await registry.GetReadyClientAsync(ServerName, settings.RunId, bounded.Token).ConfigureAwait(false);
+            if (lease.IsFailure)
+            {
+                return null;
+            }
+
+            await using (lease.Value.ConfigureAwait(false))
+            {
+                using var call = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                call.CancelAfter(CallTimeout);
+                var tools = await lease.Value.Client.ListToolsAsync(cancellationToken: call.Token).ConfigureAwait(false);
+                return [.. tools.Select(t => t.ProtocolTool)];
+            }
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested && ex is McpException or IOException or OperationCanceledException)
+        {
+            LogListFailed(logger, ex.Message);
+            return null;
+        }
+    }
+
     private static CallToolResult Error(string message) =>
         new() { IsError = true, Content = [new TextContentBlock { Text = $"error: {message}" }] };
 
@@ -201,6 +228,9 @@ internal sealed partial class RoslynProxyTools(SandboxSettings settings, RunMcpS
 
     [LoggerMessage(EventId = 5917, Level = LogLevel.Warning, Message = "The Roslyn call {Tool} did not finish within {Timeout} and was cancelled.")]
     private static partial void LogCallTimedOut(ILogger logger, string tool, TimeSpan timeout);
+
+    [LoggerMessage(EventId = 5918, Level = LogLevel.Warning, Message = "The Roslyn server's tools could not be listed: {Detail}")]
+    private static partial void LogListFailed(ILogger logger, string detail);
 
     [LoggerMessage(EventId = 5914, Level = LogLevel.Warning, Message = "The Roslyn server did not become ready: {Detail}")]
     private static partial void LogNotReady(ILogger logger, string detail);

@@ -36,9 +36,13 @@ public sealed partial class SandboxTools(IRunWorkspaceProvider workspaces, ISand
             return NoWorkspace;
         }
 
-        List<string> arguments = ["build", TargetOf(workspace), "--nologo", "-v:q", "-clp:ErrorsOnly"];
-        var outcome = await runner.RunAsync(new ProcessSpec(DotNet, arguments, workspace.Root, options.BuildTimeout), ct).ConfigureAwait(false);
-        return Format(outcome, options.BuildTimeout, $"errors: {outcome.ErrorLineCount}");
+        return await RunAsync(
+            workspace,
+            target => ["build", target, "--nologo", "-v:q", "-clp:ErrorsOnly"],
+            options.BuildTimeout,
+            SandboxChildEnvironment.Curated(),
+            outcome => $"errors: {outcome.ErrorLineCount}",
+            ct).ConfigureAwait(false);
     }
 
     /// <summary><c>sandbox__test</c>: runs <c>dotnet test</c> on the run's solution, optionally filtered.</summary>
@@ -58,15 +62,13 @@ public sealed partial class SandboxTools(IRunWorkspaceProvider workspaces, ISand
             return NoWorkspace;
         }
 
-        List<string> arguments = ["test", TargetOf(workspace), "--nologo", "-v:q"];
-        if (filter is not null)
-        {
-            arguments.Add("--filter");
-            arguments.Add(filter);
-        }
-
-        var outcome = await runner.RunAsync(new ProcessSpec(DotNet, arguments, workspace.Root, options.TestTimeout), ct).ConfigureAwait(false);
-        return Format(outcome, options.TestTimeout, TestSummary(outcome.FullOutput));
+        return await RunAsync(
+            workspace,
+            target => filter is null ? ["test", target, "--nologo", "-v:q"] : ["test", target, "--nologo", "-v:q", "--filter", filter],
+            options.TestTimeout,
+            SandboxChildEnvironment.Curated(),
+            outcome => TestSummary(outcome.FullOutput),
+            ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -84,6 +86,43 @@ public sealed partial class SandboxTools(IRunWorkspaceProvider workspaces, ISand
             : null;
 
     private static string TargetOf(RunWorkspace workspace) => workspace.SolutionPath ?? workspace.Root;
+
+    /// <summary>
+    /// Runs <c>dotnet</c> with the arguments <paramref name="arguments"/> builds for the target, in the worktree, or, when
+    /// <see cref="SandboxToolOptions.ScratchRoot"/> is set, in a <see cref="ScratchCopy"/> of it deleted afterwards. The
+    /// process starts from <paramref name="environment"/>, which each tool passes as <see cref="SandboxChildEnvironment.Curated"/>.
+    /// </summary>
+    private async Task<string> RunAsync(
+        RunWorkspace workspace, Func<string, List<string>> arguments, TimeSpan timeout, IReadOnlyDictionary<string, string> environment,
+        Func<ProcessOutcome, string> summary, CancellationToken ct)
+    {
+        if (options.ScratchRoot is not { } scratchRoot)
+        {
+            return await RunInAsync(workspace.Root, TargetOf(workspace)).ConfigureAwait(false);
+        }
+
+        ScratchCopy copy;
+        try
+        {
+            copy = ScratchCopy.Create(workspace.Root, scratchRoot);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return $"error: could not copy the workspace to run in: {ex.Message}";
+        }
+
+        using (copy)
+        {
+            return await RunInAsync(copy.Root, copy.Map(workspace.Root, TargetOf(workspace))).ConfigureAwait(false);
+        }
+
+        async Task<string> RunInAsync(string directory, string target)
+        {
+            var spec = new ProcessSpec(DotNet, arguments(target), directory, timeout, Environment: environment);
+            var outcome = await runner.RunAsync(spec, ct).ConfigureAwait(false);
+            return Format(outcome, timeout, summary(outcome));
+        }
+    }
 
     private string Format(ProcessOutcome outcome, TimeSpan timeout, string summary)
     {

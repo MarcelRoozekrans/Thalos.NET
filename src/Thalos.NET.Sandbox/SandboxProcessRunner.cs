@@ -4,7 +4,7 @@ using System.Text;
 
 namespace Thalos.Sandbox;
 
-/// <summary>Runs a process with a fixed argument list, no shell, killing its whole tree on timeout.</summary>
+/// <summary>Runs a process with a fixed argument list, no shell, an explicit environment, killing its whole tree on timeout.</summary>
 public sealed class SandboxProcessRunner : ISandboxProcessRunner
 {
     /// <summary>How long to wait for output pipes to drain after the tree was killed, so a survivor holding a pipe cannot hang the caller.</summary>
@@ -63,6 +63,13 @@ public sealed class SandboxProcessRunner : ISandboxProcessRunner
         foreach (var argument in spec.Arguments)
         {
             info.ArgumentList.Add(argument);
+        }
+
+        // Nothing is inherited: the host's environment holds the sandbox token, and the child may run agent-written code.
+        info.Environment.Clear();
+        foreach (var (key, value) in spec.Environment ?? SandboxChildEnvironment.Curated())
+        {
+            info.Environment[key] = value;
         }
 
         var process = new Process { StartInfo = info };

@@ -16,7 +16,7 @@ namespace Thalos.Tests.Sandbox.Host;
 /// remote; restore and build go to a counting fake runner; the Roslyn server is the stdio test server, started by the
 /// host's own registry with a <c>list_solutions</c> ready tool and no reload.
 /// </summary>
-public sealed class SandboxHostTests : IDisposable
+public sealed partial class SandboxHostTests : IDisposable
 {
     private static readonly string[] WorkspaceTools = ["read_file", "list_files", "write_file", "edit_file"];
     private static readonly string[] BuildTools = ["build", "test"];
@@ -52,6 +52,11 @@ public sealed class SandboxHostTests : IDisposable
             (HttpMethod.Post, "/mcp/sandbox"),
             (HttpMethod.Post, "/mcp/roslyn"),
             (HttpMethod.Get, "/mcp/workspace"),
+            (HttpMethod.Delete, "/mcp/workspace"),
+            (HttpMethod.Options, "/mcp/roslyn"),
+            (HttpMethod.Delete, "/control/ready"),
+            (HttpMethod.Options, "/control/import"),
+            (HttpMethod.Post, "/mcp/other"),
             (HttpMethod.Get, "/nowhere"),
         ];
         string?[] wrong =
@@ -76,6 +81,8 @@ public sealed class SandboxHostTests : IDisposable
 
         using var authorized = await host.SendAsync(HttpMethod.Get, "/control/ready");
         authorized.StatusCode.Should().Be(HttpStatusCode.OK, "the right token is let through");
+        using var other = await host.SendAsync(HttpMethod.Post, "/mcp/other");
+        other.StatusCode.Should().Be(HttpStatusCode.NotFound, "the route constraint admits only the three sources");
     }
 
     /// <summary>
@@ -94,7 +101,7 @@ public sealed class SandboxHostTests : IDisposable
         LocalGitRemote.RunGit(host.RepoRoot, "rev-parse", "HEAD").Should().Be(commit);
         LocalGitRemote.RunGit(host.RepoRoot, "symbolic-ref", "--short", "HEAD").Should().Be("run/feature");
         File.ReadAllText(Path.Combine(host.RepoRoot, "A.cs")).Should().Be("class A { }\n");
-        LocalGitRemote.RunGit(host.RepoRoot, "config", "--get", "core.symlinks").Should().Be("false", "the clone itself checks out symlinks as plain files");
+        LocalGitRemote.RunGit(host.RepoRoot, "config", "--local", "--get-all", "core.symlinks").Split('\n').Should().AllBe("false", "the clone persists core.symlinks=false");
 
         var restore = host.Runner.Restores.Should().ContainSingle().Subject;
         var solution = WorkspacePath.Resolve(host.RepoRoot, "App.slnx").Value;
@@ -123,7 +130,8 @@ public sealed class SandboxHostTests : IDisposable
     /// <summary>
     /// Red 1: drop the check-ref-format call from ImportService.IsValidBranchAsync; "a..b" is then accepted.
     /// Red 2: drop the ".." check from IsAcceptableSolution; "../x.slnx" is then accepted.
-    /// Red 3: keep the claim when a request is refused; the valid import after the refusals is then 409.
+    /// Red 3: claim the import before validating; the valid import after the refusals is then 409.
+    /// Red 4: accept a missing solution in IsAcceptableSolution; the null row is then accepted.
     /// </summary>
     [Fact]
     public async Task An_invalid_branch_commit_or_solution_is_refused_before_anything_is_stored()
@@ -138,6 +146,8 @@ public sealed class SandboxHostTests : IDisposable
             ("run/x", "main", "App.slnx"),
             ("run/x", commit[..39], "App.slnx"),
             ("run/x", commit, "../x.slnx"),
+            ("run/x", commit, null),
+            ("run/x", commit, " "),
             ("run/x", commit, Path.Combine(_temp, "x.slnx")),
         ];
         foreach (var (branch, sha, solution) in invalid)

@@ -203,11 +203,34 @@ internal sealed class CountingRunner : ISandboxProcessRunner
 
     public IReadOnlyList<ProcessSpec> Restores => [.. Specs.Where(s => s.Arguments.Count > 0 && string.Equals(s.Arguments[0], "restore", StringComparison.Ordinal))];
 
+    /// <summary>Called with each spec before it is answered, as the process would run: a test can write into its working directory.</summary>
+    public Action<ProcessSpec>? OnRun { get; set; }
+
     public Task<ProcessOutcome> RunAsync(ProcessSpec spec, CancellationToken ct)
     {
         Specs.Enqueue(spec);
+        OnRun?.Invoke(spec);
         return Task.FromResult(spec.Arguments.Count > 0 && string.Equals(spec.Arguments[0], "restore", StringComparison.Ordinal)
             ? RestoreOutcome
             : new ProcessOutcome(0, TimedOut: false, "Build succeeded.\n"));
+    }
+}
+
+/// <summary>
+/// Runs every spec through the real <see cref="SandboxProcessRunner"/>, with the spec's own environment and working
+/// directory, but as the stdio test server's <c>--dump-env</c>, which writes the environment it was started with to
+/// <c>&lt;directory&gt;/&lt;first argument&gt;.env</c>, e.g. <c>restore.env</c>.
+/// </summary>
+internal sealed class EnvDumpRunner(string directory) : ISandboxProcessRunner
+{
+    private readonly SandboxProcessRunner _real = new();
+
+    public string FileFor(string verb) => Path.Combine(directory, verb + ".env");
+
+    public async Task<ProcessOutcome> RunAsync(ProcessSpec spec, CancellationToken ct)
+    {
+        var dump = spec with { FileName = "dotnet", Arguments = [HostHarness.ServerDll, "--dump-env", FileFor(spec.Arguments[0])] };
+        var outcome = await _real.RunAsync(dump, ct);
+        return outcome with { FullOutput = outcome.FullOutput + "Restore complete.\nPassed!\n" };
     }
 }

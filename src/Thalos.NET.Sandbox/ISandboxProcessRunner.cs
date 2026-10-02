@@ -6,7 +6,13 @@ namespace Thalos.Sandbox;
 /// <param name="WorkingDirectory">The process's working directory.</param>
 /// <param name="Timeout">How long it may run before its whole process tree is killed.</param>
 /// <param name="MaxOutputChars">The most output characters kept. Older output is dropped from the front, so the end, where summaries are, survives.</param>
-public sealed record ProcessSpec(string FileName, IReadOnlyList<string> Arguments, string WorkingDirectory, TimeSpan Timeout, int MaxOutputChars = ProcessSpec.DefaultMaxOutputChars)
+/// <param name="Environment">
+/// The process's whole environment: it starts from exactly these variables and inherits nothing. Null means
+/// <see cref="SandboxChildEnvironment.Curated"/>, never the host's own environment.
+/// </param>
+public sealed record ProcessSpec(
+    string FileName, IReadOnlyList<string> Arguments, string WorkingDirectory, TimeSpan Timeout,
+    int MaxOutputChars = ProcessSpec.DefaultMaxOutputChars, IReadOnlyDictionary<string, string>? Environment = null)
 {
     /// <summary>The default bound on retained output, 4 million characters.</summary>
     public const int DefaultMaxOutputChars = 4 * 1024 * 1024;

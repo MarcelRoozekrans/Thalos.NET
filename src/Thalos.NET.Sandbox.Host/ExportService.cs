@@ -5,7 +5,9 @@ namespace Thalos.Sandbox.Host;
 
 /// <summary>
 /// Exports the run's changes as one binary patch against the imported commit: <c>git add -A</c>, then
-/// <c>git diff --cached --binary --full-index &lt;commit&gt;</c>. An empty patch means no change. The trusted side applies
+/// <c>git diff --cached --binary --full-index &lt;commit&gt;</c>. An empty patch means no change. <c>bin</c> and <c>obj</c>
+/// directories at any depth are never staged, whatever <c>.gitignore</c> says, and <see cref="RepoConfigGuard"/> checks the
+/// repository's config before each git command, because agent-run code can write it. The trusted side applies
 /// it to its own clean worktree with <c>GitPatchApplier</c>, which treats every byte of it as adversarial; nothing here
 /// is a control.
 /// </summary>
@@ -20,6 +22,9 @@ namespace Thalos.Sandbox.Host;
 /// <param name="workspaces">The run's workspace.</param>
 internal sealed class ExportService(SandboxSettings settings, GitCli git, LocalRunWorkspace workspaces) : IDisposable
 {
+    /// <summary>Build output is never exported, whatever the repository's <c>.gitignore</c> says.</summary>
+    private static readonly string[] BuildOutputExcludes = [":(exclude,glob)**/bin/**", ":(exclude,glob)**/obj/**"];
+
     private readonly SemaphoreSlim _gate = new(1, 1);
 
     /// <summary>
@@ -42,10 +47,20 @@ internal sealed class ExportService(SandboxSettings settings, GitCli git, LocalR
         await _gate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
-            var staged = await git.RunAsync(workspace.Root, ["add", "-A"], null, null, ct).ConfigureAwait(false);
+            if (await RepoConfigGuard.CheckAsync(git, workspace.Root, ct).ConfigureAwait(false) is { } refused)
+            {
+                return Result<string, AgentError>.Failure(AgentError.ProviderError("Export refused.", refused));
+            }
+
+            var staged = await git.RunAsync(workspace.Root, ["add", "-A", "--", ".", .. BuildOutputExcludes], null, null, ct).ConfigureAwait(false);
             if (!staged.Succeeded)
             {
                 return Failed("git add", staged, patch);
+            }
+
+            if (await RepoConfigGuard.CheckAsync(git, workspace.Root, ct).ConfigureAwait(false) is { } changed)
+            {
+                return Result<string, AgentError>.Failure(AgentError.ProviderError("Export refused.", changed));
             }
 
             var diffed = await git.RunAsync(

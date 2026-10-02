@@ -48,7 +48,8 @@ public sealed record SandboxSettings(
 
     /// <summary>
     /// Reads and validates the settings. Fails, naming the key, when the run id is not a GUID, the token is missing or
-    /// shorter than <see cref="MinTokenLength"/>, the write-extension or protected-path setting is absent, or the work
+    /// shorter than <see cref="MinTokenLength"/>, the write-extension setting is absent, the protected-path setting is absent
+    /// or empty, or the work
     /// root is not absolute. The host refuses to start on a failure.
     /// </summary>
     /// <param name="configuration">The host's configuration.</param>
@@ -73,9 +74,10 @@ public sealed record SandboxSettings(
             return Invalid($"{SandboxEnvironment.WriteExtensions} must be set: '*' or a ';'-separated extension list.");
         }
 
-        if (configuration[SandboxEnvironment.ProtectedPaths] is not { } protectedPaths)
+        // The API always sends the shipped defaults; an empty list would leave .git/ and the CI files writable.
+        if (configuration[SandboxEnvironment.ProtectedPaths] is not { } protectedPaths || Split(protectedPaths).Length == 0)
         {
-            return Invalid($"{SandboxEnvironment.ProtectedPaths} must be set.");
+            return Invalid($"{SandboxEnvironment.ProtectedPaths} must be set and must not be empty.");
         }
 
         var workRoot = configuration[WorkRootKey] is { Length: > 0 } configuredRoot ? configuredRoot : "/work";

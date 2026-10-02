@@ -18,6 +18,9 @@ internal enum ImportReply
 
     /// <summary>The bundle is over <see cref="ImportService.MaxBundleBytes"/>: 413.</summary>
     TooLarge,
+
+    /// <summary>The body could not be read to its end, such as a client that went away: 400.</summary>
+    BodyFailed,
 }
 
 /// <summary>
@@ -29,7 +32,8 @@ internal enum ImportReply
 /// <b>Order.</b> The branch, commit and solution are checked before anything is written. The body is streamed to a
 /// file under the work volume, never held in memory, and refused once it passes <see cref="MaxBundleBytes"/>. Only
 /// then is the request answered, and the rest runs in the background: <c>git clone --no-checkout</c>, then
-/// <c>git checkout -b &lt;branch&gt; &lt;commit&gt;</c> with <c>core.symlinks=false</c>, then
+/// <c>git checkout -b &lt;branch&gt; &lt;commit&gt;</c>, both with <c>core.symlinks=false</c>, which the clone also persists
+/// in the repository's config, the checkout only once <see cref="RepoConfigGuard"/> passed; then
 /// <see cref="RestoreService.RestoreAsync"/>, then the workspace is published ready, which starts Roslyn, whether
 /// restore succeeded or not. The bundle names its commit under a temporary <c>refs/heads/thalos-bundle/&lt;guid&gt;</c>
 /// branch, so the commit is in the clone.
@@ -41,7 +45,7 @@ internal enum ImportReply
 /// </para>
 /// <para>
 /// <b>Once.</b> A sandbox imports once. A second import is refused, even after the first failed: the API discards a
-/// sandbox whose import failed. A refused or oversized body releases the claim, since nothing was imported.
+/// sandbox whose import failed. A refused, oversized or unreadable body releases the claim, since nothing was imported.
 /// </para>
 /// </remarks>
 /// <param name="settings">The work root.</param>
@@ -73,7 +77,7 @@ internal sealed partial class ImportService(
     /// </summary>
     /// <param name="branch">The branch to create.</param>
     /// <param name="commit">The full 40-character sha to check out.</param>
-    /// <param name="solution">The solution, relative to the repository root, or null.</param>
+    /// <param name="solution">The solution, relative to the repository root. Required.</param>
     /// <param name="body">The bundle.</param>
     /// <param name="ct">The request's cancellation; it never cancels the import once accepted.</param>
     public async Task<ImportReply> StartAsync(string? branch, string? commit, string? solution, Stream body, CancellationToken ct)
@@ -90,27 +94,35 @@ internal sealed partial class ImportService(
         }
 
         var bundle = Path.Combine(settings.WorkRoot, "import", $"{Guid.NewGuid():N}.bundle");
-        var stored = false;
+        var reply = ImportReply.BodyFailed;
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(bundle)!);
-            stored = await StoreAsync(body, bundle, MaxBundleBytes, ct).ConfigureAwait(false);
+            reply = await StoreAsync(body, bundle, MaxBundleBytes, ct).ConfigureAwait(false) ? ImportReply.Accepted : ImportReply.TooLarge;
+        }
+        catch (IOException)
+        {
+            // A client that went away, or a body Kestrel stopped reading: nothing was imported.
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // The request was aborted while the body streamed.
         }
         finally
         {
-            if (!stored)
+            if (reply != ImportReply.Accepted)
             {
                 TryDelete(bundle);
                 Volatile.Write(ref _claimed, 0);
             }
         }
 
-        if (!stored)
+        if (reply != ImportReply.Accepted)
         {
-            return ImportReply.TooLarge;
+            return reply;
         }
 
-        _import = RunAsync(bundle, branch!, commit!, solution, _stopping.Token);
+        _import = RunAsync(bundle, branch!, commit!, solution!, _stopping.Token);
         return ImportReply.Accepted;
     }
 
@@ -149,7 +161,7 @@ internal sealed partial class ImportService(
         _stopping.Dispose();
     }
 
-    private async Task RunAsync(string bundle, string branch, string commit, string? solution, CancellationToken stopping)
+    private async Task RunAsync(string bundle, string branch, string commit, string solution, CancellationToken stopping)
     {
         try
         {
@@ -186,14 +198,19 @@ internal sealed partial class ImportService(
     }
 
     /// <summary>Clones and checks out; returns why it could not, or null once the workspace is published.</summary>
-    private async Task<string?> CheckOutAsync(string bundle, string branch, string commit, string? solution, CancellationToken ct)
+    private async Task<string?> CheckOutAsync(string bundle, string branch, string commit, string solution, CancellationToken ct)
     {
         var repo = settings.RepoRoot;
         Directory.CreateDirectory(repo);
-        var cloned = await git.RunAsync(settings.WorkRoot, ["clone", "--no-checkout", "--", bundle, repo], CheckoutConfig, null, ct).ConfigureAwait(false);
+        var cloned = await git.RunAsync(settings.WorkRoot, ["clone", "--no-checkout", "--config", "core.symlinks=false", "--", bundle, repo], CheckoutConfig, null, ct).ConfigureAwait(false);
         if (!cloned.Succeeded)
         {
             return Describe("git clone", cloned);
+        }
+
+        if (await RepoConfigGuard.CheckAsync(git, repo, ct).ConfigureAwait(false) is { } refused)
+        {
+            return refused;
         }
 
         var checkedOut = await git.RunAsync(repo, ["checkout", "-b", branch, commit], CheckoutConfig, null, ct).ConfigureAwait(false);
@@ -202,19 +219,13 @@ internal sealed partial class ImportService(
             return Describe("git checkout", checkedOut);
         }
 
-        string? solutionPath = null;
-        if (solution is not null)
+        var resolved = WorkspacePath.Resolve(repo, solution);
+        if (resolved.IsFailure || !File.Exists(resolved.Value))
         {
-            var resolved = WorkspacePath.Resolve(repo, solution);
-            if (resolved.IsFailure || !File.Exists(resolved.Value))
-            {
-                return $"the solution '{solution}' is not a file in the repository";
-            }
-
-            solutionPath = resolved.Value;
+            return $"the solution '{solution}' is not a file in the repository";
         }
 
-        workspaces.Publish(new RunWorkspace(settings.RunId, "sandbox", "", branch, branch, repo, solutionPath) { BaseCommit = commit, CreatedAt = DateTimeOffset.UtcNow });
+        workspaces.Publish(new RunWorkspace(settings.RunId, "sandbox", "", branch, branch, repo, resolved.Value) { BaseCommit = commit, CreatedAt = DateTimeOffset.UtcNow });
         return null;
     }
 
@@ -230,10 +241,13 @@ internal sealed partial class ImportService(
         return format.Succeeded;
     }
 
-    /// <summary>A relative path with no parent segment; the checkout confines it again with <see cref="WorkspacePath.Resolve"/>.</summary>
-    private static bool IsAcceptableSolution(string? solution) =>
-        solution is null || (solution.Length > 0 && !Path.IsPathRooted(solution) && !solution.StartsWith('-')
-            && !solution.Replace('\\', '/').Split('/').Contains("..", StringComparer.Ordinal));
+    /// <summary>
+    /// Required, because Roslyn is started on it; a relative path with no parent segment, which the checkout confines
+    /// again with <see cref="WorkspacePath.Resolve"/>.
+    /// </summary>
+    private static bool IsAcceptableSolution([System.Diagnostics.CodeAnalysis.NotNullWhen(true)] string? solution) =>
+        !string.IsNullOrWhiteSpace(solution) && !Path.IsPathRooted(solution) && !solution.StartsWith('-')
+            && !solution.Replace('\\', '/').Split('/').Contains("..", StringComparer.Ordinal);
 
     private static string Describe(string command, GitCliResult result) =>
         result.TimedOut ? $"{command} timed out" : $"{command} exited {result.ExitCode}: {GitMirrorStore.ExtractErrorDetail(result.StdErr)}";

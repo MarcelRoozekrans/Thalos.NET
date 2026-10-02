@@ -70,7 +70,8 @@ internal readonly record struct GitCliResult(int ExitCode, string StdOut, string
 /// on Windows; the environment block of a child process this one starts is not.
 /// </para>
 /// <para>
-/// <b>Other environment isolation.</b> The child starts from the host process's own environment — so <c>PATH</c>,
+/// <b>Other environment isolation.</b> The child starts from the host process's own environment, or from
+/// <see cref="GitWorkspaceOptions.BaseEnvironment"/> instead when a host sets one — so <c>PATH</c>,
 /// <c>TEMP</c>, and on Windows <c>SYSTEMROOT</c>, everything the git executable itself needs to run, are inherited
 /// — and then every inherited <c>GIT_*</c> variable is stripped: any one of them (<c>GIT_DIR</c>,
 /// <c>GIT_WORK_TREE</c>, <c>GIT_SSH_COMMAND</c>, a stray <c>GIT_CONFIG_GLOBAL</c> pointing somewhere else, ...)
@@ -491,6 +492,15 @@ internal sealed partial class GitCli
             StandardOutputEncoding = Encoding.UTF8,
             StandardErrorEncoding = Encoding.UTF8,
         };
+
+        if (_options.BaseEnvironment is { } baseEnvironment)
+        {
+            startInfo.Environment.Clear();
+            foreach (var (key, value) in baseEnvironment)
+            {
+                startInfo.Environment[key] = value;
+            }
+        }
 
         Sanitize(startInfo.Environment, secretConfig, indexFile);
 
