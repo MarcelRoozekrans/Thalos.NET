@@ -155,6 +155,44 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         Normalize(await CallAsync(client, "cwd")).Should().Be(Normalize(_root), "the default cwd is the workspace root");
     }
 
+    /// <summary>Red: leave InheritEnvironmentVariables at its default in TransportOptions.</summary>
+    [Fact]
+    public async Task A_run_scoped_server_does_not_inherit_a_host_variable()
+    {
+        Environment.SetEnvironmentVariable("THALOS_RUN_SECRET", "leaked");
+        try
+        {
+            var registry = Registry(runScoped: new() { Args = [.. ServerArgs] }, new FakeProvider(null));
+            await registry.OnReadyAsync(Workspace(), CancellationToken.None);
+            await using var lease = await LeaseAsync(registry);
+            (await CallAsync(lease.Client, "env", new Dictionary<string, object?>(StringComparer.Ordinal) { ["name"] = "THALOS_RUN_SECRET" }))
+                .Should().Be("<unset>");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("THALOS_RUN_SECRET", null);
+        }
+    }
+
+    /// <summary>Red: pass <c>new McpServerDefinition()</c> instead of the host entry's PassEnvironment in TransportOptions.</summary>
+    [Fact]
+    public async Task A_run_scoped_server_receives_the_host_entrys_passed_variable()
+    {
+        Environment.SetEnvironmentVariable("THALOS_RUN_PASSED", "passed");
+        try
+        {
+            var registry = Registry(runScoped: new() { Args = [.. ServerArgs] }, new FakeProvider(null), passEnvironment: ["THALOS_RUN_PASSED"]);
+            await registry.OnReadyAsync(Workspace(), CancellationToken.None);
+            await using var lease = await LeaseAsync(registry);
+            (await CallAsync(lease.Client, "env", new Dictionary<string, object?>(StringComparer.Ordinal) { ["name"] = "THALOS_RUN_PASSED" }))
+                .Should().Be("passed");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("THALOS_RUN_PASSED", null);
+        }
+    }
+
     [Fact]
     public async Task A_percent_sign_in_a_substituted_value_fails_the_start_on_Windows_where_cmd_would_expand_it()
     {
@@ -752,11 +790,12 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
 
     private RunMcpServerRegistry Registry(RunScopedMcpDefinition runScoped) => Registry(runScoped, new FakeProvider(null));
 
-    private RunMcpServerRegistry Registry(RunScopedMcpDefinition runScoped, IRunWorkspaceProvider? workspaces, IReadOnlyDictionary<string, string>? hostEnv = null)
+    private RunMcpServerRegistry Registry(RunScopedMcpDefinition runScoped, IRunWorkspaceProvider? workspaces, IReadOnlyDictionary<string, string>? hostEnv = null, IReadOnlyList<string>? passEnvironment = null)
     {
         // The host entry's own args start a working server, so a registry that ignores runScoped.Args fails an assertion, not the start.
         var definition = McpServerFixture.Definition("--host");
         definition.Env = hostEnv;
+        definition.PassEnvironment = passEnvironment;
         definition.RunScoped = runScoped;
         var registry = new RunMcpServerRegistry(Servers(definition), () => workspaces, NullLoggerFactory.Instance, TimeProvider.System);
         _registries.Add(registry);
