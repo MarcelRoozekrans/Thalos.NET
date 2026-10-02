@@ -7,6 +7,7 @@ using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Client;
+using Thalos.Git.Workspaces;
 using Thalos.Mcp;
 using Thalos.Runtime;
 using Thalos.Sandbox;
@@ -389,7 +390,8 @@ public sealed class SandboxEndToEndFixture : IAsyncLifetime
             """),
     ];
 
-    private static async Task GitAsync(string directory, params string[] args)
+    /// <summary>Runs git in <paramref name="directory"/>, asserts it exits 0, and returns its trimmed standard output.</summary>
+    internal static async Task<string> GitAsync(string directory, params string[] args)
     {
         using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(1));
         var start = new ProcessStartInfo("git") { WorkingDirectory = directory, RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false };
@@ -402,8 +404,9 @@ public sealed class SandboxEndToEndFixture : IAsyncLifetime
         var stdout = process.StandardOutput.ReadToEndAsync(timeout.Token);
         var stderr = process.StandardError.ReadToEndAsync(timeout.Token);
         await process.WaitForExitAsync(timeout.Token);
-        await stdout;
+        var output = await stdout;
         process.ExitCode.Should().Be(0, $"git {string.Join(' ', args)}: {await stderr}");
+        return output.Trim();
     }
 
     private static void DeleteTree(string? path)
@@ -466,6 +469,9 @@ public sealed class TrustedSide(ServiceProvider services, DockerSandboxRuntime r
     public DockerSandboxRuntime Runtime { get; } = runtime;
 
     public SandboxRunWorkspaceProvider Provider { get; } = provider;
+
+    /// <summary>The <see cref="IRunWorkspaceGit"/> <c>UseSandboxRunWorkspaces</c> registered, to commit a publish worktree.</summary>
+    public IRunWorkspaceGit Git => services.GetRequiredService<IRunWorkspaceGit>();
 
     /// <summary>The <c>workspace</c>, <c>sandbox</c> or <c>roslyn</c> source.</summary>
     internal IToolSource Source(string name) => string.Equals(name, "roslyn", StringComparison.Ordinal)
