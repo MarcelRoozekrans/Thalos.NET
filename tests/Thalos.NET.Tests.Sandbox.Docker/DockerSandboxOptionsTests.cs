@@ -200,6 +200,57 @@ public sealed class DockerSandboxOptionsTests
         result.Error.Message.Should().Be("could not set up the sandbox network: a Docker engine call timed out after 1 s");
     }
 
+    /// <summary>
+    /// A Windows-container engine cannot run the Linux-only images, so set-up refuses it before any container, network
+    /// or pull call. Red: drop the engine OS check from <c>EnsureLinuxEngineAsync</c>.
+    /// </summary>
+    [Fact]
+    public async Task A_windows_container_engine_is_refused_before_anything_is_created()
+    {
+        var paths = new List<string>();
+        using var listener = new System.Net.HttpListener();
+        var port = System.Net.Sockets.TcpListener.Create(0);
+        port.Start();
+        var number = ((System.Net.IPEndPoint)port.LocalEndpoint).Port;
+        port.Stop();
+        listener.Prefixes.Add($"http://127.0.0.1:{number}/");
+        listener.Start();
+        var serving = Task.Run(async () =>
+        {
+            try
+            {
+                while (true)
+                {
+                    var context = await listener.GetContextAsync();
+                    lock (paths)
+                    {
+                        paths.Add(context.Request.Url!.AbsolutePath);
+                    }
+
+                    var body = System.Text.Encoding.UTF8.GetBytes("{\"OSType\":\"windows\"}");
+                    context.Response.ContentType = "application/json";
+                    await context.Response.OutputStream.WriteAsync(body);
+                    context.Response.Close();
+                }
+            }
+            catch (Exception ex) when (ex is System.Net.HttpListenerException or ObjectDisposedException)
+            {
+                // the listener stopped
+            }
+        });
+        var options = new DockerSandboxOptions { Endpoint = new Uri($"http://127.0.0.1:{number}"), EngineTimeout = TimeSpan.FromSeconds(5) };
+        using var docker = new global::Docker.DotNet.DockerClientBuilder().WithEndpoint(options.Endpoint).WithTimeout(options.EngineTimeout).Build();
+        using var infrastructure = new DockerSandboxInfrastructure(docker, options, TimeProvider.System, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+
+        var result = await infrastructure.EnsureAsync(CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(30));
+
+        listener.Stop();
+        await serving;
+        result.IsFailure.Should().BeTrue();
+        result.Error.Message.Should().Be("run sandboxes need a Linux container engine; this engine runs windows containers");
+        paths.Should().OnlyContain(p => p.EndsWith("/info", StringComparison.Ordinal));
+    }
+
     /// <summary>Red: never remove an entry, or release the gate without leaving.</summary>
     [Fact]
     public async Task A_keyed_lock_serialises_one_key_and_forgets_it_afterwards()

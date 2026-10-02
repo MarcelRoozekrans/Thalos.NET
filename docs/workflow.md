@@ -691,6 +691,12 @@ run to that run's own container. The container has no route out except an egress
 the sandbox records, the stored patches, and the publish worktrees (`<DataRoot>/publish`). The sandbox's own
 volume is never read from the host.
 
+**Requires a Linux container engine.** The sandbox, gateway and egress images are Linux-only. On Windows that means
+Docker Desktop in Linux-container mode (WSL 2 or Hyper-V backend), not Windows-container mode. Against an engine that
+runs Windows containers, `CreateAsync` fails with "run sandboxes need a Linux container engine; this engine runs
+windows containers" before any network, container or pull call, and `GetAsync` and `ListAsync` log it and answer
+null and empty.
+
 ```csharp
 thalos
     .UseDockerSandboxRuntime()

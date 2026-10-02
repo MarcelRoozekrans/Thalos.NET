@@ -34,7 +34,7 @@ public sealed class SandboxEndToEndTests(SandboxEndToEndFixture fixture, ITestOu
     [SkippableFact]
     public async Task An_agent_written_build_target_runs_only_inside_the_container()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         await using var run = await fixture.StartRunAsync("s3");
 
         var written = await run.CallAsync("workspace", "write_file", ("path", "Directory.Build.props"), ("content", MarkerProps));
@@ -56,7 +56,7 @@ public sealed class SandboxEndToEndTests(SandboxEndToEndFixture fixture, ITestOu
     [SkippableFact]
     public async Task Restore_runs_through_the_proxy_so_no_package_is_unresolved()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         await using var run = await fixture.StartRunAsync("restore");
 
         var readiness = await fixture.Provider.ReadinessAsync(run.RunId, Ct);
@@ -75,7 +75,7 @@ public sealed class SandboxEndToEndTests(SandboxEndToEndFixture fixture, ITestOu
     [SkippableFact]
     public async Task Build_and_test_run_in_the_container()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         await using var run = await fixture.StartRunAsync("build");
 
         var build = await run.CallAsync("sandbox", "build");
@@ -100,7 +100,7 @@ public sealed class SandboxEndToEndTests(SandboxEndToEndFixture fixture, ITestOu
     [SkippableFact]
     public async Task The_container_never_sees_a_host_secret()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         const string secret = "ghp_e2e_host_secret_never_in_a_sandbox";
         var before = Environment.GetEnvironmentVariable("GITHUB_TOKEN");
         Environment.SetEnvironmentVariable("GITHUB_TOKEN", secret);
@@ -151,7 +151,7 @@ public sealed class SandboxEndToEndTests(SandboxEndToEndFixture fixture, ITestOu
     [SkippableFact]
     public async Task A_workflow_file_written_around_the_tools_is_refused_at_publish()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         await using var run = await fixture.StartRunAsync("s5");
 
         var refused = await run.CallAsync("workspace", "write_file", ("path", ".github/workflows/x.yml"), ("content", "on: push\n"));
@@ -189,7 +189,7 @@ public sealed class SandboxEndToEndTests(SandboxEndToEndFixture fixture, ITestOu
     [SkippableFact]
     public async Task A_parked_run_has_no_container_and_its_change_publishes()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         await using var run = await fixture.StartRunAsync("park");
         const string content = "namespace Lib;\n\npublic static class B\n{\n    public static int One() => 1;\n}\n";
 

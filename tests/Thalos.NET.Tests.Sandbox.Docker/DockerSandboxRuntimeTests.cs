@@ -30,7 +30,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task The_container_runs_with_the_hardening_flags()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         var spec = DockerSandboxFixture.Spec(fixture.CurlImage);
         var handle = await CreateAsync(spec);
 
@@ -70,7 +70,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task The_environment_is_only_the_specs()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         Environment.SetEnvironmentVariable("GITHUB_TOKEN", "must-not-reach-the-sandbox");
         try
         {
@@ -103,7 +103,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task A_sandbox_cannot_reach_the_internet_directly()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         var handle = await CreateAsync(DockerSandboxFixture.Spec(fixture.CurlImage));
 
         var (exit, _, stderr) = await fixture.ExecAsync(DockerSandboxRuntime.ContainerName(handle.SandboxId), "curl", "-m", "5", "--noproxy", "*", "-sS", "-o", "/dev/null", "https://example.com");
@@ -116,7 +116,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task A_sandbox_reaches_nuget_through_the_egress_proxy_and_nothing_else()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         var handle = await CreateAsync(DockerSandboxFixture.Spec(fixture.CurlImage));
         var name = DockerSandboxRuntime.ContainerName(handle.SandboxId);
 
@@ -140,7 +140,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task The_gateway_reaches_the_sandbox_by_id_and_nothing_else()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         var handle = await CreateAsync(DockerSandboxFixture.Spec(fixture.NginxImage));
         using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
 
@@ -172,7 +172,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task List_finds_a_sandbox_after_a_new_runtime_instance()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         var spec = DockerSandboxFixture.Spec(fixture.CurlImage);
         var created = await CreateAsync(spec);
 
@@ -194,7 +194,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task A_sandbox_of_another_network_is_neither_listed_nor_deleted()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         var runId = Guid.NewGuid();
         var sandboxId = runId.ToString("N");
         await fixture.Docker.Containers.CreateContainerAsync(new CreateContainerParameters
@@ -224,7 +224,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task Delete_is_idempotent_and_removes_the_volume()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         var handle = await CreateAsync(DockerSandboxFixture.Spec(fixture.VolumeImage));
         var inspect = await fixture.Docker.Containers.InspectContainerAsync(DockerSandboxRuntime.ContainerName(handle.SandboxId), Ct);
         var anonymous = inspect.Mounts!.Single(m => string.Equals(m.Destination, "/data", StringComparison.Ordinal)).Name!;
@@ -247,7 +247,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task A_failed_create_removes_what_it_made()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         var spec = DockerSandboxFixture.Spec($"thalos-sandbox-test-missing:{fixture.Suffix}");
 
         var result = await fixture.Runtime.CreateAsync(spec, Ct);
@@ -263,7 +263,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task An_existing_network_that_is_not_internal_is_refused()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         var name = $"{fixture.Network}-open";
         await fixture.Docker.Networks.CreateNetworkAsync(new NetworksCreateParameters
         {
@@ -282,7 +282,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task The_gateway_publishes_only_on_loopback_and_the_egress_proxy_publishes_nothing()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         await CreateAsync(DockerSandboxFixture.Spec(fixture.CurlImage));
         var options = fixture.Options();
 
@@ -310,7 +310,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task An_ip_literal_is_refused_even_when_its_reverse_dns_name_is_allowed()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         var options = fixture.Options($"{fixture.Network}-dns");
         options.ExtraEgressDomains.Add("dns.google");
         var runtime = fixture.NewRuntime(options);
@@ -329,7 +329,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task A_container_on_the_default_bridge_cannot_use_the_egress_proxy()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         await CreateAsync(DockerSandboxFixture.Spec(fixture.CurlImage));
         var egress = await fixture.Docker.Containers.InspectContainerAsync(fixture.Options().EgressContainerName, Ct);
         var bridgeAddress = egress.NetworkSettings!.Networks!["bridge"].IPAddress;
@@ -347,7 +347,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task A_network_replaced_by_an_open_one_is_never_used()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         var options = fixture.Options($"{fixture.Network}-swap");
         var runtime = fixture.NewRuntime(options);
         var first = await runtime.CreateAsync(DockerSandboxFixture.Spec(fixture.CurlImage), Ct);
@@ -381,7 +381,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task A_removed_gateway_is_set_up_again()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         var options = fixture.Options($"{fixture.Network}-gone");
         var runtime = fixture.NewRuntime(options);
         var first = await runtime.CreateAsync(DockerSandboxFixture.Spec(fixture.CurlImage), Ct);
@@ -402,7 +402,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task A_leftover_work_volume_is_replaced_only_when_it_is_ours()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         await CreateAsync(DockerSandboxFixture.Spec(fixture.CurlImage));
 
         var ours = DockerSandboxFixture.Spec(fixture.CurlImage);
@@ -440,7 +440,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task A_missing_infrastructure_image_is_pulled()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         const string image = "nginx:1.27-alpine-slim";
         var present = true;
         try
@@ -473,7 +473,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task Concurrent_creates_of_one_sandbox_leave_the_winner_intact()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         var runtime = fixture.NewRuntime(fixture.Options());
         var spec = DockerSandboxFixture.Spec(fixture.CurlImage);
         fixture.RemoveVolumeAfterwards(DockerSandboxRuntime.VolumeName(spec.SandboxId));
@@ -554,7 +554,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task A_container_deleted_behind_the_runtimes_back_is_reported_missing_with_its_run()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         var spec = DockerSandboxFixture.Spec(fixture.CurlImage);
         var handle = await CreateAsync(spec);
         await fixture.Docker.Containers.RemoveContainerAsync(DockerSandboxRuntime.ContainerName(handle.SandboxId), new ContainerRemoveParameters { Force = true }, Ct);
@@ -575,7 +575,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task An_exited_sandbox_is_started_again_and_a_running_one_is_left_alone()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         var handle = await CreateAsync(DockerSandboxFixture.Spec(fixture.CurlImage));
         await fixture.Docker.Containers.StopContainerAsync(DockerSandboxRuntime.ContainerName(handle.SandboxId), new ContainerStopParameters { WaitBeforeKillSeconds = 1 }, Ct);
         var exited = await fixture.Runtime.GetAsync(handle.SandboxId, Ct);
@@ -598,7 +598,7 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
     [SkippableFact]
     public async Task Start_refuses_a_container_of_another_network_and_one_that_does_not_exist()
     {
-        Skip.IfNot(DockerAvailable.Value);
+        Skip.IfNot(DockerAvailable.Value, DockerAvailable.SkipReason);
         var runId = Guid.NewGuid();
         var sandboxId = runId.ToString("N");
         await fixture.Docker.Containers.CreateContainerAsync(new CreateContainerParameters

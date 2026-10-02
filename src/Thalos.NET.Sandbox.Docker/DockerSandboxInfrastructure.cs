@@ -65,6 +65,8 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
     private readonly SemaphoreSlim gate = new(1, 1);
     private readonly HttpClient probe = new() { Timeout = TimeSpan.FromSeconds(2) };
     private SandboxInfrastructureState? state;
+    private volatile bool engineIsLinux;
+    private int wrongEngineLogged;
 
     /// <summary>The Docker client, shared with the runtime.</summary>
     public DockerClient Docker => docker;
@@ -103,6 +105,12 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
                 return Result<SandboxInfrastructureState, AgentError>.Success(raced);
             }
 
+            var engine = await EnsureLinuxEngineAsync(ct).ConfigureAwait(false);
+            if (engine.IsFailure)
+            {
+                return Result<SandboxInfrastructureState, AgentError>.Failure(engine.Error);
+            }
+
             var started = clock.GetTimestamp();
             var result = await SetUpAsync(ct).ConfigureAwait(false);
             if (result.IsSuccess)
@@ -121,6 +129,45 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
         finally
         {
             gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Refuses an engine that runs anything but Linux containers: the sandbox, gateway and egress images are Linux-only,
+    /// so on a Windows-container engine every pull would fail obscurely. Only a Linux answer is cached, because Docker
+    /// Desktop can be switched between container modes while the host runs.
+    /// </summary>
+    private async ValueTask<Result<bool, AgentError>> EnsureLinuxEngineAsync(CancellationToken ct)
+    {
+        if (engineIsLinux)
+        {
+            return Result<bool, AgentError>.Success(true);
+        }
+
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        bounded.CancelAfter(options.EngineTimeout);
+        try
+        {
+            var info = await docker.System.GetSystemInfoAsync(bounded.Token).ConfigureAwait(false);
+            if (!string.Equals(info.OSType, "linux", StringComparison.OrdinalIgnoreCase))
+            {
+                var osType = string.IsNullOrEmpty(info.OSType) ? "unknown" : info.OSType;
+                if (Interlocked.Exchange(ref wrongEngineLogged, 1) == 0)
+                {
+                    LogNotLinuxEngine(logger, osType);
+                }
+
+                return Result<bool, AgentError>.Failure(AgentError.ProviderError($"run sandboxes need a Linux container engine; this engine runs {osType} containers"));
+            }
+
+            engineIsLinux = true;
+            return Result<bool, AgentError>.Success(true);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            return Result<bool, AgentError>.Failure(ex is OperationCanceledException
+                ? EngineCallTimedOut(options.EngineTimeout)
+                : AgentError.ProviderError("could not check the Docker engine", DockerErrors.Describe(ex, options.EngineTimeout)));
         }
     }
 
@@ -735,6 +782,9 @@ internal sealed partial class DockerSandboxInfrastructure(DockerClient docker, D
 
     [LoggerMessage(EventId = 1208, Level = LogLevel.Information, Message = "Pulling the missing sandbox infrastructure image {Image}")]
     private static partial void LogPulling(ILogger logger, string image);
+
+    [LoggerMessage(EventId = 1220, Level = LogLevel.Warning, Message = "Run sandboxes need a Linux container engine, but this engine runs {OsType} containers; no sandbox can be created")]
+    private static partial void LogNotLinuxEngine(ILogger logger, string osType);
 
     [LoggerMessage(EventId = 1209, Level = LogLevel.Warning, Message = "Adopting the internal network {Network}, which this runtime did not create: it has no thalos.sandbox label")]
     private static partial void LogAdoptingUnlabelledNetwork(ILogger logger, string network);
