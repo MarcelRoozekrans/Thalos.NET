@@ -176,11 +176,22 @@ public sealed class DockerSandboxFixture : IAsyncLifetime
             await BoundedAsync(ct => Quietly(() => Docker.Images.DeleteImageAsync(image, new ImageDeleteParameters { Force = true }, ct)));
         }
 
+        // All, intermediate layers included: a build leaves labelled untagged images that a plain listing does not show.
+        // A few passes, because an image is only removable once the images built on it are gone.
         await BoundedAsync(async ct =>
         {
-            foreach (var image in await Docker.Images.ListImagesAsync(new ImagesListParameters { Filters = Filter("label", $"{TestLabel}={Suffix}") }, ct))
+            for (var pass = 0; pass < 5; pass++)
             {
-                await Quietly(() => Docker.Images.DeleteImageAsync(image.ID, new ImageDeleteParameters { Force = true }, ct));
+                var left = await Docker.Images.ListImagesAsync(new ImagesListParameters { All = true, Filters = Filter("label", $"{TestLabel}={Suffix}") }, ct);
+                if (left.Count == 0)
+                {
+                    return;
+                }
+
+                foreach (var image in left)
+                {
+                    await Quietly(() => Docker.Images.DeleteImageAsync(image.ID, new ImageDeleteParameters { Force = true }, ct));
+                }
             }
         });
 

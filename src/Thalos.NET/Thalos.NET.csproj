@@ -34,5 +34,7 @@
     <InternalsVisibleTo Include="Thalos.NET.Mcp" />
     <!-- RemoteRunToolSourceTests begin a TurnScope to call a routed tool as a run's caller. -->
     <InternalsVisibleTo Include="Thalos.NET.Tests.Sandbox" />
+    <!-- The sandbox end-to-end tests begin a TurnScope to call a routed tool as a run's caller. -->
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Sandbox.Docker" />
   </ItemGroup>
 </Project>

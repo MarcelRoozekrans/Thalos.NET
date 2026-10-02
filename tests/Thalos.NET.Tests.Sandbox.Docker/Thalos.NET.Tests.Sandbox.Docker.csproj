@@ -1,6 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <ItemGroup>
     <ProjectReference Include="..\..\src\Thalos.NET.Sandbox.Docker\Thalos.NET.Sandbox.Docker.csproj" />
+    <!-- The end-to-end tests run the full trusted-side stack: the provider, its mirror and the remote run tool sources. -->
+    <ProjectReference Include="..\..\src\Thalos.NET.Sandbox\Thalos.NET.Sandbox.csproj" />
     <PackageReference Include="Xunit.SkippableFact" />
   </ItemGroup>
 </Project>

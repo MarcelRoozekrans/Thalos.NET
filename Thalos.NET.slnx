@@ -1,6 +1,7 @@
 <Solution>
   <Folder Name="/samples/">
     <Project Path="samples/Thalos.Sample.Console/Thalos.Sample.Console.csproj" />
+    <Project Path="samples/Thalos.Sample.SandboxHost/Thalos.Sample.SandboxHost.csproj" />
   </Folder>
   <Folder Name="/src/">
     <Project Path="src/Thalos.NET.Abstractions/Thalos.NET.Abstractions.csproj" />
