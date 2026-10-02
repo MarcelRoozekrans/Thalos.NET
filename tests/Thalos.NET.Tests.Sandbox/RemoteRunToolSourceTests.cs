@@ -191,8 +191,9 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// Red: register AddRemoteRunTools("workspace", …) over a copy of WorkspaceTools with one [Description] changed; the
-    /// local schema then differs from the one the sandbox lists.
+    /// Red 1: register AddRemoteRunTools("workspace", …) over a copy of WorkspaceTools with one [Description] changed; the
+    /// local schema then differs from the one the sandbox lists. Red 2: in RemoteRunToolSource.GetToolsAsync, wrap the
+    /// local schemas after Skip(1); the local tool names are then one short of the listed ones.
     /// </summary>
     [Fact]
     public async Task Local_schemas_match_what_the_sandbox_lists()
@@ -450,15 +451,17 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// Red: in NotifyAsync, await the observer without the WaitAsync bound; the call then waits for the hanging observer
-    /// forever, and the test's own 30-second bound fails it.
+    /// Red 1: in NotifyAsync, await the observer without the WaitAsync bound; the call then waits for the hanging observer
+    /// forever, and the test's own 30-second bound fails it. Red 2: drop the CancelAsync in the TimeoutException catch;
+    /// when the wait ends first, the observer's token is then never cancelled.
     /// </summary>
     [Fact]
     public async Task A_hanging_observer_delays_a_call_only_by_the_observer_timeout()
     {
         var a = await SandboxAsync("a");
         var recorder = new RecordingObserver();
-        await using var sp = Services(new RemoteRunToolOptions { ObserverTimeout = TimeSpan.FromMilliseconds(300) }, observers: [new HangingObserver(), recorder]);
+        var hanging = new HangingObserver();
+        await using var sp = Services(new RemoteRunToolOptions { ObserverTimeout = TimeSpan.FromMilliseconds(300) }, observers: [hanging, recorder]);
 
         var result = await CallAsAsync(sp, a.RunId, "workspace", "list_files").WaitAsync(TimeSpan.FromSeconds(30));
 
@@ -466,6 +469,7 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
         result.Should().Be("error: this turn has no run workspace");
         recorder.Calls.Should().ContainSingle("the observer after the hanging one is still told");
         LogText.Should().Contain("did not finish within 00:00:00.3000000");
+        hanging.TokenCancelled.Task.IsCompleted.Should().BeTrue("the late observer is told to stop through its token");
     }
 
     // ---------- the schema-only tool types ----------
@@ -510,7 +514,8 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
 
     /// <summary>
     /// Red 1: drop the ThrowIfInvalidRemote call in AddMcpServer. Red 2: register a remote entry with the registry as
-    /// before. Red 3: drop the duplicate-name check in AddRemote.
+    /// before. Red 3: in ToolSourceNames.ThrowIfTakenForRemote, drop the remote-name check; a second remote source is then
+    /// refused only by the MCP-name check, whose message names an MCP server.
     /// </summary>
     [Fact]
     public async Task A_remote_entry_is_a_remote_source_without_the_registry_and_may_not_describe_a_local_copy()
@@ -540,7 +545,11 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
         var twice = () => new ServiceCollection().AddThalos(t => t
             .AddMcpServer("roslyn", HostDefinition(new RunScopedMcpDefinition { Remote = true }))
             .AddRemoteRunTools("roslyn", typeof(WorkspaceTools)));
-        twice.Should().Throw<ArgumentException>().WithMessage("*'roslyn' was already added*");
+        twice.Should().Throw<ArgumentException>().WithMessage("A remote run tool source named 'roslyn' was already added.*");
+        var remoteTwice = () => new ServiceCollection().AddThalos(t => t
+            .AddRemoteRunTools("workspace", typeof(WorkspaceTools))
+            .AddRemoteRunTools("workspace", typeof(WorkspaceTools)));
+        remoteTwice.Should().Throw<ArgumentException>().WithMessage("A remote run tool source named 'workspace' was already added.*");
     }
 
     /// <summary>
@@ -793,8 +802,15 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
     {
         private readonly TaskCompletionSource _never = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-        /// <summary>Never completes, and ignores its token.</summary>
-        public ValueTask OnCompletedAsync(RunToolCall completed, CancellationToken ct) => new(_never.Task);
+        /// <summary>Completes when the token the observer was given is cancelled.</summary>
+        public TaskCompletionSource TokenCancelled { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        /// <summary>Never completes, and ignores its token beyond recording that it was cancelled.</summary>
+        public ValueTask OnCompletedAsync(RunToolCall completed, CancellationToken ct)
+        {
+            ct.Register(() => TokenCancelled.TrySetResult());
+            return new(_never.Task);
+        }
     }
 
     private sealed class ThrowingObserver : IRunToolCallObserver

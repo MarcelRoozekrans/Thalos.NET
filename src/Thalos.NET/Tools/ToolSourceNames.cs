@@ -42,11 +42,21 @@ internal sealed class ToolSourceNames
         _local.Add(name);
     }
 
-    /// <summary>Records <paramref name="name"/> as a remote run tool source's name.</summary>
+    /// <summary>Records <paramref name="name"/> as a remote run tool source's name, after <see cref="ThrowIfTakenForRemote"/>.</summary>
     /// <param name="name">The source's name.</param>
     /// <param name="paramName">The parameter to name in the exception.</param>
     /// <exception cref="ArgumentException">A local tool source or another remote run tool source has the name.</exception>
     public void AddRemote(string name, string paramName)
+    {
+        ThrowIfTakenForRemote(name, paramName);
+        _remote.Add(name);
+    }
+
+    /// <summary>Refuses <paramref name="name"/> for a remote run tool source when a local or a remote tool source already has it.</summary>
+    /// <param name="name">The source's name.</param>
+    /// <param name="paramName">The parameter to name in the exception.</param>
+    /// <exception cref="ArgumentException">A local tool source or another remote run tool source has the name.</exception>
+    public void ThrowIfTakenForRemote(string name, string paramName)
     {
         if (_local.Contains(name))
         {
@@ -54,7 +64,7 @@ internal sealed class ToolSourceNames
                 $"A local tool source named '{name}' was already added; a remote run tool source cannot share its name.", paramName);
         }
 
-        if (!_remote.Add(name))
+        if (_remote.Contains(name))
         {
             throw new ArgumentException($"A remote run tool source named '{name}' was already added.", paramName);
         }

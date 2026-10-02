@@ -345,14 +345,15 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
         catch (McpException ex)
         {
             // The endpoint answered with a protocol error, such as an unknown tool: its own answer, as text.
-            LogCallRefused(_logger, Name, tool.Name, runId, ex.Message);
+            LogCallRefused(_logger, Name, tool.Name, runId, LogSanitizer.Clean(ex.Message));
             return $"error: the run's sandbox refused '{tool.Name}': {ex.Message}";
         }
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             // The sandbox runs agent-controlled code, so its answer is untrusted: one the client cannot read in any way is
             // an error result, and the client that read it is not reused.
-            LogUnusableAnswer(_logger, ex, Name, tool.Name, runId, ex.GetType().Name);
+            // Logged as its type and a cleaned message only: the message may quote what the sandbox sent.
+            LogUnusableAnswer(_logger, Name, tool.Name, runId, ex.GetType().Name, LogSanitizer.Clean(ex.Message));
             await DropAsync(runId, entry).ConfigureAwait(false);
             return $"error: the run's sandbox gave no usable answer to '{tool.Name}'; the call did not complete.";
         }
@@ -543,8 +544,7 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
     {
         foreach (var observer in _observers)
         {
-            using var timeout = new CancellationTokenSource(_options.ObserverTimeout, _clock);
-            using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct, timeout.Token);
+            using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
             try
             {
                 await observer.OnCompletedAsync(call, bounded.Token).AsTask().WaitAsync(_options.ObserverTimeout, _clock, ct).ConfigureAwait(false);
@@ -555,6 +555,8 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
             }
             catch (TimeoutException)
             {
+                // The one bound: the observer is told to stop here, through its token, and left to finish on its own.
+                await bounded.CancelAsync().ConfigureAwait(false);
                 LogObserverTimedOut(_logger, Name, call.Tool, call.RunId, _options.ObserverTimeout);
             }
             catch (Exception ex)
@@ -676,8 +678,8 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
     [LoggerMessage(EventId = 348, Level = LogLevel.Error, Message = "Remote run tool source '{Source}' could not resolve the endpoint of run {RunId}: {ErrorType}")]
     private static partial void LogResolveFailed(ILogger logger, Exception exception, string source, Guid runId, string errorType);
 
-    [LoggerMessage(EventId = 349, Level = LogLevel.Warning, Message = "The sandbox of run {RunId} gave no usable answer to '{Tool}' on remote run tool source '{Source}': {ErrorType}")]
-    private static partial void LogUnusableAnswer(ILogger logger, Exception exception, string source, string tool, Guid runId, string errorType);
+    [LoggerMessage(EventId = 349, Level = LogLevel.Warning, Message = "The sandbox of run {RunId} gave no usable answer to '{Tool}' on remote run tool source '{Source}': {ErrorType}: {Detail}")]
+    private static partial void LogUnusableAnswer(ILogger logger, string source, string tool, Guid runId, string errorType, string detail);
 
     [LoggerMessage(EventId = 350, Level = LogLevel.Error, Message = "A run tool call observer did not finish within {Timeout} after '{Tool}' on remote run tool source '{Source}' for run {RunId}; the call went on")]
     private static partial void LogObserverTimedOut(ILogger logger, string source, string tool, Guid runId, TimeSpan timeout);

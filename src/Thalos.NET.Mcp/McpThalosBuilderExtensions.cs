@@ -28,8 +28,8 @@ public static class McpThalosBuilderExtensions
     /// An entry whose <see cref="RunScopedMcpDefinition.Remote"/> is set is registered as a
     /// <see cref="RemoteRunToolSource.ForMcpHost"/> source over the host-wide server instead, and does not join the
     /// registry: a run's calls go to the endpoint the registered <see cref="IRunToolEndpointResolver"/> returns, each
-    /// bounded by the entry's <see cref="RunScopedMcpDefinition.CallTimeout"/> and otherwise by the registered
-    /// <see cref="RemoteRunToolOptions"/> or its defaults, and each registered
+    /// bounded by the entry's own <see cref="RunScopedMcpDefinition.CallTimeout"/>, which always applies; connecting and
+    /// observers are bounded by the registered <see cref="RemoteRunToolOptions"/> or its defaults. Each registered
     /// <see cref="IRunToolCallObserver"/> is told of them. The source is also an <see cref="IRunWorkspaceObserver"/>.
     /// </para>
     /// </remarks>
@@ -140,13 +140,15 @@ public static class McpThalosBuilderExtensions
     internal static void AddRemote(IServiceCollection services, string name, Func<IServiceProvider, RemoteRunToolSource> factory)
     {
         var servers = McpServers(services);
+        var names = ToolSourceNames.Of(services);
+        names.ThrowIfTakenForRemote(name, nameof(name)); // a local source, or a remote one: AddRemoteRunTools or a remote entry
         if (servers.McpNames.ContainsKey(name))
         {
             throw new ArgumentException(
                 $"An MCP server named '{name}' was already added; a remote run tool source cannot share its name.", nameof(name));
         }
 
-        ToolSourceNames.Of(services).AddRemote(name, nameof(name));
+        names.AddRemote(name, nameof(name));
         servers.McpNames.Add(name, true); // as a run-scoped entry, so a later MCP entry by this name is refused
         RegisterRemote(services, name, factory);
     }

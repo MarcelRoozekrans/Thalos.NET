@@ -12,7 +12,9 @@ public sealed class RemoteRunToolOptions
     /// <summary>
     /// How long one call may run on the run's endpoint before it is cancelled and answered with an <c>error:</c>
     /// result. A <c>sandbox__test</c> call can be long; this bounds one call. Default 20 minutes. Must be positive and at
-    /// most <see cref="int.MaxValue"/> milliseconds.
+    /// most <see cref="int.MaxValue"/> milliseconds. It applies to the sources Thalos.NET.Sandbox's
+    /// <c>AddRemoteRunTools</c> adds; a remote MCP entry is bounded by its own
+    /// <see cref="RunScopedMcpDefinition.CallTimeout"/> instead.
     /// </summary>
     public TimeSpan CallTimeout { get; set; } = TimeSpan.FromMinutes(20);
 
