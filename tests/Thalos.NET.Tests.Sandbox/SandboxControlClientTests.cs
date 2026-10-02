@@ -63,6 +63,43 @@ public sealed class SandboxControlClientTests
         ready.Value.Should().Be(new SandboxReadiness(true, "failed", "x", "ready", null));
     }
 
+    /// <summary>
+    /// A gateway error or a transport failure is no answer from the host; any status of its own is one, a refusal
+    /// included, so a wrong token still fails the import rather than the wait. Red: answer true for every status; the
+    /// gateway's 502, 503 and 504 count as answers. Red 2: answer false for every status that is not 200; the 401 is no answer.
+    /// </summary>
+    [Theory]
+    [InlineData(HttpStatusCode.BadGateway, false)]
+    [InlineData(HttpStatusCode.ServiceUnavailable, false)]
+    [InlineData(HttpStatusCode.GatewayTimeout, false)]
+    [InlineData(HttpStatusCode.OK, true)]
+    [InlineData(HttpStatusCode.Unauthorized, true)]
+    [InlineData(HttpStatusCode.InternalServerError, true)]
+    public async Task Only_the_hosts_own_status_counts_as_an_answer(HttpStatusCode status, bool answers)
+    {
+        using var http = new HttpClient(new FixedResponse(status, new MemoryStream()));
+        var client = new SandboxControlClient(http);
+
+        (await client.AnswersAsync(Handle, "token", CancellationToken.None)).Should().Be(answers);
+    }
+
+    /// <summary>Red: let the transport failure through; the call throws HttpRequestException.</summary>
+    [Fact]
+    public async Task A_refused_connection_is_no_answer()
+    {
+        using var http = new HttpClient(new Unreachable());
+        var client = new SandboxControlClient(http);
+
+        (await client.AnswersAsync(Handle, "token", CancellationToken.None)).Should().BeFalse();
+    }
+
+    /// <summary>Fails every request as a refused connection does.</summary>
+    private sealed class Unreachable : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromException<HttpResponseMessage>(new HttpRequestException("Connection refused"));
+    }
+
     /// <summary>Answers every request with <paramref name="status"/> and <paramref name="body"/>, with no Content-Length.</summary>
     private sealed class FixedResponse(HttpStatusCode status, Stream body) : HttpMessageHandler
     {

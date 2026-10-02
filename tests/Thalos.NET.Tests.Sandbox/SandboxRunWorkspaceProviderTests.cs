@@ -105,6 +105,49 @@ public sealed class SandboxRunWorkspaceProviderTests : IAsyncLifetime
         _observer.Events.Should().BeEmpty();
     }
 
+    /// <summary>
+    /// A new container's host is not listening yet when the runtime returns, and the gateway answers 502 until it is;
+    /// found by the first run against a real container. Red: drop the WaitAnsweringAsync call in ImportAsync; the import
+    /// meets the 502 and the create fails.
+    /// </summary>
+    [Fact]
+    public async Task The_import_waits_until_the_new_sandboxs_host_answers()
+    {
+        var provider = Provider();
+        Runtime.BadGatewayAnswersAfterCreate = 3;
+        var runId = Guid.NewGuid();
+
+        var created = await provider.CreateAsync(Request(runId), CancellationToken.None);
+        var ready = created.IsSuccess ? await provider.WaitAllReadyAsync(runId, TimeSpan.FromMinutes(2), CancellationToken.None) : UnitResult<AgentError>.Failure(created.Error);
+
+        using var _ = new AssertionScope();
+        created.IsSuccess.Should().BeTrue(created.IsFailure ? created.Error.ToString() : "");
+        ready.IsSuccess.Should().BeTrue(ready.IsFailure ? ready.Error.ToString() : "");
+        Runtime.HostOf(runId.ToString("N")).BadGatewayAnswers.Should().Be(0, "every 502 was met before the import");
+    }
+
+    /// <summary>
+    /// A container that stops before its host answers fails the create at once, not at the import timeout. Red: drop the
+    /// stopped check in WaitAnsweringAsync; the create waits out its 3-second import timeout and fails on that instead.
+    /// </summary>
+    [Fact]
+    public async Task A_sandbox_that_stops_before_answering_fails_the_create_at_once()
+    {
+        var provider = Provider(o => o.ImportTimeout = TimeSpan.FromSeconds(3));
+        Runtime.BadGatewayAnswersAfterCreate = int.MaxValue;
+        Task? exiting = null;
+        Runtime.AfterHostStarted = () => exiting = Runtime.ExitAsync(Runtime.Ids.Single(), exitCode: 139, oomKilled: false);
+        var runId = Guid.NewGuid();
+
+        var created = await provider.CreateAsync(Request(runId), CancellationToken.None);
+        await exiting!;
+
+        using var _ = new AssertionScope();
+        created.IsFailure.Should().BeTrue();
+        created.Error.Message.Should().Contain("did not start").And.Contain("exit 139");
+        Runtime.Deleted.Should().Equal(runId.ToString("N"));
+    }
+
     /// <summary>Red: in UndoCreateAsync, skip runtime.DeleteAsync; the sandbox is left running and never deleted.</summary>
     [Fact]
     public async Task An_import_failure_deletes_the_sandbox()

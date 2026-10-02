@@ -27,6 +27,9 @@ internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISan
     /// <summary>When set, a create fails with this error and touches nothing.</summary>
     public AgentError? CreateFailure { get; set; }
 
+    /// <summary>How many requests a new sandbox answers 502 first, as the gateway does until a new container's host listens.</summary>
+    public int BadGatewayAnswersAfterCreate { get; set; }
+
     /// <summary>When set, the host is started with another token, so it refuses the provider's requests with 401.</summary>
     public bool StartWithWrongToken { get; set; }
 
@@ -103,6 +106,7 @@ internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISan
         var workRoot = Path.Combine(root, $"{spec.SandboxId}-{Interlocked.Increment(ref _created)}");
         var token = StartWithWrongToken ? new string('w', 43) : spec.Token;
         var host = await LoopbackSandbox.StartAsync(workRoot, spec.RunId, token);
+        host.BadGatewayAnswers = BadGatewayAnswersAfterCreate;
         var handle = new SandboxHandle(spec.SandboxId, spec.RunId, SandboxState.Running, host.BaseAddress, clock.GetUtcNow());
         _sandboxes[spec.SandboxId] = new Entry(host, handle, workRoot, token);
         AfterHostStarted?.Invoke();

@@ -82,6 +82,16 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
         set => _hooks.OnHandshake = value;
     }
 
+    /// <summary>
+    /// How many more requests are answered 502 ahead of everything else, as the gateway answers while a new container's
+    /// host is not yet listening.
+    /// </summary>
+    public int BadGatewayAnswers
+    {
+        get => _hooks.BadGatewayAnswers;
+        set => _hooks.BadGatewayAnswers = value;
+    }
+
     /// <summary>When set, <c>POST /control/export</c> is answered 503 ahead of the bearer check, as a failing export.</summary>
     public bool RefuseExport
     {
@@ -131,6 +141,13 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
         var requests = new ConcurrentQueue<string>();
         app.Use(async (context, next) =>
         {
+            if (hooks.TakeBadGatewayAnswer())
+            {
+                context.Response.StatusCode = StatusCodes.Status502BadGateway;
+                await context.Response.WriteAsync("<html>502 Bad Gateway</html>");
+                return;
+            }
+
             if (hooks.RefuseExport && context.Request.Path.Equals("/control/export", StringComparison.Ordinal))
             {
                 context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
@@ -258,6 +275,31 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
         public TimeSpan BuildDelay { get; set; }
 
         public bool RefuseExport { get; set; }
+
+        private int _badGatewayAnswers;
+
+        public int BadGatewayAnswers
+        {
+            get => Volatile.Read(ref _badGatewayAnswers);
+            set => Volatile.Write(ref _badGatewayAnswers, value);
+        }
+
+        /// <summary>Takes one of the 502 answers left, if any.</summary>
+        public bool TakeBadGatewayAnswer()
+        {
+            int left;
+            do
+            {
+                left = Volatile.Read(ref _badGatewayAnswers);
+                if (left <= 0)
+                {
+                    return false;
+                }
+            }
+            while (Interlocked.CompareExchange(ref _badGatewayAnswers, left - 1, left) != left);
+
+            return true;
+        }
 
         public Action? OnHandshake { get; set; }
     }

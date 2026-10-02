@@ -161,13 +161,23 @@ public sealed partial class SandboxRunWorkspaceProvider
         return Result<RunWorkspace, AgentError>.Success(workspace);
     }
 
-    /// <summary>Streams the bundle to the sandbox under <see cref="SandboxOptions.ImportTimeout"/>.</summary>
+    /// <summary>
+    /// Waits until the new sandbox's host answers, then streams the bundle to it, both under
+    /// <see cref="SandboxOptions.ImportTimeout"/>. A container that was just started may not be listening yet; the
+    /// gateway then answers 502, which is no answer from the host.
+    /// </summary>
     private async Task<UnitResult<AgentError>> ImportAsync(SandboxHandle sandbox, SandboxRecord record, string bundle, CancellationToken ct)
     {
         using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
         bounded.CancelAfter(options.ImportTimeout);
         try
         {
+            var answering = await WaitAnsweringAsync(sandbox, record, bounded.Token).ConfigureAwait(false);
+            if (answering.IsFailure)
+            {
+                return answering;
+            }
+
             var stream = new FileStream(bundle, FileMode.Open, FileAccess.Read, FileShare.Read, 81920, FileOptions.Asynchronous);
             await using (stream.ConfigureAwait(false))
             {
@@ -176,12 +186,31 @@ public sealed partial class SandboxRunWorkspaceProvider
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            return UnitResult<AgentError>.Failure(AgentError.ProviderError($"The sandbox's import did not finish within {options.ImportTimeout}."));
+            return UnitResult<AgentError>.Failure(AgentError.ProviderError($"The sandbox did not answer and take its import within {options.ImportTimeout}."));
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             return UnitResult<AgentError>.Failure(AgentError.StoreError($"Could not read the bundle '{bundle}'.", ex.Message));
         }
+    }
+
+    /// <summary>
+    /// Asks the new sandbox every <see cref="ReadyPollInterval"/> until its host answers; fails at once when its container
+    /// stopped. The caller's token bounds the wait.
+    /// </summary>
+    private async Task<UnitResult<AgentError>> WaitAnsweringAsync(SandboxHandle sandbox, SandboxRecord record, CancellationToken ct)
+    {
+        while (!await control.AnswersAsync(sandbox, record.Token, ct).ConfigureAwait(false))
+        {
+            if (await runtime.GetAsync(record.SandboxId, ct).ConfigureAwait(false) is { State: SandboxState.Exited or SandboxState.Missing } stopped)
+            {
+                return UnitResult<AgentError>.Failure(AgentError.ProviderError($"The run's sandbox did not start: {Stopped(stopped)}."));
+            }
+
+            await Task.Delay(ReadyPollInterval, clock, ct).ConfigureAwait(false);
+        }
+
+        return UnitResult<AgentError>.Success();
     }
 
     /// <summary>

@@ -73,6 +73,31 @@ public sealed class SandboxControlClient
         }
     }
 
+    /// <summary>
+    /// Whether the sandbox's host itself answers yet: a <c>GET /control/ready</c> that reaches it, whatever it says, even a
+    /// refusal. False while the request fails in transport or the gateway answers 502, 503 or 504, as it does while a new
+    /// container's host is not yet listening. The body is never read.
+    /// </summary>
+    /// <param name="sandbox">The sandbox.</param>
+    /// <param name="token">Its bearer token.</param>
+    /// <param name="ct">Cancellation token; the call is also bounded by <see cref="ReadyTimeout"/>.</param>
+    public async Task<bool> AnswersAsync(SandboxHandle sandbox, string token, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(sandbox);
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        bounded.CancelAfter(ReadyTimeout);
+        using var request = Request(HttpMethod.Get, sandbox, token, "control/ready", content: null);
+        try
+        {
+            using var response = await _http.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, bounded.Token).ConfigureAwait(false);
+            return response.StatusCode is not (HttpStatusCode.BadGateway or HttpStatusCode.ServiceUnavailable or HttpStatusCode.GatewayTimeout);
+        }
+        catch (Exception ex) when (IsTransportFailure(ex, ct))
+        {
+            return false;
+        }
+    }
+
     /// <summary><c>GET /control/ready</c>: the sandbox's import, restore and Roslyn state.</summary>
     /// <param name="sandbox">The sandbox.</param>
     /// <param name="token">Its bearer token.</param>
