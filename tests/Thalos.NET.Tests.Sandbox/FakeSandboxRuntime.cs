@@ -51,6 +51,9 @@ internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISan
     /// <summary>When set, a delete fails with this error and deletes nothing.</summary>
     public AgentError? DeleteFailure { get; set; }
 
+    /// <summary>Sandbox ids whose delete throws, as a runtime with a bug might.</summary>
+    public ConcurrentDictionary<string, bool> ThrowOnDelete { get; } = new(StringComparer.Ordinal);
+
     /// <summary>Called once a create's host is running, with the create's token; a test cancels there to interrupt the create.</summary>
     public Action? AfterHostStarted { get; set; }
 
@@ -161,9 +164,6 @@ internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISan
 
     public ValueTask<IReadOnlyList<SandboxHandle>> ListAsync(CancellationToken ct) =>
         ValueTask.FromResult<IReadOnlyList<SandboxHandle>>(ListNothing ? [] : [.. _sandboxes.Values.Select(e => e.Handle)]);
-
-    /// <summary>Sandbox ids whose delete throws, as a runtime with a bug might.</summary>
-    public ConcurrentDictionary<string, bool> ThrowOnDelete { get; } = new(StringComparer.Ordinal);
 
     public async ValueTask<UnitResult<AgentError>> DeleteAsync(string sandboxId, CancellationToken ct)
     {

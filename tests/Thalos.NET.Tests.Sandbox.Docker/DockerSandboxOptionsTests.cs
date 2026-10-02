@@ -158,6 +158,48 @@ public sealed class DockerSandboxOptionsTests
             .Message.Should().Be("could not set up the sandbox network: a Docker engine call timed out after 15 s");
     }
 
+    /// <summary>
+    /// Through SetUpAsync's real catch: an engine that accepts the connection and never answers makes the first engine
+    /// call hit the client's own timeout while the set-up budget is far from spent, so the error names the engine call.
+    /// Red: at SetUpAsync's call site, pass true for budgetExpired; the error then names the whole budget.
+    /// </summary>
+    [Fact]
+    public async Task A_silent_engine_fails_set_up_as_an_engine_call_timeout_not_the_budget()
+    {
+        using var silent = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        silent.Start();
+        var accepted = new List<System.Net.Sockets.TcpClient>();
+        var accepting = Task.Run(async () =>
+        {
+            try
+            {
+                while (true)
+                {
+                    accepted.Add(await silent.AcceptTcpClientAsync());
+                }
+            }
+            catch (Exception ex) when (ex is System.Net.Sockets.SocketException or ObjectDisposedException)
+            {
+                // the listener stopped
+            }
+        });
+        var options = new DockerSandboxOptions
+        {
+            Endpoint = new Uri($"http://127.0.0.1:{((System.Net.IPEndPoint)silent.LocalEndpoint).Port}"),
+            EngineTimeout = TimeSpan.FromSeconds(1),
+        };
+        using var docker = new global::Docker.DotNet.DockerClientBuilder().WithEndpoint(options.Endpoint).WithTimeout(options.EngineTimeout).Build();
+        using var infrastructure = new DockerSandboxInfrastructure(docker, options, TimeProvider.System, Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance);
+
+        var result = await infrastructure.EnsureAsync(CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(30));
+
+        silent.Stop();
+        await accepting;
+        accepted.ForEach(c => c.Dispose());
+        result.IsFailure.Should().BeTrue();
+        result.Error.Message.Should().Be("could not set up the sandbox network: a Docker engine call timed out after 1 s");
+    }
+
     /// <summary>Red: never remove an entry, or release the gate without leaving.</summary>
     [Fact]
     public async Task A_keyed_lock_serialises_one_key_and_forgets_it_afterwards()
