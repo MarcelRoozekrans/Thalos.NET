@@ -2,16 +2,16 @@
   <ItemGroup>
     <!-- ZeroAlloc ecosystem -->
     <PackageVersion Include="ZeroAlloc.Results" Version="1.2.4" />
-    <PackageVersion Include="ZeroAlloc.ValueObjects" Version="2.0.11" />
+    <PackageVersion Include="ZeroAlloc.ValueObjects" Version="2.0.12" />
     <PackageVersion Include="ZeroAlloc.Mediator" Version="6.0.2" />
-    <PackageVersion Include="ZeroAlloc.Authorization" Version="2.1.4" />
-    <PackageVersion Include="ZeroAlloc.AsyncEvents" Version="1.1.6" />
-    <PackageVersion Include="ZeroAlloc.StateMachine" Version="1.6.1" />
-    <PackageVersion Include="ZeroAlloc.Telemetry" Version="1.7.0" />
+    <PackageVersion Include="ZeroAlloc.Authorization" Version="2.1.5" />
+    <PackageVersion Include="ZeroAlloc.AsyncEvents" Version="1.1.7" />
+    <PackageVersion Include="ZeroAlloc.StateMachine" Version="1.6.2" />
+    <PackageVersion Include="ZeroAlloc.Telemetry" Version="1.11.0" />
     <PackageVersion Include="ZeroAlloc.Validation" Version="1.7.8" />
     <PackageVersion Include="ZeroAlloc.Validation.Generator" Version="1.7.8" />
-    <PackageVersion Include="ZeroAlloc.Inject" Version="1.9.0" />
-    <PackageVersion Include="ZeroAlloc.Inject.Generator" Version="1.9.0" />
+    <PackageVersion Include="ZeroAlloc.Inject" Version="1.10.0" />
+    <PackageVersion Include="ZeroAlloc.Inject.Generator" Version="1.10.0" />
     <PackageVersion Include="ZeroAlloc.Analyzers" Version="1.5.4" />
 
     <!-- Agent framework + AI abstractions -->
@@ -19,7 +19,7 @@
     <PackageVersion Include="Microsoft.Extensions.AI" Version="10.10.0" />
     <PackageVersion Include="Microsoft.Extensions.AI.Abstractions" Version="10.10.1" />
     <PackageVersion Include="ModelContextProtocol" Version="2.2.0" />
-    <PackageVersion Include="Anthropic" Version="12.51.0" />
+    <PackageVersion Include="Anthropic" Version="12.53.0" />
     <PackageVersion Include="AI.Sentinel" Version="2.3.0" />
     <!-- Rag.NET (net10.0 only) — confined to Thalos.NET.Memory.RagNet -->
     <PackageVersion Include="Rag.NET.Abstractions" Version="1.0.0" />
@@ -33,8 +33,8 @@
     <!-- YAML process-graph definitions — confined to Thalos.NET.Workflow -->
     <PackageVersion Include="YamlDotNet" Version="18.1.0" />
     <!-- Raw-SQL ORM + transactional outbox, PostgreSQL persistence — net10.0-only, confined to Thalos.NET.Workflow.Orm -->
-    <PackageVersion Include="ZeroAlloc.ORM" Version="2.1.1" />
-    <PackageVersion Include="ZeroAlloc.Outbox" Version="4.0.1" />
+    <PackageVersion Include="ZeroAlloc.ORM" Version="2.2.0" />
+    <PackageVersion Include="ZeroAlloc.Outbox" Version="4.2.0" />
     <PackageVersion Include="ZeroAlloc.Outbox.Orm" Version="4.0.1" />
     <PackageVersion Include="AdoNet.Async.Adapters" Version="1.4.1" />
 
