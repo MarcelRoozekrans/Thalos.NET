@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.13.0...v0.14.0) (2026-10-02)
+
+
+### Features
+
+* **sandbox:** run sandboxes - a per-run Docker container for a run's workspace and tools ([#247](https://github.com/MarcelRoozekrans/Thalos.NET/issues/247)) ([f0574c5](https://github.com/MarcelRoozekrans/Thalos.NET/commit/f0574c50809b9e01eb5c9ecec547371396de2375))
+
 ## [0.13.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.12.0...v0.13.0) (2026-10-02)
 
 
