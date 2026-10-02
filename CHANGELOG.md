@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.13.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.12.0...v0.13.0) (2026-10-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* **mcp:** a server that relied on an inherited variable must list it in passEnvironment.
+
+### Bug Fixes
+
+* **mcp:** stdio servers no longer inherit the host environment ([#237](https://github.com/MarcelRoozekrans/Thalos.NET/issues/237)) ([3933468](https://github.com/MarcelRoozekrans/Thalos.NET/commit/3933468f15f2db04a6e4c4f7bf1f65f0ba29815d))
+
 ## [0.12.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.11.1...v0.12.0) (2026-10-01)
 
 
