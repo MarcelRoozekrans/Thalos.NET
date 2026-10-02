@@ -23,7 +23,7 @@ public sealed class SandboxOptions
     /// <c>AGENT.md</c> is the host's to add.
     /// </summary>
     public static IReadOnlyList<string> DefaultProtectedPaths { get; } =
-[
+    [
         ".git/", ".gitattributes", ".gitmodules", ".github/", ".gitlab-ci.yml", "azure-pipelines.yml",
         ".azure-pipelines/", ".circleci/", "Jenkinsfile",
     ];

@@ -2,70 +2,101 @@ using System.Net;
 
 namespace Thalos.Mcp;
 
-/// <summary>How many bytes one response from a run's endpoint may hold, and whether one has held more.</summary>
-internal sealed class ResponseCap
+/// <summary>
+/// Whether a response one call sent for exceeded the cap. <see cref="ResponseByteCap.Watch"/> makes one for the
+/// calling flow, and only the responses to requests sent from that flow mark it, so a concurrent call on the same
+/// client never sees another call's overflow as its own.
+/// </summary>
+internal sealed class ResponseCapHit
 {
-    private int _exceeded;
+    private int _hit;
 
-    /// <summary>One response may be at most <paramref name="maxBytes"/> bytes long.</summary>
-    public ResponseCap(long maxBytes)
-    {
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxBytes);
-        MaxBytes = maxBytes;
-    }
+    /// <summary>Whether a response to this call's requests held more than the cap.</summary>
+    public bool Hit => Volatile.Read(ref _hit) != 0;
 
-    /// <summary>How many bytes one response may hold.</summary>
-    public long MaxBytes { get; }
-
-    /// <summary>Whether a response has held more than <see cref="MaxBytes"/> bytes.</summary>
-    public bool Exceeded => Volatile.Read(ref _exceeded) != 0;
-
-    /// <summary>Records that a response held more than <see cref="MaxBytes"/> bytes.</summary>
-    public void MarkExceeded() => Volatile.Write(ref _exceeded, 1);
+    /// <summary>Records that a response to this call's requests held more than the cap.</summary>
+    public void Mark() => Volatile.Write(ref _hit, 1);
 }
 
 /// <summary>
 /// The HTTP handler of one run's MCP client: it wraps every response's content in a stream that counts the bytes read
-/// and faults once more than <see cref="ResponseCap.MaxBytes"/> have been read from one response, and marks the cap
-/// exceeded first. The MCP SDK reads a whole answer into memory and has no bound of its own, and the sandbox that
-/// answers runs agent-controlled code, so its answers are bounded here.
+/// and faults once more than <paramref name="maxBytes"/> have been read from one response, after marking the
+/// <see cref="ResponseCapHit"/> of the call that sent the request, if it watches. The MCP SDK reads a whole answer into
+/// memory and has no bound of its own, and the sandbox that answers runs agent-controlled code, so its answers are
+/// bounded here.
 /// </summary>
-internal sealed class ResponseByteCap(ResponseCap cap, HttpMessageHandler inner) : DelegatingHandler(inner)
+internal sealed class ResponseByteCap(long maxBytes, HttpMessageHandler inner) : DelegatingHandler(inner)
 {
+    private static readonly AsyncLocal<ResponseCapHit?> Current = new();
+
+    /// <summary>
+    /// Starts watching the calling flow: the responses to every request sent from it, until the calling async method
+    /// returns, mark the returned hit when they exceed the cap.
+    /// </summary>
+    public static ResponseCapHit Watch()
+    {
+        var hit = new ResponseCapHit();
+        Current.Value = hit;
+        return hit;
+    }
+
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
+        var hit = Current.Value;
         var response = await base.SendAsync(request, cancellationToken).ConfigureAwait(false);
-        response.Content = new CappedContent(response.Content, cap);
+        response.Content = new CappedContent(response.Content, maxBytes, hit);
         return response;
     }
 
-    /// <summary>The original content, read through a <see cref="CountingStream"/>, with its headers.</summary>
+    /// <summary>
+    /// The original content, read through a <see cref="CountingStream"/>, with its headers. Every read and copy overload
+    /// is overridden, the cancellable ones passing their token on, so a slow answer stays cancellable by the call's
+    /// timeout however the SDK reads it.
+    /// </summary>
     private sealed class CappedContent : HttpContent
     {
         private readonly HttpContent _inner;
-        private readonly ResponseCap _cap;
+        private readonly long _maxBytes;
+        private readonly ResponseCapHit? _hit;
 
-        public CappedContent(HttpContent inner, ResponseCap cap)
+        public CappedContent(HttpContent inner, long maxBytes, ResponseCapHit? hit)
         {
             _inner = inner;
-            _cap = cap;
+            _maxBytes = maxBytes;
+            _hit = hit;
             foreach (var header in inner.Headers)
             {
                 Headers.TryAddWithoutValidation(header.Key, header.Value);
             }
         }
 
-        protected override async Task<Stream> CreateContentReadStreamAsync() =>
-            new CountingStream(await _inner.ReadAsStreamAsync().ConfigureAwait(false), _cap);
+        protected override Task<Stream> CreateContentReadStreamAsync() => CreateContentReadStreamAsync(CancellationToken.None);
 
-        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+        protected override async Task<Stream> CreateContentReadStreamAsync(CancellationToken cancellationToken) =>
+            Counted(await _inner.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
+
+        protected override Stream CreateContentReadStream(CancellationToken cancellationToken) =>
+            Counted(_inner.ReadAsStream(cancellationToken));
+
+        protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context) =>
+            SerializeToStreamAsync(stream, context, CancellationToken.None);
+
+        protected override async Task SerializeToStreamAsync(Stream stream, TransportContext? context, CancellationToken cancellationToken)
         {
-            var counted = new CountingStream(await _inner.ReadAsStreamAsync().ConfigureAwait(false), _cap);
+            var counted = Counted(await _inner.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false));
             await using (counted.ConfigureAwait(false))
             {
-                await counted.CopyToAsync(stream).ConfigureAwait(false);
+                await counted.CopyToAsync(stream, cancellationToken).ConfigureAwait(false);
             }
         }
+
+        protected override void SerializeToStream(Stream stream, TransportContext? context, CancellationToken cancellationToken)
+        {
+            using var counted = Counted(_inner.ReadAsStream(cancellationToken));
+            counted.CopyTo(stream);
+        }
+
+        private CountingStream Counted(Stream inner) => new(inner, _maxBytes, _hit);
 
         protected override bool TryComputeLength(out long length)
         {
@@ -85,7 +116,7 @@ internal sealed class ResponseByteCap(ResponseCap cap, HttpMessageHandler inner)
     }
 
     /// <summary>A read-only stream that faults with <see cref="ResponseTooLargeException"/> past the cap.</summary>
-    private sealed class CountingStream(Stream inner, ResponseCap cap) : Stream
+    private sealed class CountingStream(Stream inner, long maxBytes, ResponseCapHit? hit) : Stream
     {
         private long _read;
 
@@ -142,10 +173,10 @@ internal sealed class ResponseByteCap(ResponseCap cap, HttpMessageHandler inner)
         private int Count(int read)
         {
             _read += read;
-            if (_read > cap.MaxBytes)
+            if (_read > maxBytes)
             {
-                cap.MarkExceeded();
-                throw new ResponseTooLargeException(cap.MaxBytes);
+                hit?.Mark();
+                throw new ResponseTooLargeException(maxBytes);
             }
 
             return read;
@@ -153,6 +184,6 @@ internal sealed class ResponseByteCap(ResponseCap cap, HttpMessageHandler inner)
     }
 }
 
-/// <summary>A run's endpoint sent a response longer than its <see cref="ResponseCap"/>.</summary>
+/// <summary>A run's endpoint sent a response longer than the cap of its <see cref="ResponseByteCap"/>.</summary>
 internal sealed class ResponseTooLargeException(long maxBytes)
     : IOException($"The response is longer than {maxBytes} bytes.");

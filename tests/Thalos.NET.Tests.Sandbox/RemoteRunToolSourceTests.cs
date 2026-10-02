@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using AwesomeAssertions.Execution;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -282,7 +283,7 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
     }
 
     /// <summary>
-    /// Red 1: in NewClient, pass long.MaxValue to the ResponseCap in place of MaxResultBytes; both oversized answers are
+    /// Red 1: in ConnectAsync, pass long.MaxValue to ResponseByteCap in place of MaxResultBytes; both oversized answers are
     /// then read whole and returned. Red 2: drop the DropAsync in CallAsync's cap catch; the next call then reuses the
     /// client and the sandbox sees no new handshake.
     /// </summary>
@@ -306,6 +307,108 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
         next.Should().Be("error: this turn has no run workspace", "an answer under the cap, through a new client");
         a.Connects.Should().Be(connectsAfterOversized + 1, "the client that read the oversized answer was dropped");
         LogText.Should().Contain("with more than 65536 bytes");
+    }
+
+    /// <summary>
+    /// The real sandbox host answers a stateless Streamable HTTP POST as server-sent events, not JSON. An oversized answer
+    /// framed that way must end the call promptly with the cap error, not after the call timeout. Red: in
+    /// ConnectAsync, build the HTTP client over the SocketsHttpHandler alone, without ResponseByteCap; both answers are
+    /// then read whole and returned.
+    /// </summary>
+    [Fact]
+    public async Task An_event_stream_answer_longer_than_the_cap_fails_promptly_with_the_cap_error()
+    {
+        var a = await SandboxAsync("a");
+        var oversized = JsonSerializer.Serialize(new string('x', 256 * 1024));
+        a.RespondToToolCall = _ => (id, response) => WriteEventAsync(response, $"{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":{oversized}}}]}}}}");
+        await using var sp = Services(new RemoteRunToolOptions { MaxResultBytes = 64 * 1024, CallTimeout = TimeSpan.FromMinutes(2) });
+        var timer = System.Diagnostics.Stopwatch.StartNew();
+
+        var local = await CallAsAsync(sp, a.RunId, "workspace", "list_files");
+        var host = await CallAsAsync(sp, a.RunId, "roslyn", "args");
+
+        using var _ = new AssertionScope();
+        local.Should().Be("error: the run's sandbox answered 'list_files' with more than 65536 bytes; the call did not complete.");
+        host.Should().Be("error: the run's sandbox answered 'args' with more than 65536 bytes; the call did not complete.");
+        timer.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(30), "the cap ends the call, not the two-minute call timeout");
+    }
+
+    /// <summary>
+    /// An answer under the cap that drips and then stalls mid-body is still cut off by the call timeout. Red: in
+    /// CappedContent, drop the CancellationToken overloads of SerializeToStreamAsync and CreateContentReadStreamAsync, so
+    /// the copy runs without the call's token; the call then waits for the stalled body until the test's bound.
+    /// </summary>
+    [Fact]
+    public async Task A_stalled_answer_under_the_cap_is_cut_off_by_the_call_timeout()
+    {
+        var a = await SandboxAsync("a");
+        a.RespondToToolCall = _ => async (id, response) =>
+        {
+            response.ContentType = "application/json";
+            await response.WriteAsync($"{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":\"partial");
+            await response.Body.FlushAsync();
+            try
+            {
+                await Task.Delay(TimeSpan.FromMinutes(2), response.HttpContext.RequestAborted);
+            }
+            catch (OperationCanceledException)
+            {
+                // the client went away
+            }
+        };
+        await using var sp = Services(new RemoteRunToolOptions { CallTimeout = TimeSpan.FromSeconds(2) });
+
+        var call = CallAsAsync(sp, a.RunId, "workspace", "list_files");
+        var finished = await Task.WhenAny(call, Task.Delay(TimeSpan.FromSeconds(60)));
+
+        finished.Should().BeSameAs(call, "the call timeout interrupts the stalled copy");
+        (await call).Should().Be("error: the run's sandbox did not answer 'list_files' within 00:00:02; the call was cancelled.");
+    }
+
+    /// <summary>
+    /// One run's calls share a client. When one call's answer exceeds the cap, its client is dropped, which cuts off
+    /// another call in flight on it; that other call did not receive an oversized answer and must not say so. Red: make
+    /// ResponseByteCap.Watch return one shared ResponseCapHit; the cut-off call is then reported as too large.
+    /// </summary>
+    [Fact]
+    public async Task A_call_cut_off_by_another_calls_oversized_answer_is_not_reported_as_too_large()
+    {
+        var a = await SandboxAsync("a");
+        var oversized = JsonSerializer.Serialize(new string('x', 256 * 1024));
+        a.RespondToToolCall = tool => tool switch
+        {
+            "list_files" => async (_, response) =>
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMinutes(2), response.HttpContext.RequestAborted);
+                }
+                catch (OperationCanceledException)
+                {
+                    // the client went away
+                }
+            }
+            ,
+            "read_file" => (id, response) => WriteEventAsync(response, $"{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{{\"content\":[{{\"type\":\"text\",\"text\":{oversized}}}]}}}}"),
+            _ => null,
+        };
+        await using var sp = Services(new RemoteRunToolOptions { MaxResultBytes = 64 * 1024, CallTimeout = TimeSpan.FromMinutes(2) });
+
+        var waiting = CallAsAsync(sp, a.RunId, "workspace", "list_files");
+        using (var seen = new CancellationTokenSource(TimeSpan.FromSeconds(30)))
+        {
+            while (!a.ToolCalls.Contains("list_files", StringComparer.Ordinal))
+            {
+                await Task.Delay(50, seen.Token);
+            }
+        }
+
+        var oversizedCall = await CallAsAsync(sp, a.RunId, "workspace", "read_file", ("path", "a.cs"));
+        var cutOff = await waiting.WaitAsync(TimeSpan.FromSeconds(30));
+
+        using var _ = new AssertionScope();
+        oversizedCall.Should().Be("error: the run's sandbox answered 'read_file' with more than 65536 bytes; the call did not complete.");
+        cutOff.Should().StartWith("error:").And.NotContain("with more than", "only the call whose own answer exceeded the cap says so");
     }
 
     /// <summary>Red: drop the MaxResultBytes check in the constructor; the source is then built with a cap of zero.</summary>
@@ -790,6 +893,13 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
         _remotes.Add(remote);
         await sandbox.ImportAsync(remote, Path.Combine(_temp, name + "-mirror"));
         return sandbox;
+    }
+
+    /// <summary>Answers as the real sandbox host does, one server-sent event carrying the JSON-RPC message.</summary>
+    private static async Task WriteEventAsync(HttpResponse response, string message)
+    {
+        response.ContentType = "text/event-stream";
+        await response.WriteAsync($"event: message\ndata: {message}\n\n");
     }
 
     private sealed class EmptySchemas : IToolSource

@@ -337,13 +337,17 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
     {
         using var callTimeout = new CancellationTokenSource(_options.CallTimeout, _clock);
         using var call = CancellationTokenSource.CreateLinkedTokenSource(ct, callTimeout.Token);
+
+        // Only this call's own responses mark it: another call that fails because this one dropped the shared client is
+        // not reported as too large.
+        var tooLarge = ResponseByteCap.Watch();
         try
         {
             return tool.HostTool is { } hostTool
                 ? await CallUntilSessionEndsAsync(new McpClientTool(client, hostTool.ProtocolTool, hostTool.JsonSerializerOptions).InvokeAsync(arguments, call.Token).AsTask(), client, call).ConfigureAwait(false)
                 : TextResult(tool.Name, await CallUntilSessionEndsAsync(client.CallToolAsync(tool.Name, new Dictionary<string, object?>(arguments, StringComparer.Ordinal), cancellationToken: call.Token).AsTask(), client, call).ConfigureAwait(false));
         }
-        catch (Exception) when (entry.Cap.Exceeded && !ct.IsCancellationRequested)
+        catch (Exception) when (tooLarge.Hit && !ct.IsCancellationRequested)
         {
             // However the SDK surfaced the faulted read, the answer was longer than the cap: the client that read part of
             // it is not reused.
@@ -494,7 +498,6 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
         CachedClient? entry = null;
         entry = new CachedClient(
             endpoint,
-            new ResponseCap(_options.MaxResultBytes),
             new Lazy<Task<McpClient>>(() => ConnectAsync(runId, entry!), LazyThreadSafetyMode.ExecutionAndPublication));
         return entry;
     }
@@ -502,13 +505,13 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
     /// <summary>
     /// Connects to <paramref name="entry"/>'s endpoint, bounded by the connect timeout and the source's disposal, never
     /// by one caller's token. The transport uses an HTTP client of the entry's own, over a <see cref="ResponseByteCap"/>
-    /// on the entry's cap, so every response it reads is bounded; the HTTP client has no timeout of its own, because the
-    /// connect and call timeouts bound it, and it is disposed with the entry's client.
+    /// at <see cref="RemoteRunToolOptions.MaxResultBytes"/>, so every response it reads is bounded; the HTTP client has
+    /// no timeout of its own, because the connect and call timeouts bound it, and it is disposed with the entry's client.
     /// </summary>
     private async Task<McpClient> ConnectAsync(Guid runId, CachedClient entry)
     {
         var endpoint = entry.Endpoint;
-        var http = new HttpClient(new ResponseByteCap(entry.Cap, new SocketsHttpHandler()), disposeHandler: true) { Timeout = Timeout.InfiniteTimeSpan };
+        var http = new HttpClient(new ResponseByteCap(_options.MaxResultBytes, new SocketsHttpHandler()), disposeHandler: true) { Timeout = Timeout.InfiniteTimeSpan };
         entry.Http = http;
         using var timeout = new CancellationTokenSource(_options.ConnectTimeout, _clock);
         using var connect = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token, _disposing.Token);
@@ -681,8 +684,8 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
     /// <summary>A client, and the cache entry holding it, when <paramref name="State"/> is <see cref="ClientState.Connected"/>.</summary>
     private readonly record struct Connection(ClientState State, McpClient? Client, CachedClient? Entry);
 
-    /// <summary>A run's client, the endpoint it was made for, and the cap on what its responses may hold.</summary>
-    private sealed record CachedClient(RunToolEndpoint Endpoint, ResponseCap Cap, Lazy<Task<McpClient>> Client)
+    /// <summary>A run's client and the endpoint it was made for.</summary>
+    private sealed record CachedClient(RunToolEndpoint Endpoint, Lazy<Task<McpClient>> Client)
     {
         /// <summary>The client's HTTP client, set when its connection starts; disposed with the client, or when the connection fails.</summary>
         public HttpClient? Http { get; set; }

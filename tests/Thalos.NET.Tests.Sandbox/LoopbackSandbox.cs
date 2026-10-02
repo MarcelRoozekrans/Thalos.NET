@@ -75,6 +75,17 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
         set => _hooks.AnswerToolCall = value;
     }
 
+    /// <summary>
+    /// When set, a <c>tools/call</c> of a tool it returns a writer for is answered, ahead of the bearer check and the MCP
+    /// endpoint, by that writer, given the request's raw id and the response: for answers framed or paced in a way
+    /// <see cref="AnswerToolCall"/> cannot express, such as server-sent events or a slow drip.
+    /// </summary>
+    public Func<string, Func<string, HttpResponse, Task>?>? RespondToToolCall
+    {
+        get => _hooks.RespondToToolCall;
+        set => _hooks.RespondToToolCall = value;
+    }
+
     /// <summary>Called, ahead of the bearer check, when an MCP handshake arrives: while a client is connecting.</summary>
     public Action? OnHandshake
     {
@@ -161,10 +172,8 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
             {
                 hooks.OnHandshake?.Invoke();
             }
-            if (tool is not null && id is not null && hooks.AnswerToolCall?.Invoke(tool) is { } result)
+            if (tool is not null && id is not null && await AnsweredByHookAsync(hooks, tool, id, context.Response))
             {
-                context.Response.ContentType = "application/json";
-                await context.Response.WriteAsync($"{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{result}}}");
                 return;
             }
 
@@ -173,6 +182,25 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
         SandboxHost.Map(app);
         await app.StartAsync();
         return new LoopbackSandbox(app, runId, token, new Uri(app.Urls.Single().TrimEnd('/') + "/"), requests, hooks);
+    }
+
+    /// <summary>Answers a <c>tools/call</c> by <see cref="RespondToToolCall"/> or <see cref="AnswerToolCall"/>, if either has an answer for the tool.</summary>
+    private static async Task<bool> AnsweredByHookAsync(Hooks hooks, string tool, string id, HttpResponse response)
+    {
+        if (hooks.RespondToToolCall?.Invoke(tool) is { } respond)
+        {
+            await respond(id, response);
+            return true;
+        }
+
+        if (hooks.AnswerToolCall?.Invoke(tool) is { } result)
+        {
+            response.ContentType = "application/json";
+            await response.WriteAsync($"{{\"jsonrpc\":\"2.0\",\"id\":{id},\"result\":{result}}}");
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>Imports <paramref name="remote"/>'s main and waits until Roslyn is ready.</summary>
@@ -271,6 +299,8 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
     private sealed class Hooks
     {
         public Func<string, string?>? AnswerToolCall { get; set; }
+
+        public Func<string, Func<string, HttpResponse, Task>?>? RespondToToolCall { get; set; }
 
         public TimeSpan BuildDelay { get; set; }
 
