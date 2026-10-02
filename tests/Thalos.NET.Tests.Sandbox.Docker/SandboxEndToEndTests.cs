@@ -13,6 +13,10 @@ namespace Thalos.Tests.Sandbox.Docker;
 /// </summary>
 public sealed class SandboxEndToEndTests(SandboxEndToEndFixture fixture, ITestOutputHelper output) : IClassFixture<SandboxEndToEndFixture>, IDisposable
 {
+    // Bounds the calls a test makes itself, outside the fixture's own bounded helpers. xUnit makes one instance per test,
+    // so this is a per-test deadline.
+    private readonly CancellationTokenSource bound = new(TimeSpan.FromMinutes(10));
+
     /// <summary>The spike's vector 1: a target an agent writes, which MSBuild runs before the compiler.</summary>
     private const string MarkerProps = """
         <Project>
@@ -55,7 +59,7 @@ public sealed class SandboxEndToEndTests(SandboxEndToEndFixture fixture, ITestOu
         Skip.IfNot(DockerAvailable.Value);
         await using var run = await fixture.StartRunAsync("restore");
 
-        var readiness = await fixture.Provider.ReadinessAsync(run.RunId, CancellationToken.None);
+        var readiness = await fixture.Provider.ReadinessAsync(run.RunId, Ct);
         var diagnostics = await run.CallAsync("roslyn", "get_diagnostics");
 
         using var _ = new AssertionScope();
@@ -84,11 +88,14 @@ public sealed class SandboxEndToEndTests(SandboxEndToEndFixture fixture, ITestOu
     }
 
     /// <summary>
-    /// S1. The test process holds <c>GITHUB_TOKEN</c> while the sandbox is created; a test the agent writes checks the
+    /// S1. The test process holds <c>GITHUB_TOKEN</c> while a fresh runtime and provider are constructed and the sandbox
+    /// is created, so a leak taken at either moment reaches the container; a test the agent writes checks the
     /// container's own environment, the host process's <c>/proc/1/environ</c>, and its own. The test's child environment
     /// is curated and would drop the variable anyway, so the container's environment is the check that can fail.
     /// Red: in DockerSandboxRuntime.ContainerParameters, add this process's GITHUB_TOKEN to Env, as an inherited
     /// environment would; the container's environment then holds it, the written test fails and sandbox__test exits 1.
+    /// Red 2: snapshot the process environment in DockerSandboxRuntime's constructor and pass GITHUB_TOKEN from that
+    /// snapshot into Env; the same failure.
     /// </summary>
     [SkippableFact]
     public async Task The_container_never_sees_a_host_secret()
@@ -100,7 +107,8 @@ public sealed class SandboxEndToEndTests(SandboxEndToEndFixture fixture, ITestOu
         EndToEndRun run;
         try
         {
-            run = await fixture.StartRunAsync("s1");
+            // A runtime and provider constructed while the secret is set, so a leak taken at construction is caught too.
+            run = await fixture.StartRunAsync("s1", fixture.NewTrustedSide(Path.Combine(fixture.TempRoot, "data-s1")));
         }
         finally
         {
@@ -161,8 +169,8 @@ public sealed class SandboxEndToEndTests(SandboxEndToEndFixture fixture, ITestOu
             }
             """));
         var test = await run.CallAsync("sandbox", "test", ("filter", "FullyQualifiedName~WorkflowWriter"));
-        var parked = await fixture.Provider.ParkAsync(run.RunId, CancellationToken.None);
-        var checkout = await fixture.Provider.CheckoutForPublishAsync(run.RunId, CancellationToken.None);
+        var parked = await fixture.Provider.ParkAsync(run.RunId, Ct);
+        var checkout = await fixture.Provider.CheckoutForPublishAsync(run.RunId, Ct);
 
         using var _ = new AssertionScope();
         refused.Should().StartWith("error", "the workspace tools refuse a protected path; the publish side is the control");
@@ -187,14 +195,14 @@ public sealed class SandboxEndToEndTests(SandboxEndToEndFixture fixture, ITestOu
 
         var written = await run.CallAsync("workspace", "write_file", ("path", "Lib/B.cs"), ("content", content));
         var watch = System.Diagnostics.Stopwatch.StartNew();
-        var parked = await fixture.Provider.ParkAsync(run.RunId, CancellationToken.None);
+        var parked = await fixture.Provider.ParkAsync(run.RunId, Ct);
         fixture.Timings.Enqueue($"park: {watch.Elapsed.TotalSeconds:F1} s");
-        var handle = await fixture.Runtime.GetAsync(run.SandboxId, CancellationToken.None);
+        var handle = await fixture.Runtime.GetAsync(run.SandboxId, Ct);
         var volumes = await fixture.Docker.Docker.Volumes.ListAsync(new VolumesListParameters
         {
             Filters = DockerSandboxFixture.Filter("name", DockerSandboxRuntime.VolumeName(run.SandboxId)),
-        });
-        var checkout = await fixture.Provider.CheckoutForPublishAsync(run.RunId, CancellationToken.None);
+        }, Ct);
+        var checkout = await fixture.Provider.CheckoutForPublishAsync(run.RunId, Ct);
 
         using var _ = new AssertionScope();
         written.Should().NotStartWith("error");
@@ -211,6 +219,8 @@ public sealed class SandboxEndToEndTests(SandboxEndToEndFixture fixture, ITestOu
         }
     }
 
+    private CancellationToken Ct => bound.Token;
+
     public void Dispose()
     {
         foreach (var timing in fixture.Timings)
@@ -222,5 +232,7 @@ public sealed class SandboxEndToEndTests(SandboxEndToEndFixture fixture, ITestOu
         {
             output.WriteLine(line);
         }
+
+        bound.Dispose();
     }
 }

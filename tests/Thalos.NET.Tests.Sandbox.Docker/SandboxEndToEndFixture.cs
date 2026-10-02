@@ -32,16 +32,17 @@ public sealed class SandboxEndToEndFixture : IAsyncLifetime
         [".git/", "AGENT.md", ".gitattributes", ".gitmodules", ".github/", ".gitlab-ci.yml", "azure-pipelines.yml", ".azure-pipelines/", ".circleci/", "Jenkinsfile"];
 
     private readonly ConcurrentQueue<string> log = new();
+    private readonly List<TrustedSide> stacks = [];
     private IReadOnlyList<AITool>? roslynSchemas;
-    private ServiceProvider? services;
+    private string? tempRoot;
 
     /// <summary>Labels, networks and clean-up shared with the runtime tests.</summary>
     public DockerSandboxFixture Docker { get; } = new();
 
-    /// <summary>The test's temp root: data root, seed repository and anything else the host side writes.</summary>
-    public string TempRoot { get; } = Directory.CreateTempSubdirectory("thalos-sbx-e2e-").FullName;
+    /// <summary>The test's temp root: data roots, seed repository and anything else the host side writes. Created on first use.</summary>
+    public string TempRoot => tempRoot ??= Directory.CreateTempSubdirectory("thalos-sbx-e2e-").FullName;
 
-    /// <summary>Trusted-side state: mirrors, records, stored patches, publish worktrees.</summary>
+    /// <summary>The default stack's trusted-side state: mirrors, records, stored patches, publish worktrees.</summary>
     public string DataRoot => Path.Combine(TempRoot, "data");
 
     /// <summary>The seed repository, bare, as its remote URL.</summary>
@@ -53,14 +54,14 @@ public sealed class SandboxEndToEndFixture : IAsyncLifetime
     /// <summary>How long building the image took.</summary>
     public TimeSpan ImageBuildTime { get; private set; }
 
-    public DockerSandboxRuntime Runtime { get; private set; } = null!;
+    /// <summary>The trusted side built when the fixture starts; most tests use it.</summary>
+    public TrustedSide Trusted { get; private set; } = null!;
 
-    public SandboxRunWorkspaceProvider Provider { get; private set; } = null!;
+    public DockerSandboxRuntime Runtime => Trusted.Runtime;
 
-    /// <summary>The <c>roslyn</c> source: <see cref="RemoteRunToolSource.ForLocalSchemas"/> over schemas listed from a sandbox.</summary>
-    public RemoteRunToolSource Roslyn { get; private set; } = null!;
+    public SandboxRunWorkspaceProvider Provider => Trusted.Provider;
 
-    /// <summary>Everything the stack logged, in order.</summary>
+    /// <summary>Everything the stacks logged, in order.</summary>
     public IReadOnlyList<string> Log => [.. log];
 
     /// <summary>Measured timings, in the order taken, for the report.</summary>
@@ -80,78 +81,112 @@ public sealed class SandboxEndToEndFixture : IAsyncLifetime
         Timings.Enqueue($"image build: {ImageBuildTime.TotalSeconds:F0} s");
 
         await SeedRepositoryAsync();
-        Runtime = Docker.NewRuntime(Docker.Options());
-        services = BuildServices();
-        Provider = services.GetRequiredService<SandboxRunWorkspaceProvider>();
-        Roslyn = RemoteRunToolSource.ForLocalSchemas(
-            "roslyn",
-            new SandboxListedSchemas(this),
-            Provider,
-            new RemoteRunToolOptions(),
-            services.GetRequiredService<ILoggerFactory>(),
-            TimeProvider.System);
+        Trusted = NewTrustedSide(DataRoot);
     }
 
     public async Task DisposeAsync()
     {
         if (!DockerAvailable.Value)
         {
+            // Nothing was made; a temp root exists only if something asked for it.
+            DeleteTree(tempRoot);
             return;
         }
 
-        try
+        foreach (var stack in stacks)
         {
-            if (Roslyn is not null)
+            try
             {
-                await Roslyn.DisposeAsync();
+                await stack.DisposeAsync();
             }
-
-            if (services is not null)
+            catch (Exception ex)
             {
-                await services.DisposeAsync();
+                await Console.Error.WriteLineAsync($"Sandbox end-to-end clean-up failed: {ex.GetType().Name}: {ex.Message}");
             }
-        }
-        catch (Exception ex)
-        {
-            await Console.Error.WriteLineAsync($"Sandbox end-to-end clean-up failed: {ex.GetType().Name}: {ex.Message}");
         }
 
         // Containers, volumes, the network, the infrastructure and the image, by the fixture's labels.
         await Docker.DisposeAsync();
-        DeleteTree(TempRoot);
+        DeleteTree(tempRoot);
     }
 
-    /// <summary>Creates a run from the seed's main, waits until its sandbox is ready, and times both.</summary>
-    public async Task<EndToEndRun> StartRunAsync(string name)
+    /// <summary>
+    /// A new runtime, provider and tool sources, constructed now, on the fixture's network, keeping their state under
+    /// <paramref name="dataRoot"/>. Disposed with the fixture.
+    /// </summary>
+    public TrustedSide NewTrustedSide(string dataRoot)
     {
+        var runtime = Docker.NewRuntime(Docker.Options());
+        var collection = new ServiceCollection();
+        collection.AddLogging(b => b.SetMinimumLevel(LogLevel.Debug).AddProvider(new QueueLoggers(log)));
+        collection.AddSingleton<ISandboxRuntime>(runtime);
+        collection.AddThalos(t => t.UseSandboxRunWorkspaces(o =>
+        {
+            o.DataRoot = dataRoot;
+            o.Image = Image;
+            foreach (var entry in ShippedProtectedPaths)
+            {
+                o.ProtectedPaths.Add(entry);
+            }
+        }));
+        var services = collection.BuildServiceProvider();
+        var provider = services.GetRequiredService<SandboxRunWorkspaceProvider>();
+        var roslyn = RemoteRunToolSource.ForLocalSchemas(
+            "roslyn",
+            new SandboxListedSchemas(this),
+            provider,
+            new RemoteRunToolOptions(),
+            services.GetRequiredService<ILoggerFactory>(),
+            TimeProvider.System);
+        var stack = new TrustedSide(services, runtime, provider, roslyn);
+        stacks.Add(stack);
+        return stack;
+    }
+
+    /// <summary>
+    /// Creates a run from the seed's main on <paramref name="stack"/>, the default stack unless given, waits until its
+    /// sandbox is ready, and times both. A run created but never ready is removed before the test fails.
+    /// </summary>
+    public async Task<EndToEndRun> StartRunAsync(string name, TrustedSide? stack = null)
+    {
+        stack ??= Trusted;
         var runId = Guid.NewGuid();
         var watch = Stopwatch.StartNew();
         using var bound = new CancellationTokenSource(TimeSpan.FromMinutes(5));
-        var created = await Provider.CreateAsync(new RunWorkspaceRequest(runId, "seed", Remote, "main", $"run/{name}", "Sandbox.sln"), bound.Token);
+        var created = await stack.Provider.CreateAsync(new RunWorkspaceRequest(runId, "seed", Remote, "main", $"run/{name}", "Sandbox.sln"), bound.Token);
         created.IsSuccess.Should().BeTrue(created.IsFailure ? $"{created.Error}\n{string.Join('\n', Log)}" : "");
         var createdIn = watch.Elapsed;
 
-        var ready = await Provider.WaitAllReadyAsync(runId, TimeSpan.FromMinutes(10), CancellationToken.None);
-        ready.IsSuccess.Should().BeTrue(ready.IsFailure ? $"{ready.Error}\n{string.Join('\n', Log)}" : "");
+        var run = new EndToEndRun(this, stack, runId);
+        var ready = await stack.Provider.WaitAllReadyAsync(runId, TimeSpan.FromMinutes(10), CancellationToken.None);
+        if (ready.IsFailure)
+        {
+            var reason = $"{ready.Error}\n{string.Join('\n', Log)}";
+            await run.DisposeAsync();
+            ready.IsSuccess.Should().BeTrue(reason);
+        }
+
         Timings.Enqueue($"{name}: create {createdIn.TotalSeconds:F1} s, create to ready {watch.Elapsed.TotalSeconds:F1} s");
-        return new EndToEndRun(this, runId);
+        return run;
     }
+
+    /// <summary>Adds a line to the log the tests print.</summary>
+    internal void Note(string line) => log.Enqueue($"{DateTime.UtcNow:HH:mm:ss.fff} {line}");
 
     /// <summary>The schemas of the <c>roslyn</c> route, listed once from the first sandbox that asks.</summary>
     /// <remarks>
     /// No host Roslyn server exists in this test, so the schemas come from a sandbox's own <c>/mcp/roslyn</c> listing;
     /// acceptable in a test, where the sandbox and the API run the same RoslynCodeLens version. Production takes them
-    /// from a host-wide server.
+    /// from a host-wide server. The tests of one class run one at a time, so the list is never fetched twice at once.
     /// </remarks>
-    /// <remarks>The tests of one class run one at a time, so the list is never fetched twice at once.</remarks>
-    internal async Task<IReadOnlyList<AITool>> RoslynSchemasAsync(Guid runId, CancellationToken ct)
+    internal async Task<IReadOnlyList<AITool>> RoslynSchemasAsync(SandboxRunWorkspaceProvider provider, Guid runId, CancellationToken ct)
     {
         if (roslynSchemas is not null)
         {
             return roslynSchemas;
         }
 
-        var endpoint = await Provider.ResolveAsync(runId, "roslyn", ct);
+        var endpoint = await provider.ResolveAsync(runId, "roslyn", ct);
         endpoint.Should().NotBeNull("the run's sandbox is ready");
         var transport = new HttpClientTransport(new HttpClientTransportOptions
         {
@@ -167,38 +202,21 @@ public sealed class SandboxEndToEndFixture : IAsyncLifetime
         return roslynSchemas;
     }
 
-    /// <summary>The <c>workspace</c> or <c>sandbox</c> source the provider registered.</summary>
-    internal IToolSource Source(string name) => string.Equals(name, "roslyn", StringComparison.Ordinal)
-        ? Roslyn
-        : services!.GetServices<IToolSource>().Single(s => string.Equals(s.Name, name, StringComparison.Ordinal));
-
     /// <summary>Every <paramref name="fileName"/> under <paramref name="root"/>, recursively; inaccessible directories are skipped.</summary>
     public static IReadOnlyList<string> FindFiles(string root, string fileName) =>
         Directory.Exists(root)
             ? [.. Directory.EnumerateFiles(root, fileName, new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, AttributesToSkip = FileAttributes.None })]
             : [];
 
-    private ServiceProvider BuildServices()
-    {
-        var collection = new ServiceCollection();
-        collection.AddLogging(b => b.SetMinimumLevel(LogLevel.Debug).AddProvider(new QueueLoggers(log)));
-        collection.AddSingleton<ISandboxRuntime>(Runtime);
-        collection.AddThalos(t => t.UseSandboxRunWorkspaces(o =>
-        {
-            o.DataRoot = DataRoot;
-            o.Image = Image;
-            foreach (var entry in ShippedProtectedPaths)
-            {
-                o.ProtectedPaths.Add(entry);
-            }
-        }));
-        return collection.BuildServiceProvider();
-    }
-
     /// <summary>
     /// Builds <c>Image/Dockerfile</c> with the repository root as its context, sending only what the build stage copies,
     /// without any <c>bin</c> or <c>obj</c>. Bounded at 25 minutes; a failed build throws with the build's last output.
     /// </summary>
+    /// <remarks>
+    /// The engine API's classic builder cannot label every step: the Dockerfile's <c>LABEL</c> comes last in each stage,
+    /// so a build that fails before it can leave unlabelled intermediate step images, which the label clean-up does not
+    /// find. A successful build leaves none.
+    /// </remarks>
     private async Task BuildImageAsync()
     {
         var root = RepositoryRoot();
@@ -389,11 +407,11 @@ public sealed class SandboxEndToEndFixture : IAsyncLifetime
         process.ExitCode.Should().Be(0, $"git {string.Join(' ', args)}: {await stderr}");
     }
 
-    private static void DeleteTree(string path)
+    private static void DeleteTree(string? path)
     {
         try
         {
-            if (!Directory.Exists(path))
+            if (path is null || !Directory.Exists(path))
             {
                 return;
             }
@@ -443,8 +461,27 @@ public sealed class SandboxEndToEndFixture : IAsyncLifetime
     }
 }
 
+/// <summary>One trusted side: a runtime, the provider over it, and the run tool sources. Owns its service container.</summary>
+public sealed class TrustedSide(ServiceProvider services, DockerSandboxRuntime runtime, SandboxRunWorkspaceProvider provider, RemoteRunToolSource roslyn) : IAsyncDisposable
+{
+    public DockerSandboxRuntime Runtime { get; } = runtime;
+
+    public SandboxRunWorkspaceProvider Provider { get; } = provider;
+
+    /// <summary>The <c>workspace</c>, <c>sandbox</c> or <c>roslyn</c> source.</summary>
+    internal IToolSource Source(string name) => string.Equals(name, "roslyn", StringComparison.Ordinal)
+        ? roslyn
+        : services.GetServices<IToolSource>().Single(s => string.Equals(s.Name, name, StringComparison.Ordinal));
+
+    public async ValueTask DisposeAsync()
+    {
+        await roslyn.DisposeAsync();
+        await services.DisposeAsync();
+    }
+}
+
 /// <summary>One run with a ready sandbox. Calls its tools as the run's caller; disposing removes the run, bounded.</summary>
-public sealed class EndToEndRun(SandboxEndToEndFixture fixture, Guid runId) : IAsyncDisposable
+public sealed class EndToEndRun(SandboxEndToEndFixture fixture, TrustedSide stack, Guid runId) : IAsyncDisposable
 {
     public Guid RunId { get; } = runId;
 
@@ -456,10 +493,10 @@ public sealed class EndToEndRun(SandboxEndToEndFixture fixture, Guid runId) : IA
         using var bound = new CancellationTokenSource(TimeSpan.FromMinutes(20));
         if (string.Equals(source, "roslyn", StringComparison.Ordinal))
         {
-            await fixture.RoslynSchemasAsync(RunId, bound.Token);
+            await fixture.RoslynSchemasAsync(stack.Provider, RunId, bound.Token);
         }
 
-        var tools = await fixture.Source(source).GetToolsAsync(bound.Token);
+        var tools = await stack.Source(source).GetToolsAsync(bound.Token);
         tools.IsSuccess.Should().BeTrue(tools.IsFailure ? tools.Error.Message : "");
         var function = tools.Value.OfType<AIFunction>().SingleOrDefault(f => string.Equals(f.Name, tool, StringComparison.Ordinal));
         function.Should().NotBeNull($"'{source}' offers '{tool}' (it offers {string.Join(", ", tools.Value.Select(t => t.Name))})");
@@ -475,16 +512,22 @@ public sealed class EndToEndRun(SandboxEndToEndFixture fixture, Guid runId) : IA
         return (await function!.InvokeAsync(args, bound.Token))?.ToString() ?? "";
     }
 
+    /// <summary>Removes the run, bounded at 3 minutes; a failure, returned or thrown, is logged and left to the fixture's label clean-up.</summary>
     public async ValueTask DisposeAsync()
     {
         using var bound = new CancellationTokenSource(TimeSpan.FromMinutes(3));
         try
         {
-            await fixture.Provider.RemoveAsync(RunId, bound.Token);
+            var removed = await stack.Provider.RemoveAsync(RunId, bound.Token);
+            if (removed.IsFailure)
+            {
+                fixture.Note($"Removing run {RunId} failed: {removed.Error}");
+                await Console.Error.WriteLineAsync($"Removing run {RunId} failed: {removed.Error}");
+            }
         }
         catch (Exception ex)
         {
-            // Best effort: the fixture removes every container and volume by label afterwards anyway.
+            fixture.Note($"Removing run {RunId} threw {ex.GetType().Name}: {ex.Message}");
             await Console.Error.WriteLineAsync($"Removing run {RunId} failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
