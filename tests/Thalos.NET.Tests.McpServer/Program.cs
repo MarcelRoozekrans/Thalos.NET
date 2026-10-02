@@ -60,6 +60,9 @@ if (TryMilliseconds("reload-delay-ms", out var reloadDelay))
     EchoTools.ReloadDelay = reloadDelay;
 }
 
+// `--reload-when PATH`: reload_count also waits, after counting, until PATH exists, so a test decides when a reload ends.
+EchoTools.ReloadWhen = builder.Configuration["reload-when"];
+
 EchoTools.CallLog = builder.Configuration["call-log"];
 
 // The stdio transport completes when stdin reaches EOF; the SDK's hosted service then stops the host, so the process exits promptly.

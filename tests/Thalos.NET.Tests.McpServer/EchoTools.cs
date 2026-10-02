@@ -23,6 +23,9 @@ public static class EchoTools
     /// <summary>How long <c>reload_count</c> takes after counting; set from <c>--reload-delay-ms</c>.</summary>
     public static TimeSpan ReloadDelay { get; set; }
 
+    /// <summary>A file <c>reload_count</c> waits for, after counting, before it answers; set from <c>--reload-when</c>.</summary>
+    public static string? ReloadWhen { get; set; }
+
     /// <summary>A file <c>ready_after</c>, <c>reload_count</c> and <c>slow</c> append their name to when called; set from <c>--call-log</c>.</summary>
     public static string? CallLog { get; set; }
 
@@ -66,6 +69,11 @@ public static class EchoTools
             var count = Interlocked.Increment(ref s_reloads).ToString(CultureInfo.InvariantCulture);
             await LogCallAsync("reload_count");
             await Task.Delay(ReloadDelay);
+            while (ReloadWhen is { } gate && !File.Exists(gate))
+            {
+                await Task.Delay(20);
+            }
+
             return count;
         }
         finally
