@@ -2,6 +2,7 @@ using System.Globalization;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using ModelContextProtocol.Server;
 using Thalos.Tests.McpServer;
 
 var builder = Host.CreateApplicationBuilder(args);
@@ -36,6 +37,13 @@ if (TryMilliseconds("ready-after", out var readyAfter))
 
 // `--ready-when PATH`: the ready_after tool also fails until PATH exists.
 EchoTools.ReadyWhen = builder.Configuration["ready-when"];
+
+// `--ready-tool NAME`: also offer a tool named NAME that behaves exactly as ready_after, for a host whose ready tool
+// is fixed, such as the sandbox host's `list_solutions`. Without the flag the tool list is unchanged.
+if (builder.Configuration["ready-tool"] is { Length: > 0 } readyTool)
+{
+    builder.Services.AddSingleton(McpServerTool.Create(EchoTools.ReadyAfterTool, new McpServerToolCreateOptions { Name = readyTool }));
+}
 
 // `--reload-delay-ms N`: reload_count takes N ms after counting. `--call-log PATH`: ready_after and reload_count append their name to PATH.
 if (TryMilliseconds("reload-delay-ms", out var reloadDelay))

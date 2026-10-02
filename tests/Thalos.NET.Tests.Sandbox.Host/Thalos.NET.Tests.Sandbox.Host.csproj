@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Thalos.NET.Sandbox.Host\Thalos.NET.Sandbox.Host.csproj" />
+    <!-- The Roslyn stand-in: the stdio test server, built first and run with `dotnet <dll>`. -->
+    <ProjectReference Include="..\Thalos.NET.Tests.McpServer\Thalos.NET.Tests.McpServer.csproj" ReferenceOutputAssembly="false" />
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\Thalos.NET.Tests.Git\Workspaces\LocalGitRemote.cs" Link="LocalGitRemote.cs" />
+  </ItemGroup>
+</Project>

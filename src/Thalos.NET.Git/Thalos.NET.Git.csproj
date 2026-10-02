@@ -12,5 +12,7 @@
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Thalos.NET.Tests.Git" />
+    <!-- The sandbox host runs its import and export git commands through GitCli's isolation rather than a second copy of it. -->
+    <InternalsVisibleTo Include="Thalos.NET.Sandbox.Host" />
   </ItemGroup>
 </Project>

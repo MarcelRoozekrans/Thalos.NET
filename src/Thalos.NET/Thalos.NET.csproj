@@ -28,5 +28,7 @@
     <InternalsVisibleTo Include="Thalos.NET.Tests.Skills" />
     <!-- RunScopedMcpToolSourceTests begin a TurnScope to route a direct tool call as a given caller. -->
     <InternalsVisibleTo Include="Thalos.NET.Tests.Mcp" />
+    <!-- The sandbox host begins a TurnScope around each MCP call, as the turn runner does, so tools see its SandboxCaller. -->
+    <InternalsVisibleTo Include="Thalos.NET.Sandbox.Host" />
   </ItemGroup>
 </Project>
