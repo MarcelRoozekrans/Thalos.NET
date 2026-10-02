@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging.Abstractions;
+using Thalos.Git;
 using Thalos.Git.Workspaces;
 using Thalos.Workspaces;
 
@@ -80,6 +81,51 @@ public sealed class GitPatchApplierTests : IDisposable
         result.IsFailure.Should().BeTrue();
         result.Error.Message.Should().Be("the change touches protected path '.github/workflows/ci.yml'; publish refused");
         AssertUntouched(ws);
+    }
+
+    /// <summary>
+    /// End to end, the 0.14.1 publish fix: the real applier stages a patch that adds a file the patch's own
+    /// <c>.gitignore</c> change ignores and makes <c>run.sh</c> executable, in a worktree with <c>core.fileMode=false</c>;
+    /// <see cref="GitCliRunWorkspaceGit"/> then commits it with <see cref="GitCommitRequest.CommitStagedIndex"/>.
+    /// What is committed is exactly the index the applier checked.
+    /// </summary>
+    /// <remarks>
+    /// Setup guard, the applier staged both changes: Red: drop the <c>add -f out.gen</c> or the
+    /// <c>update-index --chmod=+x</c> from the patch.
+    /// The commit's tree is the applier's index tree: Red: route CommitStagedIndex through the old reset-plus-add path,
+    /// <c>if (!request.CommitStagedIndex)</c> made always true in <c>GitCliRunWorkspaceGit.StageAsync</c>.
+    /// </remarks>
+    [Fact]
+    public async Task A_staged_index_commit_publishes_exactly_what_the_applier_checked()
+    {
+        using var remote = SeededRemote(("run.sh", "#!/bin/sh\n"));
+        var ws = await WorkspaceAsync(remote);
+        Git(ws.Root, "config", "core.fileMode", "false");
+        var patch = BuildPatch(remote, ws, dir =>
+        {
+            File.AppendAllText(Path.Combine(dir, ".gitignore"), "*.gen\n");
+            File.WriteAllText(Path.Combine(dir, "out.gen"), "generated\n");
+            Git(dir, "add", "-f", "out.gen");
+            Git(dir, "update-index", "--chmod=+x", "run.sh");
+            if (!OperatingSystem.IsWindows())
+            {
+                // BuildPatch's add -A re-reads the mode from disk where core.fileMode is true.
+                File.SetUnixFileMode(Path.Combine(dir, "run.sh"), File.GetUnixFileMode(Path.Combine(dir, "run.sh")) | UnixFileMode.UserExecute);
+            }
+        });
+
+        var applied = await Applier().ApplyAsync(ws, patch, Defaults, new PatchApplyLimits(), CancellationToken.None);
+        applied.IsSuccess.Should().BeTrue(applied.IsFailure ? applied.Error.Message + " " + applied.Error.Detail : "");
+        var appliedTree = Git(ws.Root, "write-tree");
+        Git(ws.Root, "ls-tree", appliedTree, "out.gen", "run.sh").Should().Contain("out.gen").And.Contain("100755");
+
+        var committed = await new GitCliRunWorkspaceGit(new GitWorkspaceOptions { DataRoot = _dataRoot }, NullLogger<GitCliRunWorkspaceGit>.Instance).CommitAsync(
+            ws,
+            new GitCommitRequest { Message = "run", Author = new GitAuthor("t", "t@example.invalid"), CommitStagedIndex = true },
+            CancellationToken.None);
+
+        committed.IsSuccess.Should().BeTrue(committed.IsFailure ? committed.Error.Message + " " + committed.Error.Detail : "");
+        Git(ws.Root, "rev-parse", committed.Value.Sha + "^{tree}").Should().Be(appliedTree);
     }
 
     /// <summary>

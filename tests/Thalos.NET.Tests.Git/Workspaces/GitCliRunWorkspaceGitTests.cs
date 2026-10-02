@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using AwesomeAssertions.Execution;
 using Microsoft.Extensions.Logging.Abstractions;
 using Thalos.Git;
 using Thalos.Git.Workspaces;
@@ -456,6 +457,126 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
         var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, Paths = ["STANDING.md", "ignored.log"] }, CancellationToken.None);
 
         committed.IsFailure.Should().BeTrue("git add refusing an ignored present path is a real failure, not an absent path");
+    }
+
+    /// <summary>
+    /// The 0.14.1 sandbox publish defect, reproduced with real git. A patch, built the way a sandbox builds one, adds a
+    /// <c>.gitignore</c> matching <c>*.gen</c>, adds <c>out.gen</c> (staged with <c>-f</c> in the agent's tree), makes
+    /// <c>run.sh</c> executable, modifies <c>a.txt</c> and deletes <c>gone.txt</c>. It is applied with
+    /// <c>git apply --index</c>, as <see cref="GitPatchApplier"/> does, in a worktree with <c>core.fileMode=false</c>,
+    /// the Windows default, set locally. The host then writes its own <c>STANDING.md</c>, stages it, and commits with
+    /// <see cref="GitCommitRequest.CommitStagedIndex"/>, excluding it. A reset plus <c>add -A</c> would drop
+    /// <c>out.gen</c>, which the new <c>.gitignore</c> matches, and lose <c>run.sh</c>'s mode, which
+    /// <c>core.fileMode=false</c> keeps git from reading off disk.
+    /// </summary>
+    /// <remarks>
+    /// Setup guard, the applied index holds the mode change: Red: drop the <c>update-index --chmod=+x</c> from the patch.
+    /// Setup guard, the applied index holds out.gen: Red: drop the <c>add -f out.gen</c> from the patch.
+    /// The excluded host file is not in the commit: Red: drop the ExcludePaths unstaging from the CommitStagedIndex path
+    /// of <c>StageAsync</c>.
+    /// The commit's tree is the applier's index tree: Red: route CommitStagedIndex through the old reset-plus-add path,
+    /// <c>if (!request.CommitStagedIndex)</c> made <c>if (true)</c> in <c>StageAsync</c>; the tree lacks out.gen and
+    /// run.sh's mode.
+    /// </remarks>
+    [Fact]
+    public async Task A_staged_index_commit_publishes_exactly_the_index_git_apply_staged()
+    {
+        var ws = await WorktreeAsync(("run.sh", "#!/bin/sh\necho run\n"), ("a.txt", "a\n"), ("gone.txt", "gone\n"));
+        var patch = BuildPatch(ws, dir =>
+        {
+            File.WriteAllText(Path.Combine(dir, ".gitignore"), "*.gen\n");
+            File.WriteAllText(Path.Combine(dir, "out.gen"), "generated\n");
+            File.AppendAllText(Path.Combine(dir, "a.txt"), "more\n");
+            File.Delete(Path.Combine(dir, "gone.txt"));
+            LocalGitRemote.RunGit(dir, "add", "-A");
+            LocalGitRemote.RunGit(dir, "add", "-f", "out.gen");
+            LocalGitRemote.RunGit(dir, "update-index", "--chmod=+x", "run.sh");
+        });
+        LocalGitRemote.RunGit(ws.Root, "config", "core.fileMode", "false");
+        LocalGitRemote.RunGit(ws.Root, "-c", "core.autocrlf=false", "apply", "--index", "--binary", patch);
+        var appliedTree = LocalGitRemote.RunGit(ws.Root, "write-tree");
+        LocalGitRemote.RunGit(ws.Root, "ls-files", "-s", "run.sh").Should().StartWith("100755", "the patch's mode change must be in the applied index");
+        LocalGitRemote.RunGit(ws.Root, "ls-files", "out.gen").Should().Be("out.gen", "the patch's ignored file must be in the applied index");
+        File.WriteAllText(Path.Combine(ws.Root, "STANDING.md"), "host-written\n");
+        LocalGitRemote.RunGit(ws.Root, "add", "STANDING.md");
+
+        var committed = await _git.CommitAsync(
+            ws,
+            new GitCommitRequest { Message = "run", Author = TestAuthor, CommitStagedIndex = true, ExcludePaths = ["STANDING.md"] },
+            CancellationToken.None);
+
+        committed.IsSuccess.Should().BeTrue(committed.IsFailure ? committed.Error.Message + " " + committed.Error.Detail : "");
+        using var _ = new AssertionScope();
+        FilesIn(ws, committed.Value.Sha).Should().NotContain("STANDING.md");
+        var committedTree = LocalGitRemote.RunGit(ws.Root, "rev-parse", committed.Value.Sha + "^{tree}");
+        // The diagnostic diff forces core.fileMode=true: under this worktree's false, git diff hides a mode-only change
+        // even between two trees, and the lost mode would be missing from the message.
+        committedTree.Should().Be(
+            appliedTree,
+            "the commit must be the index the applier checked; they differ by: " + LocalGitRemote.RunGit(ws.Root, "-c", "core.fileMode=true", "diff", "--raw", "--no-renames", appliedTree, committedTree));
+    }
+
+    /// <summary>
+    /// <see cref="GitCommitRequest.CommitStagedIndex"/> stages nothing from disk: with an empty index and a changed
+    /// worktree, nothing is committed, the existing "nothing to commit" outcome of <c>Created</c> false and
+    /// <c>HEAD</c>'s unchanged sha, and the changes stay unstaged.
+    /// </summary>
+    /// <remarks>
+    /// Every assertion: Red: route CommitStagedIndex through the old reset-plus-add path; <c>add -A</c> stages and
+    /// commits tracked.txt and other.cs.
+    /// </remarks>
+    [Fact]
+    public async Task A_staged_index_commit_with_nothing_staged_commits_nothing_and_stages_nothing()
+    {
+        var ws = await WorktreeAsync(("tracked.txt", "before"));
+        File.WriteAllText(Path.Combine(ws.Root, "tracked.txt"), "after");
+        File.WriteAllText(Path.Combine(ws.Root, "other.cs"), "class O {}");
+        var headBefore = Git(ws.Root, "rev-parse HEAD");
+
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, CommitStagedIndex = true }, CancellationToken.None);
+
+        committed.IsSuccess.Should().BeTrue();
+        using var _ = new AssertionScope();
+        committed.Value.Created.Should().BeFalse("nothing was staged, and CommitStagedIndex stages nothing from disk");
+        committed.Value.Sha.Should().Be(headBefore);
+        Git(ws.Root, "rev-parse HEAD").Should().Be(headBefore);
+        Git(ws.Root, "diff --name-only").Should().Be("tracked.txt", "the tracked change stays unstaged");
+        Git(ws.Root, "ls-files --others --exclude-standard").Should().Be("other.cs", "the untracked file stays untracked");
+    }
+
+    /// <summary>
+    /// <see cref="GitCommitRequest.CommitStagedIndex"/> with a <see cref="GitCommitRequest.Paths"/> list, an empty one
+    /// included, is refused as a validation failure before anything is staged: the index and <c>HEAD</c> are untouched.
+    /// </summary>
+    /// <remarks>
+    /// The failure, <c>HEAD</c> and the index, in one scope: Red: drop the CommitStagedIndex-with-Paths check from
+    /// <c>ValidateRequest</c>; the call then commits the staged index and succeeds, moving <c>HEAD</c>, and the index no
+    /// longer differs from it.
+    /// The error code: Red: return <c>AgentError.GitOperationFailed</c> for the refusal instead of a validation error.
+    /// The message: Red: reword the refusal so it names neither the option nor Paths.
+    /// </remarks>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_staged_index_commit_with_a_path_list_is_refused_and_changes_nothing(bool empty)
+    {
+        var ws = await WorktreeAsync();
+        File.WriteAllText(Path.Combine(ws.Root, "code.cs"), "class C {}");
+        Git(ws.Root, "add code.cs");
+        var headBefore = Git(ws.Root, "rev-parse HEAD");
+        IReadOnlyList<string> paths = empty ? [] : ["code.cs"];
+
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, CommitStagedIndex = true, Paths = paths }, CancellationToken.None);
+
+        using (new AssertionScope())
+        {
+            committed.IsFailure.Should().BeTrue();
+            Git(ws.Root, "rev-parse HEAD").Should().Be(headBefore);
+            Git(ws.Root, "diff --cached --name-only").Should().Be("code.cs", "the staged index is left exactly as it was");
+        }
+
+        committed.Error.Code.Should().Be(AgentErrorCode.Validation);
+        committed.Error.Message.Should().Contain("CommitStagedIndex").And.Contain("Paths");
     }
 
     /// <summary>
@@ -1060,6 +1181,22 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
             new RunWorkspaceRequest(runId, "sandbox", _remote.Url, "main", $"manufacture/{runId}", null),
             CancellationToken.None);
         return created.Value;
+    }
+
+    /// <summary>
+    /// Builds a patch the way a sandbox does: a scratch clone of <see cref="_remote"/> at the workspace's base commit,
+    /// <paramref name="stage"/>, which edits and stages, then <c>git diff --cached --binary --full-index &lt;base&gt;</c>.
+    /// </summary>
+    private string BuildPatch(RunWorkspace ws, Action<string> stage)
+    {
+        var scratch = Path.Combine(_temp, "scratch-" + Guid.NewGuid().ToString("N"));
+        LocalGitRemote.RunGit(_temp, "-c", "core.autocrlf=false", "clone", "-q", _remote!.Url, scratch);
+        LocalGitRemote.RunGit(scratch, "config", "core.autocrlf", "false");
+        LocalGitRemote.RunGit(scratch, "checkout", "-q", "--detach", ws.BaseCommit!);
+        stage(scratch);
+        var patch = Path.Combine(_temp, "patch-" + Guid.NewGuid().ToString("N") + ".patch");
+        LocalGitRemote.RunGit(scratch, "diff", "--cached", "--binary", "--full-index", "--output=" + patch, ws.BaseCommit!);
+        return patch;
     }
 
     private string MirrorOf() => Path.Combine(_options.DataRoot, "mirrors", "sandbox");

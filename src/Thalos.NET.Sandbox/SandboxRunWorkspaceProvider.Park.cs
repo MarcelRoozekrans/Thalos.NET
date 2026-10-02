@@ -124,6 +124,15 @@ public sealed partial class SandboxRunWorkspaceProvider
     /// touches a protected path (S5); the refused worktree is removed, so nothing is left to publish.
     /// </para>
     /// <para>
+    /// <b>Commit the staged index.</b> The applier applies the patch with <c>git apply --index</c>, so the returned
+    /// worktree holds the run's change staged, and that index is what the S5 check passed. Host code must commit it with
+    /// <see cref="Thalos.Git.GitCommitRequest.CommitStagedIndex"/>, which commits the index as it stands, less
+    /// <see cref="Thalos.Git.GitCommitRequest.ExcludePaths"/>. A commit that stages from disk again would drop an added
+    /// file the worktree's <c>.gitignore</c> matches and, under <c>core.fileMode=false</c>, a mode change. A file the host
+    /// writes into the worktree afterwards, such as standing instructions, is not staged by that commit; a later
+    /// path-scoped commit can take it.
+    /// </para>
+    /// <para>
     /// <b>Idempotent.</b> A worktree this call finished before is returned as it is, so a file written in it since, such
     /// as the standing instructions a resume writes, survives. A worktree an earlier call made but never finished
     /// applying to is removed and rebuilt, never returned. A run whose sandbox was lost before its export fails.

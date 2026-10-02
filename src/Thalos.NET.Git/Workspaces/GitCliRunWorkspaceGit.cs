@@ -48,6 +48,17 @@ namespace Thalos.Git.Workspaces;
 /// git option.
 /// </para>
 /// <para>
+/// <b>Committing the index as it stands.</b> With <see cref="GitCommitRequest.CommitStagedIndex"/>, the reset to
+/// <c>HEAD</c> and the <c>add</c> are both skipped: only <see cref="GitCommitRequest.ExcludePaths"/> is unstaged, and
+/// the rest of the index is committed exactly as a trusted step left it. A sandboxed run's publish worktree needs
+/// this: <see cref="GitPatchApplier"/> stages the run's patch with <c>git apply --index</c>, and that index is what
+/// its protected-path check passed. Rebuilding it from disk with <c>add -A</c> would silently drop an added file the
+/// worktree's <c>.gitignore</c> matches and, under <c>core.fileMode=false</c>, a mode change, so what was published
+/// would differ from what was checked. <see cref="GitCommitRequest.Paths"/> must then be <see langword="null"/>; a
+/// list is refused with a validation failure before anything is staged, since a path scope has no meaning when
+/// nothing is staged from disk.
+/// </para>
+/// <para>
 /// <b>Commit identity.</b> <see cref="GitCommitRequest.Author"/> — required (ruling R27) — is passed as
 /// <c>-c user.name=</c>/<c>-c user.email=</c> — never read from git config, which <see cref="GitCli"/> isolates
 /// from the host entirely, and never left to a repository config that isolation does not reach (a mirror's own
@@ -112,9 +123,9 @@ public sealed partial class GitCliRunWorkspaceGit(
                 $"Refusing to commit: the git config this worktree uses is outside the allowed surface. Detail: {violation}"));
         }
 
-        if (ValidatePaths(workspace.Root, request) is { } invalidPath)
+        if (ValidateRequest(workspace.Root, request) is { } invalid)
         {
-            return Result<GitCommitResult, AgentError>.Failure(invalidPath);
+            return Result<GitCommitResult, AgentError>.Failure(invalid);
         }
 
         var staged = await StageAsync(workspace.Root, request, ct).ConfigureAwait(false);
@@ -158,47 +169,20 @@ public sealed partial class GitCliRunWorkspaceGit(
     }
 
     /// <summary>
-    /// Resets the index to <c>HEAD</c> (clearing any leftover from a previous, failed commit attempt in this same
-    /// worktree), stages <see cref="GitCommitRequest.Paths"/> (or everything), and then unstages
-    /// <see cref="GitCommitRequest.ExcludePaths"/> — in that order, so an excluded path staged by a broad
-    /// <c>add -A</c> is always unstaged again afterwards. A <see cref="GitCommitRequest.Paths"/> entry that is absent
-    /// and untracked is dropped first (<see cref="KnownPathsAsync"/>); if none is left — including an explicit empty
-    /// list — nothing is added at all.
+    /// Builds the index this commit takes, then unstages <see cref="GitCommitRequest.ExcludePaths"/> from it — last,
+    /// so an excluded path is never committed, whichever way the index was built. Without
+    /// <see cref="GitCommitRequest.CommitStagedIndex"/> the index is rebuilt from disk first
+    /// (<see cref="ResetAndAddAsync"/>); with it, the index is taken as it stands and nothing on disk is staged.
     /// Returns the failure, or <see langword="null"/> on success.
     /// </summary>
     private async Task<AgentError?> StageAsync(string root, GitCommitRequest request, CancellationToken ct)
     {
-        var resetToHead = await _git.RunAsync(root, ["--literal-pathspecs", "reset", "-q"], null, null, ct).ConfigureAwait(false);
-        if (!resetToHead.Succeeded)
+        if (!request.CommitStagedIndex)
         {
-            return GitFailure("git reset failed.", resetToHead, secret: null);
-        }
-
-        var addArgs = new List<string> { "--literal-pathspecs", "add", "-A" };
-        var stageAnything = true;
-        if (request.Paths is { } paths)
-        {
-            var known = await KnownPathsAsync(root, paths, ct).ConfigureAwait(false);
-            if (known.IsFailure)
+            var added = await ResetAndAddAsync(root, request.Paths, ct).ConfigureAwait(false);
+            if (added is not null)
             {
-                return known.Error;
-            }
-
-            // Nothing left to stage — an explicit empty list, or every listed path absent and untracked. Only a null
-            // Paths means everything, so this must skip git add entirely: an empty pathspec list would otherwise turn
-            // "add -A -- <paths>" into a bare "add -A" that stages the whole worktree, the exact opposite of a
-            // path-scoped commit.
-            stageAnything = known.Value.Count > 0;
-            addArgs.Add("--");
-            addArgs.AddRange(known.Value);
-        }
-
-        if (stageAnything)
-        {
-            var added = await _git.RunAsync(root, addArgs, null, null, ct).ConfigureAwait(false);
-            if (!added.Succeeded)
-            {
-                return GitFailure("git add failed.", added, secret: null);
+                return added;
             }
         }
 
@@ -211,6 +195,46 @@ public sealed partial class GitCliRunWorkspaceGit(
         resetArgs.AddRange(excludePaths);
         var reset = await _git.RunAsync(root, resetArgs, null, null, ct).ConfigureAwait(false);
         return reset.Succeeded ? null : GitFailure("git reset failed.", reset, secret: null);
+    }
+
+    /// <summary>
+    /// Resets the index to <c>HEAD</c> (clearing any leftover from a previous, failed commit attempt in this same
+    /// worktree), then stages <paramref name="paths"/>, or everything when it is <see langword="null"/>. An entry that
+    /// is absent and untracked is dropped first (<see cref="KnownPathsAsync"/>); if none is left — including an
+    /// explicit empty list — nothing is added at all. Returns the failure, or <see langword="null"/> on success.
+    /// </summary>
+    private async Task<AgentError?> ResetAndAddAsync(string root, IReadOnlyList<string>? paths, CancellationToken ct)
+    {
+        var resetToHead = await _git.RunAsync(root, ["--literal-pathspecs", "reset", "-q"], null, null, ct).ConfigureAwait(false);
+        if (!resetToHead.Succeeded)
+        {
+            return GitFailure("git reset failed.", resetToHead, secret: null);
+        }
+
+        var addArgs = new List<string> { "--literal-pathspecs", "add", "-A" };
+        if (paths is not null)
+        {
+            var known = await KnownPathsAsync(root, paths, ct).ConfigureAwait(false);
+            if (known.IsFailure)
+            {
+                return known.Error;
+            }
+
+            // Nothing left to stage — an explicit empty list, or every listed path absent and untracked. Only a null
+            // Paths means everything, so this must skip git add entirely: an empty pathspec list would otherwise turn
+            // "add -A -- <paths>" into a bare "add -A" that stages the whole worktree, the exact opposite of a
+            // path-scoped commit.
+            if (known.Value.Count == 0)
+            {
+                return null;
+            }
+
+            addArgs.Add("--");
+            addArgs.AddRange(known.Value);
+        }
+
+        var added = await _git.RunAsync(root, addArgs, null, null, ct).ConfigureAwait(false);
+        return added.Succeeded ? null : GitFailure("git add failed.", added, secret: null);
     }
 
     /// <summary>
@@ -253,11 +277,19 @@ public sealed partial class GitCliRunWorkspaceGit(
     }
 
     /// <summary>
-    /// Refuses any <see cref="GitCommitRequest.Paths"/> or <see cref="GitCommitRequest.ExcludePaths"/> entry that
-    /// <see cref="WorkspacePath.Resolve"/> refuses, before any git command runs.
+    /// Refuses, before anything is staged, a <see cref="GitCommitRequest.Paths"/> list together with
+    /// <see cref="GitCommitRequest.CommitStagedIndex"/>, and any <see cref="GitCommitRequest.Paths"/> or
+    /// <see cref="GitCommitRequest.ExcludePaths"/> entry that <see cref="WorkspacePath.Resolve"/> refuses.
     /// </summary>
-    private static AgentError? ValidatePaths(string root, GitCommitRequest request) =>
-        InvalidPath(root, request.Paths) ?? InvalidPath(root, request.ExcludePaths);
+    private static AgentError? ValidateRequest(string root, GitCommitRequest request)
+    {
+        if (request.CommitStagedIndex && request.Paths is not null)
+        {
+            return AgentError.Validation("Refusing to commit: CommitStagedIndex commits the index as it stands, so Paths must be null.");
+        }
+
+        return InvalidPath(root, request.Paths) ?? InvalidPath(root, request.ExcludePaths);
+    }
 
     private static AgentError? InvalidPath(string root, IReadOnlyList<string>? paths)
     {

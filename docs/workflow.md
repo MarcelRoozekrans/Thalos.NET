@@ -734,6 +734,30 @@ applies the stored patch with `GitPatchApplier`, which treats it as adversarial:
 no symlinks or submodules. The host then commits and publishes from that worktree. Both calls are idempotent, and a
 failed park keeps the sandbox and is retried by the next sweep.
 
+**Commit the publish worktree's staged index.** `GitPatchApplier` applies the patch with `git apply --index`, so the
+publish worktree holds the run's change staged, and that index is exactly what the S5 check passed. Commit it with
+`GitCommitRequest.CommitStagedIndex = true` (since 0.14.1): `IRunWorkspaceGit.CommitAsync` then commits the index as
+it stands, with no reset and no `git add`, and still unstages `ExcludePaths` first, so an excluded path is never
+committed. `Paths` must be null with it; a list is refused as a validation error. Without the option, `CommitAsync`
+resets the index and restages the worktree from disk with `git add -A`, which is what a local worktree needs but
+silently loses part of a sandboxed run's change: a file the patch adds that the worktree's `.gitignore` matches, and,
+under `core.fileMode=false` (the Windows default), a mode change. What was published would then differ from what was
+checked. A file the host writes into the publish worktree itself, such as standing instructions, is not part of that
+commit; exclude it there and commit it afterwards with `Paths`.
+
+```csharp
+var ws = (await handoff.CheckoutForPublishAsync(runId, ct)).Value;
+await git.CommitAsync(ws, new GitCommitRequest
+{
+    Message = "Run changes",
+    Author = author,
+    CommitStagedIndex = true,          // the index the S5 check passed, as it stands
+    ExcludePaths = ["AGENT.md"],
+}, ct);
+await git.CommitAsync(ws, new GitCommitRequest { Message = "Standing instructions", Author = author, Paths = ["AGENT.md"] }, ct);
+await git.PushAsync(ws, ct);
+```
+
 **A park is final (ruling R39).** Once a run is parked, nothing unparks it or creates its sandbox again before
 publish: its `workspace__*`, `sandbox__*` and remote `runScoped` tools all answer that the run has no sandbox. So in
 sandbox mode, a process may not run an agent node after the run is parked: none after an await gate, and no reject

@@ -19,6 +19,10 @@ public interface IRunWorkspaceGit
     /// on disk nor tracked contributes nothing and is not an error; when every <see cref="GitCommitRequest.Paths"/>
     /// entry is like that, or the list is empty, nothing is staged — never everything. A tracked path deleted from
     /// disk is not absent: its deletion is staged. Any other git failure still fails the call.
+    /// With <see cref="GitCommitRequest.CommitStagedIndex"/>, nothing is staged from disk: the index is committed as it
+    /// stands, less <see cref="GitCommitRequest.ExcludePaths"/>, and <see cref="GitCommitRequest.Paths"/> must be
+    /// <see langword="null"/>, or the call fails with <see cref="AgentErrorCode.Validation"/>. A sandboxed run's
+    /// publish worktree must be committed this way.
     /// </summary>
     /// <param name="workspace">The run's worktree; the commit runs in <see cref="RunWorkspace.Root"/>.</param>
     /// <param name="request">The commit's message, identity and path scope.</param>
