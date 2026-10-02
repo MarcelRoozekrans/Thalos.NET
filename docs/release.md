@@ -118,6 +118,12 @@ joined the eleven of 0.4.x). `Thalos.NET.Workflow` ships `net8.0` + `net10.0`; `
 `expected` package list, the TFM-selection branch, and both package-count checks and their error-message text —
 is updated for both new packages.
 
+0.14.0 ships eighteen packages: `Thalos.NET.Sandbox`, `Thalos.NET.Sandbox.Docker` and `Thalos.NET.Sandbox.Host` join
+the fifteen above, and all three are `net10.0`-only. `ci.yml`'s `pack-validate` job, the `expected` package list,
+the `net10.0`-only branch of the TFM selection, and both package-count checks and their messages, now name the three.
+The sandbox container image is not a package: a host builds it from `Thalos.NET.Sandbox.Host` (see
+`samples/Thalos.Sample.SandboxHost`). Behaviour and invariants: [workflow.md, Run sandboxes](workflow.md#run-sandboxes).
+
 **Breaking changes accumulated across the workflow-engine phase (2.2, Part A):**
 
 - `ThalosAgentRuntime`'s public constructor gained a required `IOutcomeToolFactory outcomeTools` parameter

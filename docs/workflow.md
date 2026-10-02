@@ -676,6 +676,93 @@ Removing a workspace stops the run's `runScoped` servers first. A removal that f
 retried by the next sweep, never thrown. `SweepAsync` returns how many it removed; it throws when `ct` is cancelled
 and when listing the workspaces itself fails, which is why the service above catches and logs.
 
+### Run sandboxes
+
+`Thalos.NET.Sandbox`, `Thalos.NET.Sandbox.Docker` and `Thalos.NET.Sandbox.Host` (0.14.0, all `net10.0`-only) move a
+run's workspace, build and Roslyn into a per-run container, so that code the agent wrote (MSBuild targets, tests,
+analyzers) never executes on the host. `UseSandboxRunWorkspaces` (`Thalos.NET.Sandbox`) replaces the worktree
+provider of `UseGitWorktreeWorkspaces`; `UseDockerSandboxRuntime` (`Thalos.NET.Sandbox.Docker`) supplies the
+`ISandboxRuntime`. `Thalos.NET.Sandbox.Host` is the entry point of the image, see `samples/Thalos.Sample.SandboxHost`.
+
+**Architecture.** The API talks to a loopback-published gateway container (nginx), which routes each request by
+run to that run's own container. The container has no route out except an egress proxy (squid) that allows only
+`api.nuget.org`, `*.nuget.org` and `globalcdn.nuget.org`, plus domains the host adds in
+`DockerSandboxOptions`. Everything trusted lives on the host under `SandboxOptions.DataRoot`: the git mirror,
+the sandbox records, the stored patches, and the publish worktrees (`<DataRoot>/publish`). The sandbox's own
+volume is never read from the host.
+
+```csharp
+thalos
+    .UseDockerSandboxRuntime()
+    .UseSandboxRunWorkspaces(o =>
+    {
+        o.Image = "registry.example/thalos-sandbox@sha256:...";
+        o.DataRoot = "/var/lib/app/sandboxes";             // absolute
+        o.AllowedWriteExtensions = new HashSet<string> { ".cs", ".csproj", ".md" };   // null = any extension
+        o.ProtectedPaths.Add(".git/");                      // required: an empty list is refused at registration
+    });
+```
+
+**Invariants.** Each has a test that guards it.
+
+- **S1.** The container's environment holds only the keys `SandboxSpec.Environment` lists (run id, bearer token,
+  write extensions, protected paths, proxy variables). It never inherits the API's environment.
+- **S2.** The container reaches no host except through the egress proxy.
+- **S3.** MSBuild, restore and the tests run only inside the container, never on the host.
+- **S4.** The API never evaluates MSBuild, runs restore, or checks out a tree a sandboxed process touched. It
+  applies a patch into its own clean worktree.
+- **S5.** A change to a protected path fails publish. The publish-side check, in `GitPatchApplier`, is the control;
+  the sandbox-side refusal is a convenience.
+- **S6.** A grant with no extension list (`AllowedWriteExtensions` null, `"*"` on the wire) is only safe under a
+  sandbox. Refusing it otherwise is the host's job: Thalos does not know what a host's grants are. Daedalus
+  refuses an any-extension grant at boot unless `Thalos:Workflow:Sandbox:Enabled` is true.
+
+**Lifecycle.** `CreateAsync` starts the container and imports the repository into it from a git bundle cut from the
+trusted mirror, then the run is ready and its `workspace__*` and `sandbox__*` tools and its `runScoped` servers are
+served by the container. At the approval gate the host parks the run, `IParkableRunWorkspaceProvider.ParkAsync`: the
+sandbox exports its changes as a patch against the base commit, the patch is stored under `DataRoot`, and the
+container is deleted, so a run waiting on a human holds no container. A sandbox that exited is started again for the
+export, at most twice; one that no longer exists parks the run without a patch. On approval,
+`IRunWorkspaceHandoff.CheckoutForPublishAsync` cuts a clean worktree at the run's base commit from the mirror and
+applies the stored patch with `GitPatchApplier`, which treats it as adversarial: bounded size, protected paths, and
+no symlinks or submodules. The host then commits and publishes from that worktree. Both calls are idempotent, and a
+failed park keeps the sandbox and is retried by the next sweep.
+
+**`passEnvironment` and `runScoped.remote`.** A sandboxed host has no local run-scoped servers. Registration fails
+at boot with an `InvalidOperationException` naming every `runScoped` entry that is not `"remote": true`, because
+the host would start it on the host against a `sandbox://` root. A remote entry keeps its schema and serves callers
+with no run on the host, but a run's calls go to the server in that run's container, found through
+`IRunToolEndpointResolver`. It must not set `args`, `env`, `cwd`, `readyTool`, `reload` or `readyWaitTimeout`;
+`callTimeout` still bounds each call. `passEnvironment` is unaffected and applies only to servers the host itself
+starts; it never reaches a container (S1).
+
+```jsonc
+"roslyn": {
+  "command": "dnx", "args": ["RoslynCodeLens.Mcp", "--", "C:/host/App.sln"],
+  "runScoped": { "remote": true, "callTimeout": "00:02:00" }
+}
+```
+
+**`ProtectedPathSet`.** Repository-relative paths a run may read but never write; the same type backs the
+`workspace__*` tools, the sandbox host and the publish check. An entry ending in `/` protects that directory and
+everything under it (`.github/` covers `.github/workflows/ci.yml`); any other entry protects exactly that file.
+Matching is case-insensitive, `\` is read as `/`, and empty and `.` segments are dropped before comparing. A `..`
+segment in an entry throws `ArgumentException`; in a path being checked, `IsProtected` returns true, failing closed.
+The shipped defaults are `.git/`, the standing-instructions file (`AGENT.md`), `.gitattributes`, `.gitmodules`,
+`.github/`, `.gitlab-ci.yml`, `azure-pipelines.yml`, `.azure-pipelines/`, `.circleci/` and `Jenkinsfile`. Entries
+may not contain `;`, which joins them on the wire.
+
+**Residual risks.**
+
+- Agent code and the sandbox host run as the same user inside the container. Anything that discloses the bearer
+  token opens that run's own sandbox and no other: tokens are per run and S1 keeps every other secret out.
+- A sandboxed process can deliberately mutate the workspace while a reviewer or the agent is working in it, and
+  Thalos cannot tell that from a legitimate edit. The approval gate and the pull request review are the backstop,
+  with S5 limiting what a patch may touch.
+- `RepoConfigGuard` lists the git config before each git command that reads the worktree and refuses a tampered
+  one, but a write between the check and the command it guards is a time-of-check race. The publish side treats the
+  patch as adversarial regardless, and never runs git against the sandbox's tree.
+
 ## Limits worth knowing before you author a process
 
 - **The variable block put in front of a node has three caps, and the value cap is the one that bites.** The

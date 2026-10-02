@@ -27,8 +27,11 @@ A Hermes-style, ZeroAlloc-native agent framework for .NET, built on
 | `Thalos.NET.Git.LibGit2Sharp` | `IGitWriteService` implementation over LibGit2Sharp | Thalos.NET.Git, `LibGit2Sharp` |
 | `Thalos.NET.Workflow` | Durable process-graph engine: sequence, branch, loop-back and approval-gate primitives defined in a YAML file rather than in code — a graph model, loader, validator, pure interpreter and node dispatcher. No persistence backend dependency, so a consumer who does not want to reach for `Thalos.NET.Workflow.Orm` can supply their own `IWorkflowStore`. Hosts nothing itself — wiring it end to end is [docs/workflow.md](docs/workflow.md) | Thalos.NET, Thalos.NET.Skills, `YamlDotNet` |
 | `Thalos.NET.Workflow.Orm` | `IWorkflowStore` implementation over ZeroAlloc.ORM: raw-SQL persistence on PostgreSQL with a transactional outbox dispatch, so a run's transition and the work behind its next node commit or roll back together. No EF Core anywhere in its dependency tree. Ships no outbox consumer — see [docs/workflow.md](docs/workflow.md) | Thalos.NET.Workflow, `ZeroAlloc.ORM`, `ZeroAlloc.Outbox.Orm`, `Npgsql` |
+| `Thalos.NET.Sandbox` | Run sandboxes: a per-run container holds the workspace, build and Roslyn, so agent-written code never runs on the host. `UseSandboxRunWorkspaces`, park and patch hand-off, protected-path publish guard (net10.0 only) — see [docs/workflow.md](docs/workflow.md#run-sandboxes) | Thalos.NET, Thalos.NET.Git, Thalos.NET.Mcp |
+| `Thalos.NET.Sandbox.Docker` | `ISandboxRuntime` over Docker: per-run containers behind a loopback gateway, with an egress proxy that allows only NuGet (net10.0 only) | Thalos.NET.Sandbox, `Docker.DotNet.Enhanced` |
+| `Thalos.NET.Sandbox.Host` | The in-container host: workspace, build and Roslyn tools over MCP behind a per-sandbox bearer token (net10.0 only) | Thalos.NET.Sandbox, `ModelContextProtocol.AspNetCore` |
 
-Targets `net8.0` and `net10.0` (`Thalos.NET.Memory.RagNet` and `Thalos.NET.Workflow.Orm`: `net10.0` only — RagNet because Rag.NET is net10.0-only, Workflow.Orm because ZeroAlloc.ORM / ZeroAlloc.Outbox.Orm / AdoNet.Async.Adapters ship net10.0-only builds).
+Targets `net8.0` and `net10.0` (`Thalos.NET.Memory.RagNet`, `Thalos.NET.Workflow.Orm` and the three `Thalos.NET.Sandbox*` packages: `net10.0` only — RagNet because Rag.NET is net10.0-only, Workflow.Orm because ZeroAlloc.ORM / ZeroAlloc.Outbox.Orm / AdoNet.Async.Adapters ship net10.0-only builds).
 
 ## Core contracts
 
