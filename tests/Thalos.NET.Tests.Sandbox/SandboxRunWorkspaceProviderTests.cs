@@ -492,12 +492,17 @@ public sealed class SandboxRunWorkspaceProviderTests : IAsyncLifetime
     /// <summary>
     /// I2: a record that is not well formed for its run is treated as corrupt: not found, not resolved, not listed, and
     /// not removed, so nothing acts on it. Red 1: drop the SandboxId check. Red 2: drop the blank-token check. Red 3:
-    /// drop the full-sha check on BaseCommit. Each red makes its case's record found and removable again.
+    /// drop the full-sha check on BaseCommit. Reds 4 to 7: drop Repository, Remote, DefaultBranch or Branch from the
+    /// blank-field condition. Each red makes its case's record found and removable again.
     /// </summary>
     [Theory]
     [InlineData("sandbox-id")]
     [InlineData("token")]
     [InlineData("base-commit")]
+    [InlineData("repository")]
+    [InlineData("remote")]
+    [InlineData("default-branch")]
+    [InlineData("branch")]
     public async Task A_tampered_record_fails_closed(string tamper)
     {
         var provider = Provider();
@@ -508,6 +513,10 @@ public sealed class SandboxRunWorkspaceProviderTests : IAsyncLifetime
         {
             "sandbox-id" => record with { SandboxId = Guid.NewGuid().ToString("N") },
             "token" => record with { Token = "" },
+            "repository" => record with { Repository = " " },
+            "remote" => record with { Remote = " " },
+            "default-branch" => record with { DefaultBranch = " " },
+            "branch" => record with { Branch = " " },
             _ => record with { BaseCommit = record.BaseCommit[..12] },
         };
         provider.Store.EnsureDirectory().Should().BeNull();
@@ -618,6 +627,35 @@ public sealed class SandboxRunWorkspaceProviderTests : IAsyncLifetime
         _observer.Events.Should().Equal($"removing {runId}");
     }
 
+
+    /// <summary>
+    /// A record whose processing throws is logged and the pass goes on to the other records and the orphans. Red: remove
+    /// the per-record try in ReconcileAsync; the runtime's exception escapes the reconcile.
+    /// </summary>
+    [Fact]
+    public async Task Reconcile_logs_a_record_that_throws_and_settles_the_rest()
+    {
+        var provider = Provider();
+        var failing = Guid.NewGuid();
+        var removing = Guid.NewGuid();
+        var orphan = Guid.NewGuid();
+        Runtime.Seed(failing, DateTimeOffset.UtcNow);
+        Runtime.Seed(removing, DateTimeOffset.UtcNow);
+        Runtime.Seed(orphan, DateTimeOffset.UtcNow - TimeSpan.FromMinutes(11));
+        Runtime.ThrowOnDelete[failing.ToString("N")] = true;
+        provider.Store.EnsureDirectory().Should().BeNull();
+        (await provider.Store.WriteAsync(Record(failing, SandboxRecordState.Removing, DateTimeOffset.UtcNow), CancellationToken.None)).IsSuccess.Should().BeTrue();
+        (await provider.Store.WriteAsync(Record(removing, SandboxRecordState.Removing, DateTimeOffset.UtcNow), CancellationToken.None)).IsSuccess.Should().BeTrue();
+
+        var deleted = await provider.ReconcileAsync(CancellationToken.None);
+
+        using var _ = new AssertionScope();
+        deleted.Should().Be(2, "the other removing record and the orphan are settled");
+        Runtime.Ids.Should().Equal(failing.ToString("N"));
+        File.Exists(Path.Combine(SandboxesDirectory, $"{failing:D}.json")).Should().BeTrue("the failing record is left for the next pass");
+        File.Exists(Path.Combine(SandboxesDirectory, $"{removing:D}.json")).Should().BeFalse();
+        _log.Should().ContainSingle(l => l.Contains($"Reconciling {failing}", StringComparison.Ordinal) && l.Contains("the runtime failed", StringComparison.Ordinal));
+    }
 
     // ---------- plumbing ----------
 

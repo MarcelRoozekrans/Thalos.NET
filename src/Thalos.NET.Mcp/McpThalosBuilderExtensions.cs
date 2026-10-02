@@ -200,7 +200,6 @@ public static class McpThalosBuilderExtensions
 
     internal static TimeProvider Clock(IServiceProvider sp) => sp.GetService<TimeProvider>() ?? TimeProvider.System;
 
-    /// <summary>The collection's MCP entries, gathered across <see cref="AddMcpServer"/> calls.</summary>
     /// <summary>
     /// The names of the run-scoped MCP entries that are not remote: servers the host itself starts for each run, in the
     /// run's workspace root. A provider whose workspaces are not host directories, such as Thalos.NET.Sandbox's, refuses
@@ -210,6 +209,7 @@ public static class McpThalosBuilderExtensions
     internal static IReadOnlyCollection<string> LocalRunScopedServerNames(IServiceProvider services) =>
         services.GetService<McpServerSet>() is { } set ? [.. set.Definitions.Keys] : [];
 
+    /// <summary>The collection's MCP entries, gathered across <see cref="AddMcpServer"/> calls.</summary>
     private static McpServerSet McpServers(IServiceCollection services)
     {
         if (services.FirstOrDefault(d => d.ServiceType == typeof(McpServerSet))?.ImplementationInstance is McpServerSet existing)

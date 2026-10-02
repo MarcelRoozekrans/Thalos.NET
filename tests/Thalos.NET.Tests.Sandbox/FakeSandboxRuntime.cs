@@ -84,8 +84,16 @@ internal sealed class FakeSandboxRuntime(string root, TimeProvider clock) : ISan
     public ValueTask<IReadOnlyList<SandboxHandle>> ListAsync(CancellationToken ct) =>
         ValueTask.FromResult<IReadOnlyList<SandboxHandle>>(ListNothing ? [] : [.. _sandboxes.Values.Select(e => e.Handle)]);
 
+    /// <summary>Sandbox ids whose delete throws, as a runtime with a bug might.</summary>
+    public ConcurrentDictionary<string, bool> ThrowOnDelete { get; } = new(StringComparer.Ordinal);
+
     public async ValueTask<UnitResult<AgentError>> DeleteAsync(string sandboxId, CancellationToken ct)
     {
+        if (ThrowOnDelete.ContainsKey(sandboxId))
+        {
+            throw new InvalidOperationException($"the runtime failed deleting {sandboxId}");
+        }
+
         Deleted.Enqueue(sandboxId);
         if (_sandboxes.TryRemove(sandboxId, out var entry) && entry.Host is { } host)
         {
