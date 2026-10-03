@@ -86,8 +86,11 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
         set => _hooks.RespondToToolCall = value;
     }
 
-    /// <summary>Called, ahead of the bearer check, when an MCP handshake arrives: while a client is connecting.</summary>
-    public Action? OnHandshake
+    /// <summary>
+    /// Awaited, ahead of the bearer check, when an MCP handshake (<c>server/discover</c> or <c>initialize</c>) arrives,
+    /// given the request's token: while a client is connecting. A delay here makes the handshake's answer slow.
+    /// </summary>
+    public Func<CancellationToken, Task>? OnHandshake
     {
         get => _hooks.OnHandshake;
         set => _hooks.OnHandshake = value;
@@ -168,9 +171,9 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
 
             var (description, id, tool) = await DescribeAsync(context.Request);
             requests.Enqueue($"{context.Request.Path} {description}");
-            if (description is "initialize" or "server/discover")
+            if ((description is "initialize" or "server/discover") && hooks.OnHandshake is { } onHandshake)
             {
-                hooks.OnHandshake?.Invoke();
+                await onHandshake(context.RequestAborted);
             }
             if (tool is not null && id is not null && await AnsweredByHookAsync(hooks, tool, id, context.Response))
             {
@@ -331,7 +334,7 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
             return true;
         }
 
-        public Action? OnHandshake { get; set; }
+        public Func<CancellationToken, Task>? OnHandshake { get; set; }
     }
 
     /// <summary>Answers every process as a success without running it, a build after <see cref="Hooks.BuildDelay"/>.</summary>

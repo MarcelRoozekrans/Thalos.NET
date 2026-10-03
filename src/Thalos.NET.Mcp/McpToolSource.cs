@@ -83,7 +83,9 @@ public sealed partial class McpToolSource : IToolSource, IAsyncDisposable, IDisp
             timeout.CancelAfter(_definition.Timeout);
 
             LogConnecting(_logger, Name, _type);
-            var client = await McpClient.CreateAsync(CreateTransport(), clientOptions: null, _loggerFactory, timeout.Token).ConfigureAwait(false);
+            // A Streamable HTTP server's probe is bounded by the definition's timeout alone; see HttpMcpClientOptions.
+            var options = string.Equals(_type, "http", StringComparison.Ordinal) ? HttpMcpClientOptions.Create() : null;
+            var client = await McpClient.CreateAsync(CreateTransport(), options, _loggerFactory, timeout.Token).ConfigureAwait(false);
             IList<McpClientTool> tools;
             try
             {

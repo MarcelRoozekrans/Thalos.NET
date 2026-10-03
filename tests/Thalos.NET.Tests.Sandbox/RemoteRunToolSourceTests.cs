@@ -166,6 +166,36 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// A sandbox that takes longer than the MCP SDK's 5-second <c>server/discover</c> probe to answer its first handshake,
+    /// as a cold or loaded one does, is waited for within ConnectTimeout and connected with that handshake. It is not
+    /// taken for a server that predates <c>server/discover</c> and sent <c>initialize</c>, a fallback that can fail the
+    /// connection outright. Red 1: in ConnectAsync, pass <c>clientOptions: null</c> to McpClient.CreateAsync; the probe
+    /// then times out, and the sandbox also receives initialize and notifications/initialized. Red 2: in
+    /// HttpMcpClientOptions.Create, pin ProtocolVersion to 2026-07-28 instead of lifting the probe timeout; the timed-out
+    /// probe then fails the connection, and the call is answered that no connection could be made.
+    /// </summary>
+    [Fact]
+    public async Task A_sandbox_slow_to_answer_its_first_handshake_is_waited_for_not_taken_for_an_old_server()
+    {
+        var a = await SandboxAsync("a");
+        var slow = 1;
+        a.OnHandshake = async ct =>
+        {
+            if (Interlocked.Exchange(ref slow, 0) == 1)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(6), ct);
+            }
+        };
+        await using var sp = Services();
+
+        var result = await CallAsAsync(sp, a.RunId, "workspace", "list_files");
+
+        using var _ = new AssertionScope();
+        result.Should().Be("error: this turn has no run workspace", "the sandbox, which imported nothing, answered the call");
+        a.Requests.Should().Equal("/mcp/workspace server/discover", "/mcp/workspace call:list_files");
+    }
+
+    /// <summary>
     /// Red 1: in OnRemovingAsync, remember the run as removed but do not take its client out; the call after the run is
     /// ready again then reuses the client, and the sandbox sees one handshake. Red 2: in McpThalosBuilderExtensions.AddRemote, do not register the source as an
     /// IRunWorkspaceObserver; the test then finds no observer for it.
@@ -472,7 +502,12 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
         await using var sp = Services();
         var source = Source(sp, "workspace");
         Task? removal = null;
-        a.OnHandshake = () => removal ??= source.OnRemovingAsync(Workspace(a), CancellationToken.None).AsTask();
+        a.OnHandshake = _ =>
+        {
+            // Started, not awaited: the removal waits for this very connection to finish.
+            removal ??= source.OnRemovingAsync(Workspace(a), CancellationToken.None).AsTask();
+            return Task.CompletedTask;
+        };
 
         var result = await CallAsAsync(sp, a.RunId, "workspace", "list_files");
         await removal!;
