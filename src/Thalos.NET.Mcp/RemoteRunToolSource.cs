@@ -507,8 +507,8 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
     /// by one caller's token. The transport uses an HTTP client of the entry's own, over a <see cref="ResponseByteCap"/>
     /// at <see cref="RemoteRunToolOptions.MaxResultBytes"/>, so every response it reads is bounded; the HTTP client has
     /// no timeout of its own, because the connect and call timeouts bound it, and it is disposed with the entry's client.
-    /// The handshake's <c>server/discover</c> probe has no timeout of its own either, as <see cref="HttpMcpClientOptions"/>
-    /// explains, so a sandbox that is slow to answer is waited for until the connect timeout, not taken for an old server.
+    /// The MCP handshake has no timeout of the SDK's own either, as <see cref="HttpMcpClientOptions"/> explains: the connect
+    /// timeout alone bounds it, so a sandbox that is slow to answer is waited for, not taken for an old server.
     /// </summary>
     private async Task<McpClient> ConnectAsync(Guid runId, CachedClient entry)
     {
