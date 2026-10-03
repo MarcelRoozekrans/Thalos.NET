@@ -23,7 +23,7 @@ internal static class HttpMcpClientOptions
     /// not yet handed to the waiting request as the timeout fires, the HTTP transport keeps the probe's protocol version.
     /// It then sends <c>initialize</c> with an <c>MCP-Protocol-Version</c> header that does not match its body, and the
     /// server refuses it with 400. The infinite probe also works around that SDK bug; revisit it once the bug is fixed.
-    /// Upstream issue: (link to be added).
+    /// Tracked, with the upstream SDK fix, in Thalos.NET issue #260.
     /// </para>
     /// <para>
     /// The SDK's <c>InitializationTimeout</c>, 60 seconds by default, would otherwise cut a caller's connect timeout that

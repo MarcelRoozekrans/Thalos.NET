@@ -23,6 +23,7 @@ public sealed partial class McpToolSource : IToolSource, IAsyncDisposable, IDisp
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly CancellationTokenSource _disposeCts = new();
     private readonly string _type;
+    private readonly TimeProvider _clock;
     private McpClient? _client;
     private McpClientTool[]? _tools;
     private bool _disposed;
@@ -30,15 +31,26 @@ public sealed partial class McpToolSource : IToolSource, IAsyncDisposable, IDisp
     /// <summary>Creates a source named <paramref name="name"/> for <paramref name="definition"/>.</summary>
     /// <exception cref="ArgumentException"><paramref name="name"/> violates <see cref="ToolSourceName"/> or <paramref name="definition"/> is incomplete/unsupported.</exception>
     public McpToolSource(string name, McpServerDefinition definition, ILoggerFactory loggerFactory)
+        : this(name, definition, loggerFactory, TimeProvider.System)
+    {
+    }
+
+    /// <summary>
+    /// Creates a source whose connect bound, <see cref="McpServerDefinition.Timeout"/>, runs on <paramref name="clock"/>.
+    /// </summary>
+    /// <exception cref="ArgumentException"><paramref name="name"/> violates <see cref="ToolSourceName"/> or <paramref name="definition"/> is incomplete/unsupported.</exception>
+    internal McpToolSource(string name, McpServerDefinition definition, ILoggerFactory loggerFactory, TimeProvider clock)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(name);
         ToolSourceName.ThrowIfInvalid(name, nameof(name));
         ArgumentNullException.ThrowIfNull(definition);
         ArgumentNullException.ThrowIfNull(loggerFactory);
+        ArgumentNullException.ThrowIfNull(clock);
 
         Name = name;
         _definition = definition;
         _loggerFactory = loggerFactory;
+        _clock = clock;
         _logger = loggerFactory.CreateLogger<McpToolSource>();
         _type = Validate(definition);
     }
@@ -79,8 +91,8 @@ public sealed partial class McpToolSource : IToolSource, IAsyncDisposable, IDisp
                 return Result<IReadOnlyList<McpClientTool>, AgentError>.Success(_tools);
             }
 
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposeCts.Token);
-            timeout.CancelAfter(_definition.Timeout);
+            using var timer = new CancellationTokenSource(_definition.Timeout, _clock);
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct, _disposeCts.Token, timer.Token);
 
             LogConnecting(_logger, Name, _type);
             // A Streamable HTTP server's handshake is bounded by the definition's timeout alone; see HttpMcpClientOptions.
