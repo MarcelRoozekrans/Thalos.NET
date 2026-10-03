@@ -1,6 +1,7 @@
 using AwesomeAssertions.Execution;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Time.Testing;
 using Thalos.Mcp;
 
 namespace Thalos.Tests.Sandbox;
@@ -46,24 +47,32 @@ public sealed class HttpMcpToolSourceTests : IAsyncLifetime
 
     /// <summary>
     /// With no handshake timeout of the SDK's own, the definition's Timeout alone bounds a connection whose handshake is
-    /// never answered. This bound is wall-clock: McpToolSource takes no clock. A 2-second Timeout is checked against a
-    /// 4-second ceiling, below the SDK's 5-second probe, so the probe path cannot satisfy it. Red: in
-    /// GetClientToolsAsync, drop timeout.CancelAfter; the connection then never ends and the 20-second guard fails. Red 2:
-    /// cancel after three times the Timeout; the failure then comes after 6 seconds and the ceiling fails.
+    /// never answered: once the source's clock passes it, the source is unavailable. The clock is a FakeTimeProvider
+    /// advanced only after the handshake arrived, so the bound is the source's own and nothing else's; the 60-second wait
+    /// only guards against a hang. Red: in GetClientToolsAsync, link only ct and the disposal token, not timer.Token; the
+    /// connection then never ends and the guard fails. Red 2: change the unavailable message; the failure is then not
+    /// recognised as the connect failure.
     /// </summary>
     [Fact]
     public async Task An_http_handshake_that_is_never_answered_ends_at_the_definitions_timeout()
     {
         _server = await LoopbackSandbox.StartAsync(Path.Combine(_temp, "server"));
-        _server.OnHandshake = ct => Task.Delay(Timeout.InfiniteTimeSpan, ct);
-        await using var source = Source(_server, TimeSpan.FromSeconds(2));
-        var timer = System.Diagnostics.Stopwatch.StartNew();
+        var arrived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        _server.OnHandshake = ct =>
+        {
+            arrived.TrySetResult();
+            return Task.Delay(Timeout.InfiniteTimeSpan, ct);
+        };
+        var clock = new FakeTimeProvider(DateTimeOffset.UtcNow);
+        await using var source = Source(_server, TimeSpan.FromSeconds(2), clock);
 
-        var tools = await source.GetToolsAsync(CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(20));
+        var connecting = source.GetToolsAsync(CancellationToken.None).AsTask();
+        await arrived.Task.WaitAsync(TimeSpan.FromSeconds(60));
+        clock.Advance(TimeSpan.FromSeconds(2));
+        var tools = await connecting.WaitAsync(TimeSpan.FromSeconds(60));
 
-        using var _ = new AssertionScope();
         tools.IsFailure.Should().BeTrue();
-        timer.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(4), "the 2-second Timeout ends the handshake");
+        tools.Error.Message.Should().Be("MCP server 'workspace' is unavailable.");
     }
 
     /// <summary>
@@ -108,7 +117,7 @@ public sealed class HttpMcpToolSourceTests : IAsyncLifetime
 
     public Task InitializeAsync() => Task.CompletedTask;
 
-    private static McpToolSource Source(LoopbackSandbox server, TimeSpan? timeout = null) => new(
+    private static McpToolSource Source(LoopbackSandbox server, TimeSpan? timeout = null, TimeProvider? clock = null) => new(
         "workspace",
         new McpServerDefinition
         {
@@ -117,7 +126,8 @@ public sealed class HttpMcpToolSourceTests : IAsyncLifetime
             Headers = new Dictionary<string, string>(StringComparer.Ordinal) { ["Authorization"] = $"Bearer {server.Token}" },
             Timeout = timeout ?? TimeSpan.FromSeconds(30),
         },
-        NullLoggerFactory.Instance);
+        NullLoggerFactory.Instance,
+        clock ?? TimeProvider.System);
 
     public async Task DisposeAsync()
     {
