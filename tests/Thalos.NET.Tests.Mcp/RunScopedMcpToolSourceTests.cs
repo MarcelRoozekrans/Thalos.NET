@@ -107,7 +107,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
     /// A call to a run whose server is still starting is refused when its ready wait is over, not when the server answers.
     /// The ready wait runs on a fake clock that this test moves on, and the server stays silent for ten minutes, so the
     /// only thing that can end the call with this refusal is the ready wait; a call that waited for the start instead
-    /// would outlast <see cref="PastTheReadyWaitAsync"/>'s guard, and end only 30 s in, when the registry's connect timeout
+    /// would outlast <see cref="PastTheReadyWaitAsync"/>'s guard, and end only when the SDK's 60 s initialization timeout
     /// fails the start, with a different refusal. Decided by the
     /// clock and the refusal, not by wall time: on a loaded Windows runner other tests' stdio sessions pin thread-pool
     /// threads in blocking pipe reads, which has delayed a correct refusal past a 10 s bound.
@@ -137,10 +137,10 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         runScoped.Reload = "restart";
         var (tool, registry) = await RoutedToolAsync("args", runScoped);
         await registry.OnReadyAsync(Workspace(RunId), CancellationToken.None); // the first start fails and writes the marker
-        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None); // reports the failed first start
+        var waited = await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None); // reports the failed first start
         if (waited.IsFailure)
         {
-            waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None); // starts it again
+            waited = await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None); // starts it again
         }
 
         waited.IsSuccess.Should().BeTrue("the second start finds the marker");
@@ -420,7 +420,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         var pid = await KillAndWaitForSessionEndAsync(registry);
 
         var refused = await RoutedOrThrownAsync(args);
-        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None);
+        var waited = await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None);
         var restartedPid = await RoutedOrThrownAsync(pidTool);
         var served = await RoutedOrThrownAsync(args);
 
@@ -663,7 +663,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         foreach (var runId in ready ?? [])
         {
             await registry.OnReadyAsync(Workspace(runId), CancellationToken.None);
-            var waited = await registry.WaitAllReadyAsync(runId, TimeSpan.FromSeconds(30), CancellationToken.None);
+            var waited = await registry.WaitAllReadyAsync(runId, McpServerFixture.StartupBudget, CancellationToken.None);
             waited.IsSuccess.Should().BeTrue(waited.IsFailure ? waited.Error.Message : "");
         }
 
@@ -789,7 +789,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         var sw = Stopwatch.StartNew();
         while (!condition())
         {
-            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(20), $"waiting for {what}");
+            sw.Elapsed.Should().BeLessThan(McpServerFixture.StartupBudget, $"waiting for {what}");
             await Task.Delay(50);
         }
     }

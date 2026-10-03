@@ -43,7 +43,7 @@ public sealed class RunScopedMcpCompositionTests : IAsyncLifetime
         var runId = Guid.NewGuid();
         var created = await provider.CreateAsync(new RunWorkspaceRequest(runId, "sandbox", remote.Url, "main", $"manufacture/{runId}", null), CancellationToken.None);
         created.IsSuccess.Should().BeTrue(created.IsFailure ? created.Error.ToString() : "");
-        var ready = await sp.GetRequiredService<IRunToolServerReadiness>().WaitAllReadyAsync(runId, TimeSpan.FromSeconds(30), CancellationToken.None);
+        var ready = await sp.GetRequiredService<IRunToolServerReadiness>().WaitAllReadyAsync(runId, McpServerFixture.StartupBudget, CancellationToken.None);
         ready.IsSuccess.Should().BeTrue(ready.IsFailure ? ready.Error.Message : "the provider told the same registry the tools route through");
 
         try

@@ -178,13 +178,13 @@ public sealed class McpToolSourceTests(McpServerFixture fixture) : IClassFixture
         }
     }
 
-    /// <summary>Waits until <paramref name="condition"/> holds; the 60 s bound is a hang guard for a process the kernel is still tearing down.</summary>
+    /// <summary>Waits until <paramref name="condition"/> holds; the bound is a hang guard for a process the kernel is still tearing down.</summary>
     private static async Task UntilAsync(Func<bool> condition, string what)
     {
         var sw = Stopwatch.StartNew();
         while (!condition())
         {
-            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(60), $"waiting for {what}");
+            sw.Elapsed.Should().BeLessThan(McpServerFixture.StartupBudget, $"waiting for {what}");
             await Task.Delay(50);
         }
     }

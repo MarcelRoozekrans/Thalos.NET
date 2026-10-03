@@ -30,7 +30,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--solution", "${run.workspace.solution}"] });
         await registry.OnReadyAsync(Workspace(solution: "C:/w/run1/App.sln"), CancellationToken.None);
 
-        (await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None)).IsSuccess.Should().BeTrue();
+        (await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None)).ShouldBeReady();
         await using var lease = await LeaseAsync(registry);
         (await CallAsync(lease.Client, "args")).Should().Contain("C:/w/run1/App.sln");
     }
@@ -51,7 +51,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--ready-after", "5000"], ReadyTool = "ready_after" });
         await registry.OnReadyAsync(Workspace(), CancellationToken.None);
 
-        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None);
+        var waited = await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None);
         waited.IsSuccess.Should().BeTrue(waited.IsFailure ? waited.Error.Message : "");
         await using var lease = await LeaseAsync(registry);
         (await lease.Client.CallToolAsync("ready_after")).IsError.Should().NotBe(true, "readiness is reported only once the ready tool answers");
@@ -100,7 +100,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
     public async Task After_a_restart_a_waiting_run_starts_its_server_from_the_workspace_record()
     {
         var registry = Registry(runScoped: new() { Args = ServerArgs }, workspaces: ProviderThatFinds(Workspace()));
-        (await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None)).IsSuccess.Should().BeTrue("OnReadyAsync never ran in this process");
+        (await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None)).ShouldBeReady("OnReadyAsync never ran in this process");
     }
 
     [Fact]
@@ -202,7 +202,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--root", "${run.workspace.root}"], Cwd = _root });
         await registry.OnReadyAsync(Workspace() with { Root = root }, CancellationToken.None);
 
-        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None);
+        var waited = await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None);
         if (OperatingSystem.IsWindows())
         {
             waited.IsFailure.Should().BeTrue("the MCP SDK starts the server through cmd.exe, which would expand %PATH%");
@@ -210,7 +210,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         }
         else
         {
-            waited.IsSuccess.Should().BeTrue("no shell parses the arguments off Windows");
+            waited.IsSuccess.Should().BeTrue(waited.IsFailure ? waited.Error.Message : "no shell parses the arguments off Windows");
             await using var lease = await LeaseAsync(registry);
             (await CallAsync(lease.Client, "args")).Should().Contain($"--root {root}", "the value reaches the server unchanged");
         }
@@ -222,7 +222,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--solution", "${run.workspace.solution}"] });
         await registry.OnReadyAsync(Workspace(solution: null), CancellationToken.None);
 
-        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None);
+        var waited = await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None);
         waited.IsFailure.Should().BeTrue();
         waited.Error.Message.Should().Contain("run workspace has no solution");
     }
@@ -233,11 +233,11 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
     public async Task A_ready_or_reload_tool_the_server_does_not_offer_fails_the_start(string? readyTool, string reload, string expected)
     {
         // The registry runs on a fake clock that never moves, so neither the readiness wait nor the connect timeout can
-        // end the start: only the start's own outcome does, however slow the machine is. The real 60 s bound is a hang guard.
+        // end the start: only the start's own outcome does, however slow the machine is. The real startup-budget bound is a hang guard.
         var registry = Registry(runScoped: new() { Args = ServerArgs, ReadyTool = readyTool, Reload = reload }, new FakeProvider(null), clock: new FakeTimeProvider());
         await registry.OnReadyAsync(Workspace(), CancellationToken.None);
 
-        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(10), CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(60));
+        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(10), CancellationToken.None).AsTask().WaitAsync(McpServerFixture.StartupBudget);
         waited.IsFailure.Should().BeTrue();
         waited.Error.Message.Should().Contain(expected);
     }
@@ -312,7 +312,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var log = Path.Combine(_root, "calls.log");
         var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--reload-delay-ms", "1500", "--call-log", log], Reload = "tool:reload_count" });
         await registry.OnReadyAsync(Workspace(), CancellationToken.None);
-        (await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None)).IsSuccess.Should().BeTrue();
+        (await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None)).ShouldBeReady();
 
         registry.OnFilesChanged(RunId, ["a.cs"]);
         var first = Task.Run(async () => await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None));
@@ -546,7 +546,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var ready = Path.Combine(_root, "ready");
         var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--ready-when", ready, "--call-log", log], Reload = "tool:ready_after" });
         await registry.OnReadyAsync(Workspace(), CancellationToken.None);
-        (await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None)).IsSuccess.Should().BeTrue();
+        (await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None)).ShouldBeReady();
 
         registry.OnFilesChanged(RunId, ["a.cs"]);
         var failed = await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None);
@@ -565,7 +565,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         await registry.OnReadyAsync(Workspace(), CancellationToken.None);
         (await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None)).IsFailure.Should().BeTrue("the first process exits before speaking MCP");
 
-        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None);
+        var waited = await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None);
         waited.IsSuccess.Should().BeTrue(waited.IsFailure ? waited.Error.Message : "");
     }
 
@@ -576,7 +576,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var registry = Registry(runScoped: new() { Args = ServerArgs }, workspaces: provider);
         provider.HoldFinds();
 
-        var racing = Task.Run(async () => await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None));
+        var racing = Task.Run(async () => await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None));
         await provider.FindStarted.Task.WaitAsync(TimeSpan.FromSeconds(20));
         await registry.OnRemovingAsync(Workspace(), CancellationToken.None); // the record still exists: the provider deletes it after this returns
         provider.ReleaseFinds();
@@ -587,7 +587,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         (await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None)).IsFailure.Should().BeTrue("the racing lookup started no server");
         registry.InFlightLookupCount.Should().Be(0, "a removal mark lives only as long as the lookup it marks");
 
-        (await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None)).IsSuccess.Should().BeTrue("nothing about the removal is remembered once no marked lookup is in flight");
+        (await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None)).ShouldBeReady("nothing about the removal is remembered once no marked lookup is in flight");
     }
 
     [Fact]
@@ -983,7 +983,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var sw = Stopwatch.StartNew();
         while (!condition())
         {
-            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(20), $"waiting for {what}");
+            sw.Elapsed.Should().BeLessThan(McpServerFixture.StartupBudget, $"waiting for {what}");
             await Task.Delay(50);
         }
     }
