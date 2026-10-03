@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.2](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.14.1...v0.14.2) (2026-10-03)
+
+
+### Bug Fixes
+
+* **mcp:** wait for a slow HTTP MCP server's discover answer instead of falling back to initialize ([#261](https://github.com/MarcelRoozekrans/Thalos.NET/issues/261)) ([ac49271](https://github.com/MarcelRoozekrans/Thalos.NET/commit/ac49271165df2c5bbda2db10fc34e88424826503))
+
 ## [0.14.1](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.14.0...v0.14.1) (2026-10-03)
 
 
