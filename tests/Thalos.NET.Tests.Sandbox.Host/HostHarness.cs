@@ -171,7 +171,9 @@ internal sealed class HostHarness : IAsyncDisposable
             Client,
             NullLoggerFactory.Instance,
             ownsHttpClient: false);
-        return await McpClient.CreateAsync(transport);
+        // As Thalos.Mcp's HttpMcpClientOptions does: a slow first answer is waited for, not taken for an old server and
+        // retried as initialize, a fallback that can fail outright.
+        return await McpClient.CreateAsync(transport, new McpClientOptions { DiscoverProbeTimeout = Timeout.InfiniteTimeSpan });
     }
 
     /// <summary>Calls <paramref name="tool"/> on <paramref name="source"/> and returns its text.</summary>
