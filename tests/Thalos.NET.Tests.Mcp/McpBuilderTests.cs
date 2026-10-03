@@ -9,6 +9,13 @@ namespace Thalos.Tests.Mcp;
 
 public sealed class McpBuilderTests
 {
+    /// <summary>
+    /// A server declared in an .mcp.json file is started and its tools reach the catalog under the server's prefix. The
+    /// file gives the server a two-minute startup budget: this test starts its own cold <c>dotnet</c> process, which on a
+    /// loaded CI runner has outlasted the 30-second default, and the default is not what this test is about. A failed
+    /// resolve reports its error. Red: drop a name from the expected list, or set the file's timeout to one millisecond,
+    /// which fails the resolve and shows why.
+    /// </summary>
     [Fact]
     public async Task AddMcpServersFromFile_end_to_end_yields_qualified_tools_through_the_catalog()
     {
@@ -20,7 +27,7 @@ public sealed class McpBuilderTests
             await File.WriteAllTextAsync(path, $$"""
                 {
                   "mcpServers": {
-                    "echo": { "type": "stdio", "command": "dotnet", "args": ["{{dll}}"], "shutdownTimeout": "00:00:01" }
+                    "echo": { "type": "stdio", "command": "dotnet", "args": ["{{dll}}"], "timeout": "00:02:00", "shutdownTimeout": "00:00:01" }
                   }
                 }
                 """);
@@ -32,7 +39,7 @@ public sealed class McpBuilderTests
             var catalog = sp.GetRequiredService<IToolCatalog>();
             var tools = await catalog.ResolveAsync(new AgentDefinition { Id = AgentId.New(), Name = "a", Instructions = "i" }, default);
 
-            tools.IsSuccess.Should().BeTrue();
+            tools.IsSuccess.Should().BeTrue(tools.IsFailure ? tools.Error.Message : "");
             tools.Value.Select(t => t.Name).Should().BeEquivalentTo(["echo__echo", "echo__add", "echo__fail", "echo__env", "echo__args", "echo__cwd", "echo__ready_after", "echo__reload_count", "echo__slow", "echo__overlaps", "echo__pid"]);
         }
         finally
