@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.14.1](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.14.0...v0.14.1) (2026-10-03)
+
+
+### Bug Fixes
+
+* **git:** commit a sandboxed publish worktree's staged index as it stands ([ca5f513](https://github.com/MarcelRoozekrans/Thalos.NET/commit/ca5f5132e75963c196386c28d05fed7a8c851ccc))
+* **sandbox:** register IRunWorkspaceGit in UseSandboxRunWorkspaces ([ca5f513](https://github.com/MarcelRoozekrans/Thalos.NET/commit/ca5f5132e75963c196386c28d05fed7a8c851ccc))
+
 ## [0.14.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.13.0...v0.14.0) (2026-10-02)
 
 
