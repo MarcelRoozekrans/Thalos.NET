@@ -7,5 +7,6 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="..\Thalos.NET.Tests.Git\Workspaces\LocalGitRemote.cs" Link="LocalGitRemote.cs" />
+    <Compile Include="..\Thalos.NET.Tests.Git\Workspaces\ExecutableScript.cs" Link="ExecutableScript.cs" />
   </ItemGroup>
 </Project>

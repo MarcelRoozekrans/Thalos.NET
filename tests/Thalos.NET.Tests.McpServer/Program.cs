@@ -65,6 +65,21 @@ EchoTools.ReloadWhen = builder.Configuration["reload-when"];
 
 EchoTools.CallLog = builder.Configuration["call-log"];
 
+// `--exit-when PATH`: exit as soon as PATH exists, whatever the server is doing, so a test decides when the process
+// ends: a client's dispose that waits for the process to exit then waits exactly until the test creates PATH.
+if (builder.Configuration["exit-when"] is { Length: > 0 } exitWhen)
+{
+    _ = Task.Run(async () =>
+    {
+        while (!File.Exists(exitWhen))
+        {
+            await Task.Delay(50);
+        }
+
+        Environment.Exit(0);
+    });
+}
+
 // The stdio transport completes when stdin reaches EOF; the SDK's hosted service then stops the host, so the process exits promptly.
 await builder.Build().RunAsync();
 
