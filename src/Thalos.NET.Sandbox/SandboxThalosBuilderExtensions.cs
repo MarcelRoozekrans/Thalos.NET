@@ -18,16 +18,24 @@ public static class SandboxThalosBuilderExtensions
     /// <summary>
     /// Makes every run sandboxed: <see cref="SandboxRunWorkspaceProvider"/> replaces the run workspace provider, the base
     /// file reader, the tool endpoint resolver, the parkable provider, the hand-off and the run tool server readiness,
-    /// and the <c>workspace</c> and <c>sandbox</c> tools are served by each run's sandbox. An
-    /// <see cref="ISandboxRuntime"/> must be registered too, for example by <c>UseDockerSandboxRuntime</c>.
+    /// and the <c>workspace</c> and <c>sandbox</c> tools are served by each run's sandbox. A
+    /// <see cref="GitCliRunWorkspaceGit"/> replaces <see cref="IRunWorkspaceGit"/>, to commit and push the publish
+    /// worktrees the hand-off returns. An <see cref="ISandboxRuntime"/> must be registered too, for example by
+    /// <c>UseDockerSandboxRuntime</c>.
     /// </summary>
     /// <remarks>
     /// <para>
     /// <b>One mirror.</b> A single <see cref="GitWorkspaceOptions"/> rooted at <c>&lt;DataRoot&gt;/publish</c> is shared by
-    /// the <see cref="GitMirrorStore"/>, the <see cref="GitPatchApplier"/> and the <see cref="GitWorktreeWorkspaceProvider"/>
-    /// inside <see cref="SandboxPublishWorktrees"/>, which has no observers and the same <see cref="IGitCredentialSource"/>.
+    /// the <see cref="GitMirrorStore"/>, the <see cref="GitPatchApplier"/>, the <see cref="GitWorktreeWorkspaceProvider"/>
+    /// inside <see cref="SandboxPublishWorktrees"/>, which has no observers, and the <see cref="GitCliRunWorkspaceGit"/>,
+    /// all with the same <see cref="IGitCredentialSource"/>.
     /// So a sandbox's bundle and its publish worktree come from one mirror under one lock, and the base commit a sandbox
     /// started from is present when its publish worktree is cut, even if the default branch was force-pushed meanwhile.
+    /// </para>
+    /// <para>
+    /// <b>Commit the staged index.</b> A publish worktree holds the run's change staged by the
+    /// <see cref="GitPatchApplier"/>; commit it with <see cref="Thalos.Git.GitCommitRequest.CommitStagedIndex"/>, see
+    /// <see cref="SandboxRunWorkspaceProvider.CheckoutForPublishAsync"/>.
     /// </para>
     /// <para>
     /// <b>Not <c>UseRunWorkspaceTools</c>.</b> On the API the workspace tools are remote: registering the local ones
@@ -91,6 +99,10 @@ public static class SandboxThalosBuilderExtensions
         services.Replace(ServiceDescriptor.Singleton<IRunToolEndpointResolver>(sp => sp.GetRequiredService<SandboxRunWorkspaceProvider>()));
         services.Replace(ServiceDescriptor.Singleton<IParkableRunWorkspaceProvider>(sp => sp.GetRequiredService<SandboxRunWorkspaceProvider>()));
         services.Replace(ServiceDescriptor.Singleton<IRunWorkspaceHandoff>(sp => sp.GetRequiredService<SandboxRunWorkspaceProvider>()));
+        services.Replace(ServiceDescriptor.Singleton<IRunWorkspaceGit>(sp => new GitCliRunWorkspaceGit(
+            publish,
+            sp.GetRequiredService<ILogger<GitCliRunWorkspaceGit>>(),
+            sp.GetService<IGitCredentialSource>())));
 
         // AddMcpServer registers the host registry with TryAdd, so this wins in either order.
         services.Replace(ServiceDescriptor.Singleton<IRunToolServerReadiness>(sp => sp.GetRequiredService<SandboxRunWorkspaceProvider>()));

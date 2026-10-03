@@ -1,5 +1,6 @@
 using AwesomeAssertions.Execution;
 using Docker.DotNet.Models;
+using Thalos.Git;
 using Thalos.Sandbox;
 using Thalos.Sandbox.Docker;
 using Xunit.Abstractions;
@@ -185,6 +186,9 @@ public sealed class SandboxEndToEndTests(SandboxEndToEndFixture fixture, ITestOu
     /// <summary>
     /// Red: skip the runtime delete in the park's finish; the container is still there. Red 2: export against the
     /// sandbox's new commit rather than the base; the patch is empty and B.cs is not in the worktree.
+    /// The publish commit, through the IRunWorkspaceGit UseSandboxRunWorkspaces registers, with CommitStagedIndex:
+    /// Red 3: drop that registration; resolving it throws. Red 4, for the commit's tree and file list: in
+    /// GitCliRunWorkspaceGit.StageAsync, reset the index to HEAD on the CommitStagedIndex path; nothing is committed.
     /// </summary>
     [SkippableFact]
     public async Task A_parked_run_has_no_container_and_its_change_publishes()
@@ -216,6 +220,17 @@ public sealed class SandboxEndToEndTests(SandboxEndToEndFixture fixture, ITestOu
             var root = checkout.Value.Root;
             File.ReadAllText(Path.Combine(root, "Lib", "B.cs")).ReplaceLineEndings("\n").Should().Be(content);
             Directory.Exists(Path.Combine(root, "Lib", "obj")).Should().BeFalse("build output never travels in the patch");
+            var appliedTree = await SandboxEndToEndFixture.GitAsync(root, "write-tree");
+            var committed = await fixture.Trusted.Git.CommitAsync(
+                checkout.Value,
+                new GitCommitRequest { Message = "run", Author = new GitAuthor("t", "t@example.invalid"), CommitStagedIndex = true },
+                Ct);
+            committed.IsSuccess.Should().BeTrue(committed.IsFailure ? committed.Error.ToString() : "");
+            if (committed.IsSuccess)
+            {
+                (await SandboxEndToEndFixture.GitAsync(root, "rev-parse", committed.Value.Sha + "^{tree}")).Should().Be(appliedTree, "the commit is the index the S5 check passed");
+                (await SandboxEndToEndFixture.GitAsync(root, "show", "--name-only", "--format=", committed.Value.Sha)).Should().Be("Lib/B.cs");
+            }
         }
     }
 

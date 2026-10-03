@@ -144,6 +144,28 @@ The sandbox container image is not a package: a host builds it from `Thalos.NET.
   `IParkableRunWorkspaceProvider`, within its `ParkBudget`, before deciding what to remove. Its rotation lives in the
   instance, so register the sweeper as a singleton and call the same one on every tick.
 
+0.14.1 is a patch for sandbox hosts. It ships the same eighteen packages.
+
+**What a sandbox host must do in 0.14.1:** commit the publish worktree that `IRunWorkspaceHandoff.CheckoutForPublishAsync`
+returns with `GitCommitRequest.CommitStagedIndex = true`, and leave `Paths` null on that commit. See
+[workflow.md, Run sandboxes](workflow.md#run-sandboxes).
+
+- **A sandboxed publish could differ from what the S5 check passed.** `GitPatchApplier` stages the run's patch with
+  `git apply --index`, and that index is what its protected-path check passed. `GitCliRunWorkspaceGit.CommitAsync`
+  always reset the index and restaged the worktree from disk with `git add -A`, which silently dropped a file the
+  patch added that the worktree's `.gitignore` matches, on every platform, and a mode change under
+  `core.fileMode=false`, the Windows default. The new `GitCommitRequest.CommitStagedIndex` commits the index as it
+  stands: no reset, no add, `ExcludePaths` still unstaged, and `Paths` refused with a validation error. With nothing
+  staged it makes no commit, the same as before. With the option off, the default, `CommitAsync` behaves exactly as
+  in 0.14.0, which local-worktree hosts rely on.
+- **`UseSandboxRunWorkspaces` registers `IRunWorkspaceGit`** (issue #250). In 0.14.0 only `UseGitWorktreeWorkspaces`
+  did, so a host that registered only the sandbox provider had nothing to commit and push the publish worktree with.
+  It now replaces `IRunWorkspaceGit` with a `GitCliRunWorkspaceGit` over the same `<DataRoot>/publish` options as the
+  mirror, the patch applier and the publish worktrees, using the registered `IGitCredentialSource`. A host that
+  registered its own `IRunWorkspaceGit` before calling `UseSandboxRunWorkspaces` must register it after the call
+  instead, since the call replaces it. A host that registered its own only to work around #250 can now remove that
+  registration.
+
 **Breaking changes accumulated across the workflow-engine phase (2.2, Part A):**
 
 - `ThalosAgentRuntime`'s public constructor gained a required `IOutcomeToolFactory outcomeTools` parameter
