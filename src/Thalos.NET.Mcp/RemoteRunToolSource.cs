@@ -507,6 +507,8 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
     /// by one caller's token. The transport uses an HTTP client of the entry's own, over a <see cref="ResponseByteCap"/>
     /// at <see cref="RemoteRunToolOptions.MaxResultBytes"/>, so every response it reads is bounded; the HTTP client has
     /// no timeout of its own, because the connect and call timeouts bound it, and it is disposed with the entry's client.
+    /// The MCP handshake has no timeout of the SDK's own either, as <see cref="HttpMcpClientOptions"/> explains: the connect
+    /// timeout alone bounds it, so a sandbox that is slow to answer is waited for, not taken for an old server.
     /// </summary>
     private async Task<McpClient> ConnectAsync(Guid runId, CachedClient entry)
     {
@@ -531,7 +533,7 @@ public sealed partial class RemoteRunToolSource : IToolSource, IRunWorkspaceObse
             http,
             _loggers,
             ownsHttpClient: false);
-        return await McpClient.CreateAsync(transport, clientOptions: null, _loggers, connect.Token).ConfigureAwait(false);
+        return await McpClient.CreateAsync(transport, HttpMcpClientOptions.Create(), _loggers, connect.Token).ConfigureAwait(false);
     }
 
     private async ValueTask<string> StoppedDuringAsync(RoutedRemoteTool tool, Guid runId, CachedClient entry, Exception ex)

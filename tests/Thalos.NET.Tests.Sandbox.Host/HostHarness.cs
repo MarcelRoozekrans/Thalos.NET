@@ -12,6 +12,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
 using Thalos.Git.Workspaces;
+using Thalos.Mcp;
 using Thalos.Sandbox;
 using Thalos.Sandbox.Host;
 using Thalos.Tests.Git.Workspaces;
@@ -171,7 +172,8 @@ internal sealed class HostHarness : IAsyncDisposable
             Client,
             NullLoggerFactory.Instance,
             ownsHttpClient: false);
-        return await McpClient.CreateAsync(transport);
+        // The product's HTTP options: a slow first answer is waited for, not taken for an old server.
+        return await McpClient.CreateAsync(transport, HttpMcpClientOptions.Create());
     }
 
     /// <summary>Calls <paramref name="tool"/> on <paramref name="source"/> and returns its text.</summary>

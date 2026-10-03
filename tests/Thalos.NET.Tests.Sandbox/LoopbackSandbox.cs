@@ -86,11 +86,25 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
         set => _hooks.RespondToToolCall = value;
     }
 
-    /// <summary>Called, ahead of the bearer check, when an MCP handshake arrives: while a client is connecting.</summary>
-    public Action? OnHandshake
+    /// <summary>
+    /// Awaited, ahead of the bearer check, when an MCP handshake (<c>server/discover</c> or <c>initialize</c>) arrives,
+    /// given the request's token: while a client is connecting. A delay here makes the handshake's answer slow.
+    /// </summary>
+    public Func<CancellationToken, Task>? OnHandshake
     {
         get => _hooks.OnHandshake;
         set => _hooks.OnHandshake = value;
+    }
+
+    /// <summary>
+    /// When set, a <c>server/discover</c> request is answered, after <see cref="OnHandshake"/> and ahead of the bearer
+    /// check and the MCP endpoint, by this writer, given the request's raw id and the response: as a server that predates
+    /// <c>server/discover</c> answers it. The <c>initialize</c> that follows is served as usual.
+    /// </summary>
+    public Func<string, HttpResponse, Task>? AnswerDiscover
+    {
+        get => _hooks.AnswerDiscover;
+        set => _hooks.AnswerDiscover = value;
     }
 
     /// <summary>
@@ -168,10 +182,17 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
 
             var (description, id, tool) = await DescribeAsync(context.Request);
             requests.Enqueue($"{context.Request.Path} {description}");
-            if (description is "initialize" or "server/discover")
+            if ((description is "initialize" or "server/discover") && hooks.OnHandshake is { } onHandshake)
             {
-                hooks.OnHandshake?.Invoke();
+                await onHandshake(context.RequestAborted);
             }
+
+            if (description is "server/discover" && id is not null && hooks.AnswerDiscover is { } answerDiscover)
+            {
+                await answerDiscover(id, context.Response);
+                return;
+            }
+
             if (tool is not null && id is not null && await AnsweredByHookAsync(hooks, tool, id, context.Response))
             {
                 return;
@@ -183,6 +204,34 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
         await app.StartAsync();
         return new LoopbackSandbox(app, runId, token, new Uri(app.Urls.Single().TrimEnd('/') + "/"), requests, hooks);
     }
+
+    /// <summary>
+    /// An <see cref="AnswerDiscover"/> writer that answers as a server predating <c>server/discover</c> does:
+    /// <c>rpc-error</c>, a JSON-RPC Method not found error; <c>400</c> or <c>404</c>, that HTTP status with no JSON-RPC body.
+    /// </summary>
+    public static Func<string, HttpResponse, Task> PredatingDiscover(string kind) => kind switch
+    {
+        "rpc-error" => async (id, response) =>
+        {
+            response.ContentType = "application/json";
+            await response.WriteAsync($"{{\"jsonrpc\":\"2.0\",\"id\":{id},\"error\":{{\"code\":-32601,\"message\":\"Method not found\"}}}}");
+        }
+        ,
+        "400" => async (_, response) =>
+        {
+            response.StatusCode = StatusCodes.Status400BadRequest;
+            response.ContentType = "text/plain";
+            await response.WriteAsync("Bad Request: Mcp-Session-Id header is required");
+        }
+        ,
+        "404" => (_, response) =>
+        {
+            response.StatusCode = StatusCodes.Status404NotFound;
+            return Task.CompletedTask;
+        }
+        ,
+        _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "rpc-error, 400 or 404"),
+    };
 
     /// <summary>Answers a <c>tools/call</c> by <see cref="RespondToToolCall"/> or <see cref="AnswerToolCall"/>, if either has an answer for the tool.</summary>
     private static async Task<bool> AnsweredByHookAsync(Hooks hooks, string tool, string id, HttpResponse response)
@@ -331,7 +380,9 @@ internal sealed class LoopbackSandbox : IAsyncDisposable
             return true;
         }
 
-        public Action? OnHandshake { get; set; }
+        public Func<CancellationToken, Task>? OnHandshake { get; set; }
+
+        public Func<string, HttpResponse, Task>? AnswerDiscover { get; set; }
     }
 
     /// <summary>Answers every process as a success without running it, a build after <see cref="Hooks.BuildDelay"/>.</summary>
