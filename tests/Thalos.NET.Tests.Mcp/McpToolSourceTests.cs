@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging.Abstractions;
 using Thalos.Mcp;
@@ -54,18 +55,26 @@ public sealed class McpToolSourceTests(McpServerFixture fixture) : IClassFixture
         result!.ToString().Should().Contain("from-thalos");
     }
 
+    /// <summary>
+    /// A plain <c>ServiceProvider.Dispose()</c> only sees <see cref="IDisposable"/>, so the synchronous Dispose must shut
+    /// the stdio server down, not leak its process. Asserted by the server's process ending, not by how long the dispose
+    /// took: that is the SDK's teardown, which spends the shutdown timeout as a grace period and, on a loaded Windows
+    /// runner where other tests' stdio sessions pin thread-pool threads in blocking pipe reads, has taken well over 10 s.
+    /// Red, process ended: in McpToolSource.DisposeAsync, skip disposing the client.
+    /// Red, disposed: drop the first <c>ObjectDisposedException.ThrowIf</c> from GetClientToolsAsync.
+    /// </summary>
     [Fact]
     public async Task Synchronous_Dispose_shuts_the_source_down_and_further_calls_throw()
     {
-        // plain ServiceProvider.Dispose() only sees IDisposable — the source must not leak the stdio process on that path
         var source = new McpToolSource("sync", McpServerFixture.Definition(), NullLoggerFactory.Instance);
-        (await source.GetToolsAsync(default)).IsSuccess.Should().BeTrue();
+        var tools = await source.GetToolsAsync(default);
+        tools.IsSuccess.Should().BeTrue(tools.IsFailure ? tools.Error.ToString() : "");
+        var pid = await PidAsync(tools.Value);
 
-        var sw = Stopwatch.StartNew();
         source.Dispose();
         source.Dispose(); // idempotent
-        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(10));
 
+        await UntilAsync(() => !IsRunning(pid), "the disposed source's server process to end");
         var act = async () => await source.GetToolsAsync(default);
         await act.Should().ThrowAsync<ObjectDisposedException>();
     }
@@ -79,24 +88,36 @@ public sealed class McpToolSourceTests(McpServerFixture fixture) : IClassFixture
         r.Error.Code.Should().Be(AgentErrorCode.ProviderError);
     }
 
+    /// <summary>
+    /// Disposing a source aborts its in-flight connect instead of waiting for the server's first answer. The server stays
+    /// silent for ten minutes and the definition's connect timeout is ten minutes too, so only the dispose, or the SDK's
+    /// own 60 s initialization timeout, can end the connect, and the failure's detail names which: a cancellation, or a
+    /// <see cref="TimeoutException"/>. How long the abort's teardown takes is not asserted; on a loaded Windows runner,
+    /// where other tests' stdio sessions pin thread-pool threads in blocking pipe reads, it has taken over 10 s. The
+    /// two-minute bound is a hang guard only.
+    /// Red, both complete: in McpToolSource.GetClientToolsAsync, drop <c>_gate.Release()</c> from the finally.
+    /// Red, a result, not thrown: rethrow from GetClientToolsAsync's last catch.
+    /// Red, aborted by the dispose: drop <c>_disposeCts.CancelAsync()</c> from DisposeAsync; the connect then ends at the
+    /// SDK's initialization timeout.
+    /// </summary>
     [Fact]
     public async Task Dispose_during_connect_does_not_hang()
     {
-        // --delay-ms keeps the server silent, so the connect is still in flight when we dispose.
-        var source = new McpToolSource("slow", McpServerFixture.Definition("--delay-ms", "8000"), NullLoggerFactory.Instance);
-        var sw = Stopwatch.StartNew();
+        var definition = McpServerFixture.Definition("--delay-ms", "600000"); // silent: the connect is in flight when we dispose
+        definition.Timeout = TimeSpan.FromMinutes(10);
+        var source = new McpToolSource("slow", definition, NullLoggerFactory.Instance);
         var connect = source.GetToolsAsync(default).AsTask();
         await Task.Delay(100);
         var dispose = source.DisposeAsync().AsTask();
 
         var both = Task.WhenAll(connect, dispose);
-        var finished = await Task.WhenAny(both, Task.Delay(TimeSpan.FromSeconds(10)));
+        var finished = await Task.WhenAny(both, Task.Delay(TimeSpan.FromMinutes(2)));
         finished.Should().BeSameAs(both, "dispose must abort the in-flight connect and both must complete");
-        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(10));
 
         var r = await connect;
         r.IsFailure.Should().BeTrue("the aborted connect is reported as ProviderError, not thrown");
         r.Error.Code.Should().Be(AgentErrorCode.ProviderError);
+        r.Error.Detail.Should().BeOneOf([nameof(TaskCanceledException), nameof(OperationCanceledException)], "the dispose cancelled the connect; no timeout ended it");
     }
 
     [Fact]
@@ -134,5 +155,37 @@ public sealed class McpToolSourceTests(McpServerFixture fixture) : IClassFixture
         var noLoggerFactory = () => new McpToolSource("x", McpServerFixture.Definition(), null!);
         noDefinition.Should().Throw<ArgumentNullException>();
         noLoggerFactory.Should().Throw<ArgumentNullException>();
+    }
+
+    /// <summary>The process id of the server behind <paramref name="tools"/>, from its <c>pid</c> tool.</summary>
+    private static async Task<int> PidAsync(IReadOnlyList<AITool> tools)
+    {
+        var pid = (AIFunction)tools.Single(t => string.Equals(t.Name, "pid", StringComparison.Ordinal));
+        var result = (TextContent)(await pid.InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal)))!;
+        return int.Parse(result.Text, CultureInfo.InvariantCulture);
+    }
+
+    private static bool IsRunning(int pid)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(pid);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false; // no process has that id any more
+        }
+    }
+
+    /// <summary>Waits until <paramref name="condition"/> holds; the bound is a hang guard for a process the kernel is still tearing down.</summary>
+    private static async Task UntilAsync(Func<bool> condition, string what)
+    {
+        var sw = Stopwatch.StartNew();
+        while (!condition())
+        {
+            sw.Elapsed.Should().BeLessThan(McpServerFixture.StartupBudget, $"waiting for {what}");
+            await Task.Delay(50);
+        }
     }
 }

@@ -182,9 +182,27 @@ public sealed partial class SandboxHostTests
     /// Red: drop core.hooksPath=/dev/null from RepoConfigGuard.CommandConfig; the import's checkout then runs the
     /// planted post-checkout hook, which writes the marker.
     /// </summary>
+    /// <summary>
+    /// A hook planted in GitCli's isolation hooks directory never runs during an import. That a hook did not run means
+    /// something only if it could have, so the same hook, written the same way, is first shown to run where git is
+    /// pointed at it. Both are written with <see cref="ExecutableScript.Write"/>: a hook written in this process could be
+    /// held open for writing by a child another test thread forks, and git would then fail to run it with ETXTBSY,
+    /// which would pass the main assertion with the protection broken.
+    /// Red, the control: make <see cref="RecordingHook"/> exit without writing its marker; the control then fails,
+    /// while the main assertion still passes.
+    /// </summary>
     [Fact]
     public async Task A_hook_planted_in_the_isolation_hooks_directory_never_runs()
     {
+        var control = Directory.CreateDirectory(Path.Combine(_temp, "hook-control")).FullName;
+        var controlHooks = Directory.CreateDirectory(Path.Combine(control, "hooks")).FullName;
+        var controlRepo = Directory.CreateDirectory(Path.Combine(control, "repo")).FullName;
+        ExecutableScript.Write(Path.Combine(controlHooks, "post-checkout"), RecordingHook);
+        LocalGitRemote.RunGit(controlRepo, "init", "--initial-branch=main");
+        LocalGitRemote.RunGit(controlRepo, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "--allow-empty", "-m", "c");
+        LocalGitRemote.RunGit(controlRepo, "-c", $"core.hooksPath={controlHooks}", "checkout", "-b", "control");
+        File.Exists(Path.Combine(control, "hook-ran.txt")).Should().BeTrue("the hook runs where git is pointed at it, so its not running below is the isolation's doing");
+
         await using var host = await HostHarness.StartAsync(WorkRoot());
         var remote = Remote();
         var (bundle, commit) = await HostHarness.BundleAsync(remote, MirrorData);
@@ -196,11 +214,7 @@ public sealed partial class SandboxHostTests
         var hooks = Path.Combine(host.WorkRoot, "git", ".git-isolation", "hooks");
         Directory.Exists(hooks).Should().BeTrue("the planted hook must be in the directory GitCli points core.hooksPath at");
         var hook = Path.Combine(hooks, "post-checkout");
-        File.WriteAllText(hook, "#!/bin/sh\necho ran > ../hook-ran.txt\n");
-        if (!OperatingSystem.IsWindows())
-        {
-            File.SetUnixFileMode(hook, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
-        }
+        ExecutableScript.Write(hook, RecordingHook);
 
         using (var accepted = await host.ImportAsync(bundle, "run/x", commit))
         {
@@ -210,6 +224,9 @@ public sealed partial class SandboxHostTests
         (await host.WaitSettledAsync()).Imported.Should().BeTrue();
         File.Exists(Path.Combine(host.WorkRoot, "hook-ran.txt")).Should().BeFalse();
     }
+
+    /// <summary>A post-checkout hook that records that it ran in <c>hook-ran.txt</c> beside the repository git runs it in.</summary>
+    private const string RecordingHook = "#!/bin/sh\necho ran > ../hook-ran.txt\n";
 
     /// <summary>Red: drop the bin and obj exclude pathspecs from ExportService's git diff; the staged obj file is then in the patch.</summary>
     [Fact]

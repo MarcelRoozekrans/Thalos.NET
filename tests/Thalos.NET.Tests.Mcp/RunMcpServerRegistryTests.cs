@@ -18,6 +18,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
 {
     private readonly string _root = Directory.CreateTempSubdirectory("thalos-run-mcp-").FullName;
     private readonly List<RunMcpServerRegistry> _registries = [];
+    private readonly List<ILoggerFactory> _loggerFactories = [];
 
     private Guid RunId { get; } = Guid.NewGuid();
 
@@ -29,7 +30,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--solution", "${run.workspace.solution}"] });
         await registry.OnReadyAsync(Workspace(solution: "C:/w/run1/App.sln"), CancellationToken.None);
 
-        (await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None)).IsSuccess.Should().BeTrue();
+        (await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None)).ShouldBeReady();
         await using var lease = await LeaseAsync(registry);
         (await CallAsync(lease.Client, "args")).Should().Contain("C:/w/run1/App.sln");
     }
@@ -50,7 +51,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--ready-after", "5000"], ReadyTool = "ready_after" });
         await registry.OnReadyAsync(Workspace(), CancellationToken.None);
 
-        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None);
+        var waited = await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None);
         waited.IsSuccess.Should().BeTrue(waited.IsFailure ? waited.Error.Message : "");
         await using var lease = await LeaseAsync(registry);
         (await lease.Client.CallToolAsync("ready_after")).IsError.Should().NotBe(true, "readiness is reported only once the ready tool answers");
@@ -99,7 +100,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
     public async Task After_a_restart_a_waiting_run_starts_its_server_from_the_workspace_record()
     {
         var registry = Registry(runScoped: new() { Args = ServerArgs }, workspaces: ProviderThatFinds(Workspace()));
-        (await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None)).IsSuccess.Should().BeTrue("OnReadyAsync never ran in this process");
+        (await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None)).ShouldBeReady("OnReadyAsync never ran in this process");
     }
 
     [Fact]
@@ -201,7 +202,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--root", "${run.workspace.root}"], Cwd = _root });
         await registry.OnReadyAsync(Workspace() with { Root = root }, CancellationToken.None);
 
-        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None);
+        var waited = await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None);
         if (OperatingSystem.IsWindows())
         {
             waited.IsFailure.Should().BeTrue("the MCP SDK starts the server through cmd.exe, which would expand %PATH%");
@@ -209,7 +210,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         }
         else
         {
-            waited.IsSuccess.Should().BeTrue("no shell parses the arguments off Windows");
+            waited.IsSuccess.Should().BeTrue(waited.IsFailure ? waited.Error.Message : "no shell parses the arguments off Windows");
             await using var lease = await LeaseAsync(registry);
             (await CallAsync(lease.Client, "args")).Should().Contain($"--root {root}", "the value reaches the server unchanged");
         }
@@ -221,7 +222,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--solution", "${run.workspace.solution}"] });
         await registry.OnReadyAsync(Workspace(solution: null), CancellationToken.None);
 
-        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None);
+        var waited = await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None);
         waited.IsFailure.Should().BeTrue();
         waited.Error.Message.Should().Contain("run workspace has no solution");
     }
@@ -232,11 +233,11 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
     public async Task A_ready_or_reload_tool_the_server_does_not_offer_fails_the_start(string? readyTool, string reload, string expected)
     {
         // The registry runs on a fake clock that never moves, so neither the readiness wait nor the connect timeout can
-        // end the start: only the start's own outcome does, however slow the machine is. The real 60 s bound is a hang guard.
+        // end the start: only the start's own outcome does, however slow the machine is. The real startup-budget bound is a hang guard.
         var registry = Registry(runScoped: new() { Args = ServerArgs, ReadyTool = readyTool, Reload = reload }, new FakeProvider(null), clock: new FakeTimeProvider());
         await registry.OnReadyAsync(Workspace(), CancellationToken.None);
 
-        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(10), CancellationToken.None).AsTask().WaitAsync(TimeSpan.FromSeconds(60));
+        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(10), CancellationToken.None).AsTask().WaitAsync(McpServerFixture.StartupBudget);
         waited.IsFailure.Should().BeTrue();
         waited.Error.Message.Should().Contain(expected);
     }
@@ -311,7 +312,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var log = Path.Combine(_root, "calls.log");
         var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--reload-delay-ms", "1500", "--call-log", log], Reload = "tool:reload_count" });
         await registry.OnReadyAsync(Workspace(), CancellationToken.None);
-        (await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None)).IsSuccess.Should().BeTrue();
+        (await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None)).ShouldBeReady();
 
         registry.OnFilesChanged(RunId, ["a.cs"]);
         var first = Task.Run(async () => await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None));
@@ -402,6 +403,12 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         CallLog.Lines(log).Should().Equal(["slow", "reload_count"], "the reload still ran, after the call");
     }
 
+    /// <summary>
+    /// A removal does not wait for a held lease: it cancels the reload waiting for it and stops the server. The lease is
+    /// held for the whole test, so a removal that waited for it would never return; how long the removal's teardown takes
+    /// is not asserted, and <see cref="HangGuard"/> only tells returning from never returning.
+    /// Red, the removal returns: in StopAsync, first <c>await entry.WaitForNoLeasesAsync(CancellationToken.None)</c>.
+    /// </summary>
     [Fact]
     public async Task Removing_a_run_cancels_a_reload_waiting_for_a_held_lease_and_stops_the_server_anyway()
     {
@@ -415,7 +422,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         await UntilAsync(() => registry.ReloadsWaitingForLeases == 1, "the reload to wait for the held lease");
 
         var removal = registry.OnRemovingAsync(Workspace(), CancellationToken.None).AsTask();
-        (await Task.WhenAny(removal, Task.Delay(TimeSpan.FromSeconds(10)))).Should().BeSameAs(removal, "removal does not wait for a held lease");
+        (await Task.WhenAny(removal, Task.Delay(HangGuard))).Should().BeSameAs(removal, "removal does not wait for a held lease, which is held until the test ends");
         (await waiting).IsFailure.Should().BeTrue("the waiting reload was cancelled, not served");
         IsRunning(pid).Should().BeFalse("the server is stopped even though a lease is still held");
     }
@@ -439,7 +446,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         await Task.Delay(TimeSpan.FromMilliseconds(500));
         var handedOutBeforeRelease = next.IsCompleted;
         await held.DisposeAsync();
-        var lease = await next.WaitAsync(TimeSpan.FromSeconds(10));
+        var lease = await next.WaitAsync(HangGuard);
         var count = lease.IsFailure ? $"refused: {lease.Error.Message}" : null;
         if (lease.IsSuccess)
         {
@@ -527,7 +534,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         await UntilAsync(() => registry.ReloadsWaitingForLeases == 1, "the reload to wait for the held lease, which a second dispose of the other lease must not have released");
 
         await held.DisposeAsync();
-        var reloaded = await reload.WaitAsync(TimeSpan.FromSeconds(10));
+        var reloaded = await reload.WaitAsync(HangGuard);
         reloaded.IsSuccess.Should().BeTrue();
         await reloaded.Value.DisposeAsync();
     }
@@ -539,7 +546,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var ready = Path.Combine(_root, "ready");
         var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--ready-when", ready, "--call-log", log], Reload = "tool:ready_after" });
         await registry.OnReadyAsync(Workspace(), CancellationToken.None);
-        (await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None)).IsSuccess.Should().BeTrue();
+        (await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None)).ShouldBeReady();
 
         registry.OnFilesChanged(RunId, ["a.cs"]);
         var failed = await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None);
@@ -558,7 +565,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         await registry.OnReadyAsync(Workspace(), CancellationToken.None);
         (await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None)).IsFailure.Should().BeTrue("the first process exits before speaking MCP");
 
-        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None);
+        var waited = await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None);
         waited.IsSuccess.Should().BeTrue(waited.IsFailure ? waited.Error.Message : "");
     }
 
@@ -569,7 +576,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var registry = Registry(runScoped: new() { Args = ServerArgs }, workspaces: provider);
         provider.HoldFinds();
 
-        var racing = Task.Run(async () => await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None));
+        var racing = Task.Run(async () => await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None));
         await provider.FindStarted.Task.WaitAsync(TimeSpan.FromSeconds(20));
         await registry.OnRemovingAsync(Workspace(), CancellationToken.None); // the record still exists: the provider deletes it after this returns
         provider.ReleaseFinds();
@@ -580,7 +587,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         (await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None)).IsFailure.Should().BeTrue("the racing lookup started no server");
         registry.InFlightLookupCount.Should().Be(0, "a removal mark lives only as long as the lookup it marks");
 
-        (await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None)).IsSuccess.Should().BeTrue("nothing about the removal is remembered once no marked lookup is in flight");
+        (await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None)).ShouldBeReady("nothing about the removal is remembered once no marked lookup is in flight");
     }
 
     [Fact]
@@ -606,18 +613,31 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         registry.InFlightLookupCount.Should().Be(0, "a lookup that found nothing is un-tracked too, not only one that goes on to start servers");
     }
 
+    /// <summary>
+    /// A removal cancels a start still waiting for its server's first answer instead of waiting it out. The server stays
+    /// silent for ten minutes and the registry runs on a fake clock that never moves, so the connect timeout cannot end
+    /// the start either: only the removal's cancellation can, and the start says so by ending as stopped while starting.
+    /// How long the teardown takes is not asserted. It is the SDK's, which spends the shutdown timeout as a grace period
+    /// and needs free thread-pool threads; on a loaded Windows runner every other test's live stdio session pins pool
+    /// threads in blocking pipe reads, and the teardown has taken 7 to 17 s with the cancellation working.
+    /// <see cref="HangGuard"/> is a hang guard only.
+    /// Red, the start's outcome: drop <c>entry.Stopping.CancelAsync()</c> from StopAsync; the start then ends at the SDK's
+    /// 60 s initialization timeout and logs a failed start, not a stopped one.
+    /// Red, no process left: in StopAsync, skip the wait for <c>entry.Starting</c>; the removal then returns while the
+    /// cancelled start is still tearing its process down.
+    /// </summary>
     [Fact]
     public async Task Removing_a_run_while_its_server_is_starting_stops_it_promptly_and_leaves_no_process()
     {
-        var pidFile = Path.Combine(_root, "server.pid");
-        var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--pid-file", pidFile, "--delay-ms", "15000"] });
-        await registry.OnReadyAsync(Workspace(), CancellationToken.None);
-        var pid = await PidFromFileAsync(pidFile);
+        var (registry, events, pid) = await SilentlyStartingAsync();
 
-        var sw = Stopwatch.StartNew();
-        await Task.Run(async () => await registry.OnRemovingAsync(Workspace(), CancellationToken.None));
-        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(8), "the start is cancelled, not waited out");
-        IsRunning(pid).Should().BeFalse();
+        await Task.Run(async () => await registry.OnRemovingAsync(Workspace(), CancellationToken.None)).WaitAsync(HangGuard);
+        var running = IsRunning(pid);
+
+        using var _scope = new AssertionScope();
+        events.Count(StartStoppedEvent).Should().Be(1, "the removal cancelled the start, which never got an answer from its silent server");
+        events.Count(StartFailedEvent).Should().Be(0, "no timeout ended the start: the server is silent for ten minutes and the registry's clock never moves");
+        running.Should().BeFalse("the removal returns only once the cancelled start's process is gone");
     }
 
     [SkippableFact]
@@ -703,6 +723,14 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
 
     private static readonly EventId ProcessTreeNotEndedEvent = new(322);
 
+    /// <summary>
+    /// A stop whose killed server is never seen to finish exiting still returns, and warns naming the process. The seam
+    /// answers at once that the process has not exited, so a stop that takes that answer returns; whether it does is
+    /// told apart from never returning by <see cref="HangGuard"/>, not by how long the SDK's teardown before it took.
+    /// Red, returns: in EndProcessTreeAsync, wait three minutes, past <see cref="HangGuard"/>, once a process is reported still running.
+    /// Red, consulted: in EndProcessTreeAsync, always call the real <c>ServerProcessTree.EndAsync</c>, ignoring the seam.
+    /// Red, the warning: drop the <c>LogProcessTreeNotEnded</c> call from EndProcessTreeAsync.
+    /// </summary>
     [SkippableFact]
     [SupportedOSPlatform("windows")]
     public async Task A_stop_whose_killed_server_never_finishes_exiting_returns_and_warns_naming_its_process()
@@ -714,18 +742,24 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         definition.RunScoped = new() { Args = [.. ServerArgs, "--shutdown-delay-ms", "60000"] }; // only a kill ends it
         var registry = new RunMcpServerRegistry(Servers(definition), () => new FakeProvider(null), loggerFactory, TimeProvider.System);
         _registries.Add(registry);
-        registry.WaitForProcessExit = (_, _) => Task.FromResult(false); // no killed process is ever seen to finish exiting
+        var consulted = 0;
+        registry.WaitForProcessExit = (_, _) => // no killed process is ever seen to finish exiting
+        {
+            Interlocked.Increment(ref consulted);
+            return Task.FromResult(false);
+        };
         var workspace = Workspace() with { Root = Directory.CreateDirectory(Path.Combine(_root, "abandoned-ws")).FullName };
 
         await registry.OnReadyAsync(workspace, CancellationToken.None);
         var pid = await PidAsync(registry);
         await KillWrapperOnlyAsync(pid); // the server outlives the SDK's dispose, so the registry's own kill and wait run
         var removal = registry.OnRemovingAsync(workspace, CancellationToken.None).AsTask();
-        var returned = await Task.WhenAny(removal, Task.Delay(TimeSpan.FromSeconds(20))) == removal;
+        var returned = await Task.WhenAny(removal, Task.Delay(HangGuard)) == removal;
 
         using (new AssertionScope())
         {
             returned.Should().BeTrue("a stop does not hang on a process that never finishes exiting");
+            Volatile.Read(ref consulted).Should().BeGreaterThan(0, "the stop asked whether its killed process had finished exiting, and was told it never did");
             events.Messages(ProcessTreeNotEndedEvent).Should().ContainSingle()
                 .Which.Should().MatchRegex($@"\b{pid}\b", "the warning names the server's process, which may still hold the workspace");
         }
@@ -735,20 +769,60 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         await UntilAsync(() => TryDelete(workspace.Root), "the killed server to finish exiting");
     }
 
+    /// <summary>
+    /// Disposing the registry cancels a start still waiting for its server's first answer, decided as in
+    /// <see cref="Removing_a_run_while_its_server_is_starting_stops_it_promptly_and_leaves_no_process"/>: by how the start
+    /// ended, not by how long the teardown took.
+    /// Red, the start's outcome: drop <c>entry.Stopping.CancelAsync()</c> from StopAsync.
+    /// Red, no process left: in StopAsync, skip the wait for <c>entry.Starting</c>.
+    /// Red, disposed: drop <c>ObjectDisposedException.ThrowIf</c> from TryGetRun, which GetReadyClientAsync looks the run up with.
+    /// </summary>
     [Fact]
     public async Task Disposing_the_registry_while_a_server_is_starting_stops_it_promptly_and_leaves_no_process()
     {
-        var pidFile = Path.Combine(_root, "server.pid");
-        var registry = Registry(runScoped: new() { Args = [.. ServerArgs, "--pid-file", pidFile, "--delay-ms", "15000"] });
-        await registry.OnReadyAsync(Workspace(), CancellationToken.None);
-        var pid = await PidFromFileAsync(pidFile);
+        var (registry, events, pid) = await SilentlyStartingAsync();
 
-        var sw = Stopwatch.StartNew();
-        await Task.Run(async () => await registry.DisposeAsync());
-        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(8), "the start is cancelled, not waited out");
-        IsRunning(pid).Should().BeFalse();
+        await Task.Run(async () => await registry.DisposeAsync()).WaitAsync(HangGuard);
+        var running = IsRunning(pid);
         var act = async () => await registry.GetReadyClientAsync("roslyn", RunId, CancellationToken.None);
+
+        using var _scope = new AssertionScope();
+        events.Count(StartStoppedEvent).Should().Be(1, "the dispose cancelled the start, which never got an answer from its silent server");
+        events.Count(StartFailedEvent).Should().Be(0, "no timeout ended the start: the server is silent for ten minutes and the registry's clock never moves");
+        running.Should().BeFalse("the dispose returns only once the cancelled start's process is gone");
         await act.Should().ThrowAsync<ObjectDisposedException>();
+    }
+
+    private static readonly EventId StartFailedEvent = new(312);
+    private static readonly EventId StartStoppedEvent = new(318);
+
+    /// <summary>
+    /// The bound on a wait whose other outcome is never finishing, or finishing only after the SDK's 60 s initialization
+    /// timeout, which the test then fails on by how it ended: a hang guard, never the claim. Two minutes, because on a
+    /// loaded Windows runner every live stdio session in the test process pins thread-pool threads in blocking pipe
+    /// reads, the pool injects no threads while the CPU is saturated, and work that needs a pool thread, such as a stop's
+    /// teardown, has stalled for 7 to 17 s with nothing wrong.
+    /// </summary>
+    private static readonly TimeSpan HangGuard = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// A registry, with its log recorded, whose run's server has started and stays silent for ten minutes, so its start is
+    /// waiting for the server's first answer. The registry runs on a fake clock that never moves, so its connect timeout
+    /// never ends that start; only a stop, or the SDK's own 60 s initialization timeout, can. Returns the server's pid.
+    /// </summary>
+    private async Task<(RunMcpServerRegistry Registry, RecordingLoggerProvider Events, int Pid)> SilentlyStartingAsync()
+    {
+        var pidFile = Path.Combine(_root, "server.pid");
+        var events = new RecordingLoggerProvider();
+        var loggerFactory = LoggerFactory.Create(b => b.SetMinimumLevel(LogLevel.Trace).AddProvider(events));
+        _loggerFactories.Add(loggerFactory);
+        var definition = McpServerFixture.Definition("--host");
+        definition.RunScoped = new() { Args = [.. ServerArgs, "--pid-file", pidFile, "--delay-ms", "600000"] };
+        var registry = new RunMcpServerRegistry(Servers(definition), () => new FakeProvider(null), loggerFactory, new FakeTimeProvider());
+        _registries.Add(registry);
+
+        await registry.OnReadyAsync(Workspace(), CancellationToken.None);
+        return (registry, events, await PidFromFileAsync(pidFile));
     }
 
     [Fact]
@@ -786,6 +860,11 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         foreach (var registry in _registries)
         {
             await registry.DisposeAsync();
+        }
+
+        foreach (var loggerFactory in _loggerFactories)
+        {
+            loggerFactory.Dispose();
         }
 
         Directory.Delete(_root, recursive: true);
@@ -865,7 +944,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         using var wrapper = Process.GetProcessById(wrapperPid);
         wrapper.ProcessName.Should().Be("cmd", "the SDK starts a stdio server as cmd.exe /c on Windows");
         wrapper.Kill(entireProcessTree: false);
-        await wrapper.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+        await wrapper.WaitForExitAsync().WaitAsync(HangGuard);
         IsRunning(pid).Should().BeTrue("only the wrapper was killed");
     }
 
@@ -904,7 +983,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var sw = Stopwatch.StartNew();
         while (!condition())
         {
-            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(20), $"waiting for {what}");
+            sw.Elapsed.Should().BeLessThan(McpServerFixture.StartupBudget, $"waiting for {what}");
             await Task.Delay(50);
         }
     }

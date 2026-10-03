@@ -117,11 +117,13 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
         File.WriteAllText(Path.Combine(ws.Root, "code.cs"), "x");
         var sha = (await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None)).Value.Sha;
 
-        (await _git.PushAsync(ws, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        var pushed = await _git.PushAsync(ws, CancellationToken.None);
+        pushed.IsSuccess.Should().BeTrue(pushed.IsFailure ? pushed.Error.Message : "");
         // TryHeadOf, not HeadOf (fix round 1, ruling 5): a wrong-branch push leaves ws.Branch entirely absent on
         // the remote, and HeadOf throws on that; TryHeadOf returns null, landing the red on Should().Be(sha).
         _remote!.TryHeadOf(ws.Branch).Should().Be(sha);
-        (await _git.PushAsync(ws, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        var repeated = await _git.PushAsync(ws, CancellationToken.None);
+        repeated.IsSuccess.Should().BeTrue(repeated.IsFailure ? repeated.Error.Message : "");
         _remote!.TryHeadOf(ws.Branch).Should().Be(sha);
     }
 
@@ -165,7 +167,8 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
         var spyOptions = new GitWorkspaceOptions { DataRoot = _options.DataRoot, GitExecutable = spyGit, CommandTimeout = _options.CommandTimeout };
         var git = new GitCliRunWorkspaceGit(spyOptions, NullLogger<GitCliRunWorkspaceGit>.Instance);
 
-        (await git.PushAsync(ws, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        var pushed = await git.PushAsync(ws, CancellationToken.None);
+        pushed.IsSuccess.Should().BeTrue(pushed.IsFailure ? pushed.Error.Message : "");
 
         var pushLine = File.ReadAllLines(captureFile).Single(l => l.Split(' ', StringSplitOptions.RemoveEmptyEntries).Contains("push", StringComparer.Ordinal));
         var refspec = $"refs/heads/{ws.Branch}:refs/heads/{ws.Branch}";
@@ -189,7 +192,8 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
         var configPath = Path.Combine(MirrorOf(), "config");
         var configBefore = File.ReadAllText(configPath);
 
-        (await _git.PushAsync(ws, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        var pushed = await _git.PushAsync(ws, CancellationToken.None);
+        pushed.IsSuccess.Should().BeTrue(pushed.IsFailure ? pushed.Error.Message : "");
 
         File.ReadAllText(configPath).Should().Be(configBefore);
     }
@@ -298,7 +302,7 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
 
         var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, ExcludePaths = ["AGENT.m[d]"] }, CancellationToken.None);
 
-        committed.IsSuccess.Should().BeTrue();
+        committed.IsSuccess.Should().BeTrue(committed.IsFailure ? committed.Error.Message : "");
         committed.Value.Created.Should().BeTrue("'AGENT.m[d]' must be taken as a literal, nonexistent filename, never as a glob that excludes AGENT.md");
         FilesIn(ws, committed.Value.Sha).Should().Contain("AGENT.md");
     }
@@ -333,7 +337,7 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
 
         var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, Paths = ["STANDING.md", "code.cs"] }, CancellationToken.None);
 
-        committed.IsSuccess.Should().BeTrue();
+        committed.IsSuccess.Should().BeTrue(committed.IsFailure ? committed.Error.Message : "");
         committed.Value.Created.Should().BeTrue();
         FilesIn(ws, committed.Value.Sha).Should().Equal("code.cs");
     }
@@ -348,7 +352,7 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
 
         var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, Paths = ["STANDING.md", "old.txt"] }, CancellationToken.None);
 
-        committed.IsSuccess.Should().BeTrue();
+        committed.IsSuccess.Should().BeTrue(committed.IsFailure ? committed.Error.Message : "");
         committed.Value.Created.Should().BeTrue();
         // Only the deletion is committed; other.cs, outside the list, is not.
         FilesIn(ws, committed.Value.Sha).Should().Equal("old.txt");
@@ -370,7 +374,7 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
 
         var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, Paths = ["STANDING.md", "missing/NOTES.md"] }, CancellationToken.None);
 
-        committed.IsSuccess.Should().BeTrue();
+        committed.IsSuccess.Should().BeTrue(committed.IsFailure ? committed.Error.Message : "");
         committed.Value.Created.Should().BeFalse("an all-absent path list must never widen to staging the whole worktree");
         Git(ws.Root, "rev-parse HEAD").Should().Be(headBefore);
         Git(ws.Root, "diff --name-only").Should().Be("tracked.txt", "the tracked change stays in the worktree, unstaged and uncommitted");
@@ -392,7 +396,7 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
 
         var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, Paths = [] }, CancellationToken.None);
 
-        committed.IsSuccess.Should().BeTrue();
+        committed.IsSuccess.Should().BeTrue(committed.IsFailure ? committed.Error.Message : "");
         committed.Value.Created.Should().BeFalse("an explicit empty path list names nothing; only null stages everything");
         committed.Value.Sha.Should().Be(headBefore);
         Git(ws.Root, "rev-parse HEAD").Should().Be(headBefore);
@@ -537,7 +541,7 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
 
         var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor, CommitStagedIndex = true }, CancellationToken.None);
 
-        committed.IsSuccess.Should().BeTrue();
+        committed.IsSuccess.Should().BeTrue(committed.IsFailure ? committed.Error.Message : "");
         using var _ = new AssertionScope();
         committed.Value.Created.Should().BeFalse("nothing was staged, and CommitStagedIndex stages nothing from disk");
         committed.Value.Sha.Should().Be(headBefore);
@@ -643,7 +647,7 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
 
         var pushed = await git.PushAsync(ws, CancellationToken.None);
 
-        pushed.IsSuccess.Should().BeTrue();
+        pushed.IsSuccess.Should().BeTrue(pushed.IsFailure ? pushed.Error.Message : "");
         var captured = File.ReadAllText(captureFile);
         captured.Should().NotContain(token, "the credential value must never reach argv");
         captured.Should().NotContain(
@@ -771,11 +775,7 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
         }
 
         var scriptPath = Path.Combine(dir, "fsmonitor-" + Guid.NewGuid().ToString("N") + ".sh");
-        File.WriteAllText(scriptPath, "#!/bin/sh\n" + $"touch \"{markerPath}\"\n" + "exit 1\n");
-        File.SetUnixFileMode(scriptPath,
-            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
-            UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
-            UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
+        ExecutableScript.Write(scriptPath, "#!/bin/sh\n" + $"touch \"{markerPath}\"\n" + "exit 1\n");
         return scriptPath;
     }
 
@@ -1021,7 +1021,8 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
     {
         var ws = await WorktreeAsync();
         File.WriteAllText(Path.Combine(ws.Root, "code.cs"), "class C {}");
-        (await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        var committed = await _git.CommitAsync(ws, new GitCommitRequest { Message = "m", Author = TestAuthor }, CancellationToken.None);
+        committed.IsSuccess.Should().BeTrue(committed.IsFailure ? committed.Error.Message : "");
         PlantWorktreeConfigExploit(ws.Root, MirrorOf(), _temp);
 
         var pushed = await _git.PushAsync(ws, CancellationToken.None);
@@ -1234,14 +1235,7 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
     private static void WriteHookScript(string hooksDir, string hookName, string markerPath)
     {
         var hookPath = Path.Combine(hooksDir, hookName);
-        File.WriteAllText(hookPath, $"#!/bin/sh\ntouch \"{markerPath}\"\n");
-        if (!OperatingSystem.IsWindows())
-        {
-            File.SetUnixFileMode(hookPath,
-                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
-                UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
-                UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
-        }
+        ExecutableScript.Write(hookPath, $"#!/bin/sh\ntouch \"{markerPath}\"\n");
     }
 
     /// <summary>Writes a "spy" git executable that appends its full argv to <paramref name="captureFile"/> and then runs the real git with the same arguments.</summary>
@@ -1259,14 +1253,10 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
         }
 
         var scriptPath = Path.Combine(dir, "spy-git-" + Guid.NewGuid().ToString("N") + ".sh");
-        File.WriteAllText(scriptPath,
+        ExecutableScript.Write(scriptPath,
             "#!/bin/sh\n" +
             $"echo \"$@\" >> \"{captureFile}\"\n" +
             "exec git \"$@\"\n");
-        File.SetUnixFileMode(scriptPath,
-            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
-            UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
-            UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
         return scriptPath;
     }
 
@@ -1296,7 +1286,7 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
         }
 
         var scriptPath = Path.Combine(dir, "echo-git-" + Guid.NewGuid().ToString("N") + ".sh");
-        File.WriteAllText(scriptPath,
+        ExecutableScript.Write(scriptPath,
             "#!/bin/sh\n" +
             "case \" $* \" in\n" +
             "  *\" push \"*)\n" +
@@ -1305,10 +1295,6 @@ public sealed class GitCliRunWorkspaceGitTests : IDisposable
             "    ;;\n" +
             "esac\n" +
             "exec git \"$@\"\n");
-        File.SetUnixFileMode(scriptPath,
-            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
-            UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
-            UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
         return scriptPath;
     }
 

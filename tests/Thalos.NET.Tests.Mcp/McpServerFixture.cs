@@ -11,12 +11,21 @@ public sealed class McpServerFixture : IAsyncLifetime, IAsyncDisposable
         AppContext.BaseDirectory.Replace("Thalos.NET.Tests.Mcp", "Thalos.NET.Tests.McpServer", StringComparison.Ordinal),
         "Thalos.NET.Tests.McpServer.dll"));
 
+    /// <summary>
+    /// How long a test gives the stdio test server it starts to come up: the connect timeout of <see cref="Definition"/>
+    /// and the readiness waits of the tests that start their own server. Generous on purpose: each start is a cold
+    /// <c>dotnet</c> process, which on a loaded CI runner, or under the synthetic load used to reproduce CI failures, has
+    /// taken over 30 s, and how fast a server starts is not what those tests are about. A test whose subject is a
+    /// timeout sets its own.
+    /// </summary>
+    public static readonly TimeSpan StartupBudget = TimeSpan.FromMinutes(2);
+
     public static McpServerDefinition Definition(params string[] extraArgs) => new()
     {
         Type = "stdio",
         Command = "dotnet",
         Args = [ServerDll, .. extraArgs],
-        Timeout = TimeSpan.FromSeconds(30),
+        Timeout = StartupBudget,
         ShutdownTimeout = TimeSpan.FromSeconds(1),
     };
 

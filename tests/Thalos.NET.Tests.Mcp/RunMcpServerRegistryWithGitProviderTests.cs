@@ -49,7 +49,7 @@ public sealed class RunMcpServerRegistryWithGitProviderTests : IAsyncLifetime
         var runId = Guid.NewGuid();
         var created = await provider.CreateAsync(new RunWorkspaceRequest(runId, "sandbox", remote.Url, "main", $"manufacture/{runId}", null), CancellationToken.None);
         created.IsSuccess.Should().BeTrue(created.IsFailure ? created.Error.ToString() : "");
-        (await registry.WaitAllReadyAsync(runId, TimeSpan.FromSeconds(30), CancellationToken.None)).IsSuccess.Should().BeTrue();
+        (await registry.WaitAllReadyAsync(runId, McpServerFixture.StartupBudget, CancellationToken.None)).ShouldBeReady();
         int pid;
         await using (var lease = (await registry.GetReadyClientAsync("roslyn", runId, CancellationToken.None)).Value)
         {
@@ -133,7 +133,7 @@ public sealed class RunMcpServerRegistryWithGitProviderTests : IAsyncLifetime
         var runId = Guid.NewGuid();
         var created = await provider.CreateAsync(new RunWorkspaceRequest(runId, "sandbox", remote.Url, "main", $"manufacture/{runId}", null), CancellationToken.None);
         created.IsSuccess.Should().BeTrue(created.IsFailure ? created.Error.ToString() : "");
-        (await registry.WaitAllReadyAsync(runId, TimeSpan.FromSeconds(30), CancellationToken.None)).IsSuccess.Should().BeTrue();
+        (await registry.WaitAllReadyAsync(runId, McpServerFixture.StartupBudget, CancellationToken.None)).ShouldBeReady();
         await using var lease = (await registry.GetReadyClientAsync("roslyn", runId, CancellationToken.None)).Value;
         return (runId, int.Parse(((TextContentBlock)(await lease.Client.CallToolAsync("pid")).Content.Single()).Text, CultureInfo.InvariantCulture));
     }
@@ -228,6 +228,6 @@ public sealed class RunMcpServerRegistryWithGitProviderTests : IAsyncLifetime
         public ValueTask OnReadyAsync(RunWorkspace workspace, CancellationToken ct) => ValueTask.CompletedTask;
 
         public async ValueTask OnRemovingAsync(RunWorkspace workspace, CancellationToken ct) =>
-            Result = await Registry!.WaitAllReadyAsync(workspace.RunId, TimeSpan.FromSeconds(30), CancellationToken.None);
+            Result = await Registry!.WaitAllReadyAsync(workspace.RunId, McpServerFixture.StartupBudget, CancellationToken.None);
     }
 }

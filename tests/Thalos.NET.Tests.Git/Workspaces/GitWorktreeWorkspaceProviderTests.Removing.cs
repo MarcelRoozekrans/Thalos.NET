@@ -130,7 +130,7 @@ public sealed partial class GitWorktreeWorkspaceProviderTests
         }
 
         var scriptPath = Path.Combine(dir, "failing-remove-git-" + Guid.NewGuid().ToString("N") + ".sh");
-        File.WriteAllText(scriptPath,
+        ExecutableScript.Write(scriptPath,
             "#!/bin/sh\n" +
             "case \"$*\" in\n" +
             "  *\"worktree remove\"*)\n" +
@@ -139,10 +139,6 @@ public sealed partial class GitWorktreeWorkspaceProviderTests
             "    ;;\n" +
             "esac\n" +
             "exec git \"$@\"\n");
-        File.SetUnixFileMode(scriptPath,
-            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
-            UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
-            UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
         return scriptPath;
     }
 }

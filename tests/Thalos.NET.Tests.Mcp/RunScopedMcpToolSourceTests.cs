@@ -103,21 +103,29 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
 
     // ---------- a run's server that is missing, slow or failed ----------
 
+    /// <summary>
+    /// A call to a run whose server is still starting is refused when its ready wait is over, not when the server answers.
+    /// The ready wait runs on a fake clock that this test moves on, and the server stays silent for ten minutes, so the
+    /// only thing that can end the call with this refusal is the ready wait; a call that waited for the start instead
+    /// would end only when the SDK's 60 s initialization timeout fails the start, with a different refusal. Decided by the
+    /// clock and the refusal, not by wall time: on a loaded Windows runner other tests' stdio sessions pin thread-pool
+    /// threads in blocking pipe reads, which has delayed a correct refusal past a 10 s bound.
+    /// Red: in RunScopedMcpToolSource.InvokeForRunAsync, pass <c>ct</c> to GetReadyClientAsync instead of the token linked
+    /// to the ready timeout.
+    /// </summary>
     [Fact]
     public async Task A_server_still_starting_past_the_ready_wait_is_refused_within_that_wait()
     {
-        var runScoped = RunScoped("--delay-ms", "20000");
+        var runScoped = RunScoped("--delay-ms", "600000");
         runScoped.ReadyWaitTimeout = TimeSpan.FromSeconds(1);
-        var (tool, registry) = await RoutedToolAsync("args", runScoped);
-        await registry.OnReadyAsync(Workspace(RunId), CancellationToken.None); // starts, and stays silent for 20 s
+        var clock = new FakeTimeProvider();
+        var (tool, registry) = await RoutedToolAsync("args", runScoped, clock: clock);
+        await registry.OnReadyAsync(Workspace(RunId), CancellationToken.None); // starts, and stays silent for ten minutes
 
         using var _turn = BeginTurn(RunCaller(RunId));
-        var sw = Stopwatch.StartNew();
-        var result = await InvokeAsync(tool);
+        var result = await PastTheReadyWaitAsync(InvokeAsync(tool), clock);
 
-        using var _scope = new AssertionScope();
         result.Should().Be($"error: run tool server 'roslyn' is not available for this run: its server was not ready within {TimeSpan.FromSeconds(1)}.");
-        sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(10), "the wait is bounded by readyWaitTimeout, not by the server's start");
     }
 
     [Fact]
@@ -128,10 +136,10 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         runScoped.Reload = "restart";
         var (tool, registry) = await RoutedToolAsync("args", runScoped);
         await registry.OnReadyAsync(Workspace(RunId), CancellationToken.None); // the first start fails and writes the marker
-        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None); // reports the failed first start
+        var waited = await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None); // reports the failed first start
         if (waited.IsFailure)
         {
-            waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None); // starts it again
+            waited = await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None); // starts it again
         }
 
         waited.IsSuccess.Should().BeTrue("the second start finds the marker");
@@ -151,11 +159,19 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         second.Should().NotContain("--host");
     }
 
+    /// <summary>
+    /// A call past its call timeout is cancelled and reported, and its lease released. Both timeouts run on a fake clock:
+    /// the call timeout fires when this test moves the clock, and the ready wait of the call after the reload never does,
+    /// so that call waits for the reload however slow the machine is. The slow call takes ten minutes, so only the timeout
+    /// can end it within the hang guard; that the timeout ended it is shown by the report, not by wall time.
+    /// Red, the report: in RunScopedMcpToolSource.InvokeForRunAsync, link only <c>ct</c> into the call's token, not the
+    /// call timeout; the call then outlives the hang guard.
+    /// Red, the lease released: in InvokeForRunAsync, hold the lease without <c>await using</c>; the reload then waits
+    /// for it forever.
+    /// </summary>
     [Fact]
     public async Task A_call_past_the_call_timeout_is_cancelled_and_its_lease_is_released()
     {
-        // Both timeouts run on a fake clock: the call timeout fires when this test moves the clock, and the ready wait of
-        // the call after the reload never does, so that call waits for the reload however slow the machine is.
         var log = Path.Combine(_root, "calls.log");
         var runScoped = RunScoped("--call-log", log);
         runScoped.Reload = "tool:reload_count";
@@ -166,16 +182,12 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         var reloadCount = await ToolAsync(slow, "reload_count");
 
         using var _turn = BeginTurn(RunCaller(RunId));
-        var sw = Stopwatch.StartNew();
-        var call = InvokeAsync(slow, Args("ms", 20000));
+        var call = InvokeAsync(slow, Args("ms", 600000));
         await UntilAsync(() => CallLog.Read(log).Contains("slow", StringComparison.Ordinal), "the slow call to reach the run's server"); // its call timeout has started
         clock.Advance(runScoped.CallTimeout);
-        var timedOut = await call.WaitAsync(TimeSpan.FromSeconds(15));
-        var elapsed = sw.Elapsed;
+        var timedOut = await call.WaitAsync(HangGuard);
 
-        using var _scope = new AssertionScope();
         timedOut.Should().Be($"error: run tool server 'roslyn' did not answer 'slow' within {TimeSpan.FromSeconds(1)} for this run; the call was cancelled.");
-        elapsed.Should().BeLessThan(TimeSpan.FromSeconds(15), "the call is cancelled at the timeout, not reported after the server's 20 s");
 
         registry.OnFilesChanged(RunId, ["a.cs"]); // the reload waits for every lease: a leaked one would hold it forever
         (await InvokeAsync(reloadCount).WaitAsync(TimeSpan.FromSeconds(30))).Should().Be("2", "the reload ran, so the timed-out call's lease was released");
@@ -221,19 +233,31 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         await UntilAsync(() => CallLog.Read(log).Contains("slow", StringComparison.Ordinal), "the slow call to reach the run's server");
         await registry.OnRemovingAsync(Workspace(RunId), CancellationToken.None);
 
-        (await inFlight.WaitAsync(TimeSpan.FromSeconds(15))).Should().Be("error: run tool server 'roslyn' stopped during 'slow' for this run; the call did not complete.");
+        (await inFlight.WaitAsync(HangGuard)).Should().Be("error: run tool server 'roslyn' stopped during 'slow' for this run; the call did not complete.");
     }
 
+    /// <summary>
+    /// A call written to a server that is being stopped, and so never answered, ends with the server's session, not at
+    /// its call timeout. The call timeout runs on a fake clock that never moves, so a call that waited for it would never
+    /// end, and the hang guard, not a wall-clock bound, catches that; how long the session took to close is not asserted.
+    /// The window in which the call is written but never answered is held open by construction, not by timing: the
+    /// client's dispose waits up to <see cref="HangGuard"/> for the server to exit before it kills it, and the server
+    /// exits only once this test creates its <c>--exit-when</c> file, after the server has logged the routed call.
+    /// Red, the outcome: in RunScopedMcpToolSource.CallUntilSessionEndsAsync, await the invocation alone, without the
+    /// race against the client's completion; the call then outlives the hang guard.
+    /// Red, the window open: give the server a 1 ms shutdown timeout instead of <see cref="HangGuard"/>; the dispose
+    /// then kills it at once, and the session has closed by the time the server's log shows the routed call.
+    /// </summary>
     [Fact]
     public async Task A_call_sent_while_its_run_server_is_being_stopped_gets_an_error_result_instead_of_waiting_out_the_call_timeout()
     {
         var log = Path.Combine(_root, "calls.log");
-        var runScoped = RunScoped("--call-log", log);
+        var exit = Path.Combine(_root, "server-may-exit");
+        var runScoped = RunScoped("--call-log", log, "--exit-when", exit);
         runScoped.CallTimeout = TimeSpan.FromSeconds(30);
-        // Disposing the client keeps the server's stdin open this long before it kills the server: the window in which a
-        // request is written but never answered.
-        var (args, registry) = await RoutedToolAsync("args", runScoped, ready: [RunId], shutdownTimeout: TimeSpan.FromSeconds(5));
-        var slow = await ToolAsync(args, "slow");
+        // Disposing the client keeps the server's stdin open until the server exits or this long has passed: the window
+        // in which a request is written but never answered, which ends only when this test creates the exit file.
+        var (slow, registry) = await RoutedToolAsync("slow", runScoped, ready: [RunId], shutdownTimeout: HangGuard, clock: new FakeTimeProvider());
         var client = await ClientAsync(registry); // the client the routed calls below are handed
 
         // A probe call in flight on the same client: disposing the client cancels its pending requests, which ends the probe.
@@ -242,38 +266,45 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
             using var _turn = BeginTurn(RunCaller(RunId));
             return await InvokeAsync(slow, Args("ms", 60000));
         });
-        await UntilAsync(() => CallLog.Read(log).Contains("slow", StringComparison.Ordinal), "the probe call to reach the run's server");
+        await UntilAsync(() => Array.FindAll(CallLog.Lines(log), l => string.Equals(l, "slow", StringComparison.Ordinal)).Length == 1, "the probe call to reach the run's server");
 
         // Runs inside the routed call, after its lease is taken and before its request is sent: the removal has begun,
-        // the client has cancelled its pending requests, which ends the probe, and has finished closing its session,
-        // which takes milliseconds; the server's stdin stays open for the 5 s shutdown timeout after that.
+        // and the client has cancelled its pending requests, which ends the probe. The server's stdin stays open until
+        // it exits, which it does only once this test creates the exit file.
         Task? removal = null;
-        var windowOpen = false;
         var hook = new RunWhenSerialized(() =>
         {
             removal = registry.OnRemovingAsync(Workspace(RunId), CancellationToken.None).AsTask();
-            probe.Wait(TimeSpan.FromSeconds(15));
-            Thread.Sleep(TimeSpan.FromSeconds(1));
-            windowOpen = !client.Completion.IsCompleted;
+            probe.Wait(HangGuard); // a hang guard: the hook runs synchronously inside the routed call
         });
 
-        var sw = Stopwatch.StartNew();
-        string outcome;
+        Task<string> routed;
         using (BeginTurn(RunCaller(RunId)))
         {
-            outcome = await InvokeAsync(args, new AIFunctionArguments(StringComparer.Ordinal) { ["hook"] = hook });
+            routed = InvokeAsync(slow, new AIFunctionArguments(StringComparer.Ordinal) { ["ms"] = 600000, ["hook"] = hook });
         }
 
-        var elapsed = sw.Elapsed;
+        await UntilAsync(() => Array.FindAll(CallLog.Lines(log), l => string.Equals(l, "slow", StringComparison.Ordinal)).Length == 2, "the routed call to reach the run's server, which never answers it");
+        var windowOpen = !client.Completion.IsCompleted; // the server has the routed call, and the session is still open
+        await File.WriteAllTextAsync(exit, ""); // the window closes only now: the server exits and its session ends
+        var outcome = await routed.WaitAsync(HangGuard);
         await removal!;
 
         using var _scope = new AssertionScope();
         hook.Ran.Should().BeTrue("the hook began the removal inside the routed call");
         probe.IsCompleted.Should().BeTrue("the removal had cancelled the client's pending requests before the call was sent");
-        windowOpen.Should().BeTrue("the call was sent while the server's stdin was still open, so it was written but never answered");
-        outcome.Should().Be("error: run tool server 'roslyn' stopped during 'args' for this run; the call did not complete.", "a server the removal stopped is reported as stopped, not as exited");
-        elapsed.Should().BeLessThan(TimeSpan.FromSeconds(15), "the call ends with its server's session, not at the call timeout");
+        windowOpen.Should().BeTrue("the server received the routed call while its session was still open, so the call was written but never answered");
+        outcome.Should().Be("error: run tool server 'roslyn' stopped during 'slow' for this run; the call did not complete.", "a server the removal stopped is reported as stopped, not as exited");
     }
+
+    /// <summary>
+    /// The bound on a wait whose other outcome is never finishing, or finishing only after ten minutes: a hang guard,
+    /// never the claim, which each test shows by how the call was reported. Two minutes, because on a loaded Windows
+    /// runner every live stdio session in the test process pins thread-pool threads in blocking pipe reads, the pool
+    /// injects no threads while the CPU is saturated, and a call cut off by a stop or a kill has taken over 15 s to be
+    /// reported with nothing wrong.
+    /// </summary>
+    private static readonly TimeSpan HangGuard = TimeSpan.FromMinutes(2);
 
     [Fact]
     public async Task A_reload_slower_than_the_ready_wait_still_completes_and_a_later_call_is_served()
@@ -378,7 +409,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         await UntilAsync(() => CallLog.Read(log).Contains("slow", StringComparison.Ordinal), "the slow call to reach the run's server");
         await KillAsync(pid);
 
-        var result = await inFlight.WaitAsync(TimeSpan.FromSeconds(15));
+        var result = await inFlight.WaitAsync(HangGuard);
 
         using var _scope = new AssertionScope();
         result.Should().Be("error: run tool server 'roslyn' is not available for this run: its server exited during 'slow'.", "a server that died is refused, not reported as stopped");
@@ -392,7 +423,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         var pid = await KillAndWaitForSessionEndAsync(registry);
 
         var refused = await RoutedOrThrownAsync(args);
-        var waited = await registry.WaitAllReadyAsync(RunId, TimeSpan.FromSeconds(30), CancellationToken.None);
+        var waited = await registry.WaitAllReadyAsync(RunId, McpServerFixture.StartupBudget, CancellationToken.None);
         var restartedPid = await RoutedOrThrownAsync(pidTool);
         var served = await RoutedOrThrownAsync(args);
 
@@ -635,7 +666,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         foreach (var runId in ready ?? [])
         {
             await registry.OnReadyAsync(Workspace(runId), CancellationToken.None);
-            var waited = await registry.WaitAllReadyAsync(runId, TimeSpan.FromSeconds(30), CancellationToken.None);
+            var waited = await registry.WaitAllReadyAsync(runId, McpServerFixture.StartupBudget, CancellationToken.None);
             waited.IsSuccess.Should().BeTrue(waited.IsFailure ? waited.Error.Message : "");
         }
 
@@ -713,7 +744,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         {
             var pid = int.Parse(((TextContentBlock)(await lease.Value.Client.CallToolAsync("pid")).Content.Single()).Text, CultureInfo.InvariantCulture);
             await KillAsync(pid);
-            await lease.Value.Client.Completion.WaitAsync(TimeSpan.FromSeconds(15));
+            await lease.Value.Client.Completion.WaitAsync(HangGuard);
             return pid;
         }
     }
@@ -722,7 +753,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
     {
         using var process = Process.GetProcessById(pid);
         process.Kill(entireProcessTree: true);
-        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15));
+        await process.WaitForExitAsync().WaitAsync(HangGuard);
     }
 
     private static bool IsRunning(int pid)
@@ -741,19 +772,19 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
     /// <summary>
     /// The outcome of <paramref name="call"/>, a routed call that waits on a reload held at its gate, once its ready wait
     /// is over: <paramref name="clock"/> is moved on until the call gives up. The call's timer starts when the call
-    /// does, which this test cannot observe, so the clock is moved on again until it has.
+    /// does, which this test cannot observe, so the clock is moved on again until it has. <see cref="HangGuard"/> only
+    /// stops the loop for a call that never gives up, which then fails here with a <see cref="TimeoutException"/>.
     /// </summary>
     private static async Task<string> PastTheReadyWaitAsync(Task<string> call, FakeTimeProvider clock)
     {
         var sw = Stopwatch.StartNew();
-        while (!call.IsCompleted)
+        while (!call.IsCompleted && sw.Elapsed < HangGuard)
         {
-            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(30), "the call gives up once its ready wait is over");
             clock.Advance(TimeSpan.FromSeconds(1));
             await Task.WhenAny(call, Task.Delay(50));
         }
 
-        return await call;
+        return await call.WaitAsync(TimeSpan.Zero); // throws TimeoutException if the call outlived the hang guard
     }
 
     private static async Task UntilAsync(Func<bool> condition, string what)
@@ -761,7 +792,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         var sw = Stopwatch.StartNew();
         while (!condition())
         {
-            sw.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(20), $"waiting for {what}");
+            sw.Elapsed.Should().BeLessThan(McpServerFixture.StartupBudget, $"waiting for {what}");
             await Task.Delay(50);
         }
     }
