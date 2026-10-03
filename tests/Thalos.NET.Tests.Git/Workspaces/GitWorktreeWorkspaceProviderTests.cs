@@ -318,7 +318,7 @@ public sealed partial class GitWorktreeWorkspaceProviderTests : IDisposable
             new RunWorkspaceRequest(runId, "sandbox", remote.Url, "main", $"manufacture/{runId}", null),
             CancellationToken.None);
 
-        result.IsSuccess.Should().BeTrue();
+        result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error.Message : "");
         var captured = File.ReadAllText(captureFile);
         captured.Should().NotContain(token, "the credential value must never reach argv");
         captured.Should().NotContain(
@@ -794,14 +794,7 @@ public sealed partial class GitWorktreeWorkspaceProviderTests : IDisposable
     private static void WriteHookScript(string hooksDir, string markerPath)
     {
         var hookPath = Path.Combine(hooksDir, "post-checkout");
-        File.WriteAllText(hookPath, $"#!/bin/sh\ntouch \"{markerPath}\"\n");
-        if (!OperatingSystem.IsWindows())
-        {
-            File.SetUnixFileMode(hookPath,
-                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
-                UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
-                UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
-        }
+        ExecutableScript.Write(hookPath, $"#!/bin/sh\ntouch \"{markerPath}\"\n");
     }
 
     /// <summary>
@@ -840,7 +833,7 @@ public sealed partial class GitWorktreeWorkspaceProviderTests : IDisposable
         }
 
         var scriptPath = Path.Combine(dir, "hanging-clone-git-" + Guid.NewGuid().ToString("N") + ".sh");
-        File.WriteAllText(scriptPath,
+        ExecutableScript.Write(scriptPath,
             "#!/bin/sh\n" +
             "case \"$*\" in\n" +
             "  *--version*)\n" +
@@ -856,10 +849,6 @@ public sealed partial class GitWorktreeWorkspaceProviderTests : IDisposable
             "    ;;\n" +
             "esac\n" +
             "exec git \"$@\"\n");
-        File.SetUnixFileMode(scriptPath,
-            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
-            UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
-            UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
         return scriptPath;
     }
 
@@ -891,7 +880,7 @@ public sealed partial class GitWorktreeWorkspaceProviderTests : IDisposable
         }
 
         var scriptPath = Path.Combine(dir, "hanging-revparse-git-" + Guid.NewGuid().ToString("N") + ".sh");
-        File.WriteAllText(scriptPath,
+        ExecutableScript.Write(scriptPath,
             "#!/bin/sh\n" +
             "case \"$*\" in\n" +
             "  *--version*)\n" +
@@ -903,10 +892,6 @@ public sealed partial class GitWorktreeWorkspaceProviderTests : IDisposable
             "    ;;\n" +
             "esac\n" +
             "exec git \"$@\"\n");
-        File.SetUnixFileMode(scriptPath,
-            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
-            UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
-            UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
         return scriptPath;
     }
 
@@ -941,7 +926,7 @@ public sealed partial class GitWorktreeWorkspaceProviderTests : IDisposable
         }
 
         var scriptPath = Path.Combine(dir, "dubious-ownership-git-" + Guid.NewGuid().ToString("N") + ".sh");
-        File.WriteAllText(scriptPath,
+        ExecutableScript.Write(scriptPath,
             "#!/bin/sh\n" +
             "case \"$*\" in\n" +
             "  *--version*)\n" +
@@ -954,10 +939,6 @@ public sealed partial class GitWorktreeWorkspaceProviderTests : IDisposable
             "    ;;\n" +
             "esac\n" +
             "exec git \"$@\"\n");
-        File.SetUnixFileMode(scriptPath,
-            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
-            UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
-            UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
         return scriptPath;
     }
 
@@ -985,7 +966,7 @@ public sealed partial class GitWorktreeWorkspaceProviderTests : IDisposable
         }
 
         var scriptPath = Path.Combine(dir, "fake-git-" + Guid.NewGuid().ToString("N") + ".sh");
-        File.WriteAllText(scriptPath,
+        ExecutableScript.Write(scriptPath,
             "#!/bin/sh\n" +
             "case \"$*\" in\n" +
             "  *--version*)\n" +
@@ -994,10 +975,6 @@ public sealed partial class GitWorktreeWorkspaceProviderTests : IDisposable
             "    ;;\n" +
             "esac\n" +
             "exec git \"$@\"\n");
-        File.SetUnixFileMode(scriptPath,
-            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
-            UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
-            UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
         return scriptPath;
     }
 
@@ -1020,14 +997,10 @@ public sealed partial class GitWorktreeWorkspaceProviderTests : IDisposable
         }
 
         var scriptPath = Path.Combine(dir, "spy-git-" + Guid.NewGuid().ToString("N") + ".sh");
-        File.WriteAllText(scriptPath,
+        ExecutableScript.Write(scriptPath,
             "#!/bin/sh\n" +
             $"echo \"$@\" >> \"{captureFile}\"\n" +
             "exec git \"$@\"\n");
-        File.SetUnixFileMode(scriptPath,
-            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
-            UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
-            UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
         return scriptPath;
     }
 

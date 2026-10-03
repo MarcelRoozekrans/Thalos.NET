@@ -317,14 +317,10 @@ public sealed class GitMirrorStoreTests : IDisposable
         }
 
         var scriptPath = Path.Combine(dir, "spy-git-" + Guid.NewGuid().ToString("N") + ".sh");
-        File.WriteAllText(scriptPath,
+        ExecutableScript.Write(scriptPath,
             "#!/bin/sh\n" +
             $"echo \"$@\" >> \"{captureFile}\"\n" +
             "exec git \"$@\"\n");
-        File.SetUnixFileMode(scriptPath,
-            UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute |
-            UnixFileMode.GroupRead | UnixFileMode.GroupExecute |
-            UnixFileMode.OtherRead | UnixFileMode.OtherExecute);
         return scriptPath;
     }
 }
