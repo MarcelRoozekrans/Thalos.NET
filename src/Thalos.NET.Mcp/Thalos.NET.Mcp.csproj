@@ -18,5 +18,7 @@
     <InternalsVisibleTo Include="Thalos.NET.Sandbox" />
     <!-- RemoteRunToolSourceTests reach the local schema source, to prove its functions cannot act. -->
     <InternalsVisibleTo Include="Thalos.NET.Tests.Sandbox" />
+    <!-- HostHarness connects its MCP client with HttpMcpClientOptions, as the product's HTTP clients do. -->
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Sandbox.Host" />
   </ItemGroup>
 </Project>

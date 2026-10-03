@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Time.Testing;
 using ModelContextProtocol.Client;
 using Thalos.Mcp;
 using Thalos.Runtime;
@@ -171,7 +172,7 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
     /// taken for a server that predates <c>server/discover</c> and sent <c>initialize</c>, a fallback that can fail the
     /// connection outright. Red 1: in ConnectAsync, pass <c>clientOptions: null</c> to McpClient.CreateAsync; the probe
     /// then times out, and the sandbox also receives initialize and notifications/initialized. Red 2: in
-    /// HttpMcpClientOptions.Create, pin ProtocolVersion to 2026-07-28 instead of lifting the probe timeout; the timed-out
+    /// HttpMcpClientOptions.Create, pin ProtocolVersion to 2026-07-28 in place of the two infinite timeouts; the timed-out
     /// probe then fails the connection, and the call is answered that no connection could be made.
     /// </summary>
     [Fact]
@@ -193,6 +194,56 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
         using var _ = new AssertionScope();
         result.Should().Be("error: this turn has no run workspace", "the sandbox, which imported nothing, answered the call");
         a.Requests.Should().Equal("/mcp/workspace server/discover", "/mcp/workspace call:list_files");
+    }
+
+    /// <summary>
+    /// With no handshake timeout of the SDK's own, ConnectTimeout alone bounds a connection whose handshake is never
+    /// answered: once the source's clock passes it, the call is answered that no connection could be made. The clock is
+    /// a FakeTimeProvider advanced only after the handshake arrived, so the bound is the source's own and nothing else's.
+    /// Red: in ConnectAsync, link only the disposal token, not timeout.Token; the call then never ends and the 20-second
+    /// guard fails.
+    /// </summary>
+    [Fact]
+    public async Task A_handshake_that_is_never_answered_ends_at_the_connect_timeout()
+    {
+        var a = await SandboxAsync("a");
+        var arrived = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        a.OnHandshake = ct =>
+        {
+            arrived.TrySetResult();
+            return Task.Delay(Timeout.InfiniteTimeSpan, ct);
+        };
+        var clock = new FakeTimeProvider(DateTimeOffset.UtcNow);
+        await using var sp = Services(new RemoteRunToolOptions { ConnectTimeout = TimeSpan.FromSeconds(2) }, clock: clock);
+
+        var call = CallAsAsync(sp, a.RunId, "workspace", "list_files");
+        await arrived.Task.WaitAsync(TimeSpan.FromMinutes(1));
+        clock.Advance(TimeSpan.FromSeconds(2));
+        var result = await call.WaitAsync(TimeSpan.FromSeconds(20));
+
+        result.Should().Be("error: the run's sandbox did not answer 'list_files': no connection could be made to it.");
+    }
+
+    /// <summary>
+    /// A sandbox endpoint that predates server/discover, answering it with a JSON-RPC error or a bare 400 or 404, is
+    /// still connected through the initialize fallback. Red: in HttpMcpClientOptions.Create, pin ProtocolVersion to
+    /// 2026-07-28; the fallback is then refused and the call is answered that no connection could be made.
+    /// </summary>
+    [Theory]
+    [InlineData("rpc-error")]
+    [InlineData("400")]
+    [InlineData("404")]
+    public async Task An_endpoint_that_predates_server_discover_is_connected_through_initialize(string answer)
+    {
+        var a = await SandboxAsync("a");
+        a.AnswerDiscover = LoopbackSandbox.PredatingDiscover(answer);
+        await using var sp = Services();
+
+        var result = await CallAsAsync(sp, a.RunId, "workspace", "list_files");
+
+        using var _ = new AssertionScope();
+        result.Should().Be("error: this turn has no run workspace", "the sandbox, which imported nothing, answered the call");
+        a.Requests.Take(2).Should().Equal("/mcp/workspace server/discover", "/mcp/workspace initialize");
     }
 
     /// <summary>
@@ -852,9 +903,15 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
         RemoteRunToolOptions? options = null,
         IRunToolCallObserver[]? observers = null,
         IRunWorkspaceProvider? provider = null,
-        RunScopedMcpDefinition? roslyn = null)
+        RunScopedMcpDefinition? roslyn = null,
+        TimeProvider? clock = null)
     {
         var services = new ServiceCollection();
+        if (clock is not null)
+        {
+            services.AddSingleton(clock);
+        }
+
         services.AddSingleton<ILoggerFactory>(_ => LoggerFactory.Create(b => b.SetMinimumLevel(LogLevel.Trace).AddProvider(new CapturingLoggers(_logLines)))); // owned by the container
         services.AddSingleton<IRunToolEndpointResolver>(_resolver);
         if (options is not null)
