@@ -27,7 +27,7 @@
     <PackageVersion Include="Rag.NET.VectorStores.PgVector" Version="1.0.0" />
     <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.12" />
     <!-- container tests -->
-    <PackageVersion Include="Testcontainers.PostgreSql" Version="4.15.0" />
+    <PackageVersion Include="Testcontainers.PostgreSql" Version="4.16.0" />
     <PackageVersion Include="Npgsql" Version="10.0.3" />
     <!-- native git backend — confined to Thalos.NET.Git.LibGit2Sharp -->
     <PackageVersion Include="LibGit2Sharp" Version="0.32.0" />
