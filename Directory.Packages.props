@@ -20,7 +20,7 @@
     <PackageVersion Include="ModelContextProtocol" Version="2.2.0" />
     <!-- the sandbox host's MCP-over-HTTP routes — confined to Thalos.NET.Sandbox.Host -->
     <PackageVersion Include="ModelContextProtocol.AspNetCore" Version="2.2.0" />
-    <PackageVersion Include="Anthropic" Version="12.54.0" />
+    <PackageVersion Include="Anthropic" Version="12.54.1" />
     <PackageVersion Include="AI.Sentinel" Version="2.3.1" />
     <!-- Rag.NET (net10.0 only) — confined to Thalos.NET.Memory.RagNet -->
     <PackageVersion Include="Rag.NET.Abstractions" Version="1.0.0" />
