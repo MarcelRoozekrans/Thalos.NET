@@ -14,7 +14,7 @@ namespace Thalos.Workflow;
 /// <para>
 /// <b>One trace per step.</b> Each node dispatch is its own trace, rooted at a <see cref="DispatchSpanName"/> span of kind
 /// <see cref="ActivityKind.Consumer"/>, tagged <see cref="RunIdTag"/> and linked to the context that started the run,
-/// <c>WorkflowRun.TraceParent</c>. A run waits at its gate and can outlive a restart, so no span stays open for
+/// <see cref="WorkflowRun.TraceParent"/>. A run waits at its gate and can outlive a restart, so no span stays open for
 /// its whole life.
 /// </para>
 /// <para>

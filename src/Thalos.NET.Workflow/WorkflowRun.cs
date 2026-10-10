@@ -101,4 +101,12 @@ public sealed record WorkflowRun
     /// <see cref="WorkflowStatus.Succeeded"/>.
     /// </summary>
     public RunResume? LastResume { get; init; }
+
+    /// <summary>
+    /// The W3C <c>traceparent</c> of the <see cref="System.Diagnostics.Activity"/> that was current when
+    /// <see cref="IWorkflowStore.StartAsync"/> wrote this run, or <see langword="null"/> when none was, or when the run
+    /// predates 0.15.0. <see cref="WorkflowNodeDispatcher"/> links each dispatch span to it. Written once, at the same
+    /// <c>INSERT</c> that creates the run, like <see cref="StartedBy"/>, and never updated.
+    /// </summary>
+    public string? TraceParent { get; init; }
 }

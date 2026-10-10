@@ -37,7 +37,8 @@ public interface IWorkflowStore
     /// seeds <see cref="WorkflowRun.Variables"/> so the run starts holding the work item it exists to perform, and
     /// <see cref="WorkflowStartRequest.Manifest"/> is written onto the created run as <see cref="WorkflowRun.Manifest"/>
     /// and <see cref="WorkflowStartRequest.StartedBy"/> onto it as <see cref="WorkflowRun.StartedBy"/> — both once,
-    /// at the same <c>INSERT</c> that creates the row. Nothing after that ever updates either: not
+    /// at the same <c>INSERT</c> that creates the row. It records the W3C traceparent of the current activity, if any, as
+    /// <see cref="WorkflowRun.TraceParent"/> at that same <c>INSERT</c>. Nothing after that ever updates either: not
     /// <see cref="CompleteNodeAsync"/>, not <see cref="ResumeAsync"/>, not any other member of this interface. A
     /// run found through the idempotent path — <see cref="WorkflowStartRequest.CorrelationKey"/> already in use —
     /// keeps whatever manifest and starter its original call gave it; <paramref name="request"/>'s own
