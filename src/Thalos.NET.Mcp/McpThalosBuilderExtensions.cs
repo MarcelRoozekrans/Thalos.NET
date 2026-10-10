@@ -183,6 +183,9 @@ public static class McpThalosBuilderExtensions
     /// resolves endpoints also observes this source.</param>
     private static void RegisterRemote(IServiceCollection services, string name, Func<IServiceProvider, RemoteRunToolSource> factory)
     {
+        // 0.15.0: every remote run tool source times its calls on thalos.workflow.run_tool.duration. One observer per
+        // container, however many sources: TryAddEnumerable skips the repeat.
+        services.TryAddEnumerable(ServiceDescriptor.Singleton<IRunToolCallObserver, RunToolDurationObserver>());
         services.AddKeyedSingleton(name, (sp, _) => factory(sp));
         services.AddSingleton<IToolSource>(sp => sp.GetRequiredKeyedService<RemoteRunToolSource>(name));
         services.AddSingleton<IRunWorkspaceObserver>(sp => sp.GetRequiredKeyedService<RemoteRunToolSource>(name));
