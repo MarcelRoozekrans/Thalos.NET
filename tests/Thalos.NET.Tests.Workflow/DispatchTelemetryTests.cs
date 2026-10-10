@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Diagnostics.Metrics;
 using Thalos;
 using Thalos.Skills;
 using Thalos.Testing;
@@ -29,6 +30,18 @@ public sealed class DispatchTelemetryTests
           dt-stop: { terminal: failed }
         """;
 
+    private const string ListenerYaml = """
+        process: dt-listener-process
+        version: 1
+        nodes:
+          dt-listener-publish:
+            action: dt-action
+            outcomes: [published, failed]
+            branch: { published: dt-done, failed: dt-stop }
+          dt-done: { terminal: succeeded }
+          dt-stop: { terminal: failed }
+        """;
+
     private const string GateYaml = """
         process: dt-gated
         version: 1
@@ -39,7 +52,8 @@ public sealed class DispatchTelemetryTests
 
     /// <summary>
     /// Red: start the span with <c>ActivityKind.Internal</c>; the kind assertion fails.
-    /// Red: drop any one of the four SetTag calls in <c>StartDispatchActivity</c>; its assertion fails.
+    /// Red: drop the run-id SetTag in <c>StartDispatchActivity</c>; <c>DispatchOf</c> finds no span, because it matches on that tag.
+    /// Red: drop any one of the other three SetTag calls; its assertion fails.
     /// Red: map <c>DispatchOutcome.Completed</c> to <c>"failed"</c> in <c>OutcomeName</c>; the outcome assertion fails.
     /// Red: set Error status on every outcome; the status assertion fails.
     /// </summary>
@@ -53,7 +67,6 @@ public sealed class DispatchTelemetryTests
 
         var span = DispatchOf(capture, arranged.Message.RunId);
         span.Kind.Should().Be(ActivityKind.Consumer);
-        span.GetTagItem(WorkflowTelemetry.RunIdTag).Should().Be(arranged.Message.RunId);
         span.GetTagItem(WorkflowTelemetry.NodeTag).Should().Be("dt-publish");
         span.GetTagItem(WorkflowTelemetry.SeqTag).Should().Be(arranged.Message.Seq);
         span.GetTagItem(WorkflowTelemetry.ProcessTag).Should().Be("dt-process");
@@ -161,8 +174,72 @@ public sealed class DispatchTelemetryTests
     }
 
     /// <summary>
+    /// A listener that throws on the success path's measurement is not "an exception escaped the node": the node is
+    /// already decided, so the duration must not be recorded a second time on the exception path.
+    /// Red: put the success-path <c>EndDispatch</c> back inside the inner try; the throw reaches the catch, which records
+    /// again, and the count is 2.
+    /// </summary>
+    [Fact]
+    public async Task A_listener_that_throws_on_the_duration_does_not_record_it_twice()
+    {
+        var arranged = await ArrangeAsync(ListenerYaml, "dt-listener-process", "dt-listener-publish", RecordingAction.Returning(Action, new HostActionResult("published", Vars())));
+        var seen = 0;
+        using var listener = new MeterListener
+        {
+            InstrumentPublished = (instrument, l) =>
+            {
+                if (string.Equals(instrument.Meter.Name, WorkflowTelemetry.SourceName, StringComparison.Ordinal)
+                    && string.Equals(instrument.Name, WorkflowTelemetry.DispatchDurationName, StringComparison.Ordinal))
+                {
+                    l.EnableMeasurementEvents(instrument);
+                }
+            },
+        };
+        listener.SetMeasurementEventCallback<double>((_, _, tags, _) =>
+        {
+            foreach (var tag in tags)
+            {
+                if (string.Equals(tag.Key, WorkflowTelemetry.NodeTag, StringComparison.Ordinal) && Equals(tag.Value, "dt-listener-publish")
+                    && Interlocked.Increment(ref seen) == 1)
+                {
+                    throw new InvalidOperationException("zqx listener");
+                }
+            }
+        });
+        listener.Start();
+
+        var dispatch = async () => await arranged.Dispatcher.DispatchAsync(arranged.Message, CancellationToken.None);
+        await dispatch.Should().ThrowAsync<InvalidOperationException>().WithMessage("zqx listener");
+
+        Volatile.Read(ref seen).Should().Be(1);
+    }
+
+    /// <summary>
+    /// Each step is its own trace by construction, even when the caller has an ambient activity.
+    /// Red: remove <c>Activity.Current = null</c> from <c>StartDispatchActivity</c>; the span joins the ambient trace,
+    /// so the trace-id and the no-parent assertions fail.
+    /// Red, for the last assertion: make <c>DispatchAsync</c> a non-async wrapper that clears <c>Activity.Current</c>
+    /// before awaiting the traced body; the caller loses its ambient activity.
+    /// </summary>
+    [Fact]
+    public async Task A_dispatch_under_an_ambient_activity_is_still_its_own_trace_and_leaves_the_ambient_current()
+    {
+        var arranged = await ArrangeAsync(ActionYaml, "dt-process", "dt-publish", RecordingAction.Returning(Action, new HostActionResult("published", Vars())));
+        using var capture = new TelemetryCapture(WorkflowTelemetry.SourceName);
+        using var ambient = new Activity("zqx-ambient").SetIdFormat(ActivityIdFormat.W3C).Start();
+
+        await arranged.Dispatcher.DispatchAsync(arranged.Message, CancellationToken.None);
+
+        var span = DispatchOf(capture, arranged.Message.RunId);
+        span.TraceId.Should().NotBe(ambient.TraceId);
+        span.ParentSpanId.Should().Be(default(ActivitySpanId));
+        Activity.Current.Should().BeSameAs(ambient);
+    }
+
+    /// <summary>
     /// Red: pass <c>links: null</c> to <c>StartActivity</c>; the span has no link.
-    /// Red: parent the span on the stored context instead of linking it; the link count is 0 and the trace id is the origin's.
+    /// Red: parent the span on the stored context instead of linking it; the link count is 0.
+    /// Red: pass <c>parentContext: links is null ? default : links[0].Context</c>, keeping the link; the trace id is the origin's.
     /// </summary>
     [Fact]
     public async Task A_run_started_under_an_activity_links_its_dispatch_to_that_context()

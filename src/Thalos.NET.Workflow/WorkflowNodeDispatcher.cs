@@ -51,7 +51,8 @@ namespace Thalos.Workflow;
 /// <para>
 /// <b>Telemetry.</b> Each dispatch is a
 /// <c>thalos.workflow.dispatch</c> span, the parent of everything the node does: its agent turn, its host action, and the
-/// store writes it makes. The span is linked to <see cref="WorkflowRun.TraceParent"/>, and every dispatch is timed on
+/// store writes it makes. The span is the root of its own trace, even when the caller has an ambient activity. It is
+/// linked to <see cref="WorkflowRun.TraceParent"/>, and every dispatch is timed on
 /// <c>thalos.workflow.dispatch.duration</c>. With nothing listening, no span is created and the dispatch behaves exactly as
 /// before.
 /// </para>
@@ -145,18 +146,25 @@ public sealed partial class WorkflowNodeDispatcher(
         Activity? activity = null;
         try
         {
-            // Loaded before the span starts: the span's link to the run's start comes from the run, and a link can
-            // only be given to StartActivity on net8.0, which has no Activity.AddLink.
-            var run = await _store.FindAsync(message.RunId, ct).ConfigureAwait(false);
-            activity = StartDispatchActivity(message, run);
-            var outcome = await DispatchRunAsync(message, run, ct).ConfigureAwait(false);
+            DispatchOutcome outcome;
+            try
+            {
+                // Loaded before the span starts: the span's link to the run's start comes from the run, and a link can
+                // only be given to StartActivity on net8.0, which has no Activity.AddLink.
+                var run = await _store.FindAsync(message.RunId, ct).ConfigureAwait(false);
+                activity = StartDispatchActivity(message, run);
+                outcome = await DispatchRunAsync(message, run, ct).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                // Not a node outcome: the outbox retries this delivery. The span and the duration say what escaped.
+                EndDispatch(activity, message.Node, started, ex);
+                throw;
+            }
+
+            // Outside the inner try: the node's outcome is decided, so nothing past this point is "an exception escaped
+            // the node", and each path records the duration exactly once.
             EndDispatch(activity, message.Node, started, outcome);
-        }
-        catch (Exception ex)
-        {
-            // Not a node outcome: the outbox retries this delivery. The span and the duration say what escaped.
-            EndDispatch(activity, message.Node, started, ex);
-            throw;
         }
         finally
         {
@@ -784,6 +792,11 @@ public sealed partial class WorkflowNodeDispatcher(
     /// Starts this dispatch's span, or returns null when nothing listens to <see cref="WorkflowTelemetry.ActivitySource"/>.
     /// The run's start is linked, not parented: a run waits at its gate and can outlive a restart, so each step is its own
     /// trace. A run with no traceparent, or one that does not parse, is dispatched without a link.
+    /// <para>
+    /// The span is always a root. Any ambient <see cref="Activity.Current"/> is cleared before it starts, so a caller's
+    /// activity cannot pull the step into its trace. The clear cannot leak to that caller: <see cref="DispatchAsync"/> is
+    /// async, so its changes to <see cref="Activity.Current"/> stay inside it.
+    /// </para>
     /// </summary>
     private static Activity? StartDispatchActivity(WorkflowDispatchMessage message, WorkflowRun? run)
     {
@@ -797,6 +810,8 @@ public sealed partial class WorkflowNodeDispatcher(
             ? new[] { new ActivityLink(origin) }
             : null;
 
+        // Each step is its own trace by construction, not because the caller happens to have no ambient activity.
+        Activity.Current = null;
         var activity = source.StartActivity(WorkflowTelemetry.DispatchSpanName, ActivityKind.Consumer, parentContext: default, tags: null, links: links);
         if (activity is null)
         {
@@ -864,7 +879,10 @@ public sealed partial class WorkflowNodeDispatcher(
         Skipped,
     }
 
-    /// <summary>Records <paramref name="errorMessage"/> as the run's failure, the one node-level failure path, and reports it.</summary>
+    /// <summary>
+    /// Records <paramref name="errorMessage"/> as the run's failure and reports it: the failure path for the dispatch
+    /// methods that report an outcome; the two resolvers fail the run themselves and return null.
+    /// </summary>
     private async ValueTask<DispatchOutcome> FailRunAsync(Guid runId, string errorMessage, CancellationToken ct)
     {
         await _store.FailAsync(runId, errorMessage, ct).ConfigureAwait(false);
