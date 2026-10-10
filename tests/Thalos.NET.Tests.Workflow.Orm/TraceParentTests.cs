@@ -17,14 +17,16 @@ public sealed class TraceParentTests(PostgresFixture pg) : IAsyncLifetime
     public async Task InitializeAsync()
     {
         await pg.ResetAsync();
-        _store = new OrmWorkflowStore(new WorkflowOrmOptions { ConnectionString = pg.ConnectionString }, new OrmProcessDefinitionStore(new WorkflowOrmOptions { ConnectionString = pg.ConnectionString }));
+        var options = new WorkflowOrmOptions { ConnectionString = pg.ConnectionString };
+        _store = new OrmWorkflowStore(options, new OrmProcessDefinitionStore(options));
     }
 
     public Task DisposeAsync() => Task.CompletedTask;
 
     /// <summary>
     /// Red: leave <c>trace_parent</c> out of the INSERT; the run reads back null.
-    /// Red: leave it out of <c>SelectRunSql</c> or <c>ReadRow</c>; the run reads back null.
+    /// Red: leave it out of <c>ReadRow</c>; the run reads back null.
+    /// Red: leave it out of <c>SelectRunSql</c>; <c>ReadRow</c> throws <see cref="IndexOutOfRangeException"/>.
     /// </summary>
     [Fact]
     public async Task A_run_started_under_an_activity_reads_back_its_traceparent()
@@ -57,9 +59,11 @@ public sealed class TraceParentTests(PostgresFixture pg) : IAsyncLifetime
     }
 
     /// <summary>
-    /// The idempotent path starts nothing, so it keeps the first start's traceparent. Red: add
-    /// <c>DO UPDATE SET trace_parent = EXCLUDED.trace_parent</c> to the INSERT's conflict clause; the conflict then returns the new row's id, so the second start's
-    /// <c>Value.Should().Be(runId)</c> assertion fails first.
+    /// The idempotent path starts nothing, so it keeps the first start's traceparent.
+    /// Red: add <c>DO UPDATE SET trace_parent = EXCLUDED.trace_parent</c> to the conflict clause. The second
+    /// StartAsync then takes the new-run path and throws an Npgsql 23503 FK violation.
+    /// Red: run <c>UPDATE workflow_run SET trace_parent = @tp</c> in <c>LookupExistingRunIdAsync</c>; the final
+    /// <c>TraceParent.Should().Be(first)</c> assertion fails.
     /// </summary>
     [Fact]
     public async Task A_repeated_start_keeps_the_first_traceparent()
@@ -78,6 +82,23 @@ public sealed class TraceParentTests(PostgresFixture pg) : IAsyncLifetime
         }
 
         (await _store.FindAsync(runId, CancellationToken.None))!.TraceParent.Should().Be(first);
+    }
+
+    /// <summary>
+    /// Only a W3C id is a traceparent; a hierarchical id would not parse as one downstream.
+    /// Red: drop <c>{ IdFormat: ActivityIdFormat.W3C }</c> from <c>CurrentTraceParent</c>; the run reads back the
+    /// hierarchical id.
+    /// </summary>
+    [Fact]
+    public async Task A_run_started_under_a_hierarchical_activity_has_no_traceparent()
+    {
+        Guid runId;
+        using (new Activity("probe-hierarchical").SetIdFormat(ActivityIdFormat.Hierarchical).Start())
+        {
+            runId = (await _store.StartAsync(Request("c-hierarchical"), CancellationToken.None)).Value;
+        }
+
+        (await _store.FindAsync(runId, CancellationToken.None))!.TraceParent.Should().BeNull();
     }
 
     private static WorkflowStartRequest Request(string correlationKey) => new()
