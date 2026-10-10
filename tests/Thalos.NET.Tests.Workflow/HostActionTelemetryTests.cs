@@ -36,7 +36,8 @@ public sealed class HostActionTelemetryTests
     /// Red: drop the <c>{type}</c> token from the span name; the name assertion fails.
     /// Red: drop either <c>[TraceTag]</c> on <c>run</c>; its assertion fails.
     /// Red: drop the <c>[TraceTag]</c> on <c>node</c>; the action assertion fails.
-    /// Red: start the dispatch span after the action runs; the parent assertion fails.
+    /// Red: clear <c>Activity.Current</c> after the dispatch span starts and before the action runs; the parent
+    /// assertion fails.
     /// </summary>
     [Fact]
     public async Task A_host_action_is_a_span_under_its_dispatch_tagged_with_run_node_and_action()
@@ -112,6 +113,29 @@ public sealed class HostActionTelemetryTests
         capture.MeasurementsOf(WorkflowTelemetry.HostActionDurationName)
             .Single(m => Action.Equals(m.Tags.GetValueOrDefault(WorkflowTelemetry.HostActionTag)))
             .Value.Should().BeGreaterThanOrEqualTo(40);
+    }
+
+    /// <summary>
+    /// Red: remove the already-wrapped skip in the dispatcher's <c>Instrument</c>; a second proxy nests around the first,
+    /// so there are two host-action spans and the outer one is named after the proxy type.
+    /// Red: the same removal records a second <c>host_action.duration</c> measurement; the span assertion
+    /// fails first, so the measurement assertion is only reached once that one passes.
+    /// </summary>
+    [Fact]
+    public async Task An_already_wrapped_action_is_not_wrapped_again()
+    {
+        var wrapped = new WorkflowHostActionInstrumented(RecordingAction.Returning(Action, new HostActionResult("published", Vars())));
+        var (dispatcher, message) = await ArrangeAsync(wrapped);
+        using var capture = new TelemetryCapture(WorkflowTelemetry.SourceName);
+
+        await dispatcher.DispatchAsync(message, CancellationToken.None);
+
+        var runSpans = capture.Spans.Where(s => s.OperationName.StartsWith("thalos.workflow.host_action.", StringComparison.Ordinal)
+            && message.RunId.Equals(s.GetTagItem(WorkflowTelemetry.RunIdTag))).ToList();
+        runSpans.Should().ContainSingle().Which.OperationName.Should().Be(SpanName);
+        capture.MeasurementsOf(WorkflowTelemetry.HostActionDurationName)
+            .Where(m => Action.Equals(m.Tags.GetValueOrDefault(WorkflowTelemetry.HostActionTag)))
+            .Should().ContainSingle();
     }
 
     private static async Task<(WorkflowNodeDispatcher Dispatcher, WorkflowDispatchMessage Message)> ArrangeAsync(IWorkflowHostAction action)

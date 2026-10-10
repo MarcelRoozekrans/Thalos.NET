@@ -890,11 +890,14 @@ public sealed partial class WorkflowNodeDispatcher(
         return DispatchOutcome.Failed;
     }
 
-    /// <summary>Wraps each validated action in its generated telemetry proxy, keeping the ordinal index.</summary>
+    /// <summary>
+    /// Wraps each validated action in its generated telemetry proxy, keeping the ordinal index. An action a host
+    /// already wrapped is kept as it is, so it is not traced twice.
+    /// </summary>
     private static FrozenDictionary<string, IWorkflowHostAction> Instrument(FrozenDictionary<string, IWorkflowHostAction> actions) =>
         actions.ToFrozenDictionary(
             pair => pair.Key,
-            pair => (IWorkflowHostAction)new WorkflowHostActionInstrumented(pair.Value),
+            pair => pair.Value is WorkflowHostActionInstrumented ? pair.Value : new WorkflowHostActionInstrumented(pair.Value),
             StringComparer.Ordinal);
 
     [LoggerMessage(
