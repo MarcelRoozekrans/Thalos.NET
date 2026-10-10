@@ -9,7 +9,7 @@ and `AddWorkflowOrm` registers two of them — this page is the other five.
 
 | Piece | Registered by `AddWorkflowOrm`? | What it does |
 | --- | --- | --- |
-| `IWorkflowStore` and `IWorkflowRunHistory` (one `OrmWorkflowStore`) | yes | Writes the run, the event log and the next dispatch in one transaction; reads the event log back, with each completed node's token usage |
+| `IWorkflowStore` (the instrumented proxy) and `IWorkflowRunHistory` (both over one `OrmWorkflowStore`) | yes | Writes the run, the event log and the next dispatch in one transaction; reads the event log back, with each completed node's token usage |
 | `IProcessDefinitionStore` (`OrmProcessDefinitionStore`, cached) | yes | The one answer to "what is this process, at this version" |
 | `IWorkflowReferenceResolver` | **no** | Turns an `agent:`/`skill:`/`action:` name in the YAML into something that exists |
 | `WorkflowNodeDispatcher` | **no** | Runs one node's agent turn and persists the transition |
@@ -43,7 +43,7 @@ services.AddThalos(thalos => thalos
     .AddWorkflowOrm(o => o.ConnectionString = configuration.GetConnectionString("workflow")!));
 ```
 
-`AddWorkflowOrm` registers `IWorkflowStore` and `IWorkflowRunHistory` (one `OrmWorkflowStore` singleton behind both), `IProcessDefinitionStore` (an `OrmProcessDefinitionStore` behind
+`AddWorkflowOrm` registers `IWorkflowStore` (resolved through the generated `WorkflowStoreInstrumented` proxy over one `OrmWorkflowStore` singleton) and `IWorkflowRunHistory` (the concrete store), `IProcessDefinitionStore` (an `OrmProcessDefinitionStore` behind
 `CachingProcessDefinitionStore`), the options object, and — while `WorkflowOrmOptions.EnsureSchemaOnStartup` is
 left on, which it is by default — a hosted service that applies the outbox and workflow migrations before the host
 accepts work. Read [`release.md`](release.md#schema-migrations-and-rolling-deploys) before leaving that on across a
@@ -831,28 +831,30 @@ tracing.AddSource(ThalosTelemetry.SourceName, ThalosTelemetry.WorkflowSourceName
 metrics.AddMeter(ThalosTelemetry.SourceName, ThalosTelemetry.WorkflowSourceName);
 ```
 
-`WorkflowTelemetry.SourceName` is the same string as `ThalosTelemetry.WorkflowSourceName`. With no listener, nothing is
-allocated and dispatch behaves as before.
+`WorkflowTelemetry.SourceName` is the same string as `ThalosTelemetry.WorkflowSourceName`. With no listener, no spans, tags or measurements are created, and dispatch behaves as before.
 
 ### Spans
 
 | Span | Kind | Tags | Error status |
 |---|---|---|---|
 | `thalos.workflow.dispatch` | Consumer | `thalos.run.id`, `thalos.node`, `thalos.seq`, `thalos.run.process`, and either `thalos.outcome` or `error.type` | The node failed (`thalos.outcome` = `failed`), or an exception escaped (`error.type` is set, no outcome) |
-| `thalos.workflow.host_action.{type}` | Internal | `thalos.run.id`, `thalos.node`, `thalos.host_action` | The action returned a failed result, or threw |
-| `thalos.workflow.store.start` | Internal | `thalos.run.process`, `thalos.run.id` (on success) | `StartAsync` returned a failed result, or threw |
-| `thalos.workflow.store.resume` | Internal | `thalos.run.id`, `thalos.signal` | `ResumeAsync` returned a failed result, or threw |
-| `thalos.workflow.store.retry` | Internal | `thalos.run.id`, `thalos.seq` (the expected seq) | `RetryFailedNodeAsync` returned a failed result, or threw |
-| `thalos.workflow.store.fail` | Internal | `thalos.run.id` | The call threw |
-| `thalos.workflow.store.fail_stranded` | Internal | `thalos.run.id`, `thalos.seq`, `thalos.stranded.failed` | The call threw |
-| `thalos.workflow.store.cancel` | Internal | `thalos.run.id` | The call threw |
+| `thalos.workflow.host_action.{type}` | Internal | `thalos.run.id`, `thalos.node`, `thalos.host_action` | The action returned a failed result, or threw (`error.type` is set when it threw) |
+| `thalos.workflow.store.start` | Internal | `thalos.run.process`, `thalos.run.id` (on success) | `StartAsync` returned a failed result, or threw (`error.type` is set when it threw) |
+| `thalos.workflow.store.resume` | Internal | `thalos.run.id`, `thalos.signal` | `ResumeAsync` returned a failed result, or threw (`error.type` is set when it threw) |
+| `thalos.workflow.store.retry` | Internal | `thalos.run.id`, `thalos.seq` (the expected seq) | `RetryFailedNodeAsync` returned a failed result, or threw (`error.type` is set when it threw) |
+| `thalos.workflow.store.fail` | Internal | `thalos.run.id` | The call threw (`error.type` is set) |
+| `thalos.workflow.store.fail_stranded` | Internal | `thalos.run.id`, `thalos.seq`, `thalos.stranded.failed` | The call threw (`error.type` is set) |
+| `thalos.workflow.store.cancel` | Internal | `thalos.run.id` | The call threw (`error.type` is set) |
 
 - The dispatch span is a **new root every time**: the dispatcher clears the ambient `Activity` before starting it, so
   each step is its own trace, whatever the outbox poller or consumer was doing. It is **linked** to the context that
   started the run (see below), and `thalos.outcome` is `completed`, `failed`, `awaiting` or `skipped` (a stale or
   missing run).
-- `{type}` in the host action span is the action's registered name. The dispatcher wraps each `IWorkflowHostAction`
+- `{type}` in the host action span is the action's CLR type name, not its registered name: `OpenPullRequestAction` gives
+  `thalos.workflow.host_action.OpenPullRequestAction`, and a decorator gives the decorator's type name. Group on the
+  `thalos.host_action` tag, which carries the registered name. The dispatcher wraps each `IWorkflowHostAction`
   in a generated `WorkflowHostActionInstrumented` proxy, and skips an action that is already wrapped.
+- `thalos.signal` on the resume span is the signal that was requested, tagged before the store validates it.
 - The store spans come from a generated `WorkflowStoreInstrumented` proxy that `AddWorkflowOrm` registers as
   `IWorkflowStore`. `FindAsync`, `FindStrandedAsync` and `CompleteNodeAsync` are not traced: two are reads, and the
   dispatch span already times the third. Reason, error-message and payload arguments are never tagged.
@@ -864,7 +866,7 @@ allocated and dispatch behaves as before.
 | `thalos.workflow.runs.started` | Counter | `{run}` | `thalos.run.process` |
 | `thalos.workflow.runs.finished` | Counter | `{run}` | `thalos.run.process`, `thalos.run.state` (`Succeeded`, `Failed`, `Cancelled`) |
 | `thalos.workflow.dispatch.duration` | Histogram | `ms` | `thalos.node`, and `thalos.outcome` or `error.type` |
-| `thalos.workflow.host_action.duration` | Histogram | `ms` | `thalos.host_action` |
+| `thalos.workflow.host_action.duration` | Histogram | `ms` | `thalos.host_action`, or `error.type` when the action threw |
 | `thalos.workflow.run_tool.duration` | Histogram | `ms` | `thalos.tool.source`, `thalos.tool` |
 
 - `runs.started` and `runs.finished` are counted in the Orm store after the commit. A retried run counts as finished

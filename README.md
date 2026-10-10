@@ -636,7 +636,7 @@ same version — the timestamp suffix guarantees a fresh one). If a stale packag
   `ThalosTelemetry.WorkflowSourceName` (`thalos.workflow`) covers the workflow engine.
 - `thalos.workflow` has a dispatch span per node, host action and store spans, run start and finish counters, and
   dispatch, host action and run tool duration histograms.
-- Subscribe with `AddSource` and `AddMeter` for both names. With no listener, nothing is allocated.
+- Subscribe with `AddSource` and `AddMeter` for both names. With no listener, no spans, tags or measurements are created, and dispatch behaves as before.
 - Tags carry ids, names, outcomes and error types only, never content, and a failure sets Error status with no
   description.
 - Span and metric tables, and the link from a dispatch to the request that started the run:

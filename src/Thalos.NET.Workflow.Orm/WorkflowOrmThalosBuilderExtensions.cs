@@ -5,8 +5,9 @@ using Microsoft.Extensions.Hosting;
 namespace Thalos.Workflow.Orm;
 
 /// <summary>
-/// Registers the ZeroAlloc.ORM-backed workflow store, as both <see cref="IWorkflowStore"/> and
-/// <see cref="IWorkflowRunHistory"/>, and <see cref="IProcessDefinitionStore"/> on a
+/// Registers the ZeroAlloc.ORM-backed workflow store: <see cref="IWorkflowStore"/> resolves through the generated
+/// <c>WorkflowStoreInstrumented</c> proxy over it, and <see cref="IWorkflowRunHistory"/> is the concrete store. Also
+/// registers <see cref="IProcessDefinitionStore"/> on a
 /// <see cref="ThalosBuilder"/>. Both stores share the same <see cref="WorkflowOrmOptions"/> registration, and the
 /// workflow store resolves process definitions through the very <see cref="IProcessDefinitionStore"/> registered
 /// here, so syncing a definition is what makes it runnable. Both open a connection per call — one
@@ -30,8 +31,8 @@ namespace Thalos.Workflow.Orm;
 public static class WorkflowOrmThalosBuilderExtensions
 {
     /// <summary>
-    /// Uses <see cref="OrmWorkflowStore"/> as the <see cref="IWorkflowStore"/> and the
-    /// <see cref="IWorkflowRunHistory"/> — one singleton instance behind both — and
+    /// Uses <see cref="OrmWorkflowStore"/> as the <see cref="IWorkflowRunHistory"/>, and the generated
+    /// <c>WorkflowStoreInstrumented</c> proxy over that one singleton as the <see cref="IWorkflowStore"/>, and
     /// <see cref="OrmProcessDefinitionStore"/> as the <see cref="IProcessDefinitionStore"/>, replacing any
     /// earlier registration of any of them. Does not register <see cref="ProcessDefinitionSync"/> or an
     /// <c>IProcessDefinitionSource</c> — syncing is an engine-level concern and where definitions come from is
