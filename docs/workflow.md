@@ -821,6 +821,74 @@ file (`AGENT.md`) is the host's to add there. Entries may not contain `;`, which
   but not an execution path: filters and drivers are config, and git's config stays isolated. The publish side runs
   git on the host, with its own isolation directory.
 
+## 12. Telemetry
+
+The workflow engine emits spans and metrics under one name, `thalos.workflow`. The agent runtime's own source,
+`thalos`, is separate. Subscribe to both:
+
+```csharp
+tracing.AddSource(ThalosTelemetry.SourceName, ThalosTelemetry.WorkflowSourceName);
+metrics.AddMeter(ThalosTelemetry.SourceName, ThalosTelemetry.WorkflowSourceName);
+```
+
+`WorkflowTelemetry.SourceName` is the same string as `ThalosTelemetry.WorkflowSourceName`. With no listener, nothing is
+allocated and dispatch behaves as before.
+
+### Spans
+
+| Span | Kind | Tags | Error status |
+|---|---|---|---|
+| `thalos.workflow.dispatch` | Consumer | `thalos.run.id`, `thalos.node`, `thalos.seq`, `thalos.run.process`, and either `thalos.outcome` or `error.type` | The node failed (`thalos.outcome` = `failed`), or an exception escaped (`error.type` is set, no outcome) |
+| `thalos.workflow.host_action.{type}` | Internal | `thalos.run.id`, `thalos.node`, `thalos.host_action` | The action returned a failed result, or threw |
+| `thalos.workflow.store.start` | Internal | `thalos.run.process`, `thalos.run.id` (on success) | `StartAsync` returned a failed result, or threw |
+| `thalos.workflow.store.resume` | Internal | `thalos.run.id`, `thalos.signal` | `ResumeAsync` returned a failed result, or threw |
+| `thalos.workflow.store.retry` | Internal | `thalos.run.id`, `thalos.seq` (the expected seq) | `RetryFailedNodeAsync` returned a failed result, or threw |
+| `thalos.workflow.store.fail` | Internal | `thalos.run.id` | The call threw |
+| `thalos.workflow.store.fail_stranded` | Internal | `thalos.run.id`, `thalos.seq`, `thalos.stranded.failed` | The call threw |
+| `thalos.workflow.store.cancel` | Internal | `thalos.run.id` | The call threw |
+
+- The dispatch span is a **new root every time**: the dispatcher clears the ambient `Activity` before starting it, so
+  each step is its own trace, whatever the outbox poller or consumer was doing. It is **linked** to the context that
+  started the run (see below), and `thalos.outcome` is `completed`, `failed`, `awaiting` or `skipped` (a stale or
+  missing run).
+- `{type}` in the host action span is the action's registered name. The dispatcher wraps each `IWorkflowHostAction`
+  in a generated `WorkflowHostActionInstrumented` proxy, and skips an action that is already wrapped.
+- The store spans come from a generated `WorkflowStoreInstrumented` proxy that `AddWorkflowOrm` registers as
+  `IWorkflowStore`. `FindAsync`, `FindStrandedAsync` and `CompleteNodeAsync` are not traced: two are reads, and the
+  dispatch span already times the third. Reason, error-message and payload arguments are never tagged.
+
+### Metrics
+
+| Metric | Type | Unit | Tags |
+|---|---|---|---|
+| `thalos.workflow.runs.started` | Counter | `{run}` | `thalos.run.process` |
+| `thalos.workflow.runs.finished` | Counter | `{run}` | `thalos.run.process`, `thalos.run.state` (`Succeeded`, `Failed`, `Cancelled`) |
+| `thalos.workflow.dispatch.duration` | Histogram | `ms` | `thalos.node`, and `thalos.outcome` or `error.type` |
+| `thalos.workflow.host_action.duration` | Histogram | `ms` | `thalos.host_action` |
+| `thalos.workflow.run_tool.duration` | Histogram | `ms` | `thalos.tool.source`, `thalos.tool` |
+
+- `runs.started` and `runs.finished` are counted in the Orm store after the commit. A retried run counts as finished
+  again each time it ends; a no-op, such as cancelling a run that is already terminal, counts nothing; an idempotent
+  repeat of a start counts nothing.
+- `dispatch.duration` is measured from entry to `DispatchAsync`, so it includes loading the run.
+- `run_tool.duration` is recorded by `RunToolDurationObserver` in `Thalos.NET.Mcp`, for every call a remote run tool
+  source sent to a run's endpoint, sandbox `build` and `test` included. Any remote source registers the observer, once
+  per container.
+
+### The link to the start
+
+`WorkflowRun.TraceParent` holds the W3C `traceparent` that was current when `StartAsync` inserted the run. Migration
+`1010_add_workflow_run_trace_parent.sql` adds the nullable `trace_parent` column. Each dispatch span links to it, so a
+trace backend can jump from a step to the request that started the run. It is written once and never updated. A run
+from before 0.15.0 has no link, and so does a run started with no active `Activity`.
+
+### What is never in telemetry
+
+Tags carry only ids, names, counts, durations, outcomes and error types. They never carry prompt or agent text, file
+content, credentials or the arguments and results of a tool call. A failure sets Error status **with no description**
+(`ExceptionDescription = false` on every generated span), because a result error or an exception message can carry git
+output, model text or file paths. The run's event log keeps the text.
+
 ## Limits worth knowing before you author a process
 
 - **The variable block put in front of a node has three caps, and the value cap is the one that bites.** The
