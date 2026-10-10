@@ -9,6 +9,13 @@ public static class ThalosTelemetry
     /// <summary>Name of the <see cref="ActivitySource"/> and <see cref="Meter"/> (<c>"thalos"</c>) — subscribe to it in OpenTelemetry.</summary>
     public const string SourceName = "thalos";
 
+    /// <summary>
+    /// Name of the workflow engine's <see cref="ActivitySource"/> and <see cref="Meter"/> (<c>"thalos.workflow"</c>).
+    /// Declared here, in the core package, because the workflow engine and the remote run tool source both record on
+    /// it and neither references the other. Subscribe to it next to <see cref="SourceName"/>.
+    /// </summary>
+    public const string WorkflowSourceName = "thalos.workflow";
+
     /// <summary>Emits the <c>thalos.turn</c> span (tags: <c>thalos.agent</c>, <c>thalos.session</c>, <c>thalos.turn</c>, token counts, <c>thalos.tool_calls</c>).</summary>
     public static readonly ActivitySource ActivitySource = new(SourceName);
 
