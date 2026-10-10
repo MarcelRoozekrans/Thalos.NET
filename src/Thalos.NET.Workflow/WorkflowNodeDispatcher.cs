@@ -117,9 +117,10 @@ public sealed partial class WorkflowNodeDispatcher(
     /// passes explicitly, so a host that forgets to wire them fails to compile instead of failing every action node
     /// at dispatch. Built through the same index <see cref="WorkflowReferenceResolver"/> uses, so a name the
     /// validator accepted is a name this dispatcher finds. A null entry, a blank name or two actions under one name
-    /// throws <see cref="ArgumentException"/> here, at construction.
+    /// throws <see cref="ArgumentException"/> here, at construction. Each is wrapped in the generated
+    /// <c>WorkflowHostActionInstrumented</c> proxy, so every host's actions are traced without the host doing anything.
     /// </summary>
-    private readonly FrozenDictionary<string, IWorkflowHostAction> _hostActions = HostActionIndex.Build(hostActions, nameof(hostActions));
+    private readonly FrozenDictionary<string, IWorkflowHostAction> _hostActions = Instrument(HostActionIndex.Build(hostActions, nameof(hostActions)));
 
     /// <summary>
     /// Where this dispatcher tells a host operator what the reading agent can already see. Optional and last,
@@ -888,6 +889,13 @@ public sealed partial class WorkflowNodeDispatcher(
         await _store.FailAsync(runId, errorMessage, ct).ConfigureAwait(false);
         return DispatchOutcome.Failed;
     }
+
+    /// <summary>Wraps each validated action in its generated telemetry proxy, keeping the ordinal index.</summary>
+    private static FrozenDictionary<string, IWorkflowHostAction> Instrument(FrozenDictionary<string, IWorkflowHostAction> actions) =>
+        actions.ToFrozenDictionary(
+            pair => pair.Key,
+            pair => (IWorkflowHostAction)new WorkflowHostActionInstrumented(pair.Value),
+            StringComparer.Ordinal);
 
     [LoggerMessage(
         EventId = 900,
