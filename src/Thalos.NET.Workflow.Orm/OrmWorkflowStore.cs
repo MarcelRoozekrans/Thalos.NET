@@ -24,6 +24,8 @@ namespace Thalos.Workflow.Orm;
 /// <see cref="WorkflowConcurrencyException"/> is thrown rather than the loss passing silently. <see cref="CompleteNodeAsync"/>
 /// additionally checks the caller-supplied <c>seq</c> against the run's persisted <see cref="WorkflowRun.CurrentSeq"/>
 /// before touching anything, so a stale or redelivered completion is rejected the same way.
+/// Runs started and finished are counted on <see cref="WorkflowTelemetry"/> after each commit that creates a run or
+/// ends one, so a no-op, a refusal or a rolled back write counts nothing.
 /// </remarks>
 public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinitionStore definitions) : IWorkflowStore, IWorkflowRunHistory
 {
@@ -149,8 +151,15 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         // none in which that work is scheduled against a run that was never written.
         await EnqueueDispatchAsync(connection, tx, id, InitialCurrentSeq, startNode, ct).ConfigureAwait(false);
 
-        await tx.CommitAsync(ct).ConfigureAwait(false);
+        await CommitAndRecordStartAsync(tx, request.Process, ct).ConfigureAwait(false);
         return Result<Guid>.Success(id);
+    }
+
+    /// <summary>Commits a newly inserted run, then counts it: the count follows the commit, so a rolled back start counts nothing.</summary>
+    private static async Task CommitAndRecordStartAsync(NpgsqlTransaction tx, string process, CancellationToken ct)
+    {
+        await tx.CommitAsync(ct).ConfigureAwait(false);
+        WorkflowTelemetry.RecordRunStarted(process);
     }
 
     /// <summary>
@@ -317,6 +326,11 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         await ApplyTransitionAsync(connection, tx, runId, seq, row, transition, result.Outcome, result.Variables, result.Usage, ct).ConfigureAwait(false);
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
+
+        if (IsTerminal(transition.NextStatus))
+        {
+            WorkflowTelemetry.RecordRunFinished(row.Process, transition.NextStatus);
+        }
     }
 
     /// <inheritdoc/>
@@ -433,6 +447,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         }
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
+        WorkflowTelemetry.RecordRunFinished(row.Process, WorkflowStatus.Failed);
     }
 
     /// <inheritdoc/>
@@ -466,8 +481,14 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         // Same UPDATE-before-INSERT ordering as FailAsync, for the same defence-in-depth reason — but here a
         // losing xmin check is just one more "moved on" case, not a broken invariant, so it also resolves to a
         // no-op rather than a throw.
-        return await TryApplyFailedStatusAsync(connection, tx, runId, row, errorMessage, ct).ConfigureAwait(false)
+        var failed = await TryApplyFailedStatusAsync(connection, tx, runId, row, errorMessage, ct).ConfigureAwait(false)
             && await CommitAndReturnTrueAsync(tx, ct).ConfigureAwait(false);
+        if (failed)
+        {
+            WorkflowTelemetry.RecordRunFinished(row.Process, WorkflowStatus.Failed);
+        }
+
+        return failed;
     }
 
     /// <summary>
@@ -569,6 +590,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             kind: "Cancelled", actor: null, ct).ConfigureAwait(false);
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
+        WorkflowTelemetry.RecordRunFinished(row.Process, WorkflowStatus.Cancelled);
     }
 
     /// <inheritdoc/>
