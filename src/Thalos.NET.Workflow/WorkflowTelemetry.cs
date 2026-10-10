@@ -128,11 +128,11 @@ public static class WorkflowTelemetry
         Meter.CreateHistogram<double>(DispatchDurationName, unit: "ms", description: "Duration of one node dispatch");
 
     /// <summary>Counts one run of <paramref name="process"/> started.</summary>
-    public static void RecordRunStarted(string process) =>
+    internal static void RecordRunStarted(string process) =>
         RunsStarted.Add(1, new KeyValuePair<string, object?>(ProcessTag, process));
 
     /// <summary>Counts one run of <paramref name="process"/> that reached the terminal <paramref name="state"/>.</summary>
-    public static void RecordRunFinished(string process, WorkflowStatus state) =>
+    internal static void RecordRunFinished(string process, WorkflowStatus state) =>
         RunsFinished.Add(
             1,
             new KeyValuePair<string, object?>(ProcessTag, process),

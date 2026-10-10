@@ -93,6 +93,27 @@ public sealed class DispatchTelemetryTests
         span.StatusDescription.Should().BeNull();
     }
 
+    /// <summary>
+    /// A store call made while a node runs is a child of that dispatch's span, in the same trace.
+    /// Red: set <c>Activity.Current = null</c> after the dispatch span starts, before the node runs; the store span
+    /// becomes a root, so the parent-span and trace-id assertions fail.
+    /// </summary>
+    [Fact]
+    public async Task A_store_span_made_during_a_dispatch_is_a_child_of_the_dispatch_span()
+    {
+        var arranged = await ArrangeAsync(
+            ActionYaml, "dt-process", "dt-publish", RecordingAction.Failing(Action, "push failed"), instrumentStore: true);
+        using var capture = new TelemetryCapture(WorkflowTelemetry.SourceName);
+
+        await arranged.Dispatcher.DispatchAsync(arranged.Message, CancellationToken.None);
+
+        var dispatch = DispatchOf(capture, arranged.Message.RunId);
+        var fail = capture.SpansNamed(WorkflowTelemetry.StoreFailSpanName)
+            .Should().ContainSingle(s => arranged.Message.RunId.Equals(s.GetTagItem(WorkflowTelemetry.RunIdTag))).Subject;
+        fail.ParentSpanId.Should().Be(dispatch.SpanId);
+        fail.TraceId.Should().Be(dispatch.TraceId);
+    }
+
     /// <summary>Red: map <c>WorkflowStatus.Awaiting</c> to <c>Completed</c> in <c>AdvanceAndPersistAsync</c>; the outcome is "completed".</summary>
     [Fact]
     public async Task A_gate_dispatch_ends_awaiting()
@@ -279,7 +300,7 @@ public sealed class DispatchTelemetryTests
             .ContainSingle(s => runId.Equals(s.GetTagItem(WorkflowTelemetry.RunIdTag))).Subject;
 
     private static async Task<Arranged> ArrangeAsync(
-        string yaml, string process, string startNode, IWorkflowHostAction? action = null, bool underOrigin = false)
+        string yaml, string process, string startNode, IWorkflowHostAction? action = null, bool underOrigin = false, bool instrumentStore = false)
     {
         var definitions = new InMemoryProcessDefinitionStore().Seed(yaml);
         var store = new FakeWorkflowStore(definitions);
@@ -289,7 +310,7 @@ public sealed class DispatchTelemetryTests
                 new AgentTurnResult(TurnId.New(), SessionId.New(), "done", TurnUsage.Empty("test-model"), [], TimeSpan.Zero)),
         };
         var dispatcher = new WorkflowNodeDispatcher(
-            store, runner, new FakeWorkflowReferenceResolver(new Dictionary<string, AgentId>(StringComparer.Ordinal)),
+            instrumentStore ? new WorkflowStoreInstrumented(store) : store, runner, new FakeWorkflowReferenceResolver(new Dictionary<string, AgentId>(StringComparer.Ordinal)),
             definitions, new InMemorySkillStore(TimeProvider.System), _ => new FakeSecurityContext("workflow-engine"),
             [], action is null ? [] : [action]);
 
