@@ -111,6 +111,47 @@ public sealed class RunMetricsTests(PostgresFixture pg) : IAsyncLifetime
             .Which.Tags[WorkflowTelemetry.RunStateTag].Should().Be(nameof(WorkflowStatus.Succeeded));
     }
 
+    /// <summary>
+    /// A Failed run that is retried and ends again counts finished again, and the retry itself counts nothing.
+    /// Red: record a finished measurement in <c>RetryFailedNodeAsync</c>; the count after the retry is not just Failed.
+    /// Red: record a started measurement in <c>RetryFailedNodeAsync</c>; the started count is not zero.
+    /// </summary>
+    [Fact]
+    public async Task A_retried_run_counts_each_ending_and_the_retry_counts_nothing()
+    {
+        var process = Process();
+        var yaml = $$"""
+            process: {{process}}
+            version: 1
+            nodes:
+              start: { next: publish }
+              publish: { action: open-pull-request, outcomes: [published], next: done }
+              done: { terminal: succeeded }
+            """;
+        var definition = ProcessLoader.Load(yaml);
+        definition.IsSuccess.Should().BeTrue(definition.IsFailure ? definition.Error : "");
+        var options = new WorkflowOrmOptions { ConnectionString = pg.ConnectionString };
+        var definitions = new OrmProcessDefinitionStore(options);
+        await definitions.UpsertAndActivateAsync(definition.Value, yaml, CancellationToken.None);
+        var store = new OrmWorkflowStore(options, definitions);
+        var runId = (await store.StartAsync(Request(process, "c-retry"), CancellationToken.None)).Value;
+        await store.CompleteNodeAsync(runId, 1, new WorkflowTransition("publish", WorkflowStatus.Running, null, WorkflowEventKind.Completed), new NodeResult(null, Empty), CancellationToken.None);
+        using var capture = new TelemetryCapture(WorkflowTelemetry.SourceName);
+        await store.FailAsync(runId, "test", CancellationToken.None);
+
+        var retry = await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 2, RetriedBy = new RunPrincipal("test-approver", ["admin"]) }, CancellationToken.None);
+        retry.IsSuccess.Should().BeTrue(retry.IsFailure ? retry.Error : "");
+
+        Of(capture, WorkflowTelemetry.RunsFinishedName, process).Select(m => m.Tags[WorkflowTelemetry.RunStateTag]).Should()
+            .BeEquivalentTo([nameof(WorkflowStatus.Failed)]);
+        Of(capture, WorkflowTelemetry.RunsStartedName, process).Should().BeEmpty();
+
+        await store.CompleteNodeAsync(runId, 4, new WorkflowTransition("done", WorkflowStatus.Succeeded, null, WorkflowEventKind.Completed), new NodeResult(null, Empty), CancellationToken.None);
+
+        Of(capture, WorkflowTelemetry.RunsFinishedName, process).Select(m => m.Tags[WorkflowTelemetry.RunStateTag]).Should()
+            .BeEquivalentTo([nameof(WorkflowStatus.Failed), nameof(WorkflowStatus.Succeeded)]);
+    }
+
     private static string Process() => $"probe-metrics-{Guid.NewGuid():N}";
 
     private static IReadOnlyList<CapturedMeasurement> Of(TelemetryCapture capture, string instrument, string process) =>

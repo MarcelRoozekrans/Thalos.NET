@@ -26,6 +26,7 @@ namespace Thalos.Workflow.Orm;
 /// before touching anything, so a stale or redelivered completion is rejected the same way.
 /// Runs started and finished are counted on <see cref="WorkflowTelemetry"/> after each commit that creates a run or
 /// ends one, so a no-op, a refusal or a rolled back write counts nothing.
+/// A Failed run that is retried and ends again counts finished again.
 /// </remarks>
 public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinitionStore definitions) : IWorkflowStore, IWorkflowRunHistory
 {
