@@ -151,8 +151,15 @@ public sealed class NodeUsageEventTests(PostgresFixture pg) : IAsyncLifetime
         ended.Usage.Should().BeNull();
     }
 
+    /// <summary>
+    /// <c>AddWorkflowOrm</c> puts one store behind both interfaces: the history a host reads is what the store wrote,
+    /// and the store a host writes through is the telemetry proxy.
+    /// Red: resolve <c>IWorkflowStore</c> to <c>OrmWorkflowStore</c> directly; the proxy-type assertion fails.
+    /// Red: register <c>IWorkflowRunHistory</c> as a second, separately constructed <c>OrmWorkflowStore</c>; the
+    /// <c>BeSameAs</c> assertion fails.
+    /// </summary>
     [Fact]
-    public void AddWorkflowOrm_resolves_the_history_and_the_store_to_the_same_instance()
+    public void AddWorkflowOrm_traces_the_store_and_reads_history_from_the_same_instance()
     {
         var services = new ServiceCollection();
         services.AddThalos(thalos => thalos.AddWorkflowOrm(o =>
@@ -162,10 +169,11 @@ public sealed class NodeUsageEventTests(PostgresFixture pg) : IAsyncLifetime
         }));
         using var provider = services.BuildServiceProvider();
 
-        var history = provider.GetRequiredService<IWorkflowRunHistory>();
         var store = provider.GetRequiredService<IWorkflowStore>();
+        var history = provider.GetRequiredService<IWorkflowRunHistory>();
 
-        history.Should().BeSameAs(store);
+        store.Should().BeOfType<WorkflowStoreInstrumented>();
+        history.Should().BeSameAs(provider.GetRequiredService<OrmWorkflowStore>());
     }
 
     private async Task<Guid> StartAsync() =>

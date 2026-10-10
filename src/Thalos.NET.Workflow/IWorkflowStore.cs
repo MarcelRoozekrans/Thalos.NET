@@ -1,4 +1,5 @@
 using ZeroAlloc.Results;
+using ZeroAlloc.Telemetry;
 
 namespace Thalos.Workflow;
 
@@ -24,7 +25,13 @@ namespace Thalos.Workflow;
 /// <see cref="WorkflowRun.LastResume"/> can be retried between the read and the removal; that retry then finds no
 /// workspace, and its action fails the run again. It fails closed, and no work is lost that was not already
 /// unrecoverable without the workspace.
+/// <para>
+/// <b>Telemetry.</b> The generated <c>WorkflowStoreInstrumented</c> proxy, which <c>AddWorkflowOrm</c> registers, traces every
+/// state-changing call as a <c>thalos.workflow.store.*</c> span tagged with the run id. A failed <see cref="Result"/> marks
+/// the span as an error. Reads are not traced. No reason, error message or payload is ever tagged.
+/// </para>
 /// </remarks>
+[Instrument(WorkflowTelemetry.SourceName, PublicProxy = true)]
 public interface IWorkflowStore
 {
     /// <summary>
@@ -85,7 +92,9 @@ public interface IWorkflowStore
     /// method's <see cref="Result{T}"/> return.
     /// </para>
     /// </remarks>
-    ValueTask<Result<Guid>> StartAsync(WorkflowStartRequest request, CancellationToken ct);
+    [Trace(WorkflowTelemetry.StoreStartSpanName, ErrorWhen = "IsFailure", ExceptionDescription = false)]
+    [TraceTagFromResult(WorkflowTelemetry.RunIdTag, "Value", When = "IsSuccess")]
+    ValueTask<Result<Guid>> StartAsync([TraceTag(WorkflowTelemetry.ProcessTag, "Process")] WorkflowStartRequest request, CancellationToken ct);
 
     /// <summary>Finds a run by id, or <see langword="null"/> if none exists.</summary>
     ValueTask<WorkflowRun?> FindAsync(Guid runId, CancellationToken ct);
@@ -140,10 +149,15 @@ public interface IWorkflowStore
     /// <see cref="ArgumentNullException"/> for it, before anything is written, next to its existing
     /// <see cref="ArgumentException"/> guards on <see cref="WorkflowResumeRequest.Signal"/>.
     /// </remarks>
-    ValueTask<Result> ResumeAsync(Guid runId, WorkflowResumeRequest request, CancellationToken ct);
+    [Trace(WorkflowTelemetry.StoreResumeSpanName, ErrorWhen = "IsFailure", ExceptionDescription = false)]
+    ValueTask<Result> ResumeAsync(
+        [TraceTag(WorkflowTelemetry.RunIdTag)] Guid runId,
+        [TraceTag(WorkflowTelemetry.SignalTag, "Signal")] WorkflowResumeRequest request,
+        CancellationToken ct);
 
     /// <summary>Marks a run failed with <paramref name="errorMessage"/>, outside the normal node/outcome flow.</summary>
-    ValueTask FailAsync(Guid runId, string errorMessage, CancellationToken ct);
+    [Trace(WorkflowTelemetry.StoreFailSpanName, ExceptionDescription = false)]
+    ValueTask FailAsync([TraceTag(WorkflowTelemetry.RunIdTag)] Guid runId, string errorMessage, CancellationToken ct);
 
     /// <summary>
     /// The seq-guarded counterpart to <see cref="FailAsync"/> that <see cref="WorkflowRunReconciler.SweepAsync"/>
@@ -158,10 +172,17 @@ public interface IWorkflowStore
     /// <see cref="FailAsync"/>, when the run already reached a terminal state some other way. Returns whether
     /// this call actually failed the run.
     /// </summary>
-    ValueTask<bool> FailStrandedAsync(Guid runId, long expectedSeq, string errorMessage, CancellationToken ct);
+    [Trace(WorkflowTelemetry.StoreFailStrandedSpanName, ExceptionDescription = false)]
+    [TraceTagFromResult(WorkflowTelemetry.StrandedFailedTag)]
+    ValueTask<bool> FailStrandedAsync(
+        [TraceTag(WorkflowTelemetry.RunIdTag)] Guid runId,
+        [TraceTag(WorkflowTelemetry.SeqTag)] long expectedSeq,
+        string errorMessage,
+        CancellationToken ct);
 
     /// <summary>Cancels a run for <paramref name="reason"/> before it reaches a terminal node.</summary>
-    ValueTask CancelAsync(Guid runId, string reason, CancellationToken ct);
+    [Trace(WorkflowTelemetry.StoreCancelSpanName, ExceptionDescription = false)]
+    ValueTask CancelAsync([TraceTag(WorkflowTelemetry.RunIdTag)] Guid runId, string reason, CancellationToken ct);
 
     /// <summary>
     /// Re-runs the host-action node a run failed at. In one transaction: the run must be
@@ -189,7 +210,11 @@ public interface IWorkflowStore
     /// <see cref="WorkflowRetryRequest.RetriedBy"/> is a programming error and throws <see cref="ArgumentNullException"/>.
     /// </para>
     /// </remarks>
-    ValueTask<Result> RetryFailedNodeAsync(Guid runId, WorkflowRetryRequest request, CancellationToken ct);
+    [Trace(WorkflowTelemetry.StoreRetrySpanName, ErrorWhen = "IsFailure", ExceptionDescription = false)]
+    ValueTask<Result> RetryFailedNodeAsync(
+        [TraceTag(WorkflowTelemetry.RunIdTag)] Guid runId,
+        [TraceTag(WorkflowTelemetry.SeqTag, "ExpectedSeq")] WorkflowRetryRequest request,
+        CancellationToken ct);
 
     /// <summary>
     /// Finds runs stranded by a dead-lettered dispatch message, for <see cref="WorkflowRunReconciler"/> to
