@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Thalos.Workflow;
 using ZeroAlloc.Results;
 
@@ -120,6 +121,7 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
             // Manifest or StartedBy again, so FindAsync always returns exactly what this call was given.
             Manifest = request.Manifest,
             StartedBy = request.StartedBy,
+            TraceParent = CurrentTraceParent(),
         };
 
         // The start node's own dispatch, exactly as OrmWorkflowStore.StartAsync enqueues it. A fake that skipped
@@ -133,6 +135,14 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
     /// caller's handling of a failed read can be tested.
     /// </summary>
     public Guid? ThrowOnFindFor { get; set; }
+
+    /// <summary>Mirrors OrmWorkflowStore.InsertRunAsync (0.15.0): the traceparent current at the start, written once.</summary>
+    private static string? CurrentTraceParent() =>
+        Activity.Current is { IdFormat: ActivityIdFormat.W3C } current ? current.Id : null;
+
+    /// <summary>Overwrites a run's stored traceparent, for a test that needs a malformed or absent one.</summary>
+    public void SetTraceParent(Guid runId, string? traceParent) =>
+        _runs[runId] = _runs[runId] with { TraceParent = traceParent };
 
     public ValueTask<WorkflowRun?> FindAsync(Guid runId, CancellationToken ct) =>
         runId == ThrowOnFindFor

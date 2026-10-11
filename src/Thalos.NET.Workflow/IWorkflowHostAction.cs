@@ -1,4 +1,5 @@
 using ZeroAlloc.Results;
+using ZeroAlloc.Telemetry;
 
 namespace Thalos.Workflow;
 
@@ -50,7 +51,14 @@ namespace Thalos.Workflow;
 /// <c>WorkflowNodeDispatcher</c>. The first makes a process naming an unregistered action fail validation at load
 /// time; the second fails a run that reaches such a node anyway with "not registered".
 /// </para>
+/// <para>
+/// <b>Telemetry.</b> <c>WorkflowNodeDispatcher</c> wraps every action in the generated
+/// <c>WorkflowHostActionInstrumented</c> proxy. Each call is a <c>thalos.workflow.host_action.{type}</c> span, tagged
+/// <c>thalos.run.id</c>, <c>thalos.node</c> and <c>thalos.host_action</c>. A failed <see cref="Result{T}"/> marks it as an
+/// error with no description. Each call is timed on <c>thalos.workflow.host_action.duration</c>.
+/// </para>
 /// </remarks>
+[Instrument(WorkflowTelemetry.SourceName, PublicProxy = true)]
 public interface IWorkflowHostAction
 {
     /// <summary>
@@ -68,5 +76,10 @@ public interface IWorkflowHostAction
     /// <param name="run">The run the action is for, positioned at the action node.</param>
     /// <param name="node">The action node being run — the node at <c>run.CurrentNode</c>.</param>
     /// <param name="ct">Cancellation for the dispatch itself, not for whatever the action started.</param>
-    ValueTask<Result<HostActionResult>> RunAsync(WorkflowRun run, ProcessNode node, CancellationToken ct);
+    [Trace(WorkflowTelemetry.HostActionSpanName, ErrorWhen = "IsFailure", ExceptionDescription = false)]
+    [Histogram(WorkflowTelemetry.HostActionDurationName, Unit = "ms")]
+    ValueTask<Result<HostActionResult>> RunAsync(
+        [TraceTag(WorkflowTelemetry.RunIdTag, "Id")][TraceTag(WorkflowTelemetry.NodeTag, "CurrentNode")] WorkflowRun run,
+        [TraceTag(WorkflowTelemetry.HostActionTag, "Action")][MetricTag(WorkflowTelemetry.HostActionTag, "Action")] ProcessNode node,
+        CancellationToken ct);
 }

@@ -1,4 +1,5 @@
 using System.Data.Async.Adapters;
+using System.Diagnostics;
 using System.Text.Json;
 using Npgsql;
 using ZeroAlloc.Outbox;
@@ -23,11 +24,14 @@ namespace Thalos.Workflow.Orm;
 /// <see cref="WorkflowConcurrencyException"/> is thrown rather than the loss passing silently. <see cref="CompleteNodeAsync"/>
 /// additionally checks the caller-supplied <c>seq</c> against the run's persisted <see cref="WorkflowRun.CurrentSeq"/>
 /// before touching anything, so a stale or redelivered completion is rejected the same way.
+/// Runs started and finished are counted on <see cref="WorkflowTelemetry"/> after each commit that creates a run or
+/// ends one, so a no-op, a refusal or a rolled back write counts nothing.
+/// A Failed run that is retried and ends again counts finished again.
 /// </remarks>
 public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinitionStore definitions) : IWorkflowStore, IWorkflowRunHistory
 {
     private const string SelectRunSql = """
-        SELECT id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, manifest, started_by, last_resumed_by, last_resumed_at, xmin::text::bigint AS xmin
+        SELECT id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, manifest, started_by, last_resumed_by, last_resumed_at, xmin::text::bigint AS xmin, trace_parent
         FROM workflow_run
         """;
 
@@ -148,8 +152,15 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         // none in which that work is scheduled against a run that was never written.
         await EnqueueDispatchAsync(connection, tx, id, InitialCurrentSeq, startNode, ct).ConfigureAwait(false);
 
-        await tx.CommitAsync(ct).ConfigureAwait(false);
+        await CommitAndRecordStartAsync(tx, request.Process, ct).ConfigureAwait(false);
         return Result<Guid>.Success(id);
+    }
+
+    /// <summary>Commits a newly inserted run, then counts it: the count follows the commit, so a rolled back start counts nothing.</summary>
+    private static async Task CommitAndRecordStartAsync(NpgsqlTransaction tx, string process, CancellationToken ct)
+    {
+        await tx.CommitAsync(ct).ConfigureAwait(false);
+        WorkflowTelemetry.RecordRunStarted(process);
     }
 
     /// <summary>
@@ -249,8 +260,8 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         await using var insert = connection.CreateCommand();
         insert.Transaction = tx;
         insert.CommandText = """
-            INSERT INTO workflow_run (id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, manifest, started_by)
-            VALUES (@id, @process, @version, @correlationKey, @currentNode, @currentSeq, @status, NULL, @visits::jsonb, @variables::jsonb, NULL, @manifest::jsonb, @startedBy::jsonb)
+            INSERT INTO workflow_run (id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, manifest, started_by, trace_parent)
+            VALUES (@id, @process, @version, @correlationKey, @currentNode, @currentSeq, @status, NULL, @visits::jsonb, @variables::jsonb, NULL, @manifest::jsonb, @startedBy::jsonb, @traceParent)
             ON CONFLICT (correlation_key) DO NOTHING
             """;
         insert.Parameters.AddWithValue("id", id);
@@ -270,6 +281,9 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         // startedBy is required on WorkflowStartRequest and guarded non-null above — unlike manifest, this is
         // never DBNull.Value on the path that actually inserts a row (ruling R26).
         insert.Parameters.AddWithValue("startedBy", JsonSerializer.Serialize(startedBy, ManifestJsonOptions));
+        // The W3C traceparent current at this INSERT (0.15.0): the dispatcher links each node's span to it. Read here,
+        // inside the store, so no caller has to pass it; written once, like manifest and started_by.
+        insert.Parameters.AddWithValue("traceParent", (object?)CurrentTraceParent() ?? DBNull.Value);
 
         return await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
     }
@@ -313,6 +327,11 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         await ApplyTransitionAsync(connection, tx, runId, seq, row, transition, result.Outcome, result.Variables, result.Usage, ct).ConfigureAwait(false);
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
+
+        if (IsTerminal(transition.NextStatus))
+        {
+            WorkflowTelemetry.RecordRunFinished(row.Process, transition.NextStatus);
+        }
     }
 
     /// <inheritdoc/>
@@ -429,6 +448,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         }
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
+        WorkflowTelemetry.RecordRunFinished(row.Process, WorkflowStatus.Failed);
     }
 
     /// <inheritdoc/>
@@ -462,8 +482,14 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         // Same UPDATE-before-INSERT ordering as FailAsync, for the same defence-in-depth reason — but here a
         // losing xmin check is just one more "moved on" case, not a broken invariant, so it also resolves to a
         // no-op rather than a throw.
-        return await TryApplyFailedStatusAsync(connection, tx, runId, row, errorMessage, ct).ConfigureAwait(false)
+        var failed = await TryApplyFailedStatusAsync(connection, tx, runId, row, errorMessage, ct).ConfigureAwait(false)
             && await CommitAndReturnTrueAsync(tx, ct).ConfigureAwait(false);
+        if (failed)
+        {
+            WorkflowTelemetry.RecordRunFinished(row.Process, WorkflowStatus.Failed);
+        }
+
+        return failed;
     }
 
     /// <summary>
@@ -565,6 +591,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             kind: "Cancelled", actor: null, ct).ConfigureAwait(false);
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
+        WorkflowTelemetry.RecordRunFinished(row.Process, WorkflowStatus.Cancelled);
     }
 
     /// <inheritdoc/>
@@ -938,7 +965,8 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         StartedBy: reader.IsDBNull(12) ? null : JsonSerializer.Deserialize<RunPrincipal>(reader.GetString(12), ManifestJsonOptions),
         LastResumedBy: reader.IsDBNull(13) ? null : reader.GetString(13),
         LastResumedAt: reader.IsDBNull(14) ? null : reader.GetFieldValue<DateTimeOffset>(14),
-        Xmin: reader.GetInt64(15));
+        Xmin: reader.GetInt64(15),
+        TraceParent: reader.IsDBNull(16) ? null : reader.GetString(16));
 
     /// <summary>
     /// Deserializing straight to <c>Dictionary&lt;string, object?&gt;</c> leaves every value a boxed
@@ -966,6 +994,10 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     private static bool IsTerminal(WorkflowStatus status) =>
         status is WorkflowStatus.Succeeded or WorkflowStatus.Failed or WorkflowStatus.Cancelled;
 
+    /// <summary>The current activity's W3C id, which is its <c>traceparent</c>, or null when there is none or it is not W3C.</summary>
+    private static string? CurrentTraceParent() =>
+        Activity.Current is { IdFormat: ActivityIdFormat.W3C } current ? current.Id : null;
+
     private static WorkflowRun ToWorkflowRun(RunRow row) => new()
     {
         Id = row.Id,
@@ -981,6 +1013,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         Manifest = row.Manifest,
         StartedBy = row.StartedBy,
         LastResume = ToLastResume(row.LastResumedBy, row.LastResumedAt),
+        TraceParent = row.TraceParent,
     };
 
     /// <summary>
@@ -1023,5 +1056,6 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         RunPrincipal? StartedBy,
         string? LastResumedBy,
         DateTimeOffset? LastResumedAt,
-        long Xmin);
+        long Xmin,
+        string? TraceParent);
 }

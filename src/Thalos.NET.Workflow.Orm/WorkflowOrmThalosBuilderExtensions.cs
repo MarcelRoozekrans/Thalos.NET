@@ -5,8 +5,9 @@ using Microsoft.Extensions.Hosting;
 namespace Thalos.Workflow.Orm;
 
 /// <summary>
-/// Registers the ZeroAlloc.ORM-backed workflow store, as both <see cref="IWorkflowStore"/> and
-/// <see cref="IWorkflowRunHistory"/>, and <see cref="IProcessDefinitionStore"/> on a
+/// Registers the ZeroAlloc.ORM-backed workflow store: <see cref="IWorkflowStore"/> resolves through the generated
+/// <c>WorkflowStoreInstrumented</c> proxy over it, and <see cref="IWorkflowRunHistory"/> is the concrete store. Also
+/// registers <see cref="IProcessDefinitionStore"/> on a
 /// <see cref="ThalosBuilder"/>. Both stores share the same <see cref="WorkflowOrmOptions"/> registration, and the
 /// workflow store resolves process definitions through the very <see cref="IProcessDefinitionStore"/> registered
 /// here, so syncing a definition is what makes it runnable. Both open a connection per call — one
@@ -30,8 +31,8 @@ namespace Thalos.Workflow.Orm;
 public static class WorkflowOrmThalosBuilderExtensions
 {
     /// <summary>
-    /// Uses <see cref="OrmWorkflowStore"/> as the <see cref="IWorkflowStore"/> and the
-    /// <see cref="IWorkflowRunHistory"/> — one singleton instance behind both — and
+    /// Uses <see cref="OrmWorkflowStore"/> as the <see cref="IWorkflowRunHistory"/>, and the generated
+    /// <c>WorkflowStoreInstrumented</c> proxy over that one singleton as the <see cref="IWorkflowStore"/>, and
     /// <see cref="OrmProcessDefinitionStore"/> as the <see cref="IProcessDefinitionStore"/>, replacing any
     /// earlier registration of any of them. Does not register <see cref="ProcessDefinitionSync"/> or an
     /// <c>IProcessDefinitionSource</c> — syncing is an engine-level concern and where definitions come from is
@@ -65,11 +66,15 @@ public static class WorkflowOrmThalosBuilderExtensions
             new CachingProcessDefinitionStore(new OrmProcessDefinitionStore(sp.GetRequiredService<WorkflowOrmOptions>()))));
         // One OrmWorkflowStore, registered as itself and reached through both interfaces it implements, so the
         // history a host reads is the store that wrote it. Each interface forwards to the concrete registration
-        // rather than constructing its own, which also lets a host decorate IWorkflowStore alone — replacing that
-        // one descriptor — without the history losing its store.
+        // rather than constructing its own.
         services.Replace(ServiceDescriptor.Singleton(sp =>
             new OrmWorkflowStore(sp.GetRequiredService<WorkflowOrmOptions>(), sp.GetRequiredService<IProcessDefinitionStore>())));
-        services.Replace(ServiceDescriptor.Singleton<IWorkflowStore>(sp => sp.GetRequiredService<OrmWorkflowStore>()));
+        // IWorkflowStore is the generated telemetry proxy over that one store (0.15.0), so every state-changing call
+        // is a thalos.workflow.store.* span. IWorkflowRunHistory stays the concrete store: its reads are not traced.
+        // A host can still decorate IWorkflowStore alone by replacing this descriptor, and its decorator then wraps the
+        // proxy. The proxy wraps the concrete OrmWorkflowStore, never a resolved IWorkflowStore, so it cannot be
+        // wrapped twice by a second AddWorkflowOrm call: Replace swaps the one descriptor.
+        services.Replace(ServiceDescriptor.Singleton<IWorkflowStore>(sp => new WorkflowStoreInstrumented(sp.GetRequiredService<OrmWorkflowStore>())));
         services.Replace(ServiceDescriptor.Singleton<IWorkflowRunHistory>(sp => sp.GetRequiredService<OrmWorkflowStore>()));
 
         // Pinning is additive, not ORM-specific — TryAdd so a host that already registered its own

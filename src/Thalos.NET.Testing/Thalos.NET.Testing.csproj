@@ -2,7 +2,7 @@
   <PropertyGroup>
     <RootNamespace>Thalos.Testing</RootNamespace>
     <PackageId>Thalos.NET.Testing</PackageId>
-    <Description>Test doubles and contract tests for Thalos.NET: ScriptedChatClient (scripted IChatClient), RecordingNotificationPublisher (in-memory IAgentNotificationPublisher), reusable IAgentSessionStore contract tests, memory store/index contract tests, skill store/index contract tests, deterministic embedding generator (xUnit + AwesomeAssertions).</Description>
+    <Description>Test doubles and contract tests for Thalos.NET: ScriptedChatClient (scripted IChatClient), RecordingNotificationPublisher (in-memory IAgentNotificationPublisher), reusable IAgentSessionStore contract tests, memory store/index contract tests, skill store/index contract tests, deterministic embedding generator, TelemetryCapture (captures spans and metrics from named sources) (xUnit + AwesomeAssertions).</Description>
     <PackageTags>agents;testing;zeroalloc</PackageTags>
     <!-- CA1707: this package ships xUnit contract-test classes whose [Fact] methods use the repo's underscore test-naming style -->
     <NoWarn>$(NoWarn);CA1707</NoWarn>
