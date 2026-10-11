@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.15.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.14.2...v0.15.0) (2026-10-10)
+
+
+### Features
+
+* **mcp:** record each run tool call's duration ([0e02a82](https://github.com/MarcelRoozekrans/Thalos.NET/commit/0e02a82b3fd3f4de08adcdf5a58729af796674a5))
+* **workflow:** add the thalos.workflow source and meter, and a telemetry capture for tests ([0e02a82](https://github.com/MarcelRoozekrans/Thalos.NET/commit/0e02a82b3fd3f4de08adcdf5a58729af796674a5))
+* **workflow:** count started and finished runs ([0e02a82](https://github.com/MarcelRoozekrans/Thalos.NET/commit/0e02a82b3fd3f4de08adcdf5a58729af796674a5))
+* **workflow:** persist the starting traceparent on each run ([0e02a82](https://github.com/MarcelRoozekrans/Thalos.NET/commit/0e02a82b3fd3f4de08adcdf5a58729af796674a5))
+* **workflow:** trace each node dispatch and link it to the run's start ([0e02a82](https://github.com/MarcelRoozekrans/Thalos.NET/commit/0e02a82b3fd3f4de08adcdf5a58729af796674a5))
+* **workflow:** trace host actions through a generated proxy ([0e02a82](https://github.com/MarcelRoozekrans/Thalos.NET/commit/0e02a82b3fd3f4de08adcdf5a58729af796674a5))
+* **workflow:** trace the state-changing workflow store calls ([0e02a82](https://github.com/MarcelRoozekrans/Thalos.NET/commit/0e02a82b3fd3f4de08adcdf5a58729af796674a5))
+
 ## [0.14.2](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.14.1...v0.14.2) (2026-10-03)
 
 
