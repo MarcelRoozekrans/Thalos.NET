@@ -6,6 +6,7 @@
          binary references while still making it a build dependency, so a clean "dotnet test" builds it first
          instead of the durability test only passing because someone happened to build it by hand earlier. -->
     <ProjectReference Include="..\Thalos.NET.Tests.Workflow.Orm.Host\Thalos.NET.Tests.Workflow.Orm.Host.csproj" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Testing\Thalos.NET.Testing.csproj" />
     <PackageReference Include="Testcontainers.PostgreSql" />
     <PackageReference Include="Npgsql" />
   </ItemGroup>
