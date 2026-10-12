@@ -166,6 +166,16 @@ returns with `GitCommitRequest.CommitStagedIndex = true`, and leave `Paths` null
   instead, since the call replaces it. A host that registered its own only to work around #250 can now remove that
   registration.
 
+0.16.0 ships the same eighteen packages.
+
+- **`OrmWorkflowStore`'s constructor gains two optional trailing parameters**, `IEnumerable<IWorkflowRunObserver>?
+  observers = null` and `ILogger<OrmWorkflowStore>? logger = null`, so the store can tell observers about each change
+  it commits. See [workflow.md, Observing run changes](workflow.md#observing-run-changes). This is source-compatible:
+  a call with two arguments still compiles. It is binary-breaking for an assembly compiled against 0.15.x that
+  calls the constructor directly, which must be rebuilt. Hosts that use `AddWorkflowOrm` are unaffected; it passes
+  the registered observers and the logger itself. 0.16.0 is a minor release before 1.0, which is where such a break
+  belongs.
+
 **Breaking changes accumulated across the workflow-engine phase (2.2, Part A):**
 
 - `ThalosAgentRuntime`'s public constructor gained a required `IOutcomeToolFactory outcomeTools` parameter
@@ -233,6 +243,12 @@ decide when the rest start failing.
 Editing a process file **without bumping its `version`** is now a sync *error* rather than a silent overwrite.
 Authors who relied on re-syncing a version in place must bump the version instead. The error names the process
 and version and says so.
+
+### 1011 — `create_workflow_run_listing_index` (0.16.0)
+
+Adds `ix_workflow_run_created_at_id` on `workflow_run (created_at DESC, id DESC)`, which `IWorkflowRunQuery` reads
+newest first with keyset paging. It is additive and safe in a rolling deploy: older code ignores an index. It is not
+built `CONCURRENTLY`, so it briefly blocks writes to `workflow_run` while it builds.
 
 ### Outbox migration 2 — `add_outbox_lease`
 

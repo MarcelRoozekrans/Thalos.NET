@@ -157,6 +157,7 @@ public sealed class NodeUsageEventTests(PostgresFixture pg) : IAsyncLifetime
     /// Red: resolve <c>IWorkflowStore</c> to <c>OrmWorkflowStore</c> directly; the proxy-type assertion fails.
     /// Red: register <c>IWorkflowRunHistory</c> as a second, separately constructed <c>OrmWorkflowStore</c>; the
     /// <c>BeSameAs</c> assertion fails.
+    /// Red: drop the <c>IWorkflowRunQuery</c> registration; resolving it throws.
     /// </summary>
     [Fact]
     public void AddWorkflowOrm_traces_the_store_and_reads_history_from_the_same_instance()
@@ -174,6 +175,7 @@ public sealed class NodeUsageEventTests(PostgresFixture pg) : IAsyncLifetime
 
         store.Should().BeOfType<WorkflowStoreInstrumented>();
         history.Should().BeSameAs(provider.GetRequiredService<OrmWorkflowStore>());
+        provider.GetRequiredService<IWorkflowRunQuery>().Should().BeSameAs(provider.GetRequiredService<OrmWorkflowStore>());
     }
 
     private async Task<Guid> StartAsync() =>

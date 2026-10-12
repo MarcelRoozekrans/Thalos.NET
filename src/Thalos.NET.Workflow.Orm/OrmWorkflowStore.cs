@@ -1,6 +1,8 @@
 using System.Data.Async.Adapters;
 using System.Diagnostics;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using ZeroAlloc.Outbox;
 using ZeroAlloc.Results;
@@ -27,8 +29,17 @@ namespace Thalos.Workflow.Orm;
 /// Runs started and finished are counted on <see cref="WorkflowTelemetry"/> after each commit that creates a run or
 /// ends one, so a no-op, a refusal or a rolled back write counts nothing.
 /// A Failed run that is retried and ends again counts finished again.
+/// Each <see cref="IWorkflowRunObserver"/> is told about a change after the same commit, in registration order, on the
+/// caller's path, and never about a refusal, a no-op or a rolled back write; see <see cref="NotifyAsync"/>. Each
+/// mutating method is a thin public wrapper over a private core that owns the connection and the transaction and
+/// returns the change it committed, or <see langword="null"/>. The wrapper notifies only after the core has returned,
+/// so the connection is back in its pool before any observer runs.
 /// </remarks>
-public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinitionStore definitions) : IWorkflowStore, IWorkflowRunHistory
+public sealed partial class OrmWorkflowStore(
+    WorkflowOrmOptions options,
+    IProcessDefinitionStore definitions,
+    IEnumerable<IWorkflowRunObserver>? observers = null,
+    ILogger<OrmWorkflowStore>? logger = null) : IWorkflowStore, IWorkflowRunHistory, IWorkflowRunQuery
 {
     private const string SelectRunSql = """
         SELECT id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, manifest, started_by, last_resumed_by, last_resumed_at, xmin::text::bigint AS xmin, trace_parent
@@ -64,6 +75,12 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
 
     private readonly WorkflowOrmOptions _options = options ?? throw new ArgumentNullException(nameof(options));
 
+    /// <summary>Told about each committed change, in this order. Empty when none were given.</summary>
+    private readonly IWorkflowRunObserver[] _observers = observers?.ToArray() ?? [];
+
+    /// <summary>Where an observer's failure is logged. Nothing else in this store logs.</summary>
+    private readonly ILogger _logger = logger ?? (ILogger)NullLogger.Instance;
+
     /// <summary>
     /// Where <see cref="ResumeAsync"/> gets the run's <see cref="ProcessDefinition"/> from — the same
     /// <see cref="IProcessDefinitionStore"/> <c>ProcessDefinitionSync</c> writes to and
@@ -95,6 +112,21 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     /// <inheritdoc/>
     public async ValueTask<Result<Guid>> StartAsync(WorkflowStartRequest request, CancellationToken ct)
     {
+        var (result, change) = await StartCoreAsync(request, ct).ConfigureAwait(false);
+        if (change is not null)
+        {
+            await NotifyAsync(change, ct).ConfigureAwait(false);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/>'s body. The change is set only when a new run
+    /// was committed: never on the idempotent path or a failure.
+    /// </summary>
+    private async Task<(Result<Guid> Result, WorkflowRunChange? Change)> StartCoreAsync(WorkflowStartRequest request, CancellationToken ct)
+    {
         ValidateStartRequest(request);
 
         var correlationKey = request.CorrelationKey;
@@ -105,7 +137,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         // runtime — reported here, before any connection is opened, so nothing is written for it.
         if (WorkflowVariableBlock.OverKeyLimitError(initialVariables) is { } overCapError)
         {
-            return Result<Guid>.Failure(overCapError);
+            return (Result<Guid>.Failure(overCapError), null);
         }
 
         await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
@@ -122,7 +154,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         var insertResult = await TryInsertRunAsync(connection, tx, id, request.Process, request.Version, correlationKey, startNode, seeded, request.Manifest, request.StartedBy, ct).ConfigureAwait(false);
         if (insertResult.IsFailure)
         {
-            return Result<Guid>.Failure(insertResult.Error);
+            return (Result<Guid>.Failure(insertResult.Error), null);
         }
 
         var inserted = insertResult.Value;
@@ -134,7 +166,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             // message minted here would be a second delivery for a node something else already scheduled.
             var existing = await LookupExistingRunIdAsync(connection, tx, correlationKey, ct).ConfigureAwait(false);
             await tx.CommitAsync(ct).ConfigureAwait(false);
-            return Result<Guid>.Success(existing);
+            return (Result<Guid>.Success(existing), null);
         }
 
         await InsertEventAsync(
@@ -153,7 +185,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         await EnqueueDispatchAsync(connection, tx, id, InitialCurrentSeq, startNode, ct).ConfigureAwait(false);
 
         await CommitAndRecordStartAsync(tx, request.Process, ct).ConfigureAwait(false);
-        return Result<Guid>.Success(id);
+        return (Result<Guid>.Success(id), new WorkflowRunChange(id, WorkflowRunChangeKind.Started, WorkflowStatus.Running, startNode, null));
     }
 
     /// <summary>Commits a newly inserted run, then counts it: the count follows the commit, so a rolled back start counts nothing.</summary>
@@ -299,6 +331,13 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     /// <inheritdoc/>
     public async ValueTask CompleteNodeAsync(Guid runId, long seq, WorkflowTransition transition, NodeResult result, CancellationToken ct)
     {
+        var change = await CompleteNodeCoreAsync(runId, seq, transition, result, ct).ConfigureAwait(false);
+        await NotifyAsync(change, ct).ConfigureAwait(false);
+    }
+
+    /// <summary><see cref="CompleteNodeAsync"/>'s body. Every refusal throws, so a return is always a committed change.</summary>
+    private async Task<WorkflowRunChange> CompleteNodeCoreAsync(Guid runId, long seq, WorkflowTransition transition, NodeResult result, CancellationToken ct)
+    {
         ArgumentNullException.ThrowIfNull(transition);
         ArgumentNullException.ThrowIfNull(result);
 
@@ -332,10 +371,24 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         {
             WorkflowTelemetry.RecordRunFinished(row.Process, transition.NextStatus);
         }
+
+        return new WorkflowRunChange(runId, WorkflowRunChangeKind.NodeCompleted, transition.NextStatus, transition.NextNode, transition.AwaitingSignal);
     }
 
     /// <inheritdoc/>
     public async ValueTask<Result> ResumeAsync(Guid runId, WorkflowResumeRequest request, CancellationToken ct)
+    {
+        var (result, change) = await ResumeCoreAsync(runId, request, ct).ConfigureAwait(false);
+        if (change is not null)
+        {
+            await NotifyAsync(change, ct).ConfigureAwait(false);
+        }
+
+        return result;
+    }
+
+    /// <summary><see cref="ResumeAsync"/>'s body. The change is set only when the resume was committed.</summary>
+    private async Task<(Result Result, WorkflowRunChange? Change)> ResumeCoreAsync(Guid runId, WorkflowResumeRequest request, CancellationToken ct)
     {
         ValidateResumeRequest(request);
 
@@ -348,12 +401,12 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         var row = await ReadRunRowAsync(connection, tx, runId, ct).ConfigureAwait(false);
         if (row is null)
         {
-            return Result.Failure($"Workflow run '{runId}' was not found.");
+            return (Result.Failure($"Workflow run '{runId}' was not found."), null);
         }
 
         if (row.Status != WorkflowStatus.Awaiting || !string.Equals(row.AwaitingSignal, signal, StringComparison.Ordinal))
         {
-            return Result.Failure($"Workflow run '{runId}' is not awaiting signal '{signal}'.");
+            return (Result.Failure($"Workflow run '{runId}' is not awaiting signal '{signal}'."), null);
         }
 
         // Resolved on the run's pinned (Process, ProcessVersion), not on whatever version is currently active —
@@ -362,7 +415,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         var definition = await _definitions.GetAsync(row.Process, row.ProcessVersion, ct).ConfigureAwait(false);
         if (definition.IsFailure)
         {
-            return Result.Failure(definition.Error);
+            return (Result.Failure(definition.Error), null);
         }
 
         var process = definition.Value;
@@ -378,17 +431,18 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         var transitionResult = WorkflowInterpreter.Advance(process, run, new NodeResult(null, variables));
         if (transitionResult.IsFailure)
         {
-            return Result.Failure(transitionResult.Error);
+            return (Result.Failure(transitionResult.Error), null);
         }
 
         var applied = await ApplyResumeAsync(connection, tx, runId, row, transitionResult.Value, variables, request.ResumedBy, signal, ct).ConfigureAwait(false);
         if (applied.IsFailure)
         {
-            return applied;
+            return (applied, null);
         }
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
-        return Result.Success();
+        var resumed = transitionResult.Value;
+        return (Result.Success(), new WorkflowRunChange(runId, WorkflowRunChangeKind.Resumed, resumed.NextStatus, resumed.NextNode, resumed.AwaitingSignal));
     }
 
     /// <summary>
@@ -420,6 +474,16 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     /// <inheritdoc/>
     public async ValueTask FailAsync(Guid runId, string errorMessage, CancellationToken ct)
     {
+        var change = await FailCoreAsync(runId, errorMessage, ct).ConfigureAwait(false);
+        if (change is not null)
+        {
+            await NotifyAsync(change, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary><see cref="FailAsync"/>'s body. The change is <see langword="null"/> when the run was already terminal.</summary>
+    private async Task<WorkflowRunChange?> FailCoreAsync(Guid runId, string errorMessage, CancellationToken ct)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(errorMessage);
 
         await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
@@ -435,7 +499,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             // workflow_run_event's (run_id, seq) unique index — FailAsync never advances current_seq, so a
             // retry reads the identical row.CurrentSeq the first call already used — and would mean nothing
             // anyway: the run's outcome is already on record.
-            return;
+            return null;
         }
 
         // The xmin-checked UPDATE runs before the event INSERT, same as ApplyTransitionAsync and for the same
@@ -449,6 +513,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
         WorkflowTelemetry.RecordRunFinished(row.Process, WorkflowStatus.Failed);
+        return new WorkflowRunChange(runId, WorkflowRunChangeKind.Failed, WorkflowStatus.Failed, row.CurrentNode, null);
     }
 
     /// <inheritdoc/>
@@ -464,6 +529,18 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     /// </remarks>
     public async ValueTask<bool> FailStrandedAsync(Guid runId, long expectedSeq, string errorMessage, CancellationToken ct)
     {
+        var (failed, change) = await FailStrandedCoreAsync(runId, expectedSeq, errorMessage, ct).ConfigureAwait(false);
+        if (change is not null)
+        {
+            await NotifyAsync(change, ct).ConfigureAwait(false);
+        }
+
+        return failed;
+    }
+
+    /// <summary><see cref="FailStrandedAsync"/>'s body. The change is set only when it returns <see langword="true"/>.</summary>
+    private async Task<(bool Failed, WorkflowRunChange? Change)> FailStrandedCoreAsync(Guid runId, long expectedSeq, string errorMessage, CancellationToken ct)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(errorMessage);
 
         await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
@@ -476,7 +553,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         // this sweep correctly declining to touch state a concurrent write already changed, never a throw.
         if (row is null || row.CurrentSeq != expectedSeq || IsTerminal(row.Status))
         {
-            return false;
+            return (false, null);
         }
 
         // Same UPDATE-before-INSERT ordering as FailAsync, for the same defence-in-depth reason — but here a
@@ -484,12 +561,13 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         // no-op rather than a throw.
         var failed = await TryApplyFailedStatusAsync(connection, tx, runId, row, errorMessage, ct).ConfigureAwait(false)
             && await CommitAndReturnTrueAsync(tx, ct).ConfigureAwait(false);
-        if (failed)
+        if (!failed)
         {
-            WorkflowTelemetry.RecordRunFinished(row.Process, WorkflowStatus.Failed);
+            return (false, null);
         }
 
-        return failed;
+        WorkflowTelemetry.RecordRunFinished(row.Process, WorkflowStatus.Failed);
+        return (true, new WorkflowRunChange(runId, WorkflowRunChangeKind.Failed, WorkflowStatus.Failed, row.CurrentNode, null));
     }
 
     /// <summary>
@@ -540,6 +618,16 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
     /// <inheritdoc/>
     public async ValueTask CancelAsync(Guid runId, string reason, CancellationToken ct)
     {
+        var change = await CancelCoreAsync(runId, reason, ct).ConfigureAwait(false);
+        if (change is not null)
+        {
+            await NotifyAsync(change, ct).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary><see cref="CancelAsync"/>'s body. The change is <see langword="null"/> when the run was already terminal.</summary>
+    private async Task<WorkflowRunChange?> CancelCoreAsync(Guid runId, string reason, CancellationToken ct)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(reason);
 
         await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
@@ -553,7 +641,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
             // Idempotent for the same reason as FailAsync above: a run already Succeeded, Failed or
             // Cancelled has nothing left for this call to record, and re-recording it at the same
             // row.CurrentSeq would collide with workflow_run_event's (run_id, seq) unique index.
-            return;
+            return null;
         }
 
         // Same UPDATE-before-INSERT ordering as FailAsync, and for the same reason: two concurrent CancelAsync
@@ -592,10 +680,23 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
         WorkflowTelemetry.RecordRunFinished(row.Process, WorkflowStatus.Cancelled);
+        return new WorkflowRunChange(runId, WorkflowRunChangeKind.Cancelled, WorkflowStatus.Cancelled, row.CurrentNode, null);
     }
 
     /// <inheritdoc/>
     public async ValueTask<Result> RetryFailedNodeAsync(Guid runId, WorkflowRetryRequest request, CancellationToken ct)
+    {
+        var (result, change) = await RetryFailedNodeCoreAsync(runId, request, ct).ConfigureAwait(false);
+        if (change is not null)
+        {
+            await NotifyAsync(change, ct).ConfigureAwait(false);
+        }
+
+        return result;
+    }
+
+    /// <summary><see cref="RetryFailedNodeAsync"/>'s body. The change is set only when the retry was committed.</summary>
+    private async Task<(Result Result, WorkflowRunChange? Change)> RetryFailedNodeCoreAsync(Guid runId, WorkflowRetryRequest request, CancellationToken ct)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(request.RetriedBy);
@@ -606,29 +707,29 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         var row = await ReadRunRowAsync(connection, tx, runId, ct).ConfigureAwait(false);
         if (row is null)
         {
-            return Result.Failure($"Workflow run '{runId}' was not found.");
+            return (Result.Failure($"Workflow run '{runId}' was not found."), null);
         }
 
         if (row.Status != WorkflowStatus.Failed)
         {
-            return Result.Failure($"Workflow run '{runId}' is {row.Status}; only a Failed run can be retried.");
+            return (Result.Failure($"Workflow run '{runId}' is {row.Status}; only a Failed run can be retried."), null);
         }
 
         if (row.CurrentSeq != request.ExpectedSeq)
         {
-            return Result.Failure($"Workflow run '{runId}' is at seq {row.CurrentSeq}, not {request.ExpectedSeq}; it changed since it was read.");
+            return (Result.Failure($"Workflow run '{runId}' is at seq {row.CurrentSeq}, not {request.ExpectedSeq}; it changed since it was read."), null);
         }
 
         // Resolved on the run's pinned version, as ResumeAsync does; see _definitions.
         var definition = await _definitions.GetAsync(row.Process, row.ProcessVersion, ct).ConfigureAwait(false);
         if (definition.IsFailure)
         {
-            return Result.Failure(definition.Error);
+            return (Result.Failure(definition.Error), null);
         }
 
         if (!definition.Value.Nodes.TryGetValue(row.CurrentNode, out var node) || node.Action is null)
         {
-            return Result.Failure($"Workflow run '{runId}' failed at '{row.CurrentNode}', which is not a host-action node; only a host-action node can be retried.");
+            return (Result.Failure($"Workflow run '{runId}' failed at '{row.CurrentNode}', which is not a host-action node; only a host-action node can be retried."), null);
         }
 
         var retriedSeq = row.CurrentSeq + 1;
@@ -638,7 +739,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         // check here and never reaches the event INSERT or the enqueue.
         if (!await MarkRetriedAsync(connection, tx, runId, row.Xmin, dispatchSeq, ct).ConfigureAwait(false))
         {
-            return Result.Failure($"Workflow run '{runId}' was concurrently modified.");
+            return (Result.Failure($"Workflow run '{runId}' was concurrently modified."), null);
         }
 
         await InsertEventAsync(
@@ -651,7 +752,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         await EnqueueDispatchAsync(connection, tx, runId, dispatchSeq, row.CurrentNode, ct).ConfigureAwait(false);
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
-        return Result.Success();
+        return (Result.Success(), new WorkflowRunChange(runId, WorkflowRunChangeKind.Retried, WorkflowStatus.Running, row.CurrentNode, null));
     }
 
     /// <summary>
@@ -675,6 +776,32 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
 
         return await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false) == 1;
     }
+
+    /// <summary>
+    ///     Tells each observer about a change the caller has just committed. Every exception an observer throws,
+    ///     cancellation included, is logged by type and swallowed: the change is committed, so the caller sees
+    ///     success.
+    /// </summary>
+    private async ValueTask NotifyAsync(WorkflowRunChange change, CancellationToken ct)
+    {
+        foreach (var observer in _observers)
+        {
+            try
+            {
+                await observer.OnChangedAsync(change, ct).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                LogObserverFailed(_logger, observer.GetType().FullName ?? observer.GetType().Name, change.RunId,
+                    change.Kind, exception.GetType().FullName ?? exception.GetType().Name);
+            }
+        }
+    }
+
+    [LoggerMessage(EventId = 920, Level = LogLevel.Warning,
+        Message = "Workflow run observer {Observer} threw {ExceptionType} on the {ChangeKind} change of run {RunId}. The change is committed.")]
+    private static partial void LogObserverFailed(
+        ILogger logger, string observer, Guid runId, WorkflowRunChangeKind changeKind, string exceptionType);
 
     /// <summary>
     /// The most stranded runs <see cref="FindStrandedAsync"/> returns in one call. A dead-lettered dispatch
@@ -721,6 +848,66 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         }
 
         return results;
+    }
+
+    private const string SelectSummarySql = """
+        SELECT id, process, process_version, status, current_node, awaiting_signal, started_by, created_at, updated_at
+        FROM workflow_run
+        WHERE (@status::text IS NULL OR status = @status::text)
+          AND (@process::text IS NULL OR process = @process::text)
+          AND (@afterCreatedAt::timestamptz IS NULL OR (created_at, id) < (@afterCreatedAt::timestamptz, @afterId::uuid))
+        ORDER BY created_at DESC, id DESC
+        LIMIT @limit
+        """;
+
+    /// <inheritdoc/>
+    public async ValueTask<WorkflowRunPage> ListAsync(WorkflowRunFilter filter, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+        ArgumentOutOfRangeException.ThrowIfLessThan(filter.Take, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(filter.Take, WorkflowRunFilter.MaxTake);
+
+        await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = SelectSummarySql;
+        cmd.Parameters.AddWithValue("status", (object?)filter.Status?.ToString() ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("process", (object?)filter.Process ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("afterCreatedAt", (object?)filter.After?.CreatedAt.ToUniversalTime() ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("afterId", (object?)filter.After?.Id ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("limit", filter.Take + 1);
+
+        var runs = await ReadSummariesAsync(cmd, ct).ConfigureAwait(false);
+        if (runs.Count <= filter.Take)
+        {
+            return new WorkflowRunPage(runs, Next: null);
+        }
+
+        runs.RemoveAt(runs.Count - 1);
+        var last = runs[^1];
+        return new WorkflowRunPage(runs, new WorkflowRunCursor(last.CreatedAt, last.Id));
+    }
+
+    private static async Task<List<WorkflowRunSummary>> ReadSummariesAsync(NpgsqlCommand cmd, CancellationToken ct)
+    {
+        var runs = new List<WorkflowRunSummary>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            runs.Add(new WorkflowRunSummary
+            {
+                Id = reader.GetGuid(0),
+                Process = reader.GetString(1),
+                ProcessVersion = reader.GetInt32(2),
+                Status = Enum.Parse<WorkflowStatus>(reader.GetString(3)),
+                CurrentNode = reader.GetString(4),
+                AwaitingSignal = reader.IsDBNull(5) ? null : reader.GetString(5),
+                StartedBy = reader.IsDBNull(6) ? null : JsonSerializer.Deserialize<RunPrincipal>(reader.GetString(6), ManifestJsonOptions),
+                CreatedAt = reader.GetFieldValue<DateTimeOffset>(7),
+                UpdatedAt = reader.GetFieldValue<DateTimeOffset>(8),
+            });
+        }
+
+        return runs;
     }
 
     /// <inheritdoc/>
