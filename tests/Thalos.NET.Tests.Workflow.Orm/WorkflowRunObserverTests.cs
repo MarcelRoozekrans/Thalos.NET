@@ -74,8 +74,10 @@ public sealed class WorkflowRunObserverTests(PostgresFixture pg) : IAsyncLifetim
     }
 
     /// <summary>
-    ///     A resume with the wrong signal is refused and notifies nothing; the right signal notifies <c>Resumed</c>.
+    ///     A resume with the wrong signal is refused and notifies nothing; the right signal notifies <c>Resumed</c> with
+    ///     the gate's transition: the approval gate's successor <c>done</c>, still Running, awaiting nothing.
     ///     Red: notify before the Result.Failure returns. Red: drop the NotifyAsync call after Resume's commit.
+    ///     Red: pass row.CurrentNode and row.Status in ResumeAsync instead of the transition's.
     /// </summary>
     [Fact]
     public async Task Only_a_committed_resume_notifies()
@@ -91,7 +93,8 @@ public sealed class WorkflowRunObserverTests(PostgresFixture pg) : IAsyncLifetim
         var resumed = await _store.ResumeAsync(runId,
             new WorkflowResumeRequest { Signal = WorkflowRunSeeds.GateSignal, ResumedBy = TestPrincipals.Approver }, CancellationToken.None);
         resumed.IsSuccess.Should().BeTrue();
-        _observer.Changes.Should().ContainSingle().Which.Change.Kind.Should().Be(WorkflowRunChangeKind.Resumed);
+        _observer.Changes.Select(c => c.Change).Should().Equal(
+            new WorkflowRunChange(runId, WorkflowRunChangeKind.Resumed, WorkflowStatus.Running, "done", null));
     }
 
     /// <summary>
@@ -113,8 +116,10 @@ public sealed class WorkflowRunObserverTests(PostgresFixture pg) : IAsyncLifetim
     }
 
     /// <summary>
-    ///     Fail notifies <c>Failed</c>; a stranded fail at a stale seq returns false and notifies nothing.
+    ///     Fail notifies <c>Failed</c>; a stranded fail at a stale seq returns false and notifies nothing; a stranded
+    ///     fail at the run's real seq returns true and notifies <c>Failed</c>.
     ///     Red: drop the NotifyAsync call in FailAsync. Red: notify when FailStrandedAsync returns false.
+    ///     Red: drop the notify on FailStrandedAsync's success path.
     /// </summary>
     [Fact]
     public async Task Fail_notifies_and_a_refused_stranded_fail_does_not()
@@ -125,9 +130,12 @@ public sealed class WorkflowRunObserverTests(PostgresFixture pg) : IAsyncLifetim
 
         await _store.FailAsync(failed, "boom", CancellationToken.None);
         (await _store.FailStrandedAsync(stranded, expectedSeq: 99, "stale", CancellationToken.None)).Should().BeFalse();
+        // A new run is at seq 1.
+        (await _store.FailStrandedAsync(stranded, expectedSeq: 1, "stranded", CancellationToken.None)).Should().BeTrue();
 
         _observer.Changes.Select(c => c.Change).Should().Equal(
-            new WorkflowRunChange(failed, WorkflowRunChangeKind.Failed, WorkflowStatus.Failed, "implement", null));
+            new WorkflowRunChange(failed, WorkflowRunChangeKind.Failed, WorkflowStatus.Failed, "implement", null),
+            new WorkflowRunChange(stranded, WorkflowRunChangeKind.Failed, WorkflowStatus.Failed, "implement", null));
     }
 
     /// <summary>
@@ -149,24 +157,92 @@ public sealed class WorkflowRunObserverTests(PostgresFixture pg) : IAsyncLifetim
     }
 
     /// <summary>
-    ///     An observer that throws does not fail the change, does not stop the next observer, and is logged with its
-    ///     exception's type and never its message.
+    ///     An observer that throws, cancellation included, does not fail the change, does not stop the next observer,
+    ///     and is logged with its type, the run, the change kind and the exception's type, never its message.
     ///     Red: let the exception escape NotifyAsync: StartAsync throws.
     ///     Red: return from NotifyAsync on the first failure: the second observer sees nothing.
     ///     Red: log the exception object or its message: the secret text appears in the log.
+    ///     Red: drop the runId argument from LogObserverFailed. Red: drop the changeKind argument.
+    ///     Red: add <c>when (exception is not OperationCanceledException)</c> to the catch: the cancellation case throws.
     /// </summary>
-    [Fact]
-    public async Task A_throwing_observer_is_logged_by_type_and_ignored()
+    [Theory]
+    [InlineData(typeof(InvalidOperationException))]
+    [InlineData(typeof(OperationCanceledException))]
+    public async Task A_throwing_observer_is_logged_by_type_and_ignored(Type exceptionType)
     {
         var after = new RecordingObserver(pg.ConnectionString);
-        var store = NewStore(new ThrowingObserver(), after);
+        var store = NewStore(new ThrowingObserver((Exception)Activator.CreateInstance(exceptionType, "zqx-secret")!), after);
 
         var runId = await StartAsync("c1", store);
 
         after.Changes.Should().ContainSingle().Which.Change.RunId.Should().Be(runId);
         var line = _log.Lines.Should().ContainSingle().Subject;
-        line.Should().Contain(nameof(InvalidOperationException)).And.Contain(nameof(ThrowingObserver));
+        line.Should().Contain(exceptionType.Name).And.Contain(nameof(ThrowingObserver));
+        line.Should().Contain(runId.ToString()).And.Contain(nameof(WorkflowRunChangeKind.Started));
         line.Should().NotContain("zqx-secret");
+    }
+
+    /// <summary>
+    ///     Observers run one after another, in registration order: a first observer that yields still finishes before
+    ///     the second starts.
+    ///     Red: iterate _observers in reverse. Red: run the observers concurrently with Task.WhenAll.
+    /// </summary>
+    [Fact]
+    public async Task Observers_run_in_registration_order_one_at_a_time()
+    {
+        var seen = new List<string>();
+        var store = NewStore(new AppendingObserver(seen, "first", TimeSpan.FromMilliseconds(100)), new AppendingObserver(seen, "second", TimeSpan.Zero));
+
+        await StartAsync("c1", store);
+
+        seen.Should().Equal("first", "second");
+    }
+
+    /// <summary>
+    ///     Each observer gets the caller's own token.
+    ///     Red: pass CancellationToken.None in NotifyAsync.
+    /// </summary>
+    [Fact]
+    public async Task Observers_get_the_callers_token()
+    {
+        using var cts = new CancellationTokenSource();
+
+        await _store.StartAsync(new WorkflowStartRequest
+        {
+            Process = "manufacture",
+            Version = 1,
+            CorrelationKey = "c1",
+            StartNode = "implement",
+            InitialVariables = null,
+            StartedBy = TestPrincipals.Starter,
+        }, cts.Token);
+
+        _observer.Tokens.Should().Equal(cts.Token);
+    }
+
+    /// <summary>
+    ///     Observers run after the store has released its connection: with a pool of one, an observer that opens its
+    ///     own connection from that same pool gets it, for a start, a completion and a cancel.
+    ///     Red: notify inside StartCoreAsync before the connection's scope ends: the observer's open times out.
+    ///     Red: the same inside CancelCoreAsync.
+    /// </summary>
+    [Fact]
+    public async Task Observers_run_after_the_store_released_its_connection()
+    {
+        var poolOfOne = new NpgsqlConnectionStringBuilder(pg.ConnectionString) { MaxPoolSize = 1, Timeout = 2 }.ConnectionString;
+        var observer = new RecordingObserver(poolOfOne);
+        var store = new OrmWorkflowStore(new WorkflowOrmOptions { ConnectionString = poolOfOne },
+            WorkflowRunSeeds.NewDefinitionStore(pg.ConnectionString), [observer], _log.For<OrmWorkflowStore>());
+
+        var runId = await StartAsync("c1", store);
+        await store.CompleteNodeAsync(runId, seq: 1,
+            new WorkflowTransition("review", WorkflowStatus.Running, null, WorkflowEventKind.Completed),
+            new NodeResult("ok", new Dictionary<string, object?>(StringComparer.Ordinal)), CancellationToken.None);
+        await store.CancelAsync(runId, "test", CancellationToken.None);
+
+        observer.Changes.Select(c => c.Change.Kind).Should().Equal(
+            WorkflowRunChangeKind.Started, WorkflowRunChangeKind.NodeCompleted, WorkflowRunChangeKind.Cancelled);
+        _log.Lines.Should().BeEmpty();
     }
 
     /// <summary>
@@ -180,7 +256,7 @@ public sealed class WorkflowRunObserverTests(PostgresFixture pg) : IAsyncLifetim
     {
         var after = new RecordingObserver(pg.ConnectionString);
         var services = new ServiceCollection();
-        services.AddSingleton<IWorkflowRunObserver>(new ThrowingObserver());
+        services.AddSingleton<IWorkflowRunObserver>(new ThrowingObserver(new InvalidOperationException("zqx-secret")));
         services.AddSingleton<IWorkflowRunObserver>(after);
         services.AddSingleton(_log.For<OrmWorkflowStore>());
         services.AddThalos(thalos => thalos.AddWorkflowOrm(o =>
@@ -203,22 +279,42 @@ public sealed class WorkflowRunObserverTests(PostgresFixture pg) : IAsyncLifetim
     private Task<Guid> StartAsync(string correlation, OrmWorkflowStore? store = null) =>
         WorkflowRunSeeds.StartAsync(store ?? _store, process: "manufacture", correlation);
 
-    private sealed class ThrowingObserver : IWorkflowRunObserver
+    private sealed class ThrowingObserver(Exception exception) : IWorkflowRunObserver
     {
-        public ValueTask OnChangedAsync(WorkflowRunChange change, CancellationToken ct) =>
-            throw new InvalidOperationException("zqx-secret");
+        public ValueTask OnChangedAsync(WorkflowRunChange change, CancellationToken ct) => throw exception;
+    }
+
+    /// <summary>Waits <paramref name="delay"/>, yielding when it is not zero, then appends <paramref name="name"/>.</summary>
+    private sealed class AppendingObserver(List<string> seen, string name, TimeSpan delay) : IWorkflowRunObserver
+    {
+        public async ValueTask OnChangedAsync(WorkflowRunChange change, CancellationToken ct)
+        {
+            if (delay > TimeSpan.Zero)
+            {
+                await Task.Delay(delay, ct);
+            }
+
+            lock (seen)
+            {
+                seen.Add(name);
+            }
+        }
     }
 
     private sealed class RecordingObserver(string connectionString) : IWorkflowRunObserver
     {
         private readonly List<(WorkflowRunChange Change, bool VisibleOnAnotherConnection)> _changes = [];
+        private readonly List<CancellationToken> _tokens = [];
 
         public IReadOnlyList<(WorkflowRunChange Change, bool VisibleOnAnotherConnection)> Changes => _changes;
+
+        public IReadOnlyList<CancellationToken> Tokens => _tokens;
 
         public void Clear() => _changes.Clear();
 
         public async ValueTask OnChangedAsync(WorkflowRunChange change, CancellationToken ct)
         {
+            _tokens.Add(ct);
             await using var connection = new NpgsqlConnection(connectionString);
             await connection.OpenAsync(ct);
             await using var cmd = new NpgsqlCommand("SELECT count(*) FROM workflow_run WHERE id = @id", connection);
