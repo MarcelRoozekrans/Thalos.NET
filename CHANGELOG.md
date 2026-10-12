@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.15.0...v0.16.0) (2026-10-12)
+
+
+### Features
+
+* **workflow:** list runs and observe their changes ([#321](https://github.com/MarcelRoozekrans/Thalos.NET/issues/321)) ([bd54210](https://github.com/MarcelRoozekrans/Thalos.NET/commit/bd542108d1da50517816153ee81101808b221029))
+
 ## [0.15.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.14.2...v0.15.0) (2026-10-10)
 
 
