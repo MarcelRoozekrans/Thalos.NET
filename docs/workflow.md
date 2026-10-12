@@ -9,7 +9,7 @@ and `AddWorkflowOrm` registers two of them — this page is the other five.
 
 | Piece | Registered by `AddWorkflowOrm`? | What it does |
 | --- | --- | --- |
-| `IWorkflowStore` (the instrumented proxy) and `IWorkflowRunHistory` (both over one `OrmWorkflowStore`) | yes | Writes the run, the event log and the next dispatch in one transaction; reads the event log back, with each completed node's token usage |
+| `IWorkflowStore` (the instrumented proxy), `IWorkflowRunHistory` and `IWorkflowRunQuery` (all over one `OrmWorkflowStore`) | yes | Writes the run, the event log and the next dispatch in one transaction; reads the event log back, with each completed node's token usage; lists runs newest first |
 | `IProcessDefinitionStore` (`OrmProcessDefinitionStore`, cached) | yes | The one answer to "what is this process, at this version" |
 | `IWorkflowReferenceResolver` | **no** | Turns an `agent:`/`skill:`/`action:` name in the YAML into something that exists |
 | `WorkflowNodeDispatcher` | **no** | Runs one node's agent turn and persists the transition |
@@ -43,11 +43,30 @@ services.AddThalos(thalos => thalos
     .AddWorkflowOrm(o => o.ConnectionString = configuration.GetConnectionString("workflow")!));
 ```
 
-`AddWorkflowOrm` registers `IWorkflowStore` (resolved through the generated `WorkflowStoreInstrumented` proxy over one `OrmWorkflowStore` singleton) and `IWorkflowRunHistory` (the concrete store), `IProcessDefinitionStore` (an `OrmProcessDefinitionStore` behind
+`AddWorkflowOrm` registers `IWorkflowStore` (resolved through the generated `WorkflowStoreInstrumented` proxy over one `OrmWorkflowStore` singleton) and `IWorkflowRunHistory` and `IWorkflowRunQuery` (both the concrete store), `IProcessDefinitionStore` (an `OrmProcessDefinitionStore` behind
 `CachingProcessDefinitionStore`), the options object, and — while `WorkflowOrmOptions.EnsureSchemaOnStartup` is
 left on, which it is by default — a hosted service that applies the outbox and workflow migrations before the host
 accepts work. Read [`release.md`](release.md#schema-migrations-and-rolling-deploys) before leaving that on across a
 rolling deploy: migration 1004 is not backward compatible with pre-1004 code.
+
+### Listing runs
+
+`IWorkflowRunQuery.ListAsync(WorkflowRunFilter, ct)` lists runs for an operator console. `AddWorkflowOrm` registers it
+over the same `OrmWorkflowStore` singleton as `IWorkflowStore` and `IWorkflowRunHistory`, so a host resolves it from DI
+with nothing further to configure.
+
+Each `WorkflowRunSummary` carries the run's `Id`, `Process`, `ProcessVersion`, `Status`, `CurrentNode`,
+`AwaitingSignal`, `StartedBy`, `CreatedAt` and `UpdatedAt`. It never carries the run's variables or its last error, so
+work content cannot leave through a listing; open the run itself for those.
+
+Runs come back newest first, ordered by `CreatedAt` and then by `Id`. `WorkflowRunFilter` narrows them by `Status` and
+by `Process`, compared exactly, and `Take` sets the page size: 25 by default, at most `WorkflowRunFilter.MaxTake`
+(100). A `Take` outside 1 to 100 throws `ArgumentOutOfRangeException`.
+
+Paging is by keyset, not by offset. A page returns `Next`, a `WorkflowRunCursor` holding the `CreatedAt` and `Id` of its
+last run, or `null` when no older run matches. Pass it as `After` on the next call to continue strictly past that run;
+a run created while you page never shifts the pages you have not read yet. Migration 1011 adds the index that serves
+this order.
 
 ## 2. The reference resolver
 
@@ -820,25 +839,6 @@ file (`AGENT.md`) is the host's to add there. Entries may not contain `;`, which
   agent-writable. Agent code can plant `git/attributes` or `git/ignore` there, which change how git reads the tree,
   but not an execution path: filters and drivers are config, and git's config stays isolated. The publish side runs
   git on the host, with its own isolation directory.
-
-## Listing runs
-
-`IWorkflowRunQuery.ListAsync(WorkflowRunFilter, ct)` lists runs for an operator console. `AddWorkflowOrm` registers it
-over the same `OrmWorkflowStore` singleton as `IWorkflowStore` and `IWorkflowRunHistory`, so a host resolves it from DI
-with nothing further to configure.
-
-Each `WorkflowRunSummary` carries the run's `Id`, `Process`, `ProcessVersion`, `Status`, `CurrentNode`,
-`AwaitingSignal`, `StartedBy`, `CreatedAt` and `UpdatedAt`. It never carries the run's variables or its last error, so
-work content cannot leave through a listing; open the run itself for those.
-
-Runs come back newest first, ordered by `CreatedAt` and then by `Id`. `WorkflowRunFilter` narrows them by `Status` and
-by `Process`, compared exactly, and `Take` sets the page size: 25 by default, at most `WorkflowRunFilter.MaxTake`
-(100). A `Take` outside 1 to 100 throws `ArgumentOutOfRangeException`.
-
-Paging is by keyset, not by offset. A page returns `Next`, a `WorkflowRunCursor` holding the `CreatedAt` and `Id` of its
-last run, or `null` when no older run matches. Pass it as `After` on the next call to continue strictly past that run;
-a run created while you page never shifts the pages you have not read yet. Migration 1011 adds the index that serves
-this order.
 
 ## 12. Telemetry
 
