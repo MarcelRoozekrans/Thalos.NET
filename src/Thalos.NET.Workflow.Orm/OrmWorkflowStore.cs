@@ -28,7 +28,7 @@ namespace Thalos.Workflow.Orm;
 /// ends one, so a no-op, a refusal or a rolled back write counts nothing.
 /// A Failed run that is retried and ends again counts finished again.
 /// </remarks>
-public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinitionStore definitions) : IWorkflowStore, IWorkflowRunHistory
+public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinitionStore definitions) : IWorkflowStore, IWorkflowRunHistory, IWorkflowRunQuery
 {
     private const string SelectRunSql = """
         SELECT id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, manifest, started_by, last_resumed_by, last_resumed_at, xmin::text::bigint AS xmin, trace_parent
@@ -721,6 +721,66 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         }
 
         return results;
+    }
+
+    private const string SelectSummarySql = """
+        SELECT id, process, process_version, status, current_node, awaiting_signal, started_by, created_at, updated_at
+        FROM workflow_run
+        WHERE (@status::text IS NULL OR status = @status::text)
+          AND (@process::text IS NULL OR process = @process::text)
+          AND (@afterCreatedAt::timestamptz IS NULL OR (created_at, id) < (@afterCreatedAt::timestamptz, @afterId::uuid))
+        ORDER BY created_at DESC, id DESC
+        LIMIT @limit
+        """;
+
+    /// <inheritdoc/>
+    public async ValueTask<WorkflowRunPage> ListAsync(WorkflowRunFilter filter, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(filter);
+        ArgumentOutOfRangeException.ThrowIfLessThan(filter.Take, 1);
+        ArgumentOutOfRangeException.ThrowIfGreaterThan(filter.Take, WorkflowRunFilter.MaxTake);
+
+        await using var connection = await OpenConnectionAsync(ct).ConfigureAwait(false);
+        await using var cmd = connection.CreateCommand();
+        cmd.CommandText = SelectSummarySql;
+        cmd.Parameters.AddWithValue("status", (object?)filter.Status?.ToString() ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("process", (object?)filter.Process ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("afterCreatedAt", (object?)filter.After?.CreatedAt.ToUniversalTime() ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("afterId", (object?)filter.After?.Id ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("limit", filter.Take + 1);
+
+        var runs = await ReadSummariesAsync(cmd, ct).ConfigureAwait(false);
+        if (runs.Count <= filter.Take)
+        {
+            return new WorkflowRunPage(runs, Next: null);
+        }
+
+        runs.RemoveAt(runs.Count - 1);
+        var last = runs[^1];
+        return new WorkflowRunPage(runs, new WorkflowRunCursor(last.CreatedAt, last.Id));
+    }
+
+    private static async Task<List<WorkflowRunSummary>> ReadSummariesAsync(NpgsqlCommand cmd, CancellationToken ct)
+    {
+        var runs = new List<WorkflowRunSummary>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct).ConfigureAwait(false);
+        while (await reader.ReadAsync(ct).ConfigureAwait(false))
+        {
+            runs.Add(new WorkflowRunSummary
+            {
+                Id = reader.GetGuid(0),
+                Process = reader.GetString(1),
+                ProcessVersion = reader.GetInt32(2),
+                Status = Enum.Parse<WorkflowStatus>(reader.GetString(3)),
+                CurrentNode = reader.GetString(4),
+                AwaitingSignal = reader.IsDBNull(5) ? null : reader.GetString(5),
+                StartedBy = reader.IsDBNull(6) ? null : JsonSerializer.Deserialize<RunPrincipal>(reader.GetString(6), ManifestJsonOptions),
+                CreatedAt = reader.GetFieldValue<DateTimeOffset>(7),
+                UpdatedAt = reader.GetFieldValue<DateTimeOffset>(8),
+            });
+        }
+
+        return runs;
     }
 
     /// <inheritdoc/>

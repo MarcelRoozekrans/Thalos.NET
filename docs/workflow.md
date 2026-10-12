@@ -821,6 +821,25 @@ file (`AGENT.md`) is the host's to add there. Entries may not contain `;`, which
   but not an execution path: filters and drivers are config, and git's config stays isolated. The publish side runs
   git on the host, with its own isolation directory.
 
+## Listing runs
+
+`IWorkflowRunQuery.ListAsync(WorkflowRunFilter, ct)` lists runs for an operator console. `AddWorkflowOrm` registers it
+over the same `OrmWorkflowStore` singleton as `IWorkflowStore` and `IWorkflowRunHistory`, so a host resolves it from DI
+with nothing further to configure.
+
+Each `WorkflowRunSummary` carries the run's `Id`, `Process`, `ProcessVersion`, `Status`, `CurrentNode`,
+`AwaitingSignal`, `StartedBy`, `CreatedAt` and `UpdatedAt`. It never carries the run's variables or its last error, so
+work content cannot leave through a listing; open the run itself for those.
+
+Runs come back newest first, ordered by `CreatedAt` and then by `Id`. `WorkflowRunFilter` narrows them by `Status` and
+by `Process`, compared exactly, and `Take` sets the page size: 25 by default, at most `WorkflowRunFilter.MaxTake`
+(100). A `Take` outside 1 to 100 throws `ArgumentOutOfRangeException`.
+
+Paging is by keyset, not by offset. A page returns `Next`, a `WorkflowRunCursor` holding the `CreatedAt` and `Id` of its
+last run, or `null` when no older run matches. Pass it as `After` on the next call to continue strictly past that run;
+a run created while you page never shifts the pages you have not read yet. Migration 1011 adds the index that serves
+this order.
+
 ## 12. Telemetry
 
 The workflow engine emits spans and metrics under one name, `thalos.workflow`. The agent runtime's own source,

@@ -575,7 +575,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
             ConnectionString = pg.ConnectionString,
             OutboxStoreFactory = connection => new ThrowingOutboxStore(connection),
         },
-        NewDefinitionStore());
+        WorkflowRunSeeds.NewDefinitionStore(pg.ConnectionString));
 
     /// <summary>
     /// A store wired to the real <see cref="OrmProcessDefinitionStore"/> over the same database — the same pairing
@@ -584,10 +584,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     /// the only way a definition becomes runnable.
     /// </summary>
     private OrmWorkflowStore NewStore() =>
-        new(new WorkflowOrmOptions { ConnectionString = pg.ConnectionString }, NewDefinitionStore());
-
-    private OrmProcessDefinitionStore NewDefinitionStore() =>
-        new(new WorkflowOrmOptions { ConnectionString = pg.ConnectionString });
+        new(new WorkflowOrmOptions { ConnectionString = pg.ConnectionString }, WorkflowRunSeeds.NewDefinitionStore(pg.ConnectionString));
 
     // --- RetryFailedNodeAsync ------------------------------------------------------------------------------
 
@@ -775,7 +772,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
 
     private async Task<OrmWorkflowStore> ActivatePublishingProcessAsync()
     {
-        var definitions = NewDefinitionStore();
+        var definitions = WorkflowRunSeeds.NewDefinitionStore(pg.ConnectionString);
         var definition = ProcessLoader.Load(PublishingYaml);
         definition.IsSuccess.Should().BeTrue(definition.IsFailure ? definition.Error : "");
         await definitions.UpsertAndActivateAsync(definition.Value, PublishingYaml, CancellationToken.None);
@@ -808,7 +805,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     /// </summary>
     private async Task<OrmWorkflowStore> ActivateApprovalProcessAsync()
     {
-        var definitions = NewDefinitionStore();
+        var definitions = WorkflowRunSeeds.NewDefinitionStore(pg.ConnectionString);
         var definition = ProcessLoader.Load(ApprovalYaml);
         definition.IsSuccess.Should().BeTrue(definition.IsFailure ? definition.Error : "");
         await definitions.UpsertAndActivateAsync(definition.Value, ApprovalYaml, CancellationToken.None);

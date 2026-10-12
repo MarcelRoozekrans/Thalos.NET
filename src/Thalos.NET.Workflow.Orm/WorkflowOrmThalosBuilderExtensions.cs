@@ -76,6 +76,7 @@ public static class WorkflowOrmThalosBuilderExtensions
         // wrapped twice by a second AddWorkflowOrm call: Replace swaps the one descriptor.
         services.Replace(ServiceDescriptor.Singleton<IWorkflowStore>(sp => new WorkflowStoreInstrumented(sp.GetRequiredService<OrmWorkflowStore>())));
         services.Replace(ServiceDescriptor.Singleton<IWorkflowRunHistory>(sp => sp.GetRequiredService<OrmWorkflowStore>()));
+        services.Replace(ServiceDescriptor.Singleton<IWorkflowRunQuery>(sp => sp.GetRequiredService<OrmWorkflowStore>()));
 
         // Pinning is additive, not ORM-specific — TryAdd so a host that already registered its own
         // IRunManifestResolver (or WorkflowRunStarter) keeps that registration, and a second AddWorkflowOrm call

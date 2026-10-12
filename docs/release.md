@@ -234,6 +234,12 @@ Editing a process file **without bumping its `version`** is now a sync *error* r
 Authors who relied on re-syncing a version in place must bump the version instead. The error names the process
 and version and says so.
 
+### 0.16.0 — `1011_create_workflow_run_listing_index`
+
+Adds `ix_workflow_run_created_at_id` on `workflow_run (created_at DESC, id DESC)`, which `IWorkflowRunQuery` reads
+newest first with keyset paging. It is additive and safe in a rolling deploy: older code ignores an index. It is not
+built `CONCURRENTLY`, so it briefly blocks writes to `workflow_run` while it builds.
+
 ### Outbox migration 2 — `add_outbox_lease`
 
 ZeroAlloc.Outbox 3.0 adds migration 2 to `OutboxOrmMigrations.Postgres`: nullable `LockedBy` and `LockedUntil`
