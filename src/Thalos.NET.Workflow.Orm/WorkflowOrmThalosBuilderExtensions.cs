@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 
 namespace Thalos.Workflow.Orm;
 
@@ -66,9 +67,13 @@ public static class WorkflowOrmThalosBuilderExtensions
             new CachingProcessDefinitionStore(new OrmProcessDefinitionStore(sp.GetRequiredService<WorkflowOrmOptions>()))));
         // One OrmWorkflowStore, registered as itself and reached through both interfaces it implements, so the
         // history a host reads is the store that wrote it. Each interface forwards to the concrete registration
-        // rather than constructing its own.
+        // rather than constructing its own. Every registered IWorkflowRunObserver is told about each change it commits.
         services.Replace(ServiceDescriptor.Singleton(sp =>
-            new OrmWorkflowStore(sp.GetRequiredService<WorkflowOrmOptions>(), sp.GetRequiredService<IProcessDefinitionStore>())));
+            new OrmWorkflowStore(
+                sp.GetRequiredService<WorkflowOrmOptions>(),
+                sp.GetRequiredService<IProcessDefinitionStore>(),
+                sp.GetServices<IWorkflowRunObserver>(),
+                sp.GetService<ILogger<OrmWorkflowStore>>())));
         // IWorkflowStore is the generated telemetry proxy over that one store (0.15.0), so every state-changing call
         // is a thalos.workflow.store.* span. IWorkflowRunHistory stays the concrete store: its reads are not traced.
         // A host can still decorate IWorkflowStore alone by replacing this descriptor, and its decorator then wraps the

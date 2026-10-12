@@ -166,6 +166,16 @@ returns with `GitCommitRequest.CommitStagedIndex = true`, and leave `Paths` null
   instead, since the call replaces it. A host that registered its own only to work around #250 can now remove that
   registration.
 
+0.16.0 ships the same eighteen packages.
+
+- **`OrmWorkflowStore`'s constructor gains two optional trailing parameters**, `IEnumerable<IWorkflowRunObserver>?
+  observers = null` and `ILogger<OrmWorkflowStore>? logger = null`, so the store can tell observers about each change
+  it commits. See [workflow.md, Observing run changes](workflow.md#observing-run-changes). This is source-compatible:
+  a call with two arguments still compiles. It is binary-breaking for an assembly compiled against 0.15.x that
+  calls the constructor directly, which must be rebuilt. Hosts that use `AddWorkflowOrm` are unaffected; it passes
+  the registered observers and the logger itself. 0.16.0 is a minor release before 1.0, which is where such a break
+  belongs.
+
 **Breaking changes accumulated across the workflow-engine phase (2.2, Part A):**
 
 - `ThalosAgentRuntime`'s public constructor gained a required `IOutcomeToolFactory outcomeTools` parameter

@@ -15,9 +15,6 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
 {
     private static readonly IReadOnlyDictionary<string, object?> Empty = new Dictionary<string, object?>(StringComparer.Ordinal);
 
-    /// <summary>A resumer fixture for tests that need one but are not testing who it is.</summary>
-    private static readonly RunPrincipal TestApprover = new("test-approver", ["admin"]);
-
     private OrmWorkflowStore _store = null!;
 
     public async Task InitializeAsync()
@@ -334,15 +331,10 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task ResumeAsync_defers_to_the_interpreter_for_the_gates_successor()
     {
-        var store = await ActivateApprovalProcessAsync();
+        var store = NewStore();
+        var runId = await WorkflowRunSeeds.ParkedAtGateAsync(store, pg, "c-resume");
 
-        var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "approval", Version = 1, CorrelationKey = "c-resume", StartNode = "start", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
-        await store.CompleteNodeAsync(
-            runId, seq: 1,
-            new WorkflowTransition("gate", WorkflowStatus.Awaiting, "ok", WorkflowEventKind.Awaiting),
-            new NodeResult(null, Empty), CancellationToken.None);
-
-        var result = await store.ResumeAsync(runId, new WorkflowResumeRequest { Signal = "ok", Payload = "approved", ResumedBy = TestApprover }, CancellationToken.None);
+        var result = await store.ResumeAsync(runId, new WorkflowResumeRequest { Signal = WorkflowRunSeeds.GateSignal, Payload = "approved", ResumedBy = TestPrincipals.Approver }, CancellationToken.None);
 
         result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error : "");
         var run = await store.FindAsync(runId, CancellationToken.None);
@@ -356,15 +348,10 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task ResumeAsync_fails_when_the_signal_does_not_match()
     {
-        var store = await ActivateApprovalProcessAsync();
+        var store = NewStore();
+        var runId = await WorkflowRunSeeds.ParkedAtGateAsync(store, pg, "c-resume-2");
 
-        var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "approval", Version = 1, CorrelationKey = "c-resume-2", StartNode = "start", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
-        await store.CompleteNodeAsync(
-            runId, seq: 1,
-            new WorkflowTransition("gate", WorkflowStatus.Awaiting, "ok", WorkflowEventKind.Awaiting),
-            new NodeResult(null, Empty), CancellationToken.None);
-
-        var result = await store.ResumeAsync(runId, new WorkflowResumeRequest { Signal = "wrong-signal", ResumedBy = TestApprover }, CancellationToken.None);
+        var result = await store.ResumeAsync(runId, new WorkflowResumeRequest { Signal = "wrong-signal", ResumedBy = TestPrincipals.Approver }, CancellationToken.None);
 
         result.IsFailure.Should().BeTrue();
     }
@@ -580,7 +567,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     /// <summary>
     /// A store wired to the real <see cref="OrmProcessDefinitionStore"/> over the same database — the same pairing
     /// <c>AddWorkflowOrm</c> composes. Nothing here registers process definitions in memory: a test that needs a
-    /// definition resolvable puts it in the table through <see cref="ActivateApprovalProcessAsync"/>, which is now
+    /// definition resolvable puts it in the table through <see cref="WorkflowRunSeeds.ActivateAsync"/>, which is now
     /// the only way a definition becomes runnable.
     /// </summary>
     private OrmWorkflowStore NewStore() =>
@@ -595,7 +582,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         var runId = await FailedAtPublishAsync(store, "c-retry");
         var outboxBefore = await CountAsync("SELECT count(*) FROM outboxmessages", null);
 
-        var result = await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 2, RetriedBy = TestApprover }, CancellationToken.None);
+        var result = await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 2, RetriedBy = TestPrincipals.Approver }, CancellationToken.None);
 
         result.IsSuccess.Should().BeTrue(result.IsFailure ? result.Error : "");
         var run = await store.FindAsync(runId, CancellationToken.None);
@@ -619,8 +606,8 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         // Red if the event is written at S, which also throws on the unique index, or at S+2.
         retried.Seq.Should().Be(3);
         // Red if actor is not written or not read back.
-        retried.Actor!.Id.Should().Be(TestApprover.Id);
-        retried.Actor.Roles.Should().Equal(TestApprover.Roles);
+        retried.Actor!.Id.Should().Be(TestPrincipals.Approver.Id);
+        retried.Actor.Roles.Should().Equal(TestPrincipals.Approver.Roles);
         // Red if a Failed or Entered event also gets an actor.
         events.Where(e => !string.Equals(e.Kind, nameof(WorkflowEventKind.Retried), StringComparison.Ordinal)).Should().OnlyContain(e => e.Actor == null);
     }
@@ -628,17 +615,16 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     [Fact]
     public async Task RetryFailedNodeAsync_keeps_the_last_resume()
     {
-        var store = await ActivateApprovalProcessAsync();
-        var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "approval", Version = 1, CorrelationKey = "c-retry-resume", StartNode = "start", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
-        await store.CompleteNodeAsync(runId, seq: 1, new WorkflowTransition("gate", WorkflowStatus.Awaiting, "ok", WorkflowEventKind.Awaiting), new NodeResult(null, Empty), CancellationToken.None);
-        (await store.ResumeAsync(runId, new WorkflowResumeRequest { Signal = "ok", Payload = null, ResumedBy = TestApprover }, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        var store = NewStore();
+        var runId = await WorkflowRunSeeds.ParkedAtGateAsync(store, pg, "c-retry-resume");
+        (await store.ResumeAsync(runId, new WorkflowResumeRequest { Signal = WorkflowRunSeeds.GateSignal, Payload = null, ResumedBy = TestPrincipals.Approver }, CancellationToken.None)).IsSuccess.Should().BeTrue();
         await store.FailAsync(runId, "boom", CancellationToken.None);
 
         // The approval process has no action node, so this retry is refused. The run still holds its LastResume.
         // This guards that the refusal path writes nothing; the success path is guarded by the next assertion.
         (await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 3, RetriedBy = TestPrincipals.Starter }, CancellationToken.None)).IsFailure.Should().BeTrue();
         // Red if a refused retry clears last_resumed_by.
-        (await store.FindAsync(runId, CancellationToken.None))!.LastResume!.By.Id.Should().Be(TestApprover.Id);
+        (await store.FindAsync(runId, CancellationToken.None))!.LastResume!.By.Id.Should().Be(TestPrincipals.Approver.Id);
     }
 
     [Fact]
@@ -685,7 +671,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         var eventsBefore = await CountAsync("SELECT count(*) FROM workflow_run_event", null);
         var outboxBefore = await CountAsync("SELECT count(*) FROM outboxmessages", null);
 
-        var result = await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = seq, RetriedBy = TestApprover }, CancellationToken.None);
+        var result = await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = seq, RetriedBy = TestPrincipals.Approver }, CancellationToken.None);
 
         // Red on "running" if the status guard is dropped; on "stale-seq" if the seq guard is dropped; on
         // "not-found" if a missing row throws instead of failing.
@@ -702,7 +688,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "publishing", Version = 1, CorrelationKey = "c-retry-agent", StartNode = "start", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
         await store.FailAsync(runId, "turn failed", CancellationToken.None);
 
-        var result = await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 1, RetriedBy = TestApprover }, CancellationToken.None);
+        var result = await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 1, RetriedBy = TestPrincipals.Approver }, CancellationToken.None);
 
         // Red if the action-node guard is dropped: an agent node would re-run and re-spend its turn.
         result.IsFailure.Should().BeTrue();
@@ -719,7 +705,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         var eventsBefore = await CountAsync("SELECT count(*) FROM workflow_run_event", null);
         var outboxBefore = await CountAsync("SELECT count(*) FROM outboxmessages", null);
 
-        var result = await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 2, RetriedBy = TestApprover }, CancellationToken.None);
+        var result = await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 2, RetriedBy = TestPrincipals.Approver }, CancellationToken.None);
 
         // Red if the definition lookup failure is ignored or throws instead of failing the result.
         result.IsFailure.Should().BeTrue();
@@ -749,8 +735,8 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         var runId = await FailedAtPublishAsync(store, "c-retry-race");
 
         var results = await Task.WhenAll(
-            store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 2, RetriedBy = TestApprover }, CancellationToken.None).AsTask(),
-            store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 2, RetriedBy = TestApprover }, CancellationToken.None).AsTask());
+            store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 2, RetriedBy = TestPrincipals.Approver }, CancellationToken.None).AsTask(),
+            store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 2, RetriedBy = TestPrincipals.Approver }, CancellationToken.None).AsTask());
 
         // Red if the UPDATE drops its xmin check: both UPDATEs commit through the row lock, then the loser's
         // Retried INSERT collides on the unique index at S+1 and throws WorkflowConcurrencyException, so
@@ -760,58 +746,13 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         (await CountAsync("SELECT count(*) FROM workflow_run_event WHERE run_id = @id AND kind = 'Retried'", runId)).Should().Be(1);
     }
 
-    /// <summary>A task node, then an action node: the shape a retry is for.</summary>
-    private const string PublishingYaml = """
-        process: publishing
-        version: 1
-        nodes:
-          start: { next: publish }
-          publish: { action: open-pull-request, outcomes: [published], next: done }
-          done: { terminal: succeeded }
-        """;
+    /// <summary>A store that resolves <see cref="WorkflowRunSeeds.PublishingYaml"/>, activated in the table.</summary>
+    private async Task<OrmWorkflowStore> ActivatePublishingProcessAsync() =>
+        new(new WorkflowOrmOptions { ConnectionString = pg.ConnectionString }, await WorkflowRunSeeds.ActivateAsync(pg, WorkflowRunSeeds.PublishingYaml));
 
-    private async Task<OrmWorkflowStore> ActivatePublishingProcessAsync()
-    {
-        var definitions = WorkflowRunSeeds.NewDefinitionStore(pg.ConnectionString);
-        var definition = ProcessLoader.Load(PublishingYaml);
-        definition.IsSuccess.Should().BeTrue(definition.IsFailure ? definition.Error : "");
-        await definitions.UpsertAndActivateAsync(definition.Value, PublishingYaml, CancellationToken.None);
-        return new OrmWorkflowStore(new WorkflowOrmOptions { ConnectionString = pg.ConnectionString }, definitions);
-    }
-
-    /// <summary>Starts a publishing run, moves it onto <c>publish</c> at seq 2, and fails it there.</summary>
-    private static async Task<Guid> FailedAtPublishAsync(OrmWorkflowStore store, string key)
-    {
-        var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "publishing", Version = 1, CorrelationKey = key, StartNode = "start", InitialVariables = new Dictionary<string, object?>(StringComparer.Ordinal) { ["work_intent"] = "x" }, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
-        await store.CompleteNodeAsync(runId, seq: 1, new WorkflowTransition("publish", WorkflowStatus.Running, null, WorkflowEventKind.Completed), new NodeResult(null, Empty), CancellationToken.None);
-        await store.FailAsync(runId, "node 'publish': push failed", CancellationToken.None);
-        return runId;
-    }
-
-    /// <summary>The YAML behind <see cref="ActivateApprovalProcessAsync"/>: a task node, an approval gate, a terminal.</summary>
-    private const string ApprovalYaml = """
-        process: approval
-        version: 1
-        nodes:
-          start: { next: gate }
-          gate: { await: ok, next: done }
-          done: { terminal: succeeded }
-        """;
-
-    /// <summary>
-    /// Writes the approval process into <c>process_definition</c> and returns a workflow store that resolves
-    /// against it. This replaces the in-memory registry these two resume tests used to seed: a definition now has
-    /// to be in the table for a resume to find it, which is the whole point of the change they were updated for.
-    /// </summary>
-    private async Task<OrmWorkflowStore> ActivateApprovalProcessAsync()
-    {
-        var definitions = WorkflowRunSeeds.NewDefinitionStore(pg.ConnectionString);
-        var definition = ProcessLoader.Load(ApprovalYaml);
-        definition.IsSuccess.Should().BeTrue(definition.IsFailure ? definition.Error : "");
-        await definitions.UpsertAndActivateAsync(definition.Value, ApprovalYaml, CancellationToken.None);
-
-        return new OrmWorkflowStore(new WorkflowOrmOptions { ConnectionString = pg.ConnectionString }, definitions);
-    }
+    /// <summary>A publishing run failed at <c>publish</c>, seq 2; see <see cref="WorkflowRunSeeds.FailedAtHostActionAsync"/>.</summary>
+    private async Task<Guid> FailedAtPublishAsync(OrmWorkflowStore store, string key) =>
+        (await WorkflowRunSeeds.FailedAtHostActionAsync(store, pg, key)).RunId;
 
     private async Task<T?> ScalarAsync<T>(string sql, object? parameter)
     {

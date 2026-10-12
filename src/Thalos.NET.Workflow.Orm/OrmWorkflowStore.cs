@@ -1,6 +1,8 @@
 using System.Data.Async.Adapters;
 using System.Diagnostics;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using ZeroAlloc.Outbox;
 using ZeroAlloc.Results;
@@ -27,8 +29,14 @@ namespace Thalos.Workflow.Orm;
 /// Runs started and finished are counted on <see cref="WorkflowTelemetry"/> after each commit that creates a run or
 /// ends one, so a no-op, a refusal or a rolled back write counts nothing.
 /// A Failed run that is retried and ends again counts finished again.
+/// Each <see cref="IWorkflowRunObserver"/> is told about a change after the same commit, in registration order, on the
+/// caller's path, and never about a refusal, a no-op or a rolled back write; see <see cref="NotifyAsync"/>.
 /// </remarks>
-public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinitionStore definitions) : IWorkflowStore, IWorkflowRunHistory, IWorkflowRunQuery
+public sealed partial class OrmWorkflowStore(
+    WorkflowOrmOptions options,
+    IProcessDefinitionStore definitions,
+    IEnumerable<IWorkflowRunObserver>? observers = null,
+    ILogger<OrmWorkflowStore>? logger = null) : IWorkflowStore, IWorkflowRunHistory, IWorkflowRunQuery
 {
     private const string SelectRunSql = """
         SELECT id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, manifest, started_by, last_resumed_by, last_resumed_at, xmin::text::bigint AS xmin, trace_parent
@@ -63,6 +71,12 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         new Dictionary<string, object?>(StringComparer.Ordinal);
 
     private readonly WorkflowOrmOptions _options = options ?? throw new ArgumentNullException(nameof(options));
+
+    /// <summary>Told about each committed change, in this order. Empty when none were given.</summary>
+    private readonly IWorkflowRunObserver[] _observers = observers?.ToArray() ?? [];
+
+    /// <summary>Where an observer's failure is logged. Nothing else in this store logs.</summary>
+    private readonly ILogger _logger = logger ?? (ILogger)NullLogger.Instance;
 
     /// <summary>
     /// Where <see cref="ResumeAsync"/> gets the run's <see cref="ProcessDefinition"/> from — the same
@@ -152,15 +166,20 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         // none in which that work is scheduled against a run that was never written.
         await EnqueueDispatchAsync(connection, tx, id, InitialCurrentSeq, startNode, ct).ConfigureAwait(false);
 
-        await CommitAndRecordStartAsync(tx, request.Process, ct).ConfigureAwait(false);
+        await CommitAndRecordStartAsync(tx, request, id, ct).ConfigureAwait(false);
         return Result<Guid>.Success(id);
     }
 
-    /// <summary>Commits a newly inserted run, then counts it: the count follows the commit, so a rolled back start counts nothing.</summary>
-    private static async Task CommitAndRecordStartAsync(NpgsqlTransaction tx, string process, CancellationToken ct)
+    /// <summary>
+    /// Commits a newly inserted run, then counts it and tells the observers: both follow the commit, so a rolled back
+    /// start counts and notifies nothing. Split out of <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/>
+    /// only to keep that method inside the analyzer's length limit.
+    /// </summary>
+    private async Task CommitAndRecordStartAsync(NpgsqlTransaction tx, WorkflowStartRequest request, Guid id, CancellationToken ct)
     {
         await tx.CommitAsync(ct).ConfigureAwait(false);
-        WorkflowTelemetry.RecordRunStarted(process);
+        WorkflowTelemetry.RecordRunStarted(request.Process);
+        await NotifyAsync(new WorkflowRunChange(id, WorkflowRunChangeKind.Started, WorkflowStatus.Running, request.StartNode, null), ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -332,6 +351,8 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         {
             WorkflowTelemetry.RecordRunFinished(row.Process, transition.NextStatus);
         }
+
+        await NotifyAsync(new WorkflowRunChange(runId, WorkflowRunChangeKind.NodeCompleted, transition.NextStatus, transition.NextNode, transition.AwaitingSignal), ct).ConfigureAwait(false);
     }
 
     /// <inheritdoc/>
@@ -388,6 +409,8 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         }
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
+        var resumed = transitionResult.Value;
+        await NotifyAsync(new WorkflowRunChange(runId, WorkflowRunChangeKind.Resumed, resumed.NextStatus, resumed.NextNode, resumed.AwaitingSignal), ct).ConfigureAwait(false);
         return Result.Success();
     }
 
@@ -449,6 +472,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
         WorkflowTelemetry.RecordRunFinished(row.Process, WorkflowStatus.Failed);
+        await NotifyAsync(new WorkflowRunChange(runId, WorkflowRunChangeKind.Failed, WorkflowStatus.Failed, row.CurrentNode, null), ct).ConfigureAwait(false);
     }
 
     /// <inheritdoc/>
@@ -487,6 +511,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         if (failed)
         {
             WorkflowTelemetry.RecordRunFinished(row.Process, WorkflowStatus.Failed);
+            await NotifyAsync(new WorkflowRunChange(runId, WorkflowRunChangeKind.Failed, WorkflowStatus.Failed, row.CurrentNode, null), ct).ConfigureAwait(false);
         }
 
         return failed;
@@ -592,6 +617,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
         WorkflowTelemetry.RecordRunFinished(row.Process, WorkflowStatus.Cancelled);
+        await NotifyAsync(new WorkflowRunChange(runId, WorkflowRunChangeKind.Cancelled, WorkflowStatus.Cancelled, row.CurrentNode, null), ct).ConfigureAwait(false);
     }
 
     /// <inheritdoc/>
@@ -651,6 +677,7 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
         await EnqueueDispatchAsync(connection, tx, runId, dispatchSeq, row.CurrentNode, ct).ConfigureAwait(false);
 
         await tx.CommitAsync(ct).ConfigureAwait(false);
+        await NotifyAsync(new WorkflowRunChange(runId, WorkflowRunChangeKind.Retried, WorkflowStatus.Running, row.CurrentNode, null), ct).ConfigureAwait(false);
         return Result.Success();
     }
 
@@ -675,6 +702,32 @@ public sealed class OrmWorkflowStore(WorkflowOrmOptions options, IProcessDefinit
 
         return await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false) == 1;
     }
+
+    /// <summary>
+    ///     Tells each observer about a change the caller has just committed. Every exception an observer throws,
+    ///     cancellation included, is logged by type and swallowed: the change is committed, so the caller sees
+    ///     success.
+    /// </summary>
+    private async ValueTask NotifyAsync(WorkflowRunChange change, CancellationToken ct)
+    {
+        foreach (var observer in _observers)
+        {
+            try
+            {
+                await observer.OnChangedAsync(change, ct).ConfigureAwait(false);
+            }
+            catch (Exception exception)
+            {
+                LogObserverFailed(_logger, observer.GetType().FullName ?? observer.GetType().Name, change.RunId,
+                    change.Kind, exception.GetType().FullName ?? exception.GetType().Name);
+            }
+        }
+    }
+
+    [LoggerMessage(EventId = 920, Level = LogLevel.Warning,
+        Message = "Workflow run observer {Observer} threw {ExceptionType} on the {ChangeKind} change of run {RunId}. The change is committed.")]
+    private static partial void LogObserverFailed(
+        ILogger logger, string observer, Guid runId, WorkflowRunChangeKind changeKind, string exceptionType);
 
     /// <summary>
     /// The most stranded runs <see cref="FindStrandedAsync"/> returns in one call. A dead-lettered dispatch
