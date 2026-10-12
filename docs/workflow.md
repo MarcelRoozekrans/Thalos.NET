@@ -78,7 +78,9 @@ services.AddSingleton<IWorkflowRunObserver, MyConsoleNotifier>();
 ```
 
 **When an observer runs.** After the store's transaction commits, and only when the call succeeds. The store awaits
-each observer in turn, in registration order, on the caller's own path and with the caller's `CancellationToken`. An
+each observer in turn, in registration order, on the caller's own path and with the caller's `CancellationToken`. The
+store has already returned its connection to the pool by then, so an observer that opens one of its own does not
+compete with the store for it. An
 observer is never told about a refused or rolled back change: not about a `Result` failure, not about a call that
 throws, not about `StartAsync` returning an existing run for a correlation key already used, not about `FailAsync` or
 `CancelAsync` on a run that is already terminal, and not about `FailStrandedAsync` returning `false`.
