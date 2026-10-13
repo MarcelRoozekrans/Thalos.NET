@@ -373,8 +373,8 @@ public sealed class AgentFactoryTests
         var h = Build();
         var def = Def();
 
-        await h.Factory.ValidateOverridesAsync(def, null, ["t"], CancellationToken.None);
-        await h.Factory.ValidateOverridesAsync(def with { Tools = ["t*"] }, null, ["t"], CancellationToken.None);
+        (await h.Factory.ValidateOverridesAsync(def, null, ["t"], CancellationToken.None)).IsSuccess.Should().BeTrue();
+        (await h.Factory.ValidateOverridesAsync(def with { Tools = ["t*"] }, null, ["t"], CancellationToken.None)).IsSuccess.Should().BeTrue();
 
         await h.Catalog.Received(2).ResolveAsync(Arg.Any<AgentDefinition>(), Arg.Any<CancellationToken>());
     }
@@ -400,6 +400,98 @@ public sealed class AgentFactoryTests
 
         (await factory.ValidateOverridesAsync(def, null, ["t"], CancellationToken.None)).IsSuccess.Should().BeTrue();
         catalog.Resolutions.Should().Be(2);
+    }
+
+    /// <summary>Gives every build its own dispose-tracking client, in build order, so a test can tell pipelines apart.</summary>
+    private static List<DisposeTrackingClient> TrackEachBuild(Harness h)
+    {
+        var clients = new List<DisposeTrackingClient>();
+        h.Provider.CreateChatClient(Arg.Any<AgentDefinition>()).Returns(_ =>
+        {
+            var client = new DisposeTrackingClient(h.Client);
+            clients.Add(client);
+            return client;
+        });
+        return clients;
+    }
+
+    /// <summary>
+    /// A changed definition replacing the unfiltered agent also drops the filtered agent of the same id and revision
+    /// that still holds the old definition. Red: drop the <c>EvictStaleSiblings</c> call; the filtered pipeline stays
+    /// live and undisposed (verified). The first assertion is the pre-existing replacement of the requested key.
+    /// </summary>
+    [Fact]
+    public async Task A_changed_definition_drops_the_stale_pipelines_under_other_filters()
+    {
+        var h = Build();
+        var clients = TrackEachBuild(h);
+        var def = Def();
+        await h.Factory.GetOrCreateAsync(def, CancellationToken.None);
+        await h.Factory.GetOrCreateAsync(def, ["t"], CancellationToken.None);
+
+        (await h.Factory.GetOrCreateAsync(def with { Instructions = "sys2" }, CancellationToken.None)).IsSuccess.Should().BeTrue();
+
+        clients[0].Disposed.Should().BeTrue();
+        clients[1].Disposed.Should().BeTrue();
+    }
+
+    /// <summary>
+    /// A sibling already built on the new definition is kept. Red: evict siblings without the definition check; its
+    /// client is disposed (verified). Red: evict them without the check and without disposing; the next filtered call
+    /// returns a rebuilt instance (verified).
+    /// </summary>
+    [Fact]
+    public async Task A_changed_definition_keeps_a_pipeline_already_on_the_new_definition()
+    {
+        var h = Build();
+        var clients = TrackEachBuild(h);
+        var def = Def();
+        var changed = def with { Instructions = "sys2" };
+        await h.Factory.GetOrCreateAsync(def, CancellationToken.None);
+        var filtered = (await h.Factory.GetOrCreateAsync(changed, ["t"], CancellationToken.None)).Value;
+
+        await h.Factory.GetOrCreateAsync(changed, CancellationToken.None);
+
+        clients[1].Disposed.Should().BeFalse();
+        (await h.Factory.GetOrCreateAsync(changed, ["t"], CancellationToken.None)).Value.Should().BeSameAs(filtered);
+    }
+
+    /// <summary>
+    /// The public overload refuses what validation refuses, rather than build a zero-tool pipeline. Red: remove the shape
+    /// check from <c>GetOrCreateAsync</c>; the call succeeds (verified). Red: change the message (verified). Red: run the
+    /// check only after the build; the provider was asked for a client (verified).
+    /// </summary>
+    [Fact]
+    public async Task An_empty_tool_filter_is_refused_by_the_factory()
+    {
+        var h = Build();
+
+        var result = await h.Factory.GetOrCreateAsync(Def(), [], CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be(AgentErrorCode.Validation);
+        result.Error.Message.Should().Be("Tool filter must not be empty; pass null for no filter.");
+        h.Provider.DidNotReceiveWithAnyArgs().CreateChatClient(default!);
+    }
+
+    /// <summary>
+    /// Red: drop the blank-entry loop from the shape check; the empty and whitespace entries succeed, and the null entry
+    /// throws (verified). Red: run the check only after the build; the provider was asked for a client (verified).
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public async Task A_blank_tool_filter_entry_is_refused_by_the_factory(string? entry)
+    {
+        var h = Build();
+
+        var result = await h.Factory.GetOrCreateAsync(Def(), ["t", entry!], CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be(AgentErrorCode.Validation);
+        result.Error.Message.Should().Be("Tool filter entry must not be blank.");
+        h.Provider.DidNotReceiveWithAnyArgs().CreateChatClient(default!);
     }
 
     /// <summary>A catalog whose first resolution waits for <see cref="Open"/>; later ones answer at once.</summary>

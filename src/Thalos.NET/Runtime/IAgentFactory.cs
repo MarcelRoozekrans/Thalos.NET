@@ -23,7 +23,9 @@ public interface IAgentFactory
     /// at least one entry with <c>Glob.IsMatch</c>; it is never resolved against the host's tool catalog, so it can only
     /// narrow. Filtered agents are cached like unfiltered ones, with the filter's distinct entries in ordinal order as part
     /// of the key, so equal sets in any order share one pipeline. <see langword="null"/> is the unfiltered agent of
-    /// <see cref="GetOrCreateAsync(AgentDefinition, CancellationToken)"/>. Validate the filter first with
+    /// <see cref="GetOrCreateAsync(AgentDefinition, CancellationToken)"/>; an empty filter or a null or blank entry returns
+    /// <see cref="AgentError.Validation"/> and builds nothing. When a changed definition replaces a cached agent, the agents
+    /// cached for that id and revision under other filters are dropped too. Validate the filter first with
     /// <see cref="ValidateOverridesAsync"/>.
     /// </summary>
     ValueTask<Result<AIAgent, AgentError>> GetOrCreateAsync(AgentDefinition definition, IReadOnlyList<string>? toolFilter, CancellationToken ct);

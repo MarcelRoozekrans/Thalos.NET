@@ -110,17 +110,9 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
             return UnitResult<AgentError>.Success();
         }
 
-        if (toolFilter.Count == 0)
+        if (CheckFilterShape(toolFilter) is { } refused)
         {
-            return UnitResult<AgentError>.Failure(AgentError.Validation("Tool filter must not be empty; pass null for no filter."));
-        }
-
-        foreach (var entry in toolFilter)
-        {
-            if (string.IsNullOrWhiteSpace(entry))
-            {
-                return UnitResult<AgentError>.Failure(AgentError.Validation("Tool filter entry must not be blank."));
-            }
+            return UnitResult<AgentError>.Failure(refused);
         }
 
         var resolved = await ResolveToolsAsync(definition, ct).ConfigureAwait(false);
@@ -138,6 +130,71 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
         }
 
         return UnitResult<AgentError>.Success();
+    }
+
+    /// <summary>
+    /// Refuses an empty filter, which would offer no tools rather than mean "no filter", and a null or blank entry; null
+    /// for no filter passes. Shared by validation and the build, so neither can be reached with a filter the other refuses.
+    /// </summary>
+    private static AgentError? CheckFilterShape(IReadOnlyList<string>? toolFilter)
+    {
+        if (toolFilter is null)
+        {
+            return null;
+        }
+
+        if (toolFilter.Count == 0)
+        {
+            return AgentError.Validation("Tool filter must not be empty; pass null for no filter.");
+        }
+
+        foreach (var entry in toolFilter)
+        {
+            if (string.IsNullOrWhiteSpace(entry))
+            {
+                return AgentError.Validation("Tool filter entry must not be blank.");
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The definition changed for a cached key: treat it as invalidated, so the caller rebuilds with the new one. Pipelines
+    /// under the other tool filters of this (id, revision) hold the old definition too; they are dropped now rather than
+    /// left live until their next access.
+    /// </summary>
+    private void EvictChangedDefinition(CacheKey key, Lazy<Task<Result<Entry, AgentError>>> lazy, Entry entry, AgentDefinition definition)
+    {
+        if (_cache.TryRemove(KeyValuePair.Create(key, lazy)))
+        {
+            entry.Dispose(_logger);
+        }
+
+        EvictStaleSiblings(key, definition);
+    }
+
+    /// <summary>
+    /// Removes and disposes the completed pipelines under the other tool filters of <paramref name="key"/>'s (id, revision)
+    /// whose definition differs from <paramref name="definition"/>. A sibling already rebuilt on the new definition stays;
+    /// one still building is left to the definition check of its own next access.
+    /// </summary>
+    private void EvictStaleSiblings(CacheKey key, AgentDefinition definition)
+    {
+        foreach (var (sibling, lazy) in _cache)
+        {
+            if (sibling == key || sibling.Id != key.Id || !string.Equals(sibling.Revision, key.Revision, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (lazy.IsValueCreated && lazy.Value.IsCompletedSuccessfully && lazy.Value.Result.IsSuccess
+                && !SameDefinition(lazy.Value.Result.Value.Definition, definition)
+                && _cache.TryRemove(KeyValuePair.Create(sibling, lazy)))
+            {
+                lazy.Value.Result.Value.Dispose(_logger);
+            }
+        }
     }
 
     private static bool MatchesAny(string pattern, IReadOnlyList<AITool> tools)
@@ -201,6 +258,11 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
     /// <inheritdoc />
     public async ValueTask<Result<AIAgent, AgentError>> GetOrCreateAsync(AgentDefinition definition, IReadOnlyList<string>? toolFilter, CancellationToken ct)
     {
+        if (CheckFilterShape(toolFilter) is { } refused)
+        {
+            return Result<AIAgent, AgentError>.Failure(refused);
+        }
+
         var retriedStaleFailure = false;
         // distinct and ordinally sorted, so equal sets share one pipeline; the build matches against this copy, never the
         // caller's list, so a later mutation of that list cannot change a pipeline cached under the key it produced
@@ -244,12 +306,7 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
 
             if (!SameDefinition(entry.Definition, definition))
             {
-                // The definition changed for a cached key: treat as invalidated and rebuild with the new one.
-                if (_cache.TryRemove(KeyValuePair.Create(key, lazy)))
-                {
-                    entry.Dispose(_logger);
-                }
-
+                EvictChangedDefinition(key, lazy, entry, definition);
                 continue;
             }
 

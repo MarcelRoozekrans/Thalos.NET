@@ -67,7 +67,8 @@ internal sealed class RuntimeFixture
     public RuntimeFixture Build()
     {
         var provider = Substitute.For<IChatClientProvider>();
-        provider.Name.Returns("fake"); provider.DefaultModel.Returns("dm");
+        provider.Name.Returns("fake");
+        provider.DefaultModel.Returns("dm");
         provider.CreateChatClient(Arg.Any<AgentDefinition>()).Returns(ci => (ChatClientFactory ?? (_ => Client))(ci.Arg<AgentDefinition>()));
 
         var source = Substitute.For<IToolSource>();
