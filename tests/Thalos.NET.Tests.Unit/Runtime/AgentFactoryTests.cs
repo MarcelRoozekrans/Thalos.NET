@@ -346,6 +346,83 @@ public sealed class AgentFactoryTests
         (await h.Factory.GetOrCreateAsync(v1, CancellationToken.None)).Value.Should().NotBeSameAs(a1);
     }
 
+    /// <summary>
+    /// Validation and the build share one cached resolution of the agent's tools until the agent is invalidated.
+    /// Red: the resolution cache is bypassed, or validation calls the catalog directly, so the first count is 2. Red:
+    /// <c>Invalidate</c> leaves the cached resolution in place, so the second count stays 1. All verified.
+    /// </summary>
+    [Fact]
+    public async Task The_tool_resolution_is_cached_until_the_agent_is_invalidated()
+    {
+        var h = Build();
+        var def = Def();
+
+        (await h.Factory.ValidateOverridesAsync(def, null, ["t"], CancellationToken.None)).IsSuccess.Should().BeTrue();
+        (await h.Factory.GetOrCreateAsync(def, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        await h.Catalog.Received(1).ResolveAsync(Arg.Any<AgentDefinition>(), Arg.Any<CancellationToken>());
+
+        h.Factory.Invalidate(def.Id);
+        (await h.Factory.GetOrCreateAsync(def, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        await h.Catalog.Received(2).ResolveAsync(Arg.Any<AgentDefinition>(), Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>Red: the cached resolution is reused without comparing the definition, so the changed globs resolve once (verified).</summary>
+    [Fact]
+    public async Task A_changed_definition_resolves_its_tools_again()
+    {
+        var h = Build();
+        var def = Def();
+
+        await h.Factory.ValidateOverridesAsync(def, null, ["t"], CancellationToken.None);
+        await h.Factory.ValidateOverridesAsync(def with { Tools = ["t*"] }, null, ["t"], CancellationToken.None);
+
+        await h.Catalog.Received(2).ResolveAsync(Arg.Any<AgentDefinition>(), Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>
+    /// A resolution still in flight when the agent is invalidated must not repopulate the cache with the old tools.
+    /// Red: drop the post-store generation check in <c>ResolveToolsAsync</c>; the stale result stays cached and the count is 1 (verified).
+    /// </summary>
+    [Fact]
+    public async Task A_resolution_that_finishes_after_invalidation_is_not_cached()
+    {
+        var catalog = new GatedCatalog();
+        var provider = Substitute.For<IChatClientProvider>();
+        provider.DefaultModel.Returns("default-model");
+        using var factory = new AgentFactory(provider, [], catalog, new SessionStoreChatHistoryProvider(new InMemorySessionStore(TimeProvider.System)),
+            new ServiceCollection().BuildServiceProvider(), loggerFactory: null);
+        var def = Def();
+
+        var pending = factory.ValidateOverridesAsync(def, null, ["t"], CancellationToken.None).AsTask();
+        factory.Invalidate(def.Id);
+        catalog.Open();
+        (await pending).IsSuccess.Should().BeTrue();
+
+        (await factory.ValidateOverridesAsync(def, null, ["t"], CancellationToken.None)).IsSuccess.Should().BeTrue();
+        catalog.Resolutions.Should().Be(2);
+    }
+
+    /// <summary>A catalog whose first resolution waits for <see cref="Open"/>; later ones answer at once.</summary>
+    private sealed class GatedCatalog : IToolCatalog
+    {
+        private readonly TaskCompletionSource _gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _resolutions;
+
+        public int Resolutions => Volatile.Read(ref _resolutions);
+
+        public void Open() => _gate.SetResult();
+
+        public async ValueTask<Result<IReadOnlyList<AITool>, AgentError>> ResolveAsync(AgentDefinition agent, CancellationToken ct)
+        {
+            if (Interlocked.Increment(ref _resolutions) == 1)
+            {
+                await _gate.Task.WaitAsync(ct);
+            }
+
+            return Result<IReadOnlyList<AITool>, AgentError>.Success([AIFunctionFactory.Create(() => "ok", "t")]);
+        }
+    }
+
     private static ThalosOptions OptionsWith(AgentDefinition definition)
     {
         var options = new ThalosOptions();

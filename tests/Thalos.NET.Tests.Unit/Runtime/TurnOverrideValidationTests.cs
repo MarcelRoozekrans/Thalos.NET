@@ -24,7 +24,7 @@ public sealed class TurnOverrideValidationTests
         return (f, session.Value);
     }
 
-    /// <summary>Red: the membership test against AllowedModels is removed, since the model is then refused.</summary>
+    /// <summary>Red: removing the membership test against AllowedModels refuses the model.</summary>
     [Fact]
     public async Task A_model_override_in_the_allowed_list_is_accepted()
     {
@@ -36,7 +36,7 @@ public sealed class TurnOverrideValidationTests
         f.Client.Requests.Should().HaveCount(1);
     }
 
-    /// <summary>Red: the default-model branch is removed: the agent here lists no other model, so only the default can admit it.</summary>
+    /// <summary>Red: removing the default-model branch refuses the model, since the agent lists no other and only the default can admit it.</summary>
     [Fact]
     public async Task A_model_override_equal_to_the_agents_own_model_is_accepted_without_an_allowed_list()
     {
@@ -47,7 +47,7 @@ public sealed class TurnOverrideValidationTests
         result.IsSuccess.Should().BeTrue();
     }
 
-    /// <summary>Red: the fallback to the provider default is dropped (the agent has no model of its own here).</summary>
+    /// <summary>Red: dropping the fallback to the provider default refuses the model, since this agent has no model of its own.</summary>
     [Fact]
     public async Task A_model_override_equal_to_the_provider_default_is_accepted_when_the_agent_names_no_model()
     {
@@ -59,8 +59,8 @@ public sealed class TurnOverrideValidationTests
     }
 
     /// <summary>
-    /// Red: validation is removed (the turn runs and a chat request is sent), when the message text changes, and
-    /// when the code changes from Validation. The request count of zero goes red if the check moves after the model call.
+    /// Red: removing validation lets the turn run and send a chat request; changing the message text or the error code
+    /// turns its own assertion red. The request count of zero goes red if the check moves after the model call.
     /// </summary>
     [Fact]
     public async Task A_model_override_outside_the_allowed_list_is_refused()
@@ -88,7 +88,7 @@ public sealed class TurnOverrideValidationTests
         next.IsSuccess.Should().BeTrue();
     }
 
-    /// <summary>Red: the match is dropped (the filter is then refused) or when the glob is not run through Glob.IsMatch.</summary>
+    /// <summary>Red: dropping the match, or comparing names without Glob.IsMatch, refuses the filter.</summary>
     [Fact]
     public async Task A_tool_filter_entry_matching_one_of_the_agents_tools_is_accepted()
     {
@@ -100,8 +100,8 @@ public sealed class TurnOverrideValidationTests
     }
 
     /// <summary>
-    /// Red: the tool check is removed. The offending entry is the second one, so a check of only the first entry
-    /// goes red too.
+    /// Red: removing the tool check accepts the filter. The offending entry is the second one, so checking only the
+    /// first entry goes red too.
     /// </summary>
     [Fact]
     public async Task A_tool_filter_entry_matching_none_of_the_agents_tools_is_refused()
@@ -116,7 +116,7 @@ public sealed class TurnOverrideValidationTests
         f.Client.Requests.Should().BeEmpty();
     }
 
-    /// <summary>Red: validation matches against the filter-narrowed set or the host's whole catalog instead of the agent's own tools.</summary>
+    /// <summary>Red: matching against the host's whole catalog instead of the agent's own tools accepts the filter.</summary>
     [Fact]
     public async Task A_tool_the_host_has_but_the_agent_is_not_configured_for_is_refused()
     {
@@ -130,7 +130,7 @@ public sealed class TurnOverrideValidationTests
         result.Error.Message.Should().Be("Tool filter entry 't__echo' matches none of agent 'a' tools.");
     }
 
-    /// <summary>Red: null starts to be treated as an empty filter or an unknown model, which would refuse an ordinary turn.</summary>
+    /// <summary>Red: treating null as an empty filter or as an unknown model refuses an ordinary turn.</summary>
     [Fact]
     public async Task No_override_behaves_exactly_as_before()
     {

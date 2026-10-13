@@ -16,7 +16,12 @@ public static class ThalosTelemetry
     /// </summary>
     public const string WorkflowSourceName = "thalos.workflow";
 
-    /// <summary>Emits the <c>thalos.turn</c> span (tags: <c>thalos.agent</c>, <c>thalos.session</c>, <c>thalos.turn</c>, token counts, <c>thalos.tool_calls</c>).</summary>
+    /// <summary>
+    /// Emits the <c>thalos.turn</c> span (tags: <c>thalos.agent</c>, <c>thalos.session</c>, <c>thalos.turn</c>,
+    /// <c>gen_ai.request.model</c> = the model the chat request names, after any turn override, <c>thalos.tools.offered</c> =
+    /// the number of tools offered after any turn tool filter, outcome tool included, token counts, <c>thalos.tool_calls</c>).
+    /// No tag carries a tool name.
+    /// </summary>
     public static readonly ActivitySource ActivitySource = new(SourceName);
 
     /// <summary>Owner of the counters/histograms below.</summary>
