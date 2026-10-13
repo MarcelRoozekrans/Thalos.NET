@@ -41,6 +41,18 @@ public sealed class RoleCharterFileLoaderTests
         parsed.Error.Message.Should().Contain("tools").And.Contain("configuration");
     }
 
+    /// <summary>Red: remove <c>allowedmodels</c> from <c>Forbidden</c> in the loader, so the key falls through to "unknown key" or is accepted.</summary>
+    [Fact]
+    public void A_charter_that_declares_allowedmodels_is_refused()
+    {
+        var withAllowed = Valid.Replace("model: claude-opus-5", "allowedmodels: [x]", StringComparison.Ordinal);
+
+        var parsed = RoleCharterFileLoader.Parse("roles/reviewer.md", "reviewer", withAllowed, Now);
+
+        parsed.IsFailure.Should().BeTrue();
+        parsed.Error.Message.Should().Contain("allowedmodels").And.Contain("configuration");
+    }
+
     [Fact]
     public void Name_must_match_the_file()
     {

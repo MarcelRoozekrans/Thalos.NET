@@ -49,4 +49,19 @@ public sealed record SubagentRunRequest
     /// see its own <see cref="AgentTurnRequest.AgentRevision"/> for resolution semantics.
     /// </summary>
     public string? AgentRevision { get; init; }
+
+    /// <summary>
+    /// The model this run should use instead of the agent's own. <see langword="null"/> (the default) means the definition's
+    /// model. Refused with <see cref="AgentErrorCode.Validation"/> unless it is in <see cref="AgentDefinition.AllowedModels"/>
+    /// or equals the model the agent would use anyway.
+    /// </summary>
+    public string? Model { get; init; }
+
+    /// <summary>
+    /// Glob patterns narrowing the tools this run is offered, matched with <c>Glob.IsMatch</c> against qualified names
+    /// <c>source__tool</c>. <see langword="null"/> (the default) means no filter. It can only narrow: a pattern that matches
+    /// none of the agent's own tools is refused with <see cref="AgentErrorCode.Validation"/>, so a filter never widens the set.
+    /// <see langword="null"/> means no filter; an empty list is not "no tools" and is refused, as is a null or blank entry.
+    /// </summary>
+    public IReadOnlyList<string>? ToolFilter { get; init; }
 }

@@ -18,6 +18,30 @@ public interface IAgentFactory
     ValueTask<Result<AIAgent, AgentError>> GetOrCreateAsync(AgentDefinition definition, CancellationToken ct);
 
     /// <summary>
+    /// Returns the agent for <paramref name="definition"/> narrowed to <paramref name="toolFilter"/>, building it on first use.
+    /// The filter keeps, in their resolved order, only those of the agent's own resolved tools whose qualified name matches
+    /// at least one entry with <c>Glob.IsMatch</c>; it is never resolved against the host's tool catalog, so it can only
+    /// narrow. Filtered agents are cached like unfiltered ones, with the filter's distinct entries in ordinal order as part
+    /// of the key, so equal sets in any order share one pipeline. <see langword="null"/> is the unfiltered agent of
+    /// <see cref="GetOrCreateAsync(AgentDefinition, CancellationToken)"/>; an empty filter or a null or blank entry returns
+    /// <see cref="AgentError.Validation"/> and builds nothing. When a changed definition replaces a cached agent, the agents
+    /// cached for that id and revision under other filters are dropped too. Validate the filter first with
+    /// <see cref="ValidateOverridesAsync"/>.
+    /// </summary>
+    ValueTask<Result<AIAgent, AgentError>> GetOrCreateAsync(AgentDefinition definition, IReadOnlyList<string>? toolFilter, CancellationToken ct);
+
+    /// <summary>
+    /// Checks a turn's requested <paramref name="model"/> and <paramref name="toolFilter"/> against <paramref name="definition"/>
+    /// and returns <see cref="AgentError.Validation"/> for anything outside the agent's own configuration; it builds nothing and
+    /// sends no chat request. A <paramref name="model"/> is accepted when it is in <see cref="AgentDefinition.AllowedModels"/> or
+    /// equals the model the agent runs on anyway (<see cref="AgentDefinition.Model"/>, else the chat client provider's default).
+    /// Every <paramref name="toolFilter"/> entry must match, with <c>Glob.IsMatch</c>, at least one of the agent's own resolved
+    /// qualified tool names, so a filter can only narrow. A null or blank entry, or an empty <paramref name="toolFilter"/>,
+    /// is refused. <see langword="null"/> for either argument means no override and is not checked.
+    /// </summary>
+    ValueTask<UnitResult<AgentError>> ValidateOverridesAsync(AgentDefinition definition, string? model, IReadOnlyList<string>? toolFilter, CancellationToken ct);
+
+    /// <summary>
     /// Drops every cached agent for <paramref name="agentId"/> — every revision, not just the unrevisioned one — and disposes
     /// their chat-client pipelines immediately; the next call for each rebuilds. Not turn-safe: turns in flight on that agent
     /// may fail — invalidate while quiescent.

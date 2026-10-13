@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Globalization;
 using Microsoft.Agents.AI;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Logging;
@@ -55,11 +56,21 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
     private readonly ILogger _logger;
     private readonly IReadOnlyList<IAgentContextProviderSource> _contextProviderSources;
     private readonly ConcurrentDictionary<CacheKey, Lazy<Task<Result<Entry, AgentError>>>> _cache = new();
+    private readonly ConcurrentDictionary<CacheKey, ResolvedTools> _resolvedTools = new();
+    private long _invalidations; // bumped by Invalidate, so a resolution in flight across it is not cached
     private volatile bool _disposed;
 
-    /// <summary>Cache key: an agent pipeline is built once per (<see cref="AgentDefinition.Id"/>, <see cref="AgentDefinition.Revision"/>)
-    /// pair, so two runs holding two revisions of the same agent get two independent pipelines that don't evict each other.</summary>
-    private readonly record struct CacheKey(AgentId Id, string? Revision);
+    /// <summary>
+    /// Cache key: an agent pipeline is built once per (<see cref="AgentDefinition.Id"/>, <see cref="AgentDefinition.Revision"/>,
+    /// tool filter) triple, so two runs holding two revisions of the same agent get two independent pipelines that don't
+    /// evict each other, and a turn's tool filter gets a pipeline offering only its tools. <paramref name="ToolFilterKey"/> is
+    /// the filter's distinct entries after an ordinal sort (see <see cref="ToToolFilterKey"/>), so equal sets share one
+    /// pipeline; it is <see langword="null"/> without a filter. The resolved-tools cache uses the key without a filter.
+    /// </summary>
+    private readonly record struct CacheKey(AgentId Id, string? Revision, string? ToolFilterKey);
+
+    /// <summary>One successful resolution of an agent's tools, kept with the definition it was resolved for.</summary>
+    private sealed record ResolvedTools(AgentDefinition Definition, IReadOnlyList<AITool> Tools);
 
     /// <summary>Resolved by DI; <paramref name="contextProviderSources"/> are every registered <see cref="IAgentContextProviderSource"/> (Thalos.NET.Memory registers one).</summary>
     public AgentFactory(
@@ -82,17 +93,188 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
     }
 
     /// <inheritdoc />
-    public async ValueTask<Result<AIAgent, AgentError>> GetOrCreateAsync(AgentDefinition definition, CancellationToken ct)
+    public async ValueTask<UnitResult<AgentError>> ValidateOverridesAsync(
+        AgentDefinition definition, string? model, IReadOnlyList<string>? toolFilter, CancellationToken ct)
     {
+        ArgumentNullException.ThrowIfNull(definition);
+
+        if (model is not null
+            && !definition.AllowedModels.Contains(model, StringComparer.Ordinal)
+            && !string.Equals(model, definition.Model ?? _provider.DefaultModel, StringComparison.Ordinal))
+        {
+            return UnitResult<AgentError>.Failure(AgentError.Validation($"Model '{model}' is not in agent '{definition.Name}' allowed models."));
+        }
+
+        if (toolFilter is null)
+        {
+            return UnitResult<AgentError>.Success();
+        }
+
+        if (CheckFilterShape(toolFilter) is { } refused)
+        {
+            return UnitResult<AgentError>.Failure(refused);
+        }
+
+        var resolved = await ResolveToolsAsync(definition, ct).ConfigureAwait(false);
+        if (resolved.IsFailure)
+        {
+            return UnitResult<AgentError>.Failure(resolved.Error);
+        }
+
+        foreach (var pattern in toolFilter)
+        {
+            if (!MatchesAny(pattern, resolved.Value))
+            {
+                return UnitResult<AgentError>.Failure(AgentError.Validation($"Tool filter entry '{pattern}' matches none of agent '{definition.Name}' tools."));
+            }
+        }
+
+        return UnitResult<AgentError>.Success();
+    }
+
+    /// <summary>
+    /// Refuses an empty filter, which would offer no tools rather than mean "no filter", and a null or blank entry; null
+    /// for no filter passes. Shared by validation and the build, so neither can be reached with a filter the other refuses.
+    /// </summary>
+    private static AgentError? CheckFilterShape(IReadOnlyList<string>? toolFilter)
+    {
+        if (toolFilter is null)
+        {
+            return null;
+        }
+
+        if (toolFilter.Count == 0)
+        {
+            return AgentError.Validation("Tool filter must not be empty; pass null for no filter.");
+        }
+
+        foreach (var entry in toolFilter)
+        {
+            if (string.IsNullOrWhiteSpace(entry))
+            {
+                return AgentError.Validation("Tool filter entry must not be blank.");
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The definition changed for a cached key: treat it as invalidated, so the caller rebuilds with the new one. Pipelines
+    /// under the other tool filters of this (id, revision) hold the old definition too; they are dropped now rather than
+    /// left live until their next access.
+    /// </summary>
+    private void EvictChangedDefinition(CacheKey key, Lazy<Task<Result<Entry, AgentError>>> lazy, Entry entry, AgentDefinition definition)
+    {
+        if (_cache.TryRemove(KeyValuePair.Create(key, lazy)))
+        {
+            entry.Dispose(_logger);
+        }
+
+        EvictStaleSiblings(key, definition);
+    }
+
+    /// <summary>
+    /// Removes and disposes the completed pipelines under the other tool filters of <paramref name="key"/>'s (id, revision)
+    /// whose definition differs from <paramref name="definition"/>. A sibling already rebuilt on the new definition stays;
+    /// one still building is left to the definition check of its own next access.
+    /// </summary>
+    private void EvictStaleSiblings(CacheKey key, AgentDefinition definition)
+    {
+        foreach (var (sibling, lazy) in _cache)
+        {
+            if (sibling == key || sibling.Id != key.Id || !string.Equals(sibling.Revision, key.Revision, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (lazy.IsValueCreated && lazy.Value.IsCompletedSuccessfully && lazy.Value.Result.IsSuccess
+                && !SameDefinition(lazy.Value.Result.Value.Definition, definition)
+                && _cache.TryRemove(KeyValuePair.Create(sibling, lazy)))
+            {
+                lazy.Value.Result.Value.Dispose(_logger);
+            }
+        }
+    }
+
+    private static bool MatchesAny(string pattern, IReadOnlyList<AITool> tools)
+    {
+        for (var i = 0; i < tools.Count; i++)
+        {
+            if (Glob.IsMatch(pattern, tools[i].Name))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Resolves <paramref name="definition"/>'s tools through the catalog once and caches the result per
+    /// (<see cref="AgentDefinition.Id"/>, <see cref="AgentDefinition.Revision"/>) for as long as the definition is equal by
+    /// value, so a filtered turn's validation and its pipeline build share one resolution and validation checks the very
+    /// list the pipelines offer. A failure is not cached. <see cref="Invalidate"/> drops the cached list, and a resolution
+    /// still in flight when it runs is returned to its caller but not cached.
+    /// </summary>
+    private async ValueTask<Result<IReadOnlyList<AITool>, AgentError>> ResolveToolsAsync(AgentDefinition definition, CancellationToken ct)
+    {
+        var key = new CacheKey(definition.Id, definition.Revision, ToolFilterKey: null);
+        if (_resolvedTools.TryGetValue(key, out var cached) && SameDefinition(cached.Definition, definition))
+        {
+            return Result<IReadOnlyList<AITool>, AgentError>.Success(cached.Tools);
+        }
+
+        var generation = Interlocked.Read(ref _invalidations);
+        var resolved = await _toolCatalog.ResolveAsync(definition, ct).ConfigureAwait(false);
+        if (resolved.IsFailure)
+        {
+            return resolved;
+        }
+
+        // store, then check: an Invalidate that ran at any point since the resolution started has bumped the counter,
+        // and the entry is removed again; checking before the store would leave a window between the check and it
+        var entry = new ResolvedTools(definition, resolved.Value);
+        _resolvedTools[key] = entry;
+        if (Interlocked.Read(ref _invalidations) != generation)
+        {
+            _resolvedTools.TryRemove(KeyValuePair.Create(key, entry));
+        }
+
+        return resolved;
+    }
+
+    /// <summary>
+    /// The cache-key form of a normalized tool filter: each entry as <c>{length}:{entry}</c>, concatenated. The length
+    /// prefix keeps the encoding unambiguous whatever characters an entry holds, so two different sets never share a key.
+    /// </summary>
+    private static string? ToToolFilterKey(string[]? patterns) =>
+        patterns is null ? null : string.Concat(patterns.Select(p => $"{p.Length.ToString(CultureInfo.InvariantCulture)}:{p}"));
+
+    /// <inheritdoc cref="IAgentFactory.GetOrCreateAsync(AgentDefinition, CancellationToken)" />
+    public ValueTask<Result<AIAgent, AgentError>> GetOrCreateAsync(AgentDefinition definition, CancellationToken ct) =>
+        GetOrCreateAsync(definition, toolFilter: null, ct);
+
+    /// <inheritdoc />
+    public async ValueTask<Result<AIAgent, AgentError>> GetOrCreateAsync(AgentDefinition definition, IReadOnlyList<string>? toolFilter, CancellationToken ct)
+    {
+        if (CheckFilterShape(toolFilter) is { } refused)
+        {
+            return Result<AIAgent, AgentError>.Failure(refused);
+        }
+
         var retriedStaleFailure = false;
-        var key = new CacheKey(definition.Id, definition.Revision);
+        // distinct and ordinally sorted, so equal sets share one pipeline; the build matches against this copy, never the
+        // caller's list, so a later mutation of that list cannot change a pipeline cached under the key it produced
+        var patterns = toolFilter?.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+        var key = new CacheKey(definition.Id, definition.Revision, ToToolFilterKey(patterns));
         while (true)
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
 
             var lazy = _cache.GetOrAdd(key, static (_, state) =>
-                new Lazy<Task<Result<Entry, AgentError>>>(() => state.self.BuildAsync(state.definition), LazyThreadSafetyMode.ExecutionAndPublication),
-                (self: this, definition));
+                new Lazy<Task<Result<Entry, AgentError>>>(() => state.self.BuildAsync(state.definition, state.patterns), LazyThreadSafetyMode.ExecutionAndPublication),
+                (self: this, definition, patterns));
             var wasCompleted = lazy.IsValueCreated && lazy.Value.IsCompleted;
 
             var built = await AwaitBuildAsync(key, lazy, ct).ConfigureAwait(false);
@@ -124,12 +306,7 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
 
             if (!SameDefinition(entry.Definition, definition))
             {
-                // The definition changed for a cached key: treat as invalidated and rebuild with the new one.
-                if (_cache.TryRemove(KeyValuePair.Create(key, lazy)))
-                {
-                    entry.Dispose(_logger);
-                }
-
+                EvictChangedDefinition(key, lazy, entry, definition);
                 continue;
             }
 
@@ -144,6 +321,15 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
     /// </remarks>
     public void Invalidate(AgentId agentId)
     {
+        Interlocked.Increment(ref _invalidations);
+        foreach (var key in _resolvedTools.Keys)
+        {
+            if (key.Id == agentId)
+            {
+                _resolvedTools.TryRemove(key, out _);
+            }
+        }
+
         foreach (var key in _cache.Keys)
         {
             if (key.Id == agentId && _cache.TryRemove(key, out var lazy))
@@ -153,10 +339,11 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
         }
     }
 
-    /// <summary>Disposes every cached chat-client pipeline. Subsequent <see cref="GetOrCreateAsync"/> calls throw <see cref="ObjectDisposedException"/>.</summary>
+    /// <summary>Disposes every cached chat-client pipeline. Subsequent <c>GetOrCreateAsync</c> calls throw <see cref="ObjectDisposedException"/>.</summary>
     public void Dispose()
     {
         _disposed = true;
+        _resolvedTools.Clear();
         while (!_cache.IsEmpty)
         {
             foreach (var key in _cache.Keys)
@@ -195,16 +382,20 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
         && Equals(a.Memory, b.Memory)
         && string.Equals(a.Revision, b.Revision, StringComparison.Ordinal);
 
-    private async Task<Result<Entry, AgentError>> BuildAsync(AgentDefinition definition)
+    private async Task<Result<Entry, AgentError>> BuildAsync(AgentDefinition definition, string[]? toolFilter)
     {
         IChatClient? client = null;
         try
         {
-            var tools = await _toolCatalog.ResolveAsync(definition, CancellationToken.None).ConfigureAwait(false);
-            if (tools.IsFailure)
+            var resolved = await ResolveToolsAsync(definition, CancellationToken.None).ConfigureAwait(false);
+            if (resolved.IsFailure)
             {
-                return Result<Entry, AgentError>.Failure(tools.Error);
+                return Result<Entry, AgentError>.Failure(resolved.Error);
             }
+
+            // A filter narrows the agent's own resolved tools, in their resolved order; it is never resolved against the
+            // host catalog, where a pattern such as "*" would also match tools the agent was never given.
+            var tools = toolFilter is null ? resolved.Value : Narrow(resolved.Value, toolFilter);
 
             // The budget check goes directly over the provider, below every decorator, so a decorator that answers or
             // short-circuits a call can never skip it (see TurnBudgetChatClient).
@@ -235,7 +426,7 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
                     Instructions = definition.Instructions,
                     ModelId = definition.Model ?? _provider.DefaultModel,
                     MaxOutputTokens = definition.MaxOutputTokens,
-                    Tools = tools.Value.Count == 0 ? null : tools.Value.ToList(),
+                    Tools = tools.Count == 0 ? null : tools.ToList(),
                 },
             }, _loggerFactory, _services);
 
@@ -252,6 +443,20 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
             LogBuildFailed(_logger, definition.Name, ex.Message, ex);
             return Result<Entry, AgentError>.Failure(AgentError.ProviderError($"Failed to build agent '{definition.Name}'.", ex.GetType().Name));
         }
+    }
+
+    private static List<AITool> Narrow(IReadOnlyList<AITool> tools, string[] toolFilter)
+    {
+        var kept = new List<AITool>(tools.Count);
+        foreach (var tool in tools)
+        {
+            if (Array.Exists(toolFilter, pattern => Glob.IsMatch(pattern, tool.Name)))
+            {
+                kept.Add(tool);
+            }
+        }
+
+        return kept;
     }
 
     private static void DisposeClient(IChatClient client, string agentName, ILogger logger)

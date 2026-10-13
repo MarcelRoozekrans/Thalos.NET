@@ -19,6 +19,9 @@ public sealed record AgentEnvelope
     /// <summary>Glob allow-list over qualified tool names. Always wins over anything a charter could ask for: a charter never names tools.</summary>
     public required IReadOnlyList<string> Tools { get; init; }
 
+    /// <summary>Model ids a turn of this agent may ask for besides the charter's model. Empty → none. Config-owned like <see cref="Tools"/>: a charter never names them.</summary>
+    public IReadOnlyList<string> AllowedModels { get; init; } = [];
+
     /// <summary>Per-call output token cap. Null → provider default.</summary>
     public int? MaxOutputTokens { get; init; }
 

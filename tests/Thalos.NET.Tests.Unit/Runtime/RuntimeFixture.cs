@@ -41,6 +41,11 @@ internal sealed class RuntimeFixture
     /// <summary>Replaces the default single-agent <see cref="StaticAgentCatalog"/>; set before <see cref="Build"/> to test revision resolution.</summary>
     public IAgentCatalog? CatalogOverride { get; set; }
 
+    private int _toolResolutions;
+
+    /// <summary>How many times the default <c>t</c> source was asked for its tools, which is once per catalog resolution.</summary>
+    public int ToolResolutions => Volatile.Read(ref _toolResolutions);
+
     public RuntimeFixture(params string[] allowTools)
     {
         Agent = new AgentDefinition { Id = AgentId.New(), Name = "a", Instructions = "sys", Model = "m1", Tools = allowTools.Length == 0 ? ["*"] : allowTools };
@@ -50,21 +55,42 @@ internal sealed class RuntimeFixture
 
     public RuntimeFixture WithTool(AIFunction fn) { Tools.Add(fn); return this; }
 
+    /// <summary>Tool sources served after the default <c>t</c> source, in the order added; their tools qualify as <c>{name}__{tool}</c>.</summary>
+    public List<(string Name, IReadOnlyList<AITool> Tools)> ExtraSources { get; } = [];
+
+    public RuntimeFixture WithSource(string name, params AIFunction[] tools) { ExtraSources.Add((name, tools)); return this; }
+
     public RuntimeFixture WithModel(string? model) { Agent = Agent with { Model = model }; return this; }
+
+    public RuntimeFixture WithAllowedModels(params string[] models) { Agent = Agent with { AllowedModels = models }; return this; }
 
     public RuntimeFixture Build()
     {
         var provider = Substitute.For<IChatClientProvider>();
-        provider.Name.Returns("fake"); provider.DefaultModel.Returns("dm");
+        provider.Name.Returns("fake");
+        provider.DefaultModel.Returns("dm");
         provider.CreateChatClient(Arg.Any<AgentDefinition>()).Returns(ci => (ChatClientFactory ?? (_ => Client))(ci.Arg<AgentDefinition>()));
 
         var source = Substitute.For<IToolSource>();
         source.Name.Returns("t");
-        source.GetToolsAsync(Arg.Any<CancellationToken>()).Returns(_ => Result<IReadOnlyList<AITool>, AgentError>.Success(Tools));
+        source.GetToolsAsync(Arg.Any<CancellationToken>()).Returns(_ =>
+        {
+            Interlocked.Increment(ref _toolResolutions);
+            return Result<IReadOnlyList<AITool>, AgentError>.Success(Tools);
+        });
 
         var store = StoreDecorator?.Invoke(Store) ?? Store;
         var publisher = PublisherDecorator?.Invoke(Publisher) ?? Publisher;
-        var catalog = new ToolCatalog([source], Authorizer, publisher, TimeProvider.System);
+        List<IToolSource> sources = [source];
+        foreach (var (name, tools) in ExtraSources)
+        {
+            var extra = Substitute.For<IToolSource>();
+            extra.Name.Returns(name);
+            extra.GetToolsAsync(Arg.Any<CancellationToken>()).Returns(_ => Result<IReadOnlyList<AITool>, AgentError>.Success(tools));
+            sources.Add(extra);
+        }
+
+        var catalog = new ToolCatalog(sources, Authorizer, publisher, TimeProvider.System);
         var history = new SessionStoreChatHistoryProvider(store);
         var services = new ServiceCollection().BuildServiceProvider();
         var factory = new AgentFactory(provider, Decorators, catalog, history, services, null);

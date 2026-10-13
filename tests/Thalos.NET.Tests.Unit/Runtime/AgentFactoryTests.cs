@@ -346,6 +346,175 @@ public sealed class AgentFactoryTests
         (await h.Factory.GetOrCreateAsync(v1, CancellationToken.None)).Value.Should().NotBeSameAs(a1);
     }
 
+    /// <summary>
+    /// Validation and the build share one cached resolution of the agent's tools until the agent is invalidated.
+    /// Red: the resolution cache is bypassed, or validation calls the catalog directly, so the first count is 2. Red:
+    /// <c>Invalidate</c> leaves the cached resolution in place, so the second count stays 1. All verified.
+    /// </summary>
+    [Fact]
+    public async Task The_tool_resolution_is_cached_until_the_agent_is_invalidated()
+    {
+        var h = Build();
+        var def = Def();
+
+        (await h.Factory.ValidateOverridesAsync(def, null, ["t"], CancellationToken.None)).IsSuccess.Should().BeTrue();
+        (await h.Factory.GetOrCreateAsync(def, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        await h.Catalog.Received(1).ResolveAsync(Arg.Any<AgentDefinition>(), Arg.Any<CancellationToken>());
+
+        h.Factory.Invalidate(def.Id);
+        (await h.Factory.GetOrCreateAsync(def, CancellationToken.None)).IsSuccess.Should().BeTrue();
+        await h.Catalog.Received(2).ResolveAsync(Arg.Any<AgentDefinition>(), Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>Red: the cached resolution is reused without comparing the definition, so the changed globs resolve once (verified).</summary>
+    [Fact]
+    public async Task A_changed_definition_resolves_its_tools_again()
+    {
+        var h = Build();
+        var def = Def();
+
+        (await h.Factory.ValidateOverridesAsync(def, null, ["t"], CancellationToken.None)).IsSuccess.Should().BeTrue();
+        (await h.Factory.ValidateOverridesAsync(def with { Tools = ["t*"] }, null, ["t"], CancellationToken.None)).IsSuccess.Should().BeTrue();
+
+        await h.Catalog.Received(2).ResolveAsync(Arg.Any<AgentDefinition>(), Arg.Any<CancellationToken>());
+    }
+
+    /// <summary>
+    /// A resolution still in flight when the agent is invalidated must not repopulate the cache with the old tools.
+    /// Red: drop the post-store generation check in <c>ResolveToolsAsync</c>; the stale result stays cached and the count is 1 (verified).
+    /// </summary>
+    [Fact]
+    public async Task A_resolution_that_finishes_after_invalidation_is_not_cached()
+    {
+        var catalog = new GatedCatalog();
+        var provider = Substitute.For<IChatClientProvider>();
+        provider.DefaultModel.Returns("default-model");
+        using var factory = new AgentFactory(provider, [], catalog, new SessionStoreChatHistoryProvider(new InMemorySessionStore(TimeProvider.System)),
+            new ServiceCollection().BuildServiceProvider(), loggerFactory: null);
+        var def = Def();
+
+        var pending = factory.ValidateOverridesAsync(def, null, ["t"], CancellationToken.None).AsTask();
+        factory.Invalidate(def.Id);
+        catalog.Open();
+        (await pending).IsSuccess.Should().BeTrue();
+
+        (await factory.ValidateOverridesAsync(def, null, ["t"], CancellationToken.None)).IsSuccess.Should().BeTrue();
+        catalog.Resolutions.Should().Be(2);
+    }
+
+    /// <summary>Gives every build its own dispose-tracking client, in build order, so a test can tell pipelines apart.</summary>
+    private static List<DisposeTrackingClient> TrackEachBuild(Harness h)
+    {
+        var clients = new List<DisposeTrackingClient>();
+        h.Provider.CreateChatClient(Arg.Any<AgentDefinition>()).Returns(_ =>
+        {
+            var client = new DisposeTrackingClient(h.Client);
+            clients.Add(client);
+            return client;
+        });
+        return clients;
+    }
+
+    /// <summary>
+    /// A changed definition replacing the unfiltered agent also drops the filtered agent of the same id and revision
+    /// that still holds the old definition. Red: drop the <c>EvictStaleSiblings</c> call; the filtered pipeline stays
+    /// live and undisposed (verified). The first assertion is the pre-existing replacement of the requested key.
+    /// </summary>
+    [Fact]
+    public async Task A_changed_definition_drops_the_stale_pipelines_under_other_filters()
+    {
+        var h = Build();
+        var clients = TrackEachBuild(h);
+        var def = Def();
+        await h.Factory.GetOrCreateAsync(def, CancellationToken.None);
+        await h.Factory.GetOrCreateAsync(def, ["t"], CancellationToken.None);
+
+        (await h.Factory.GetOrCreateAsync(def with { Instructions = "sys2" }, CancellationToken.None)).IsSuccess.Should().BeTrue();
+
+        clients[0].Disposed.Should().BeTrue();
+        clients[1].Disposed.Should().BeTrue();
+    }
+
+    /// <summary>
+    /// A sibling already built on the new definition is kept. Red: evict siblings without the definition check; its
+    /// client is disposed (verified). Red: evict them without the check and without disposing; the next filtered call
+    /// returns a rebuilt instance (verified).
+    /// </summary>
+    [Fact]
+    public async Task A_changed_definition_keeps_a_pipeline_already_on_the_new_definition()
+    {
+        var h = Build();
+        var clients = TrackEachBuild(h);
+        var def = Def();
+        var changed = def with { Instructions = "sys2" };
+        await h.Factory.GetOrCreateAsync(def, CancellationToken.None);
+        var filtered = (await h.Factory.GetOrCreateAsync(changed, ["t"], CancellationToken.None)).Value;
+
+        await h.Factory.GetOrCreateAsync(changed, CancellationToken.None);
+
+        clients[1].Disposed.Should().BeFalse();
+        (await h.Factory.GetOrCreateAsync(changed, ["t"], CancellationToken.None)).Value.Should().BeSameAs(filtered);
+    }
+
+    /// <summary>
+    /// The public overload refuses what validation refuses, rather than build a zero-tool pipeline. Red: remove the shape
+    /// check from <c>GetOrCreateAsync</c>; the call succeeds (verified). Red: change the message (verified). Red: run the
+    /// check only after the build; the provider was asked for a client (verified).
+    /// </summary>
+    [Fact]
+    public async Task An_empty_tool_filter_is_refused_by_the_factory()
+    {
+        var h = Build();
+
+        var result = await h.Factory.GetOrCreateAsync(Def(), [], CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be(AgentErrorCode.Validation);
+        result.Error.Message.Should().Be("Tool filter must not be empty; pass null for no filter.");
+        h.Provider.DidNotReceiveWithAnyArgs().CreateChatClient(default!);
+    }
+
+    /// <summary>
+    /// Red: drop the blank-entry loop from the shape check; the empty and whitespace entries succeed, and the null entry
+    /// throws (verified). Red: run the check only after the build; the provider was asked for a client (verified).
+    /// </summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData(null)]
+    public async Task A_blank_tool_filter_entry_is_refused_by_the_factory(string? entry)
+    {
+        var h = Build();
+
+        var result = await h.Factory.GetOrCreateAsync(Def(), ["t", entry!], CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be(AgentErrorCode.Validation);
+        result.Error.Message.Should().Be("Tool filter entry must not be blank.");
+        h.Provider.DidNotReceiveWithAnyArgs().CreateChatClient(default!);
+    }
+
+    /// <summary>A catalog whose first resolution waits for <see cref="Open"/>; later ones answer at once.</summary>
+    private sealed class GatedCatalog : IToolCatalog
+    {
+        private readonly TaskCompletionSource _gate = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _resolutions;
+
+        public int Resolutions => Volatile.Read(ref _resolutions);
+
+        public void Open() => _gate.SetResult();
+
+        public async ValueTask<Result<IReadOnlyList<AITool>, AgentError>> ResolveAsync(AgentDefinition agent, CancellationToken ct)
+        {
+            if (Interlocked.Increment(ref _resolutions) == 1)
+            {
+                await _gate.Task.WaitAsync(ct);
+            }
+
+            return Result<IReadOnlyList<AITool>, AgentError>.Success([AIFunctionFactory.Create(() => "ok", "t")]);
+        }
+    }
+
     private static ThalosOptions OptionsWith(AgentDefinition definition)
     {
         var options = new ThalosOptions();

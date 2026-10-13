@@ -29,4 +29,11 @@ public sealed class AgentDefinitionTests
     {
         Valid().Tools.Should().BeEquivalentTo(["*"]);
     }
+
+    /// <summary>Red: give <c>AllowedModels</c> a non-empty default, or drop the property's initializer so it is null.</summary>
+    [Fact]
+    public void AllowedModels_defaults_to_empty()
+    {
+        Valid().AllowedModels.Should().NotBeNull().And.BeEmpty();
+    }
 }

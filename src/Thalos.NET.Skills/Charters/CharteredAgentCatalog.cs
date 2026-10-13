@@ -138,7 +138,7 @@ public sealed class CharteredAgentCatalog : IAgentCatalog
         _snapshot = new Snapshot(agents, current, byRevision);
     }
 
-    /// <summary>Tools, output cap and memory always come from <paramref name="envelope"/>; prose, model, skills and the revision pin always come from <paramref name="charter"/>.</summary>
+    /// <summary>Tools, allowed models, output cap and memory always come from <paramref name="envelope"/>; prose, model, skills and the revision pin always come from <paramref name="charter"/>.</summary>
     private static AgentDefinition Compose(AgentEnvelope envelope, RoleCharter charter) => new()
     {
         Id = envelope.Id,
@@ -148,6 +148,7 @@ public sealed class CharteredAgentCatalog : IAgentCatalog
         Model = charter.Model,
         Skills = charter.Skills,
         Tools = envelope.Tools,
+        AllowedModels = envelope.AllowedModels,
         MaxOutputTokens = envelope.MaxOutputTokens,
         Memory = envelope.Memory,
         Revision = charter.ContentHash,

@@ -201,8 +201,9 @@ public sealed partial class ThalosAgentRuntime(
         activity?.SetTag("thalos.agent", definition.Name).SetTag("thalos.session", sessionId.ToString()).SetTag("thalos.turn", turnId.ToString());
         var startedAt = Stopwatch.GetTimestamp();
         var text = new StringBuilder();
-        // boxed so a round-trip that completed before the provider failed is still billed on the failed turn
-        var usage = new StrongBox<TurnUsage>(TurnUsage.Empty(definition.Model ?? string.Empty));
+        // boxed so a round-trip that completed before the provider failed is still billed on the failed turn. The turn's
+        // model override, already validated, wins over the definition's; with neither, the provider-reported model is adopted.
+        var usage = new StrongBox<TurnUsage>(TurnUsage.Empty(request.Model ?? definition.Model ?? string.Empty));
         AgentError? failure = null;
 
         try
@@ -211,7 +212,7 @@ public sealed partial class ThalosAgentRuntime(
             await publisher.PublishAsync(new TurnStartedNotification(sessionId, turnId, definition.Id, request.Caller.Id, clock.GetUtcNow()), ct).ConfigureAwait(false);
             LogTurnStarted(_logger, turnId, sessionId, definition.Name);
 
-            failure = await ResolveAndRunAsync(scope, definition, request, text, usage, ct).ConfigureAwait(false);
+            failure = await ResolveAndRunAsync(scope, activity, definition, request, text, usage, ct).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -247,22 +248,25 @@ public sealed partial class ThalosAgentRuntime(
     /// the first <see cref="AgentError"/> that stops it or <see langword="null"/> when the loop ran. Run options are
     /// built <em>before</em> the agent so a request naming an outcome schema no provider could accept fails without
     /// first building, and caching, a chat-client pipeline for it. Split out of <see cref="ProduceTurnAsync"/> so
-    /// that method stays about the turn's lifecycle rather than its resolution order.
+    /// that method stays about the turn's lifecycle rather than its resolution order. The turn's tool filter selects a
+    /// narrowed agent, and its model override goes into the run options; both were validated before the session was claimed.
     /// </summary>
     private async ValueTask<AgentError?> ResolveAndRunAsync(
-        TurnScope scope, AgentDefinition definition, AgentTurnRequest request, StringBuilder text, StrongBox<TurnUsage> usage, CancellationToken ct)
+        TurnScope scope, Activity? activity, AgentDefinition definition, AgentTurnRequest request, StringBuilder text, StrongBox<TurnUsage> usage, CancellationToken ct)
     {
-        var runOptions = BuildRunOptions(request.RequiredOutcome);
+        var runOptions = BuildRunOptions(request.RequiredOutcome, request.Model);
         if (runOptions.IsFailure)
         {
             return runOptions.Error;
         }
 
-        var agent = await agentFactory.GetOrCreateAsync(definition, ct).ConfigureAwait(false);
+        var agent = await agentFactory.GetOrCreateAsync(definition, request.ToolFilter, ct).ConfigureAwait(false);
         if (agent.IsFailure)
         {
             return agent.Error;
         }
+
+        TagRequest(activity, agent.Value, definition, request.Model, runOptions.Value);
 
         await RunModelLoopAsync(scope, agent.Value, request.Text, runOptions.Value, text, usage, ct).ConfigureAwait(false);
         return null;
@@ -333,17 +337,19 @@ public sealed partial class ThalosAgentRuntime(
     // ---------- helpers ----------
 
     /// <summary>
-    /// Turns an optional <see cref="AgentTurnRequest.RequiredOutcome"/> into the per-run options MAF unions with the
-    /// agent's own <c>ChatOptions</c>, adding the outcome tool to this turn's tool list and nothing else.
+    /// Turns an optional <see cref="AgentTurnRequest.RequiredOutcome"/> and an optional, already validated
+    /// <see cref="AgentTurnRequest.Model"/> into the per-run options MAF merges with the agent's own <c>ChatOptions</c>:
+    /// the outcome tool is added to this turn's tool list and the model replaces the agent's model, nothing else. Tool
+    /// narrowing cannot happen here, because MAF adds run-option tools to the agent's; it is the agent factory's job.
     /// </summary>
     /// <remarks>
     /// <para>
     /// Run options, not the agent's cached tool set, because the outcome set belongs to the <em>turn</em>: two
     /// workflow nodes routinely share one agent definition and declare different outcomes, and the agent cache is
     /// keyed on the definition alone. Anything baked into the agent would leak one node's outcome set into the
-    /// other's turns — or, worse, into a turn that declared none. <c>null</c> in, <c>null</c> out: a request without
-    /// an outcome schema produces no options object at all, so <c>RunStreamingAsync</c> receives exactly the
-    /// argument it received before this existed.
+    /// other's turns — or, worse, into a turn that declared none. <c>null</c> in, <c>null</c> out: a request with
+    /// neither an outcome schema nor a model override produces no options object at all, so <c>RunStreamingAsync</c>
+    /// receives exactly the argument it received before this existed.
     /// </para>
     /// <para>
     /// <c>ChatOptions.ToolMode</c> is deliberately left alone. <c>ChatToolMode.RequireSpecific</c> exists and is
@@ -354,17 +360,49 @@ public sealed partial class ThalosAgentRuntime(
     /// read side, where the absence is unambiguous.
     /// </para>
     /// </remarks>
-    private Result<ChatClientAgentRunOptions?, AgentError> BuildRunOptions(OutcomeToolSchema? requiredOutcome)
+    private Result<ChatClientAgentRunOptions?, AgentError> BuildRunOptions(OutcomeToolSchema? requiredOutcome, string? model)
     {
-        if (requiredOutcome is null)
+        if (requiredOutcome is null && model is null)
         {
             return Result<ChatClientAgentRunOptions?, AgentError>.Success(null);
         }
 
-        var tool = outcomeTools.Create(requiredOutcome);
-        return tool.IsFailure
-            ? Result<ChatClientAgentRunOptions?, AgentError>.Failure(tool.Error)
-            : Result<ChatClientAgentRunOptions?, AgentError>.Success(new ChatClientAgentRunOptions(new ChatOptions { Tools = [tool.Value] }));
+        // MAF lets a run option's ModelId win over the agent's own, so a model override needs no pipeline of its own.
+        var options = new ChatOptions { ModelId = model };
+        if (requiredOutcome is not null)
+        {
+            var tool = outcomeTools.Create(requiredOutcome);
+            if (tool.IsFailure)
+            {
+                return Result<ChatClientAgentRunOptions?, AgentError>.Failure(tool.Error);
+            }
+
+            options.Tools = [tool.Value];
+        }
+
+        return Result<ChatClientAgentRunOptions?, AgentError>.Success(new ChatClientAgentRunOptions(options));
+    }
+
+    /// <summary>
+    /// Tags the <c>thalos.turn</c> span with the model the chat request names, <c>gen_ai.request.model</c>, and the number of
+    /// tools it offers, <c>thalos.tools.offered</c>: the agent's tools after the turn's filter plus the outcome tool. Never a
+    /// tool name. Both read the agent's own <see cref="ChatOptions"/> through <c>GetService</c>, which a
+    /// <see cref="ChatClientAgent"/> answers; an agent that does not leaves the model tag to the definition's model and the
+    /// count out.
+    /// </summary>
+    private static void TagRequest(Activity? activity, AIAgent agent, AgentDefinition definition, string? model, ChatClientAgentRunOptions? runOptions)
+    {
+        if (activity is null)
+        {
+            return;
+        }
+
+        var agentOptions = agent.GetService<ChatOptions>();
+        activity.SetTag("gen_ai.request.model", model ?? agentOptions?.ModelId ?? definition.Model);
+        if (agentOptions is not null)
+        {
+            activity.SetTag("thalos.tools.offered", (agentOptions.Tools?.Count ?? 0) + (runOptions?.ChatOptions?.Tools?.Count ?? 0));
+        }
     }
 
     /// <summary>Validates, loads, authorizes and claims the session (Idle → Running). Nothing here may leave the session claimed on failure.</summary>
@@ -394,6 +432,14 @@ public sealed partial class ThalosAgentRuntime(
         if (!agents.TryGet(session.AgentId, request.AgentRevision, out var definition))
         {
             return Result<AgentDefinition, AgentError>.Failure(AgentError.AgentNotFound(session.AgentId));
+        }
+
+        // A requested model or tool filter outside the agent's own configuration is refused before the session is claimed,
+        // so a refused turn leaves the session Idle and sends no chat request. Tool absence is a host's security boundary.
+        var overrides = await agentFactory.ValidateOverridesAsync(definition, request.Model, request.ToolFilter, ct).ConfigureAwait(false);
+        if (overrides.IsFailure)
+        {
+            return Result<AgentDefinition, AgentError>.Failure(overrides.Error);
         }
 
         var machine = new AgentSessionMachine(session.State);

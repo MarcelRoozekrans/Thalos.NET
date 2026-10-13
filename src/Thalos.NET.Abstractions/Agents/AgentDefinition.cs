@@ -38,6 +38,12 @@ public sealed record AgentDefinition
     public IReadOnlyList<string> Skills { get; init; } = [];
 
     /// <summary>
+    /// Model ids a single turn may ask for instead of <see cref="Model"/>. Empty by default: no override is allowed, only the
+    /// agent's own model. It gates requests rather than shaping the pipeline, so the agent factory does not compare it.
+    /// </summary>
+    public IReadOnlyList<string> AllowedModels { get; init; } = [];
+
+    /// <summary>
     /// Per-agent memory settings (Thalos.NET.Memory); null = host defaults. Compared by value by the agent factory. Added in 0.2.0:
     /// definitions serialised before that (or by hosts without memory) simply carry <see langword="null"/> here.
     /// </summary>
