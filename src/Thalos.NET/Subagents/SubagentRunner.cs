@@ -190,6 +190,8 @@ public sealed partial class SubagentRunner : ISubagentRunner
                 {
                     RequiredOutcome = request.RequiredOutcome,
                     AgentRevision = request.AgentRevision,
+                    Model = request.Model,
+                    ToolFilter = request.ToolFilter,
                     MaxTotalTokens = budget.MaxTotalTokens,
                 },
                 ct)

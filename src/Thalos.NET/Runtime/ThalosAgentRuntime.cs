@@ -396,6 +396,14 @@ public sealed partial class ThalosAgentRuntime(
             return Result<AgentDefinition, AgentError>.Failure(AgentError.AgentNotFound(session.AgentId));
         }
 
+        // A requested model or tool filter outside the agent's own configuration is refused before the session is claimed,
+        // so a refused turn leaves the session Idle and sends no chat request. Tool absence is a host's security boundary.
+        var overrides = await agentFactory.ValidateOverridesAsync(definition, request.Model, request.ToolFilter, ct).ConfigureAwait(false);
+        if (overrides.IsFailure)
+        {
+            return Result<AgentDefinition, AgentError>.Failure(overrides.Error);
+        }
+
         var machine = new AgentSessionMachine(session.State);
         if (!machine.TryFire(SessionTrigger.Start))
         {

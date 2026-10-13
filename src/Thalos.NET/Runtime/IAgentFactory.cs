@@ -18,6 +18,16 @@ public interface IAgentFactory
     ValueTask<Result<AIAgent, AgentError>> GetOrCreateAsync(AgentDefinition definition, CancellationToken ct);
 
     /// <summary>
+    /// Checks a turn's requested <paramref name="model"/> and <paramref name="toolFilter"/> against <paramref name="definition"/>
+    /// and returns <see cref="AgentError.Validation"/> for anything outside the agent's own configuration; it builds nothing and
+    /// sends no chat request. A <paramref name="model"/> is accepted when it is in <see cref="AgentDefinition.AllowedModels"/> or
+    /// equals the model the agent runs on anyway (<see cref="AgentDefinition.Model"/>, else the chat client provider's default).
+    /// Every <paramref name="toolFilter"/> entry must match, with <c>Glob.IsMatch</c>, at least one of the agent's own resolved
+    /// qualified tool names, so a filter can only narrow. <see langword="null"/> for either means no override and is not checked.
+    /// </summary>
+    ValueTask<UnitResult<AgentError>> ValidateOverridesAsync(AgentDefinition definition, string? model, IReadOnlyList<string>? toolFilter, CancellationToken ct);
+
+    /// <summary>
     /// Drops every cached agent for <paramref name="agentId"/> — every revision, not just the unrevisioned one — and disposes
     /// their chat-client pipelines immediately; the next call for each rebuilds. Not turn-safe: turns in flight on that agent
     /// may fail — invalidate while quiescent.

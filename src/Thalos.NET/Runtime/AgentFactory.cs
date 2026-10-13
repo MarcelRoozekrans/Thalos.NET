@@ -82,6 +82,54 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
     }
 
     /// <inheritdoc />
+    public async ValueTask<UnitResult<AgentError>> ValidateOverridesAsync(
+        AgentDefinition definition, string? model, IReadOnlyList<string>? toolFilter, CancellationToken ct)
+    {
+        ArgumentNullException.ThrowIfNull(definition);
+
+        if (model is not null
+            && !definition.AllowedModels.Contains(model, StringComparer.Ordinal)
+            && !string.Equals(model, definition.Model ?? _provider.DefaultModel, StringComparison.Ordinal))
+        {
+            return UnitResult<AgentError>.Failure(AgentError.Validation($"Model '{model}' is not in agent '{definition.Name}' allowed models."));
+        }
+
+        if (toolFilter is null)
+        {
+            return UnitResult<AgentError>.Success();
+        }
+
+        var resolved = await _toolCatalog.ResolveAsync(definition, ct).ConfigureAwait(false);
+        if (resolved.IsFailure)
+        {
+            return UnitResult<AgentError>.Failure(resolved.Error);
+        }
+
+        foreach (var pattern in toolFilter)
+        {
+            if (!MatchesAny(pattern, resolved.Value))
+            {
+                return UnitResult<AgentError>.Failure(AgentError.Validation($"Tool filter entry '{pattern}' matches none of agent '{definition.Name}' tools."));
+            }
+        }
+
+        return UnitResult<AgentError>.Success();
+    }
+
+    private static bool MatchesAny(string pattern, IReadOnlyList<AITool> tools)
+    {
+        for (var i = 0; i < tools.Count; i++)
+        {
+            if (Glob.IsMatch(pattern, tools[i].Name))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <inheritdoc />
     public async ValueTask<Result<AIAgent, AgentError>> GetOrCreateAsync(AgentDefinition definition, CancellationToken ct)
     {
         var retriedStaleFailure = false;

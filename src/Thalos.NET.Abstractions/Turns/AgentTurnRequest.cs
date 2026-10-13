@@ -31,6 +31,20 @@ public sealed record AgentTurnRequest(
     public string? AgentRevision { get; init; }
 
     /// <summary>
+    /// The model this turn should use instead of the agent's own. <see langword="null"/> (the default) means the definition's
+    /// model. Refused with <see cref="AgentErrorCode.Validation"/> unless it is in <see cref="AgentDefinition.AllowedModels"/>
+    /// or equals the model the agent would use anyway.
+    /// </summary>
+    public string? Model { get; init; }
+
+    /// <summary>
+    /// Glob patterns narrowing the tools this turn is offered, matched with <c>Glob.IsMatch</c> against qualified names
+    /// <c>source__tool</c>. <see langword="null"/> (the default) means no filter. It can only narrow: a pattern that matches
+    /// none of the agent's own tools is refused with <see cref="AgentErrorCode.Validation"/>, so a filter never widens the set.
+    /// </summary>
+    public IReadOnlyList<string>? ToolFilter { get; init; }
+
+    /// <summary>
     /// The turn's token ceiling: input plus output tokens of every model round trip, as the provider reports them. The
     /// runtime checks it before each round trip and fails the turn with
     /// <see cref="AgentErrorCode.SubagentBudgetExceeded"/> instead of starting a round trip once the turn has already

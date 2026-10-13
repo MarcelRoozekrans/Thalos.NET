@@ -52,6 +52,8 @@ internal sealed class RuntimeFixture
 
     public RuntimeFixture WithModel(string? model) { Agent = Agent with { Model = model }; return this; }
 
+    public RuntimeFixture WithAllowedModels(params string[] models) { Agent = Agent with { AllowedModels = models }; return this; }
+
     public RuntimeFixture Build()
     {
         var provider = Substitute.For<IChatClientProvider>();
