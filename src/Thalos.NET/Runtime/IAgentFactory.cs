@@ -23,7 +23,7 @@ public interface IAgentFactory
     /// sends no chat request. A <paramref name="model"/> is accepted when it is in <see cref="AgentDefinition.AllowedModels"/> or
     /// equals the model the agent runs on anyway (<see cref="AgentDefinition.Model"/>, else the chat client provider's default).
     /// Every <paramref name="toolFilter"/> entry must match, with <c>Glob.IsMatch</c>, at least one of the agent's own resolved
-    /// qualified tool names, so a filter can only narrow. <see langword="null"/> for either means no override and is not checked.
+    /// qualified tool names, so a filter can only narrow. A null or blank entry, or an empty <paramref name="toolFilter"/>, is refused. <see langword="null"/> for either argument means no override and is not checked.
     /// </summary>
     ValueTask<UnitResult<AgentError>> ValidateOverridesAsync(AgentDefinition definition, string? model, IReadOnlyList<string>? toolFilter, CancellationToken ct);
 

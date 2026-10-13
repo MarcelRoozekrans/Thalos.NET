@@ -99,6 +99,19 @@ public sealed partial class AgentFactory : IAgentFactory, IDisposable
             return UnitResult<AgentError>.Success();
         }
 
+        if (toolFilter.Count == 0)
+        {
+            return UnitResult<AgentError>.Failure(AgentError.Validation("Tool filter must not be empty; pass null for no filter."));
+        }
+
+        foreach (var entry in toolFilter)
+        {
+            if (string.IsNullOrWhiteSpace(entry))
+            {
+                return UnitResult<AgentError>.Failure(AgentError.Validation("Tool filter entry must not be blank."));
+            }
+        }
+
         var resolved = await _toolCatalog.ResolveAsync(definition, ct).ConfigureAwait(false);
         if (resolved.IsFailure)
         {

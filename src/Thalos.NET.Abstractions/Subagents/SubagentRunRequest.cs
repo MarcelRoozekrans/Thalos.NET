@@ -61,6 +61,7 @@ public sealed record SubagentRunRequest
     /// Glob patterns narrowing the tools this run is offered, matched with <c>Glob.IsMatch</c> against qualified names
     /// <c>source__tool</c>. <see langword="null"/> (the default) means no filter. It can only narrow: a pattern that matches
     /// none of the agent's own tools is refused with <see cref="AgentErrorCode.Validation"/>, so a filter never widens the set.
+    /// <see langword="null"/> means no filter; an empty list is not "no tools" and is refused, as is a null or blank entry.
     /// </summary>
     public IReadOnlyList<string>? ToolFilter { get; init; }
 }

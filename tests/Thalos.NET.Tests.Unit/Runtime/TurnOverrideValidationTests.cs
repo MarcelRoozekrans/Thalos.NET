@@ -24,7 +24,7 @@ public sealed class TurnOverrideValidationTests
         return (f, session.Value);
     }
 
-    /// <summary>Red when the membership test against AllowedModels is removed, since the model is then refused.</summary>
+    /// <summary>Red: the membership test against AllowedModels is removed, since the model is then refused.</summary>
     [Fact]
     public async Task A_model_override_in_the_allowed_list_is_accepted()
     {
@@ -36,7 +36,7 @@ public sealed class TurnOverrideValidationTests
         f.Client.Requests.Should().HaveCount(1);
     }
 
-    /// <summary>Red when the default-model branch is removed: the agent here lists no other model, so only the default can admit it.</summary>
+    /// <summary>Red: the default-model branch is removed: the agent here lists no other model, so only the default can admit it.</summary>
     [Fact]
     public async Task A_model_override_equal_to_the_agents_own_model_is_accepted_without_an_allowed_list()
     {
@@ -47,7 +47,7 @@ public sealed class TurnOverrideValidationTests
         result.IsSuccess.Should().BeTrue();
     }
 
-    /// <summary>Red when the fallback to the provider default is dropped (the agent has no model of its own here).</summary>
+    /// <summary>Red: the fallback to the provider default is dropped (the agent has no model of its own here).</summary>
     [Fact]
     public async Task A_model_override_equal_to_the_provider_default_is_accepted_when_the_agent_names_no_model()
     {
@@ -59,7 +59,7 @@ public sealed class TurnOverrideValidationTests
     }
 
     /// <summary>
-    /// Red when validation is removed (the turn runs and a chat request is sent), when the message text changes, and
+    /// Red: validation is removed (the turn runs and a chat request is sent), when the message text changes, and
     /// when the code changes from Validation. The request count of zero goes red if the check moves after the model call.
     /// </summary>
     [Fact]
@@ -75,7 +75,7 @@ public sealed class TurnOverrideValidationTests
         f.Client.Requests.Should().BeEmpty();
     }
 
-    /// <summary>Red when validation runs after the session is claimed: the session would be left Running or fail to start the next turn.</summary>
+    /// <summary>Red: moving the validation below the session claim leaves the session Running, so the next turn fails as busy (verified).</summary>
     [Fact]
     public async Task A_refused_override_leaves_the_session_usable()
     {
@@ -88,7 +88,7 @@ public sealed class TurnOverrideValidationTests
         next.IsSuccess.Should().BeTrue();
     }
 
-    /// <summary>Red when the match is dropped (the filter is then refused) or when the glob is not run through Glob.IsMatch.</summary>
+    /// <summary>Red: the match is dropped (the filter is then refused) or when the glob is not run through Glob.IsMatch.</summary>
     [Fact]
     public async Task A_tool_filter_entry_matching_one_of_the_agents_tools_is_accepted()
     {
@@ -100,7 +100,7 @@ public sealed class TurnOverrideValidationTests
     }
 
     /// <summary>
-    /// Red when the tool check is removed. The offending entry is the second one, so a check of only the first entry
+    /// Red: the tool check is removed. The offending entry is the second one, so a check of only the first entry
     /// goes red too.
     /// </summary>
     [Fact]
@@ -116,7 +116,7 @@ public sealed class TurnOverrideValidationTests
         f.Client.Requests.Should().BeEmpty();
     }
 
-    /// <summary>Red when validation matches against the filter-narrowed set or the host's whole catalog instead of the agent's own tools.</summary>
+    /// <summary>Red: validation matches against the filter-narrowed set or the host's whole catalog instead of the agent's own tools.</summary>
     [Fact]
     public async Task A_tool_the_host_has_but_the_agent_is_not_configured_for_is_refused()
     {
@@ -130,7 +130,7 @@ public sealed class TurnOverrideValidationTests
         result.Error.Message.Should().Be("Tool filter entry 't__echo' matches none of agent 'a' tools.");
     }
 
-    /// <summary>Red when null starts to be treated as an empty filter or an unknown model, which would refuse an ordinary turn.</summary>
+    /// <summary>Red: null starts to be treated as an empty filter or an unknown model, which would refuse an ordinary turn.</summary>
     [Fact]
     public async Task No_override_behaves_exactly_as_before()
     {
@@ -140,5 +140,48 @@ public sealed class TurnOverrideValidationTests
 
         result.IsSuccess.Should().BeTrue();
         f.Client.Requests.Should().HaveCount(1);
+    }
+
+    /// <summary>Red: dropping the null and blank check lets Glob.IsMatch throw ArgumentNullException out of the turn (verified).</summary>
+    [Fact]
+    public async Task A_null_tool_filter_entry_is_refused_not_thrown()
+    {
+        var (f, session) = await ReadyAsync();
+
+        var result = await f.Runtime.RunTurnAsync(new AgentTurnRequest(session, "go", Caller) { ToolFilter = ["t__echo", null!] }, CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be(AgentErrorCode.Validation);
+        result.Error.Message.Should().Be("Tool filter entry must not be blank.");
+        f.Client.Requests.Should().BeEmpty();
+    }
+
+    /// <summary>Red: removing the whitespace check lets "  " reach the match and report a different message.</summary>
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task A_blank_tool_filter_entry_is_refused(string entry)
+    {
+        var (f, session) = await ReadyAsync();
+
+        var result = await f.Runtime.RunTurnAsync(new AgentTurnRequest(session, "go", Caller) { ToolFilter = [entry] }, CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be(AgentErrorCode.Validation);
+        result.Error.Message.Should().Be("Tool filter entry must not be blank.");
+    }
+
+    /// <summary>Red: removing the empty-list check lets [] pass as a no-op filter.</summary>
+    [Fact]
+    public async Task An_empty_tool_filter_is_refused()
+    {
+        var (f, session) = await ReadyAsync();
+
+        var result = await f.Runtime.RunTurnAsync(new AgentTurnRequest(session, "go", Caller) { ToolFilter = [] }, CancellationToken.None);
+
+        result.IsFailure.Should().BeTrue();
+        result.Error.Code.Should().Be(AgentErrorCode.Validation);
+        result.Error.Message.Should().Be("Tool filter must not be empty; pass null for no filter.");
+        f.Client.Requests.Should().BeEmpty();
     }
 }

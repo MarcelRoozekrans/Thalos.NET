@@ -23,7 +23,7 @@ public sealed class SubagentTurnOverrideTests
     }
 
     /// <summary>
-    /// Red the moment either <c>Model = request.Model</c> or <c>ToolFilter = request.ToolFilter</c> is dropped from
+    /// Red: dropping either <c>Model = request.Model</c> or <c>ToolFilter = request.ToolFilter</c> is dropped from
     /// <c>SubagentRunner.RunTurnAsync</c>; each assertion is its own conjunct of the matcher, so each goes red alone.
     /// </summary>
     [Fact]
@@ -42,7 +42,7 @@ public sealed class SubagentTurnOverrideTests
             Arg.Any<CancellationToken>());
     }
 
-    /// <summary>Red when the runner invents a model or an empty filter: an empty filter would mean "no tools", not "no filter".</summary>
+    /// <summary>Red: when the runner invents a model or an empty filter: an empty filter would mean "no tools", not "no filter".</summary>
     [Fact]
     public async Task A_run_without_overrides_leaves_both_null_on_the_turn()
     {
