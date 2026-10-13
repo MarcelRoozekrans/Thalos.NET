@@ -37,6 +37,7 @@ public static class RoleCharterFileLoader
     private static readonly FrozenDictionary<string, string> Forbidden = new Dictionary<string, string>(StringComparer.Ordinal)
     {
         ["tools"] = "a charter may not name tools: a role's tool list is its security envelope and stays in configuration, where changing it needs a reviewed deploy",
+        ["allowedmodels"] = "a charter may not declare allowedmodels: the models a turn may switch to are part of a role's security envelope and stay in configuration, where changing them needs a reviewed deploy",
     }.ToFrozenDictionary(StringComparer.Ordinal);
 
     /// <summary>Parses already-read <paramref name="text"/> as the role named <paramref name="expectedRole"/>; <paramref name="sourcePath"/> is the root-relative path used in error messages.</summary>

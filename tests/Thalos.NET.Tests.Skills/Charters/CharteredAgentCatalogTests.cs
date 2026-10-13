@@ -8,11 +8,12 @@ public sealed class CharteredAgentCatalogTests
     private static readonly AgentId ReviewerId = AgentId.New();
     private static readonly DateTimeOffset Now = new(2026, 9, 23, 12, 0, 0, TimeSpan.Zero);
 
-    private static AgentEnvelope Envelope(string role, IReadOnlyList<string>? tools = null) => new()
+    private static AgentEnvelope Envelope(string role, IReadOnlyList<string>? tools = null, IReadOnlyList<string>? allowedModels = null) => new()
     {
         Id = ReviewerId,
         Name = role,
         Tools = tools ?? ["*"],
+        AllowedModels = allowedModels ?? [],
     };
 
     private static RoleCharter Charter(string role, string hash, string instructions = "x", string? model = null, bool active = true) => new()
@@ -63,6 +64,16 @@ public sealed class CharteredAgentCatalogTests
         d.Instructions.Should().Be("Review it.");
         d.Model.Should().Be("claude-opus-5");
         d.Revision.Should().Be("h1");
+    }
+
+    /// <summary>Red: drop <c>AllowedModels = envelope.AllowedModels</c> from <c>Compose</c>; the composed list is then empty.</summary>
+    [Fact]
+    public void A_composed_chartered_agent_carries_the_envelopes_allowed_models()
+    {
+        var catalog = CatalogWith(Envelope("reviewer", allowedModels: ["claude-sonnet-5-5", "claude-opus-5-5"]));
+        catalog.Set([Charter("reviewer", "h1")]);
+
+        Get(catalog, ReviewerId).AllowedModels.Should().Equal("claude-sonnet-5-5", "claude-opus-5-5");
     }
 
     [Fact]
