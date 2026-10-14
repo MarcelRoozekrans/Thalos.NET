@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.17.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.16.0...v0.17.0) (2026-10-13)
+
+
+### ⚠ BREAKING CHANGES
+
+* IAgentFactory gained ValidateOverridesAsync; external implementers must add it.
+
+### Features
+
+* let a turn narrow its tools and pick an allowed model ([#325](https://github.com/MarcelRoozekrans/Thalos.NET/issues/325)) ([a398f64](https://github.com/MarcelRoozekrans/Thalos.NET/commit/a398f6493f3449592b09703cc7b09ee85701445c))
+
 ## [0.16.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.15.0...v0.16.0) (2026-10-12)
 
 
