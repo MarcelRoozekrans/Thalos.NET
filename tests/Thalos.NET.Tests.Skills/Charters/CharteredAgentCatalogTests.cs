@@ -76,6 +76,20 @@ public sealed class CharteredAgentCatalogTests
         Get(catalog, ReviewerId).AllowedModels.Should().Equal("claude-sonnet-5-5", "claude-opus-5-5");
     }
 
+    /// <summary>
+    /// Red: in <c>Compose</c> set <c>AllowedModels = null!</c> (not empty), or <c>AllowedModels = ["claude-opus-5"]</c>
+    /// (a default from elsewhere); either turns the assertion red.
+    /// </summary>
+    [Fact]
+    public void A_default_envelope_composes_to_an_empty_allowed_models_list()
+    {
+        var envelope = new AgentEnvelope { Id = ReviewerId, Name = "reviewer", Tools = ["*"] };
+        var catalog = CatalogWith(envelope);
+        catalog.Set([Charter("reviewer", "h1")]);
+
+        Get(catalog, ReviewerId).AllowedModels.Should().NotBeNull().And.BeEmpty();
+    }
+
     [Fact]
     public void A_pinned_revision_is_served_after_the_charter_moves_on()
     {
