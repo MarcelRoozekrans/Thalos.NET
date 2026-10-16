@@ -481,3 +481,6 @@ $RECYCLE.BIN/
 # Vim temporary swap files
 *.swp
 
+
+# Screenshots and page snapshots the Playwright MCP server writes into the working directory.
+.playwright-mcp/
