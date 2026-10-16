@@ -5,7 +5,7 @@
     <PackageVersion Include="ZeroAlloc.ValueObjects" Version="2.2.1" />
     <PackageVersion Include="ZeroAlloc.Mediator" Version="6.6.1" />
     <PackageVersion Include="ZeroAlloc.Authorization" Version="2.1.5" />
-    <PackageVersion Include="ZeroAlloc.AsyncEvents" Version="1.1.8" />
+    <PackageVersion Include="ZeroAlloc.AsyncEvents" Version="1.1.10" />
     <PackageVersion Include="ZeroAlloc.StateMachine" Version="1.6.3" />
     <PackageVersion Include="ZeroAlloc.Telemetry" Version="1.12.4" />
     <PackageVersion Include="ZeroAlloc.Validation" Version="2.3.1" />
