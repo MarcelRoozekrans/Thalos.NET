@@ -15,11 +15,9 @@ on:
         type: boolean
         default: false
   # release-please.yml calls this workflow with publish_to_nuget=true once it has cut a release, so
-  # merging the release PR publishes without anyone dispatching anything. It has to be a call rather
-  # than a `push: tags` trigger on this file: release-please pushes the tag with the default
-  # GITHUB_TOKEN, and GitHub refuses to start a workflow from an event that token created. A tag
-  # trigger here would never fire — silently, with no run and no error. Do not "simplify" this into
-  # one.
+  # merging the release PR publishes without anyone dispatching anything. Do not add a `push: tags`
+  # trigger here as well: release-please pushes the tag with the release bot GitHub App's token, so
+  # such a trigger would fire next to the call and publish the same release twice.
   workflow_call:
     inputs:
       publish_to_nuget:
