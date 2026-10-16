@@ -57,13 +57,16 @@ gh workflow run ci.yml --ref vX.Y.Z -f publish_to_nuget=true   # publish a tagge
 ```
 
 > **Why the publish is a `workflow_call` and not a `push: tags` trigger on `ci.yml`.**
-> release-please pushes the tag using the default `GITHUB_TOKEN`, and GitHub will not start a
-> workflow from an event that token created — its guard against workflows triggering themselves
-> forever. A tag trigger on `ci.yml` would never fire, and it would fail *silently*: no run, no
-> error, a release that quietly never reaches nuget.org. A PAT would lift the restriction and was
-> rejected, because it means a long-lived stored credential with write access in a repository whose
-> release design is deliberately Trusted Publishing with no stored key. Do not "simplify" the call
-> into a tag trigger.
+> The call runs in the same run that cut the release and checks out exactly that tag. release-please
+> works with a token from the release bot GitHub App (the `RELEASE_BOT_CLIENT_ID` variable and the
+> `RELEASE_BOT_PRIVATE_KEY` secret), so its tag push *does* start workflows: a `push: tags` trigger
+> added to `ci.yml` would fire next to the call and publish the release twice. Do not add one.
+>
+> Before the App token, release-please ran on the default `GITHUB_TOKEN`, whose events start no
+> workflow — so the release PR arrived with no checks and a tag trigger would never have fired. A
+> PAT was rejected as a long-lived stored credential acting as a person; the App key is the one
+> stored credential now, it never expires and acts as no person, and the nuget.org push is still
+> Trusted Publishing with no stored key.
 
 Pre-1.0 bump rules (`release-please-config.json`): `bump-minor-pre-major` keeps a `feat!:` /
 `BREAKING CHANGE` at a minor bump (0.4.0 → 0.5.0) instead of jumping to 1.0.0, a `feat:` takes the
