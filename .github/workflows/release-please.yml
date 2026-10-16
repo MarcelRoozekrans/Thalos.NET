@@ -38,6 +38,19 @@ jobs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
+      # Pushes and PRs made with GITHUB_TOKEN trigger no workflows, so bot PRs
+      # never got their required checks. A token from the release bot GitHub App
+      # acts as the App, and its pushes trigger CI like anyone else's.
+      - name: Mint a release bot token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ vars.RELEASE_BOT_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-issues: write
+
       # release-type simple: the release PR maintains CHANGELOG.md and a version.txt; nothing in the
       # build consumes either — GitVersion derives the build's version from the tag this creates.
       # The version rules live in release-please-config.json: bump-minor-pre-major keeps a breaking
@@ -49,6 +62,7 @@ jobs:
         id: release
         uses: googleapis/release-please-action@v5
         with:
+          token: ${{ steps.app-token.outputs.token }}
           # Manifest mode. Passing `release-type` here instead would run the action in its legacy
           # single-package mode, which ignores release-please-config.json entirely — and with it
           # bump-minor-pre-major, the setting whose whole job is to keep a breaking change on 0.x at
@@ -61,12 +75,12 @@ jobs:
 
   # The last link: merging the release PR now publishes, with no dispatch.
   #
-  # This calls ci.yml directly rather than letting the tag push trigger it. release-please pushes
-  # that tag with the default GITHUB_TOKEN, and GitHub will not start a workflow from an event that
-  # token created — a `push: tags` trigger on ci.yml would never fire, and would fail by doing
-  # nothing at all rather than by going red. A PAT would also work and was rejected: it means a
-  # long-lived stored credential with write access in a repository whose release design is
-  # deliberately Trusted Publishing with no stored key.
+  # This calls ci.yml directly rather than letting the tag push trigger it: the call runs in the same
+  # run that cut the release and checks out exactly that tag. release-please now writes the PR, the
+  # tag and the release with a token from the release bot GitHub App, so its events do start
+  # workflows — which is why ci.yml must NOT also get a `push: tags` trigger: it would fire next to
+  # this call and publish twice. The App key is the one stored credential; it never expires and acts
+  # as no person, and the nuget.org push itself is still Trusted Publishing with no stored key.
   #
   # ci.yml re-runs build-test on both operating systems and pack-validate before publish-nuget is
   # allowed to start, and publish-nuget still refuses any commit that is not tagged v<version> and
