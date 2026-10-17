@@ -1,4 +1,3 @@
-using System.Diagnostics.CodeAnalysis;
 using Microsoft.Extensions.DependencyInjection;
 
 namespace Thalos.Workspaces;
@@ -25,8 +24,6 @@ public static class WorkspaceToolsThalosBuilderExtensions
     /// <paramref name="configure"/> left a value that cannot work, such as a negative
     /// <see cref="RunWorkspaceToolOptions.ContentionTimeout"/> other than <see cref="Timeout.InfiniteTimeSpan"/>.
     /// </exception>
-    [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
-    [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     public static ThalosBuilder UseRunWorkspaceTools(
         this ThalosBuilder builder, IReadOnlySet<string> allowedWriteExtensions, Action<RunWorkspaceToolOptions>? configure = null)
     {
@@ -38,7 +35,7 @@ public static class WorkspaceToolsThalosBuilderExtensions
         options.Validate(nameof(configure));
 
         builder.Services.AddSingleton(options);
-        return builder.AddLocalTools(RunWorkspaceToolOptions.SourceName, typeof(WorkspaceTools));
+        return AddTools(builder);
     }
 
     /// <summary>
@@ -51,8 +48,6 @@ public static class WorkspaceToolsThalosBuilderExtensions
     /// <param name="builder">The builder to register on.</param>
     /// <param name="configure">Customises protected paths and limits; runs after the any-extension ceiling is set.</param>
     /// <exception cref="ArgumentException"><paramref name="configure"/> left a value that cannot work.</exception>
-    [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
-    [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     public static ThalosBuilder UseRunWorkspaceToolsAllowingAnyExtension(this ThalosBuilder builder, Action<RunWorkspaceToolOptions>? configure = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -64,6 +59,16 @@ public static class WorkspaceToolsThalosBuilderExtensions
         configure?.Invoke(options);
         options.Validate(nameof(configure));
         builder.Services.AddSingleton(options);
-        return builder.AddLocalTools(RunWorkspaceToolOptions.SourceName, typeof(WorkspaceTools));
+        return AddTools(builder);
     }
+
+    /// <summary>The four tools, registered without reflection, so a trimmed or Native AOT host can serve them.</summary>
+    private static ThalosBuilder AddTools(ThalosBuilder builder) =>
+        builder.AddLocalTools<WorkspaceTools>(
+            RunWorkspaceToolOptions.SourceName,
+            WorkspaceToolsJsonContext.CreateToolOptions(),
+            static t => t.ReadFile,
+            static t => t.ListFiles,
+            static t => t.WriteFile,
+            static t => t.EditFile);
 }

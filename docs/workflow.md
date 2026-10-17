@@ -740,6 +740,8 @@ run's workspace, build and Roslyn into a per-run container, so that code the age
 analyzers) never executes on the host. `UseSandboxRunWorkspaces` (`Thalos.NET.Sandbox`) replaces the worktree
 provider of `UseGitWorktreeWorkspaces`; `UseDockerSandboxRuntime` (`Thalos.NET.Sandbox.Docker`) supplies the
 `ISandboxRuntime`. `Thalos.NET.Sandbox.Host` is the entry point of the image, see `samples/Thalos.Sample.SandboxHost`.
+It is AOT-clean from 0.18.0, so the entry point may be published as Native AOT; `NativeAotSmokeTests` publishes and
+runs one.
 
 **Architecture.** The API talks to a loopback-published gateway container (nginx), which routes each request by
 run to that run's own container. The container has no route out except an egress proxy (squid) that allows only

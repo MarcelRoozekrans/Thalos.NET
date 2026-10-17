@@ -179,6 +179,23 @@ returns with `GitCommitRequest.CommitStagedIndex = true`, and leave `Paths` null
   the registered observers and the logger itself. 0.16.0 is a minor release before 1.0, which is where such a break
   belongs.
 
+0.18.0 ships the same eighteen packages. `Thalos.NET.Sandbox.Host` is AOT-clean: it is built with `IsAotCompatible`
+and the request delegate generator, so a sandbox entry point that calls `SandboxHost.CreateBuilder` publishes as
+Native AOT with no trim or AOT warning. `tests/Thalos.NET.Tests.Sandbox.Host.Native` is that entry point, published
+and run by `NativeAotSmokeTests` on Linux x64.
+
+- **`SandboxHost.CreateBuilder` no longer carries `[RequiresUnreferencedCode]` or `[RequiresDynamicCode]`**, and
+  neither do `UseRunWorkspaceTools` and `UseRunWorkspaceToolsAllowingAnyExtension`. A caller that suppressed the
+  warnings can drop the suppression.
+- **`ThalosBuilder.AddLocalTools<TTools>(sourceName, serializerOptions, params Func<TTools, Delegate>[] tools)`** is
+  the reflection-free form of `AddLocalTools(sourceName, params Type[])`: each tool is a method group such as
+  `t => t.ReadFile`, and arguments and results go through the given options, typically a source-generated
+  `JsonSerializerContext`. The workspace and sandbox tools are registered this way now. `AddLocalTools(typeof ...)`
+  is unchanged for JIT hosts.
+- **The sandbox host uses `WebApplication.CreateSlimBuilder`.** It keeps configuration, console logging and Kestrel
+  over HTTP, and adds back the `regex` route constraint its MCP route needs. A host that added an HTTPS endpoint or a
+  hosting-startup assembly to the builder `CreateBuilder` returns must now add the matching services itself.
+
 **Breaking changes accumulated across the workflow-engine phase (2.2, Part A):**
 
 - `ThalosAgentRuntime`'s public constructor gained a required `IOutcomeToolFactory outcomeTools` parameter

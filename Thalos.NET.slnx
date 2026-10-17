@@ -36,6 +36,7 @@
     <Project Path="tests/Thalos.NET.Tests.Sandbox/Thalos.NET.Tests.Sandbox.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Sandbox.Docker/Thalos.NET.Tests.Sandbox.Docker.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Sandbox.Host/Thalos.NET.Tests.Sandbox.Host.csproj" />
+    <Project Path="tests/Thalos.NET.Tests.Sandbox.Host.Native/Thalos.NET.Tests.Sandbox.Host.Native.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Sentinel/Thalos.NET.Tests.Sentinel.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Skills/Thalos.NET.Tests.Skills.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Subagents/Thalos.NET.Tests.Subagents.csproj" />
