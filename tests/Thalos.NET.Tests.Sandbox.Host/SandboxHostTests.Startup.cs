@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Thalos.Sandbox;
 using Thalos.Tools;
 using Thalos.Workspaces;
+using ZeroAlloc.Results;
 
 namespace Thalos.Tests.Sandbox.Host;
 
@@ -52,5 +53,24 @@ public sealed partial class SandboxHostTests
         // Red: remove the ToolSourceWarmup registration from SandboxHost.AddTools: the host starts, and the bad binder
         // would fail each MCP request instead.
         await start.Should().ThrowAsync<InvalidOperationException>().WithMessage("*must return one of its [ThalosTool] methods*NotATool'.");
+    }
+
+    /// <summary>A tool source that answers a failure instead of throwing.</summary>
+    private sealed class FailingToolSource : IToolSource
+    {
+        public string Name => "failing";
+
+        public ValueTask<Result<IReadOnlyList<AITool>, AgentError>> GetToolsAsync(CancellationToken ct) =>
+            new(Result<IReadOnlyList<AITool>, AgentError>.Failure(AgentError.Validation("the tools could not be listed")));
+    }
+
+    [Fact]
+    public async Task A_tool_source_that_answers_a_failure_stops_the_start()
+    {
+        var start = () => HostHarness.StartAsync(WorkRoot(), services: s => s.AddSingleton<IToolSource>(new FailingToolSource()));
+
+        // Red: make ToolSourceWarmup ignore a failed result: the host starts, and the route serves no tools instead.
+        await start.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("The sandbox host cannot start: tool source 'failing' failed: the tools could not be listed");
     }
 }
