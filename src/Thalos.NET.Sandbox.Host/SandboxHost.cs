@@ -10,6 +10,7 @@ using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Thalos.Git.Workspaces;
 using Thalos.Mcp;
+using Thalos.Tools;
 using Thalos.Workspaces;
 
 namespace Thalos.Sandbox.Host;
@@ -112,7 +113,7 @@ public static class SandboxHost
                 thalos.UseRunWorkspaceTools(settings.WriteExtensions, o => AddProtected(o, settings));
             }
 
-            thalos.AddLocalTools<SandboxTools>(SandboxToolOptions.SourceName, SandboxToolsJsonContext.CreateToolOptions(), static t => t.Build, static t => t.Test);
+            thalos.AddLocalTools<SandboxTools>(SandboxToolOptions.SourceName, LocalToolSourceBinding.CreateOptions(SandboxToolsJsonContext.Default), static t => t.Build, static t => t.Test);
         });
 
         services.AddMcpServer().WithHttpTransport(o =>

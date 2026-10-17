@@ -122,29 +122,8 @@ internal sealed class LocalToolSource<[DynamicallyAccessedMembers(DynamicallyAcc
     private sealed class ScopedTool(IServiceProvider root, Func<TTools, Delegate> binder, AIFunctionFactoryOptions options, AIFunction probe)
         : DelegatingAIFunction(probe)
     {
-        protected override async ValueTask<object?> InvokeCoreAsync(AIFunctionArguments arguments, CancellationToken cancellationToken)
-        {
-            var scope = root.CreateAsyncScope();
-            await using var _ = scope.ConfigureAwait(false);
-            var instance = ActivatorUtilities.CreateInstance<TTools>(scope.ServiceProvider);
-            try
-            {
-                var bound = AIFunctionFactory.Create(binder(instance), options);
-                var scopedArguments = new AIFunctionArguments(arguments, StringComparer.Ordinal) { Services = scope.ServiceProvider, Context = arguments.Context };
-                return await bound.InvokeAsync(scopedArguments, cancellationToken).ConfigureAwait(false);
-            }
-            finally
-            {
-                switch (instance)
-                {
-                    case IAsyncDisposable asyncDisposable:
-                        await asyncDisposable.DisposeAsync().ConfigureAwait(false);
-                        break;
-                    case IDisposable disposable:
-                        disposable.Dispose();
-                        break;
-                }
-            }
-        }
+        protected override ValueTask<object?> InvokeCoreAsync(AIFunctionArguments arguments, CancellationToken cancellationToken) =>
+            LocalToolSourceBinding.InvokeScopedAsync(
+                root, sp => ActivatorUtilities.CreateInstance<TTools>(sp), instance => AIFunctionFactory.Create(binder(instance), options), arguments, cancellationToken);
     }
 }

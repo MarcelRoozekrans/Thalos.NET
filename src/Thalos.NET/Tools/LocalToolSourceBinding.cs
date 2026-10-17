@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using Microsoft.Extensions.AI;
+using Microsoft.Extensions.DependencyInjection;
 using Thalos.Runtime;
 using ZeroAlloc.Authorization;
 
@@ -62,6 +63,56 @@ internal static class LocalToolSourceBinding
             + $"type assignable to ISecurityContext at '{parameter.Name}{offendingPath}'. Only a parameter whose own "
             + "declared type is exactly ISecurityContext, passed by value, is bound to the turn; declare it that "
             + "way, or remove ISecurityContext from this parameter's shape.";
+    }
+
+    /// <summary>
+    /// The serializer options for a reflection-free tool source: <see cref="AIJsonUtilities.DefaultOptions"/>' settings,
+    /// the ones a reflected tool's arguments and results go through, with <paramref name="resolver"/> as the only
+    /// resolver, read-only.
+    /// </summary>
+    /// <param name="resolver">The tools' metadata, typically a source-generated <see cref="System.Text.Json.Serialization.JsonSerializerContext"/>.</param>
+    public static JsonSerializerOptions CreateOptions(IJsonTypeInfoResolver resolver)
+    {
+        ArgumentNullException.ThrowIfNull(resolver);
+        var options = new JsonSerializerOptions(AIJsonUtilities.DefaultOptions) { TypeInfoResolver = resolver };
+        options.MakeReadOnly();
+        return options;
+    }
+
+    /// <summary>
+    /// Runs one call of an instance tool method in a fresh DI scope: creates the instance from the scope, binds the
+    /// function to it, invokes it with the scope as <see cref="AIFunctionArguments.Services"/>, and disposes the instance,
+    /// then the scope.
+    /// </summary>
+    /// <param name="root">The container the scope is created from.</param>
+    /// <param name="create">Creates the tool instance from the scope's provider.</param>
+    /// <param name="bind">The function bound to that instance.</param>
+    /// <param name="arguments">The call's arguments; copied, with the scope's provider.</param>
+    /// <param name="cancellationToken">Cancellation token.</param>
+    public static async ValueTask<object?> InvokeScopedAsync<TInstance>(
+        IServiceProvider root, Func<IServiceProvider, TInstance> create, Func<TInstance, AIFunction> bind, AIFunctionArguments arguments, CancellationToken cancellationToken)
+        where TInstance : notnull
+    {
+        var scope = root.CreateAsyncScope();
+        await using var _ = scope.ConfigureAwait(false);
+        var instance = create(scope.ServiceProvider);
+        try
+        {
+            var scopedArguments = new AIFunctionArguments(arguments, StringComparer.Ordinal) { Services = scope.ServiceProvider, Context = arguments.Context };
+            return await bind(instance).InvokeAsync(scopedArguments, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            switch (instance)
+            {
+                case IAsyncDisposable asyncDisposable:
+                    await asyncDisposable.DisposeAsync().ConfigureAwait(false);
+                    break;
+                case IDisposable disposable:
+                    disposable.Dispose();
+                    break;
+            }
+        }
     }
 
     /// <summary>
