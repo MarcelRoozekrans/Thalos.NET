@@ -192,9 +192,16 @@ and run by `NativeAotSmokeTests` on Linux x64.
   `t => t.ReadFile`, and arguments and results go through the given options, typically a source-generated
   `JsonSerializerContext`. The workspace and sandbox tools are registered this way now. `AddLocalTools(typeof ...)`
   is unchanged for JIT hosts.
-- **The sandbox host uses `WebApplication.CreateSlimBuilder`.** It keeps configuration, console logging and Kestrel
-  over HTTP, and adds back the `regex` route constraint its MCP route needs. A host that added an HTTPS endpoint or a
-  hosting-startup assembly to the builder `CreateBuilder` returns must now add the matching services itself.
+- **The sandbox host fails fast on a tool source that cannot build its tools.** It builds every registered source's
+  tools once as it starts, before the server listens, so a bad binder or a principal hidden in a parameter stops the
+  start instead of failing each MCP request.
+
+**Breaking change in 0.18.0:**
+
+- **`SandboxHost.CreateBuilder` returns a slim builder** (`WebApplication.CreateSlimBuilder`): no HTTPS
+  configuration, no hosting startup assemblies, console logging only. It keeps configuration and Kestrel over HTTP,
+  and adds back the `regex` route constraint its MCP route needs. A host that relied on any of the others in the
+  builder `CreateBuilder` returns must now add them itself.
 
 **Breaking changes accumulated across the workflow-engine phase (2.2, Part A):**
 
