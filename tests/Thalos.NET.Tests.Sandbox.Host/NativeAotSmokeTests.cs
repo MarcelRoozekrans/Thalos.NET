@@ -4,7 +4,6 @@ using System.Net.Http.Headers;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
-using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Client;
 using ModelContextProtocol.Protocol;
@@ -35,6 +34,9 @@ public sealed class NativeAotSmokeTests(NativeHostPublish publish) : IClassFixtu
     public void The_native_publish_reports_no_trim_or_AOT_warning()
     {
         Skip.IfNot(Supported, "the native publish targets linux-x64");
+        // Red: look for a command that does not exist instead of clang: the test fails with the install hint, never
+        // with a generic publish failure, and never skips.
+        publish.MissingToolchain.Should().BeNull();
         // Red: break the smoke host's Program.cs so it does not compile: the publish exits 1. A publish that fails for
         // any reason is never counted as zero warnings.
         publish.ExitCode.Should().Be(0, $"the native publish must succeed; its output ends with:\n{publish.OutputTail}");
@@ -48,6 +50,9 @@ public sealed class NativeAotSmokeTests(NativeHostPublish publish) : IClassFixtu
     public async Task The_native_host_serves_control_ready_and_the_workspace_tools()
     {
         Skip.IfNot(Supported, "the native publish targets linux-x64");
+        // Red: look for a command that does not exist instead of clang: the test fails with the install hint, never
+        // with a generic publish failure, and never skips.
+        publish.MissingToolchain.Should().BeNull();
         // Red: as in the test above, a smoke host that does not compile: the publish exits 1.
         publish.ExitCode.Should().Be(0, $"the native publish must succeed; its output ends with:\n{publish.OutputTail}");
 
@@ -98,12 +103,15 @@ public sealed class NativeAotSmokeTests(NativeHostPublish publish) : IClassFixtu
 /// itself. The publish goes into a fresh <c>--artifacts-path</c>, because an up-to-date publish prints no warnings and
 /// would count zero.
 /// </summary>
-public sealed partial class NativeHostPublish : IAsyncLifetime
+public sealed class NativeHostPublish : IAsyncLifetime
 {
     private readonly string _temp = Directory.CreateTempSubdirectory("thalos-sbx-native-").FullName;
     private string _output = "";
 
     public int ExitCode { get; private set; } = -1;
+
+    /// <summary>Why the publish was not attempted on Linux x64, or null when the toolchain is there.</summary>
+    public string? MissingToolchain { get; private set; }
 
     public IReadOnlyList<string> Warnings { get; private set; } = [];
 
@@ -115,6 +123,14 @@ public sealed partial class NativeHostPublish : IAsyncLifetime
     {
         if (!OperatingSystem.IsLinux() || RuntimeInformation.OSArchitecture != Architecture.X64)
         {
+            return;
+        }
+
+        // A native publish links with clang against zlib; without clang the publish fails deep in ILC's targets.
+        if (FindOnPath("clang") is null)
+        {
+            MissingToolchain = "clang is not on PATH, so Native AOT cannot link on this machine. Install the toolchain, "
+                + "for example `sudo apt-get install -y clang zlib1g-dev`, as ci.yml does on its Linux leg.";
             return;
         }
 
@@ -148,7 +164,7 @@ public sealed partial class NativeHostPublish : IAsyncLifetime
         await process.WaitForExitAsync(timeout.Token);
         _output = await stdout + await stderr;
         ExitCode = process.ExitCode;
-        Warnings = DistinctWarnings(_output);
+        Warnings = IlWarnings.Distinct(_output, RepoRoot());
     }
 
     public Task DisposeAsync()
@@ -156,21 +172,6 @@ public sealed partial class NativeHostPublish : IAsyncLifetime
         DeleteQuietly(_temp);
         return Task.CompletedTask;
     }
-
-    /// <summary>
-    /// The IL2xxx and IL3xxx warnings in <paramref name="output"/>, distinct by code, file, line without column, and
-    /// member, as Daedalus's <c>eng/aot/count-warnings.sh</c> counts them: ILC's and the analyzer's report of one site are
-    /// one warning, and MSBuild's end-of-build repeat is no second one.
-    /// </summary>
-    internal static IReadOnlyList<string> DistinctWarnings(string output) =>
-        [.. output.Split('\n')
-            .Select(line => WarningLine().Match(line.TrimEnd('\r')))
-            .Where(m => m.Success)
-            .Select(m => m.Groups["file"].Success
-                ? $"{m.Groups["code"].Value}|{Path.GetRelativePath(RepoRoot(), m.Groups["file"].Value.Trim())}|{m.Groups["line"].Value}|{WithoutOrigin(m.Groups["message"].Value)}"
-                : $"{m.Groups["code"].Value}|||{m.Groups["message"].Value}")
-            .Distinct(StringComparer.Ordinal)
-            .Order(StringComparer.Ordinal)];
 
     internal static void DeleteQuietly(string path)
     {
@@ -188,15 +189,11 @@ public sealed partial class NativeHostPublish : IAsyncLifetime
         }
     }
 
-    /// <summary>ILC puts the method it found the use in before the message; the analyzer does not.</summary>
-    private static string WithoutOrigin(string message)
-    {
-        var used = message.IndexOf("Using member", StringComparison.Ordinal);
-        return used > 0 ? message[used..] : message;
-    }
-
-    [GeneratedRegex(@"^\s*(?:(?<file>[^(]+)\((?<line>\d+)(?:,\d+)?\)\s*:\s*)?(?:[^:]*?\s)?warning (?<code>IL[23]\d{3})\s*:\s*(?<message>.*?)(?:\s+\[[^\]]+\])?$", RegexOptions.CultureInvariant, matchTimeoutMilliseconds: 1000)]
-    private static partial Regex WarningLine();
+    private static string? FindOnPath(string command) =>
+        (Environment.GetEnvironmentVariable("PATH") ?? "")
+            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
+            .Select(directory => Path.Combine(directory, command))
+            .FirstOrDefault(File.Exists);
 
     private static string RepoRoot()
     {
