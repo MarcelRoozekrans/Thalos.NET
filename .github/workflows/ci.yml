@@ -54,6 +54,9 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write   # Codecov upload via OIDC, no token secret
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -89,7 +92,17 @@ jobs:
         run: |
           filter=""
           if [ "$RUNNER_OS" = "Windows" ]; then filter='--filter Category!=Docker'; fi
-          dotnet test Thalos.NET.slnx --no-build -c Release --logger "trx;LogFileName=tests.trx" $filter
+          dotnet test Thalos.NET.slnx --no-build -c Release --logger "trx;LogFileName=tests.trx" --settings coverage.runsettings --results-directory TestResults $filter
+
+      # Both legs upload; Codecov merges them. The Docker-tagged tests add to the Linux report only.
+      - name: Upload coverage to Codecov
+        if: '!cancelled()'
+        uses: codecov/codecov-action@v5
+        with:
+          use_oidc: true
+          files: "TestResults/**/coverage.cobertura.xml"
+          disable_search: true   # only the files above, not every *.xml the search finds
+          fail_ci_if_error: false
 
   # Conventional commits, enforced mechanically — release-please derives release versions from
   # commit messages, so a malformed type is a commit the release tooling cannot read. Lints only the
