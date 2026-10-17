@@ -1,6 +1,7 @@
 # Thalos.NET
 
 [![CI](https://github.com/MarcelRoozekrans/Thalos.NET/actions/workflows/ci.yml/badge.svg)](https://github.com/MarcelRoozekrans/Thalos.NET/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/MarcelRoozekrans/Thalos.NET/graph/badge.svg)](https://codecov.io/gh/MarcelRoozekrans/Thalos.NET)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 > Named after Talos, the bronze guardian of Crete. Spelled *Thalos* because `Talos.*` is taken on nuget.org.
