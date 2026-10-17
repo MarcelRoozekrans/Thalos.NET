@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.AspNetCore.Routing.Constraints;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Thalos.Git.Workspaces;
@@ -115,6 +116,9 @@ public static class SandboxHost
 
             thalos.AddLocalTools<SandboxTools>(SandboxToolOptions.SourceName, LocalToolSourceBinding.CreateOptions(SandboxToolsJsonContext.Default), static t => t.Build, static t => t.Test);
         });
+
+        // Fail fast: a tool source that cannot build its tools stops the start, before /control/ready answers.
+        services.AddHostedService<ToolSourceWarmup>();
 
         services.AddMcpServer().WithHttpTransport(o =>
         {
@@ -264,6 +268,44 @@ public static class SandboxHost
             return result is System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.String } text ? text.GetString() : result;
         }
     }
+}
+
+/// <summary>
+/// Builds every registered tool source's tools once, in <see cref="StartingAsync"/>, which the host runs before any
+/// hosted service starts, the server among them. A source that throws, such as a binder that names no tool method or a
+/// parameter that hides a principal, or that answers a failure, stops the start, so the host never answers
+/// <c>/control/ready</c> with tools it cannot serve. The sources cache what they built, so the MCP routes reuse it.
+/// </summary>
+/// <param name="sources">The registered tool sources.</param>
+internal sealed class ToolSourceWarmup(IEnumerable<IToolSource> sources) : IHostedLifecycleService
+{
+    /// <inheritdoc />
+    public async Task StartingAsync(CancellationToken cancellationToken)
+    {
+        foreach (var source in sources)
+        {
+            var tools = await source.GetToolsAsync(cancellationToken).ConfigureAwait(false);
+            if (tools.IsFailure)
+            {
+                throw new InvalidOperationException($"The sandbox host cannot start: tool source '{source.Name}' failed: {tools.Error.Message}");
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    /// <inheritdoc />
+    public Task StartedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    /// <inheritdoc />
+    public Task StoppingAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    /// <inheritdoc />
+    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    /// <inheritdoc />
+    public Task StoppedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }
 
 /// <summary>The body of <c>GET /control/ready</c>.</summary>

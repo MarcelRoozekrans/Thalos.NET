@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Thalos.Sandbox;
@@ -8,6 +9,16 @@ namespace Thalos.Tests.Sandbox.Host;
 
 public sealed partial class SandboxHostTests
 {
+    /// <summary>A tool class whose only binder in the test below names a method that is not a tool.</summary>
+    [ThalosToolType]
+    public sealed class BadBinderTools
+    {
+        [ThalosTool("ok")]
+        public static string Ok() => "ok";
+
+        public static string NotATool() => "no";
+    }
+
     private static string Shape(AIFunction tool) =>
         $"{tool.Name}\n{tool.Description}\n{tool.JsonSchema.GetRawText()}\n{tool.ReturnJsonSchema?.GetRawText() ?? "(no return schema)"}";
 
@@ -29,5 +40,17 @@ public sealed partial class SandboxHostTests
             // Red: give LocalToolSource<TTools>'s functions the tool's name as their description: the lists differ.
             (await ShapesAsync(registered.Single(s => string.Equals(s.Name, name, StringComparison.Ordinal)))).Should().Equal(expected, name);
         }
+    }
+
+    [Fact]
+    public async Task A_tool_source_that_cannot_build_its_tools_stops_the_start()
+    {
+        var start = () => HostHarness.StartAsync(
+            WorkRoot(),
+            services: s => s.AddThalos(t => t.AddLocalTools<BadBinderTools>("bad", JsonSerializerOptions.Default, _ => BadBinderTools.NotATool)));
+
+        // Red: remove the ToolSourceWarmup registration from SandboxHost.AddTools: the host starts, and the bad binder
+        // would fail each MCP request instead.
+        await start.Should().ThrowAsync<InvalidOperationException>().WithMessage("*must return one of its [ThalosTool] methods*NotATool'.");
     }
 }
