@@ -5,6 +5,10 @@
     <PackageId>Thalos.NET.Sandbox.Host</PackageId>
     <Description>The in-container host for Thalos.NET run sandboxes: workspace, build and Roslyn tools over MCP.</Description>
     <PackageTags>agents;sandbox;container;mcp;workflow;microsoft-agent-framework;zeroalloc</PackageTags>
+    <!-- A consumer publishes the sandbox host as Native AOT: the trim and AOT analyzers run here, and the request
+         delegate generator binds the control endpoints at compile time instead of by reflection. -->
+    <IsAotCompatible>true</IsAotCompatible>
+    <EnableRequestDelegateGenerator>true</EnableRequestDelegateGenerator>
   </PropertyGroup>
   <ItemGroup>
     <FrameworkReference Include="Microsoft.AspNetCore.App" />

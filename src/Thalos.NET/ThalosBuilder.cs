@@ -129,6 +129,56 @@ public sealed class ThalosBuilder
     }
 
     /// <summary>
+    /// In-process tools from the <see cref="ThalosToolTypeAttribute"/> class <typeparamref name="TTools"/>, exposed as
+    /// <c>{sourceName}__{tool}</c>, without reflection: each tool is named by a binder that returns the tool method bound
+    /// to an instance, as a method group, and arguments and results go through <paramref name="serializerOptions"/>. The
+    /// form for trimmed and Native AOT hosts; <see cref="AddLocalTools(string, Type[])"/> discovers the same tools by
+    /// reflection.
+    /// </summary>
+    /// <example><c>thalos.AddLocalTools&lt;MyTools&gt;("mine", MyJsonContext.Default.Options, t =&gt; t.Search, t =&gt; t.Fetch);</c></example>
+    /// <typeparam name="TTools">The tool class; its public constructor is resolved from the container on every call.</typeparam>
+    /// <param name="sourceName">The source name.</param>
+    /// <param name="serializerOptions">
+    /// The options the tools' arguments and results go through. Their resolver must cover every parameter and result
+    /// type, typically a <see cref="System.Text.Json.Serialization.JsonSerializerContext"/>.
+    /// </param>
+    /// <param name="tools">One binder per tool, such as <c>t =&gt; t.ReadFile</c>.</param>
+    /// <returns>This builder.</returns>
+    /// <exception cref="ArgumentException">
+    /// <typeparamref name="TTools"/> is not marked <see cref="ThalosToolTypeAttribute"/>, no binder is given, or a remote
+    /// run tool source named <paramref name="sourceName"/> was already added.
+    /// </exception>
+    /// <remarks>
+    /// The tools behave as <see cref="AddLocalTools(string, Type[])"/>'s do: names from <see cref="ThalosToolAttribute"/>,
+    /// descriptions from <see cref="System.ComponentModel.DescriptionAttribute"/>, the caller bound to a parameter typed
+    /// exactly <see cref="ISecurityContext"/>, and a fresh DI scope and instance per call. A binder that returns anything
+    /// but one of <typeparamref name="TTools"/>'s own <see cref="ThalosToolAttribute"/> methods, or a parameter whose
+    /// shape hides a principal, fails the source's first <see cref="IToolSource.GetToolsAsync"/>.
+    /// </remarks>
+    public ThalosBuilder AddLocalTools<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TTools>(
+        string sourceName, System.Text.Json.JsonSerializerOptions serializerOptions, params Func<TTools, Delegate>[] tools)
+        where TTools : class
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceName);
+        ArgumentNullException.ThrowIfNull(serializerOptions);
+        ArgumentNullException.ThrowIfNull(tools);
+        if (!typeof(TTools).IsDefined(typeof(ThalosToolTypeAttribute), inherit: false))
+        {
+            throw new ArgumentException($"Type '{typeof(TTools).FullName}' is not marked [ThalosToolType].", nameof(tools));
+        }
+
+        if (tools.Length == 0)
+        {
+            throw new ArgumentException("At least one tool binder is required.", nameof(tools));
+        }
+
+        ToolSourceNames.Of(Services).AddLocal(sourceName, nameof(sourceName));
+        Func<TTools, Delegate>[] binders = [.. tools];
+        Services.AddSingleton<IToolSource>(sp => new LocalToolSource<TTools>(sourceName, sp, serializerOptions, binders));
+        return this;
+    }
+
+    /// <summary>
     /// Uses <typeparamref name="TStore"/> as the session store, wrapped in the ZeroAlloc.Telemetry proxy (<c>AgentSessionStoreInstrumented</c>).
     /// The store is a singleton: implementations that need scoped resources (a DbContext, a unit of work) should take
     /// <see cref="IServiceScopeFactory"/> and create a scope per call rather than depending on scoped services directly.

@@ -179,6 +179,30 @@ returns with `GitCommitRequest.CommitStagedIndex = true`, and leave `Paths` null
   the registered observers and the logger itself. 0.16.0 is a minor release before 1.0, which is where such a break
   belongs.
 
+0.18.0 ships the same eighteen packages. `Thalos.NET.Sandbox.Host` is AOT-clean: it is built with `IsAotCompatible`
+and the request delegate generator, so a sandbox entry point that calls `SandboxHost.CreateBuilder` publishes as
+Native AOT with no trim or AOT warning. `tests/Thalos.NET.Tests.Sandbox.Host.Native` is that entry point, published
+and run by `NativeAotSmokeTests` on Linux x64.
+
+- **`SandboxHost.CreateBuilder` no longer carries `[RequiresUnreferencedCode]` or `[RequiresDynamicCode]`**, and
+  neither do `UseRunWorkspaceTools` and `UseRunWorkspaceToolsAllowingAnyExtension`. A caller that suppressed the
+  warnings can drop the suppression.
+- **`ThalosBuilder.AddLocalTools<TTools>(sourceName, serializerOptions, params Func<TTools, Delegate>[] tools)`** is
+  the reflection-free form of `AddLocalTools(sourceName, params Type[])`: each tool is a method group such as
+  `t => t.ReadFile`, and arguments and results go through the given options, typically a source-generated
+  `JsonSerializerContext`. The workspace and sandbox tools are registered this way now. `AddLocalTools(typeof ...)`
+  is unchanged for JIT hosts.
+- **The sandbox host fails fast on a tool source that cannot build its tools.** It builds every registered source's
+  tools once as it starts, before the server listens, so a bad binder or a principal hidden in a parameter stops the
+  start instead of failing each MCP request.
+
+**Breaking change in 0.18.0:**
+
+- **`SandboxHost.CreateBuilder` returns a slim builder** (`WebApplication.CreateSlimBuilder`): no HTTPS
+  configuration, no hosting startup assemblies, console logging only. It keeps configuration and Kestrel over HTTP,
+  and adds back the `regex` route constraint its MCP route needs. A host that relied on any of the others in the
+  builder `CreateBuilder` returns must now add them itself.
+
 **Breaking changes accumulated across the workflow-engine phase (2.2, Part A):**
 
 - `ThalosAgentRuntime`'s public constructor gained a required `IOutcomeToolFactory outcomeTools` parameter

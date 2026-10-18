@@ -1,14 +1,17 @@
-using System.Diagnostics.CodeAnalysis;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Features;
+using Microsoft.AspNetCore.Routing;
+using Microsoft.AspNetCore.Routing.Constraints;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol.Server;
 using Thalos.Git.Workspaces;
 using Thalos.Mcp;
+using Thalos.Tools;
 using Thalos.Workspaces;
 
 namespace Thalos.Sandbox.Host;
@@ -53,11 +56,12 @@ public static class SandboxHost
     /// </summary>
     /// <param name="args">Command-line arguments; <c>--KEY=value</c> pairs override the environment.</param>
     /// <exception cref="InvalidOperationException">The settings are missing or invalid; the host does not start.</exception>
-    [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
-    [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     public static WebApplicationBuilder CreateBuilder(string[] args)
     {
-        var builder = WebApplication.CreateBuilder(args);
+        // The slim builder keeps configuration, console logging and Kestrel over HTTP, which is all the host uses; the
+        // regex route constraint the MCP route needs is added back by name.
+        var builder = WebApplication.CreateSlimBuilder(args);
+        builder.Services.Configure<RouteOptions>(o => o.SetParameterPolicy<RegexInlineRouteConstraint>("regex"));
         var read = SandboxSettings.Read(builder.Configuration);
         if (read.IsFailure)
         {
@@ -97,8 +101,6 @@ public static class SandboxHost
         services.AddSingleton<RouteTools>();
     }
 
-    [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
-    [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     private static void AddTools(IServiceCollection services, SandboxSettings settings)
     {
         services.AddThalos(thalos =>
@@ -112,8 +114,11 @@ public static class SandboxHost
                 thalos.UseRunWorkspaceTools(settings.WriteExtensions, o => AddProtected(o, settings));
             }
 
-            thalos.AddLocalTools(SandboxToolOptions.SourceName, typeof(SandboxTools));
+            thalos.AddLocalTools<SandboxTools>(SandboxToolOptions.SourceName, LocalToolSourceBinding.CreateOptions(SandboxToolsJsonContext.Default), static t => t.Build, static t => t.Test);
         });
+
+        // Fail fast: a tool source that cannot build its tools stops the start, before /control/ready answers.
+        services.AddHostedService<ToolSourceWarmup>();
 
         services.AddMcpServer().WithHttpTransport(o =>
         {
@@ -263,6 +268,44 @@ public static class SandboxHost
             return result is System.Text.Json.JsonElement { ValueKind: System.Text.Json.JsonValueKind.String } text ? text.GetString() : result;
         }
     }
+}
+
+/// <summary>
+/// Builds every registered tool source's tools once, in <see cref="StartingAsync"/>, which the host runs before any
+/// hosted service starts, the server among them. A source that throws, such as a binder that names no tool method or a
+/// parameter that hides a principal, or that answers a failure, stops the start, so the host never answers
+/// <c>/control/ready</c> with tools it cannot serve. The sources cache what they built, so the MCP routes reuse it.
+/// </summary>
+/// <param name="sources">The registered tool sources.</param>
+internal sealed class ToolSourceWarmup(IEnumerable<IToolSource> sources) : IHostedLifecycleService
+{
+    /// <inheritdoc />
+    public async Task StartingAsync(CancellationToken cancellationToken)
+    {
+        foreach (var source in sources)
+        {
+            var tools = await source.GetToolsAsync(cancellationToken).ConfigureAwait(false);
+            if (tools.IsFailure)
+            {
+                throw new InvalidOperationException($"The sandbox host cannot start: tool source '{source.Name}' failed: {tools.Error.Message}");
+            }
+        }
+    }
+
+    /// <inheritdoc />
+    public Task StartAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    /// <inheritdoc />
+    public Task StartedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    /// <inheritdoc />
+    public Task StoppingAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    /// <inheritdoc />
+    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+
+    /// <inheritdoc />
+    public Task StoppedAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }
 
 /// <summary>The body of <c>GET /control/ready</c>.</summary>

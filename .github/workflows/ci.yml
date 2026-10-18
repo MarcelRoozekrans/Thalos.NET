@@ -75,6 +75,12 @@ jobs:
           key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj', 'Directory.Packages.props') }}
           restore-keys: ${{ runner.os }}-nuget-
 
+      # NativeAotSmokeTests publishes the sandbox host as Native AOT, which links with clang against zlib.
+      # Installed explicitly so the test never depends on what the runner image happens to carry.
+      - name: Install the Native AOT toolchain
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y clang zlib1g-dev
+
       - name: Restore
         run: dotnet restore Thalos.NET.slnx
 
