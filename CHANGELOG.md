@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.18.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.17.0...v0.18.0) (2026-10-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* **sandbox:** SandboxHost.CreateBuilder now returns a slim builder: no HTTPS configuration, no hosting startup assemblies, console logging only. Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+### Features
+
+* **sandbox:** make the sandbox host AOT-clean ([#365](https://github.com/MarcelRoozekrans/Thalos.NET/issues/365)) ([8a6cf03](https://github.com/MarcelRoozekrans/Thalos.NET/commit/8a6cf03ded044069e0d239b8fa102c409a0d0903))
+
 ## [0.17.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.16.0...v0.17.0) (2026-10-13)
 
 
