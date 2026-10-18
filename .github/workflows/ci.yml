@@ -103,7 +103,7 @@ jobs:
       # Both legs upload; Codecov merges them. The Docker-tagged tests add to the Linux report only.
       - name: Upload coverage to Codecov
         if: '!cancelled()'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@v7
         with:
           use_oidc: true
           files: "TestResults/**/coverage.cobertura.xml"
