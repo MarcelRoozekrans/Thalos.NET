@@ -25,7 +25,8 @@ public static class AnthropicThalosBuilderExtensions
     {
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentNullException.ThrowIfNull(configuration);
-        return Register(builder, builder.Services.AddOptions<AnthropicOptions>().Bind(configuration.GetSection(AnthropicOptions.SectionName)));
+        var options = builder.Services.AddOptions<AnthropicOptions>().Bind(configuration.GetSection(AnthropicOptions.SectionName));
+        return Register(builder, options);
     }
 
     private static ThalosBuilder Register(ThalosBuilder builder, OptionsBuilder<AnthropicOptions> options)
