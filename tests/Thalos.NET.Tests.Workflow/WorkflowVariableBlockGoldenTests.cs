@@ -8,10 +8,9 @@ namespace Thalos.Tests.Workflow;
 /// </summary>
 public sealed class WorkflowVariableBlockGoldenTests
 {
-    // Red: in WorkflowVariableBlock.RenderMap, serialize each value with options whose Encoder is
-    // JavaScriptEncoder.UnsafeRelaxedJsonEscaping; the nested map's markup and accent then render unescaped.
-    // Red: in WorkflowVariableBlock.RenderSequence, serialize each element with that relaxed encoder; the markup and
-    // accent in "names" then render unescaped.
+    // Red: give the Utf8JsonWriter in WorkflowVariableJson.ToElement JsonWriterOptions with Encoder =
+    // JavaScriptEncoder.UnsafeRelaxedJsonEscaping, which RenderMap and RenderSequence render each member through;
+    // the nested map's markup and accent, and those in "names", then render unescaped.
     // Red: in RenderSequence, return sb.ToString() without the member-omission notice; "many" then ends without it.
     // Red: in RenderMap, return sb.ToString() without the member-omission notice; "wide" then ends without it.
     [Fact]

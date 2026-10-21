@@ -51,7 +51,7 @@ public sealed class StoredRowReadTests(PostgresFixture pg) : IAsyncLifetime
 
     public Task DisposeAsync() => Task.CompletedTask;
 
-    // Red: drop JsonSerializerDefaults.Web from OrmWorkflowJson's ManifestJsonOptions; the camelCase manifest no
+    // Red: drop WorkflowOrmWebJsonContext's Web source-generation options; the camelCase manifest no
     // longer binds. Red: in DeserializeVariables, deserialize to Dictionary<string, object?> directly; the values are
     // then JsonElements.
     [Fact]
@@ -101,7 +101,7 @@ public sealed class StoredRowReadTests(PostgresFixture pg) : IAsyncLifetime
         }, o => o.PreferringRuntimeMemberTypes());
     }
 
-    // Red: drop JsonSerializerDefaults.Web from OrmWorkflowJson's ManifestJsonOptions; usage then reads as zeros
+    // Red: drop WorkflowOrmWebJsonContext's Web source-generation options; usage then reads as zeros
     // and no model. Red: put [JsonPropertyName("cacheRead")] on TurnUsage.CacheReadTokens; the cache-read count then
     // reads as 0.
     [Fact]
@@ -114,7 +114,7 @@ public sealed class StoredRowReadTests(PostgresFixture pg) : IAsyncLifetime
         stored.Actor.Should().BeEquivalentTo(Principal);
     }
 
-    // Red: drop JsonSerializerDefaults.Web from OrmWorkflowJson's ManifestJsonOptions; the starter then no longer
+    // Red: drop WorkflowOrmWebJsonContext's Web source-generation options; the starter then no longer
     // reads back.
     [Fact]
     public async Task A_stored_run_lists_with_its_starter()

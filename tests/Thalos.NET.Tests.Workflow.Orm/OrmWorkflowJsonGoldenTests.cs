@@ -55,7 +55,8 @@ public sealed class OrmWorkflowJsonGoldenTests
         ["e"] = JsonDocument.Parse("""{"x":[1,2],"y":"é"}""").RootElement.Clone(),
     };
 
-    // Red: give SerializeVisits options with WriteIndented = true; the text gains line breaks.
+    // Red: give WorkflowOrmJsonContext [JsonSourceGenerationOptions(WriteIndented = true)]; the text gains line
+    // breaks.
     [Fact]
     public void Visits_are_written_as_before() =>
         OrmWorkflowJson.SerializeVisits(new Dictionary<string, int>(StringComparer.Ordinal) { ["implement"] = 1, ["review"] = 2 })
@@ -69,10 +70,12 @@ public sealed class OrmWorkflowJsonGoldenTests
         OrmWorkflowJson.DeserializeVisits("""{"implement":1,"review":2}""")
             .Should().Equal(new Dictionary<string, int>(StringComparer.Ordinal) { ["implement"] = 1, ["review"] = 2 });
 
-    // Red: give SerializeVariables options with Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping; the markup,
-    // quote, accent and emoji in "s" and the accent in "e" are then written unescaped.
-    // Red: give SerializeVariables options with NumberHandling = JsonNumberHandling.WriteAsString; every number,
-    // the negative, whole, shortest-round-trip and exponent ones included, is then written quoted.
+    // Red: give the Utf8JsonWriter in SerializeVariables JsonWriterOptions with Encoder =
+    // JavaScriptEncoder.UnsafeRelaxedJsonEscaping; the markup, quote, accent and emoji in "s" are then written
+    // unescaped.
+    // Red: in WorkflowVariableJson.TryWriteNumber, write the long and double arms with WriteStringValue of the
+    // invariant text; every such number, the negative, whole, shortest-round-trip and exponent ones included, is
+    // then written quoted.
     [Fact]
     public void Variables_of_every_shape_are_written_as_before() =>
         OrmWorkflowJson.SerializeVariables(Variables()).Should().Be("""
@@ -114,16 +117,16 @@ public sealed class OrmWorkflowJsonGoldenTests
         element["y"].Should().Be("é");
     }
 
-    // Red: drop JsonSerializerDefaults.Web from OrmWorkflowJson's ManifestJsonOptions; the property names are then
-    // written PascalCase.
+    // Red: drop WorkflowOrmWebJsonContext's [JsonSourceGenerationOptions(JsonSerializerDefaults.Web)]; the property
+    // names are then written PascalCase.
     [Fact]
     public void A_manifest_is_written_as_before() =>
         OrmWorkflowJson.SerializeManifest(Manifest()).Should().Be("""
             {"nodes":{"implement":{"agentName":"implementer","agentId":"01ARZ3NDEKTSV4RRFFQ69G5FAV","agentRevision":"rev-1","skillName":"manufacture-implement","skillHash":"hash-1"},"review":{"agentName":"reviewer","agentId":"01ARZ3NDEKTSV4RRFFQ69G5FAV","agentRevision":null,"skillName":"code-review","skillHash":"hash-2"}},"documents":{"standing_instructions":"a\u0022b \u003Ca \u0026 \u0027\u00E9\u0027 \uD83D\uDE80\u003E\nline"}}
             """);
 
-    // Red: drop JsonSerializerDefaults.Web from ManifestJsonOptions; the camelCase names no longer bind and the read
-    // fails.
+    // Red: drop WorkflowOrmWebJsonContext's Web source-generation options; the camelCase names no longer bind and
+    // the read fails.
     [Fact]
     public void A_manifest_is_read_as_before()
     {
@@ -134,21 +137,21 @@ public sealed class OrmWorkflowJsonGoldenTests
         read.Should().BeEquivalentTo(Manifest());
     }
 
-    // Red: drop JsonSerializerDefaults.Web from ManifestJsonOptions; the names are then written PascalCase.
+    // Red: drop WorkflowOrmWebJsonContext's Web source-generation options; the names are then written PascalCase.
     [Fact]
     public void A_principal_is_written_as_before() =>
         OrmWorkflowJson.SerializePrincipal(Principal).Should().Be("""
             {"id":"alice","roles":["admin","dev"],"displayName":"Alice \u003C\u00E9\u003E"}
             """);
 
-    // Red: drop JsonSerializerDefaults.Web from ManifestJsonOptions; the camelCase names no longer bind.
+    // Red: drop WorkflowOrmWebJsonContext's Web source-generation options; the camelCase names no longer bind.
     [Fact]
     public void A_principal_is_read_as_before() =>
         OrmWorkflowJson.DeserializePrincipal("""{"id":"alice","roles":["admin","dev"],"displayName":"Alice \u003C\u00E9\u003E"}""")
             .Should().BeEquivalentTo(Principal);
 
-    // Red: give ManifestJsonOptions DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull; the null display
-    // name is then left out.
+    // Red: give WorkflowOrmWebJsonContext's [JsonSourceGenerationOptions] DefaultIgnoreCondition =
+    // JsonIgnoreCondition.WhenWritingNull; the null display name is then left out.
     [Fact]
     public void A_principal_without_a_display_name_is_written_as_before() =>
         OrmWorkflowJson.SerializePrincipal(Unnamed).Should().Be("""
@@ -162,21 +165,21 @@ public sealed class OrmWorkflowJsonGoldenTests
         OrmWorkflowJson.DeserializePrincipal("""{"id":"bob","roles":["dev"],"displayName":null}""")
             .Should().BeEquivalentTo(Unnamed);
 
-    // Red: drop JsonSerializerDefaults.Web from ManifestJsonOptions; the names are then written PascalCase.
+    // Red: drop WorkflowOrmWebJsonContext's Web source-generation options; the names are then written PascalCase.
     [Fact]
     public void Usage_is_written_as_before() =>
         OrmWorkflowJson.SerializeUsage(Usage).Should().Be("""
             {"inputTokens":120,"outputTokens":45,"modelId":"claude-test","cacheReadTokens":30,"cacheWriteTokens":12}
             """);
 
-    // Red: drop JsonSerializerDefaults.Web from ManifestJsonOptions; the camelCase names no longer bind.
+    // Red: drop WorkflowOrmWebJsonContext's Web source-generation options; the camelCase names no longer bind.
     // Red: put [JsonPropertyName("cacheRead")] on TurnUsage.CacheReadTokens; the cache-read count then reads as 0.
     [Fact]
     public void Usage_is_read_as_before() =>
         OrmWorkflowJson.DeserializeUsage("""{"inputTokens":120,"outputTokens":45,"modelId":"claude-test","cacheReadTokens":30,"cacheWriteTokens":12}""")
             .Should().Be(Usage);
 
-    // Red: drop JsonSerializerDefaults.Web from ManifestJsonOptions; the names are then written PascalCase.
+    // Red: drop WorkflowOrmWebJsonContext's Web source-generation options; the names are then written PascalCase.
     [Fact]
     public void A_resume_envelope_is_written_as_before() =>
         OrmWorkflowJson.SerializeResumeEnvelope(new LastResumeEnvelope(Principal, "approved"))
@@ -184,13 +187,14 @@ public sealed class OrmWorkflowJsonGoldenTests
                 {"principal":{"id":"alice","roles":["admin","dev"],"displayName":"Alice \u003C\u00E9\u003E"},"signal":"approved"}
                 """);
 
-    // Red: drop JsonSerializerDefaults.Web from ManifestJsonOptions; the camelCase names no longer bind.
+    // Red: drop WorkflowOrmWebJsonContext's Web source-generation options; the camelCase names no longer bind.
     [Fact]
     public void A_resume_envelope_is_read_as_before() =>
         OrmWorkflowJson.DeserializeResumeEnvelope("""{"principal":{"id":"alice","roles":["admin","dev"],"displayName":"Alice \u003C\u00E9\u003E"},"signal":"approved"}""")
             .Should().BeEquivalentTo(new LastResumeEnvelope(Principal, "approved"));
 
-    // Red: give SerializeDispatch JsonSerializerDefaults.Web options; the payload's names are then camelCase.
+    // Red: give WorkflowJsonContext [JsonSourceGenerationOptions(JsonSerializerDefaults.Web)]; the payload's names
+    // are then camelCase.
     [Fact]
     public void The_dispatch_payload_bytes_are_as_before()
     {

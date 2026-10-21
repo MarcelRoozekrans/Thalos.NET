@@ -11,7 +11,9 @@ namespace Thalos.Workflow;
 /// The JSON-shaped contract every <see cref="WorkflowRun.Variables"/> value keeps: a <see cref="string"/>, a number
 /// (<see cref="byte"/> through <see cref="ulong"/>, <see cref="float"/>, <see cref="double"/>, <see cref="decimal"/>),
 /// a <see cref="bool"/>, <see langword="null"/>, a <see cref="JsonElement"/>, a <see cref="JsonNode"/>, or a list or
-/// a string-keyed dictionary of those. Every entry point a bag comes in through checks it with <see cref="Validate"/>,
+/// a string-keyed dictionary of those. A <see cref="float"/> or <see cref="double"/> must be finite, because JSON has
+/// no NaN or infinity. A <c>byte[]</c> counts as a string: it is written as Base64, as the reflection-based serializer
+/// wrote it, and reads back as that string. Every entry point a bag comes in through checks it with <see cref="Validate"/>,
 /// and the store and the prompt block write it with <see cref="Write"/>, which needs no reflection and no
 /// <see cref="JsonSerializer"/> call, so it works the same under trimming and Native AOT as on the JIT.
 /// </summary>
@@ -25,8 +27,13 @@ namespace Thalos.Workflow;
 /// A dictionary is recognised as <see cref="IReadOnlyDictionary{TKey,TValue}"/> or <see cref="IDictionary{TKey,TValue}"/>
 /// of <see cref="string"/> to <see cref="object"/>, or as the non-generic <see cref="IDictionary"/> with string keys,
 /// which <see cref="Dictionary{TKey,TValue}"/> and the other framework dictionaries implement for any value type. A
-/// custom <c>IDictionary&lt;string, T&gt;</c> that implements none of those enumerates as key-value pairs, which are
-/// refused rather than written in a shape nobody asked for.
+/// custom <c>IDictionary&lt;string, T&gt;</c> that implements none of those enumerates as key-value pairs; it is
+/// refused, naming the dictionary's own type, rather than written in a shape nobody asked for.
+/// </para>
+/// <para>
+/// A list or other sequence must be re-enumerable, with the same members each time: <see cref="Validate"/> walks it
+/// at the entry point, and <see cref="Write"/> walks it twice more, once to check and once to write. A one-shot
+/// iterator is empty on the second walk.
 /// </para>
 /// <para>
 /// Nothing here converts the values a run holds: the in-memory bag and the bag read back from a store keep their CLR
@@ -36,8 +43,12 @@ namespace Thalos.Workflow;
 public static class WorkflowVariableJson
 {
     /// <summary>
-    /// The deepest a value may nest, counting the bag itself as one level: the same limit the reflection-based
-    /// serializer and <see cref="JsonDocument"/> apply by default. It also stops a list that contains itself.
+    /// The deepest a value may nest, counting the bag itself as one level, so a variable may hold 63 nested lists or
+    /// dictionaries and not 64. That is the depth <see cref="JsonDocument"/> parses by default, so a bag this accepts
+    /// still reads back from a store. It is also where the reflection-based serializer stopped: it wrote a bag holding
+    /// 63 nested lists and threw a <see cref="JsonException"/> for 64, which is now an <see cref="ArgumentException"/>
+    /// at the entry point instead of a failure in the store. The limit also stops a list that contains itself, which
+    /// would otherwise overflow the stack.
     /// </summary>
     private const int MaxDepth = 64;
 
@@ -113,6 +124,11 @@ public static class WorkflowVariableJson
             return null;
         }
 
+        if ((value is double d && !double.IsFinite(d)) || (value is float f && !float.IsFinite(f)))
+        {
+            return Refusal.NonFinite(value);
+        }
+
         if (TryWriteNumber(writer, value) || TryWriteLeaf(writer, value))
         {
             return null;
@@ -143,6 +159,9 @@ public static class WorkflowVariableJson
                 return true;
             case bool b:
                 writer?.WriteBooleanValue(b);
+                return true;
+            case byte[] bytes:
+                writer?.WriteBase64StringValue(bytes);
                 return true;
             case JsonElement element:
                 if (writer is not null)
@@ -251,7 +270,9 @@ public static class WorkflowVariableJson
         {
             if (Walk(writer, item, depth + 1) is { } refusal)
             {
-                return refusal.Under(index);
+                // A custom IDictionary<string, T> enumerates as KeyValuePair members: name the dictionary, at its own
+                // path, rather than a pair inside it.
+                return refusal.IsPair(item) ? Refusal.ForType(sequence.GetType()) : refusal.Under(index);
             }
 
             index++;
@@ -265,13 +286,21 @@ public static class WorkflowVariableJson
     private sealed class Refusal
     {
         private readonly Type? _type;
+        private object? _value;
         private readonly List<object> _segments = [];
 
         private Refusal(Type? type) => _type = type;
 
         public static Refusal ForType(Type type) => new(type);
 
-        public static Refusal TooDeep() => new(null);
+        public static Refusal TooDeep() => new(type: null);
+
+        public static Refusal NonFinite(object value) => new(type: null) { _value = value };
+
+        /// <summary>Whether this refuses <paramref name="item"/> itself, a <see cref="KeyValuePair{TKey,TValue}"/>.</summary>
+        public bool IsPair(object? item) =>
+            _segments.Count == 0 && _type is { IsGenericType: true } type && item is not null
+            && type == item.GetType() && type.GetGenericTypeDefinition() == typeof(KeyValuePair<,>);
 
         public Refusal Under(string key)
         {
@@ -300,9 +329,12 @@ public static class WorkflowVariableJson
             }
 
             var where = path.Length == 0 ? "$" : path.ToString();
-            var message = _type is null
-                ? $"Workflow variable '{where}' nests deeper than {MaxDepth} levels."
-                : $"Workflow variable '{where}' has type '{_type.FullName}', which is not JSON-shaped. {Allowed}";
+            var message = (_type, _value) switch
+            {
+                (null, null) => $"Workflow variable '{where}' nests deeper than {MaxDepth} levels.",
+                (null, IFormattable number) => $"Workflow variable '{where}' is {number.ToString(null, CultureInfo.InvariantCulture)}, which is not a JSON number. A float or double must be finite.",
+                _ => $"Workflow variable '{where}' has type '{_type?.FullName}', which is not JSON-shaped. {Allowed}",
+            };
             return new ArgumentException(message, paramName);
         }
     }

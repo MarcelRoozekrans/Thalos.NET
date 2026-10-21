@@ -97,6 +97,7 @@ public sealed class WorkflowVariableContractTests
     // Red: in Write, take only JsonValue as a leaf, not every JsonNode; the JsonObject in "node" then enumerates as
     // KeyValuePair elements and is refused.
     // Red: in Write, sort a non-generic dictionary's keys; "dict" then reads {"a":2,"z":1}.
+    // Red: drop the byte[] arm from WorkflowVariableJson.TryWriteLeaf; "bytes" is then written [1,2,3], not "AQID".
     [Fact]
     public void Every_JSON_shape_is_written_as_the_reflective_serializer_wrote_it()
     {
@@ -152,6 +153,160 @@ public sealed class WorkflowVariableContractTests
         block.Should().Contain("\no: {\"k\":\"v\"}\n");
     }
 
+    // Red: drop the depth check from WorkflowVariableJson.Walk; Validate then overflows the stack on the list that
+    // contains itself.
+    [Fact]
+    public void A_list_that_contains_itself_is_refused_as_too_deep()
+    {
+        var loop = new List<object?>();
+        loop.Add(loop);
+        var bag = new Dictionary<string, object?>(StringComparer.Ordinal) { ["v"] = loop };
+
+        var act = () => new NodeResult("done", bag);
+
+        act.Should().Throw<ArgumentException>().WithMessage("Workflow variable 'v[0]*' nests deeper than 64 levels.*");
+    }
+
+    // Red: lower MaxDepth in WorkflowVariableJson to 63; 63 nested lists are then refused.
+    [Fact]
+    public void A_variable_of_63_nested_lists_is_accepted()
+    {
+        var bag = new Dictionary<string, object?>(StringComparer.Ordinal) { ["v"] = Nested(63) };
+
+        var act = () => new NodeResult("done", bag);
+
+        act.Should().NotThrow();
+    }
+
+    // Red: raise MaxDepth in WorkflowVariableJson to 65; 64 nested lists are then accepted.
+    [Fact]
+    public void A_variable_of_64_nested_lists_is_refused()
+    {
+        var bag = new Dictionary<string, object?>(StringComparer.Ordinal) { ["v"] = Nested(64) };
+
+        var act = () => new NodeResult("done", bag);
+
+        act.Should().Throw<ArgumentException>().WithMessage("Workflow variable 'v*' nests deeper than 64 levels.*");
+    }
+
+    /// <summary><paramref name="levels"/> lists, each the only member of the one around it.</summary>
+    private static List<object?> Nested(int levels)
+    {
+        var list = new List<object?>();
+        for (var i = 1; i < levels; i++)
+        {
+            list = [list];
+        }
+
+        return list;
+    }
+
+    // Red: drop the finite check from WorkflowVariableJson.Walk; Validate then lets the value through.
+    [Theory]
+    [InlineData(double.NaN, "NaN")]
+    [InlineData(double.PositiveInfinity, "Infinity")]
+    [InlineData(double.NegativeInfinity, "-Infinity")]
+    public void A_non_finite_double_is_refused_naming_its_path(double value, string text)
+    {
+        var bag = new Dictionary<string, object?>(StringComparer.Ordinal) { ["v"] = new List<object?> { 1.5, value } };
+
+        var act = () => new NodeResult("done", bag);
+
+        act.Should().Throw<ArgumentException>()
+            .WithMessage($"Workflow variable 'v[1]' is {text}, which is not a JSON number. A float or double must be finite.*");
+    }
+
+    // Red: in the finite check in WorkflowVariableJson.Walk, test only double; the float NaN is then let through.
+    [Fact]
+    public void A_non_finite_float_is_refused()
+    {
+        var bag = new Dictionary<string, object?>(StringComparer.Ordinal) { ["v"] = float.NaN };
+
+        var act = () => new NodeResult("done", bag);
+
+        act.Should().Throw<ArgumentException>().WithMessage("Workflow variable 'v' is NaN, which is not a JSON number.*");
+    }
+
+    // Red: drop the finite check from WorkflowVariableJson.Walk; Write then throws the writer's own exception
+    // part-way through the object, not this message.
+    [Fact]
+    public void ToElement_refuses_a_non_finite_double_before_writing()
+    {
+        var act = () => WorkflowVariableJson.ToElement(new Dictionary<string, object?>(StringComparer.Ordinal) { ["ok"] = 1, ["x"] = double.NaN });
+
+        act.Should().Throw<ArgumentException>().WithMessage("Workflow variable 'x' is NaN, which is not a JSON number.*");
+    }
+
+    // Red: in WorkflowVariableJson.WalkSequence, return refusal.Under(index) for a KeyValuePair member too; the
+    // message then names 'v[0]' and KeyValuePair`2 instead of the dictionary.
+    [Fact]
+    public void A_custom_generic_dictionary_is_refused_naming_its_own_type()
+    {
+        var bag = new Dictionary<string, object?>(StringComparer.Ordinal) { ["v"] = new CustomMap { ["k"] = 1 } };
+
+        var act = () => new NodeResult("done", bag);
+
+        act.Should().Throw<ArgumentException>()
+            .WithMessage($"Workflow variable 'v' has type '{typeof(CustomMap).FullName}', which is not JSON-shaped.*");
+    }
+
+    // Red: in WorkflowVariableBlock.RenderMap, render each key as Sanitize(keys[kept]) rather than through
+    // WorkflowVariableJson.ToElement; the key then renders raw and unquoted.
+    [Fact]
+    public void A_nested_map_key_renders_as_an_escaped_JSON_string_in_the_prompt_block()
+    {
+        var bag = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["m"] = new Dictionary<string, object?>(StringComparer.Ordinal) { ["<k é>"] = "v" },
+        };
+
+        var block = WorkflowVariableBlock.Render(bag).Block;
+
+        block.Should().Contain("\nm: {\"\\u003Ck \\u00E9\\u003E\":\"v\"}\n");
+    }
+
+    /// <summary>
+    /// An <see cref="IDictionary{TKey,TValue}"/> of string to int that implements neither the non-generic
+    /// <see cref="System.Collections.IDictionary"/> nor a dictionary of <see cref="object"/>, so it enumerates only
+    /// as key-value pairs.
+    /// </summary>
+    private sealed class CustomMap : IDictionary<string, int>
+    {
+        private readonly Dictionary<string, int> _inner = new(StringComparer.Ordinal);
+
+        public int this[string key] { get => _inner[key]; set => _inner[key] = value; }
+
+        public ICollection<string> Keys => _inner.Keys;
+
+        public ICollection<int> Values => _inner.Values;
+
+        public int Count => _inner.Count;
+
+        public bool IsReadOnly => false;
+
+        public void Add(string key, int value) => _inner.Add(key, value);
+
+        public void Add(KeyValuePair<string, int> item) => _inner.Add(item.Key, item.Value);
+
+        public void Clear() => _inner.Clear();
+
+        public bool Contains(KeyValuePair<string, int> item) => _inner.Contains(item);
+
+        public bool ContainsKey(string key) => _inner.ContainsKey(key);
+
+        public void CopyTo(KeyValuePair<string, int>[] array, int arrayIndex) => ((ICollection<KeyValuePair<string, int>>)_inner).CopyTo(array, arrayIndex);
+
+        public IEnumerator<KeyValuePair<string, int>> GetEnumerator() => _inner.GetEnumerator();
+
+        public bool Remove(string key) => _inner.Remove(key);
+
+        public bool Remove(KeyValuePair<string, int> item) => ((ICollection<KeyValuePair<string, int>>)_inner).Remove(item);
+
+        public bool TryGetValue(string key, out int value) => _inner.TryGetValue(key, out value);
+
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
     /// <summary>Every allowed shape, including the ones a host passes in rather than the engine's own read shapes.</summary>
     private static Dictionary<string, object?> EveryShape() => new(StringComparer.Ordinal)
     {
@@ -170,6 +325,7 @@ public sealed class WorkflowVariableContractTests
         ["d"] = 1.5,
         ["whole"] = 2.0,
         ["m"] = 12.50m,
+        ["bytes"] = new byte[] { 1, 2, 3 },
         ["l"] = new List<string> { "x", "y" },
         ["arr"] = new[] { 1, 2 },
         ["o"] = new List<object?> { "x", 1L, false, null },
