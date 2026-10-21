@@ -69,6 +69,36 @@ public sealed class AuthorizingAIFunctionTests
         pub.Of<ToolCallRequestedNotification>().Should().ContainSingle().Which.ArgumentsJson.Should().Be("""{"text":"hi"}""");
     }
 
+    // Red: in AuthorizingAIFunction, read the arguments' type info from ToolArgumentsJsonContext.Default alone, without
+    // AIJsonUtilities.DefaultOptions.TypeInfoResolver; JsonElement has no metadata there and the call throws.
+    [Fact]
+    public async Task AuthorizingAIFunction_authorizes_JsonElement_arguments()
+    {
+        JsonElement? authorized = null;
+        var auth = Substitute.For<IToolAuthorizer>();
+        auth.AuthorizeAsync(Arg.Any<ISecurityContext>(), Arg.Any<string>(), Arg.Do<JsonElement>(e => authorized = e.Clone()), Arg.Any<CancellationToken>())
+            .Returns(ToolAuthorizationDecision.Allow());
+        var pub = new RecordingNotificationPublisher();
+        var fn = new AuthorizingAIFunction(Echo(), "test__echo", auth, pub, TimeProvider.System);
+        var values = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["text"] = "\"src/a.cs\"",
+            ["lines"] = "[1,2.5,-3]",
+            ["options"] = """{"deep":true,"skip":null,"tags":["x"]}""",
+        };
+        var arguments = new AIFunctionArguments(StringComparer.Ordinal);
+        foreach (var (name, json) in values)
+        {
+            arguments[name] = JsonDocument.Parse(json).RootElement.Clone();
+        }
+
+        await fn.InvokeAsync(arguments);
+
+        const string expected = """{"text":"src/a.cs","lines":[1,2.5,-3],"options":{"deep":true,"skip":null,"tags":["x"]}}""";
+        authorized!.Value.GetRawText().Should().Be(expected);
+        pub.Of<ToolCallRequestedNotification>().Should().ContainSingle().Which.ArgumentsJson.Should().Be(expected);
+    }
+
     [Fact]
     public async Task Denied_call_does_not_invoke_inner_and_returns_denial_text()
     {
