@@ -4,6 +4,7 @@
     <PackageId>Thalos.NET.Channels.Telegram</PackageId>
     <Description>Telegram Bot API transport for Thalos.NET.Channels: a source, an adapter and MarkdownV2 rendering that connect Telegram chats to the channel pump.</Description>
     <PackageTags>agents;channels;telegram;chat;microsoft-agent-framework;zeroalloc</PackageTags>
+    <EnableConfigurationBindingGenerator>true</EnableConfigurationBindingGenerator>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Thalos.NET.Channels\Thalos.NET.Channels.csproj" />

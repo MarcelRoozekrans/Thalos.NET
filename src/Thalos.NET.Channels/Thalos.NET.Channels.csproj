@@ -4,6 +4,7 @@
     <PackageId>Thalos.NET.Channels</PackageId>
     <Description>Channel hosting for Thalos.NET: a ChannelPump that binds inbound IChannelSource messages to agent sessions, command handling, delta coalescing, and an in-box console channel.</Description>
     <PackageTags>agents;channels;chat;cli;microsoft-agent-framework;zeroalloc</PackageTags>
+    <EnableConfigurationBindingGenerator>true</EnableConfigurationBindingGenerator>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />

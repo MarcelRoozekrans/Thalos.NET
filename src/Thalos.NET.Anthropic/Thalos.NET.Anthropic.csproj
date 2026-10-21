@@ -4,6 +4,7 @@
     <PackageId>Thalos.NET.Anthropic</PackageId>
     <Description>Anthropic Claude chat-client provider for Thalos.NET.</Description>
     <PackageTags>agents;anthropic;claude</PackageTags>
+    <EnableConfigurationBindingGenerator>true</EnableConfigurationBindingGenerator>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />

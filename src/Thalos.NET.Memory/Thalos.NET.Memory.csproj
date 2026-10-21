@@ -4,6 +4,7 @@
     <PackageId>Thalos.NET.Memory</PackageId>
     <Description>Curated long-term memory for Thalos.NET agents: MemoryRecord model, IMemoryStore/IMemoryIndex/IMemoryService ports, auto-recall AIContextProvider, memory tools, in-memory implementations.</Description>
     <PackageTags>agents;memory;semantic-search;microsoft-agent-framework;zeroalloc</PackageTags>
+    <EnableConfigurationBindingGenerator>true</EnableConfigurationBindingGenerator>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />
