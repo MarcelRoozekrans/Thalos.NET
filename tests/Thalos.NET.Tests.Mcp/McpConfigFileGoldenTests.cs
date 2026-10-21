@@ -39,12 +39,88 @@ public sealed class McpConfigFileGoldenTests
                 "remote": true,
               },
             },
+            "slow": { "command": "slow-server", "timeout": "00:01:30", },
             "context7": { "Type": "http", "URL": "https://context7.com/api", "headers": { "Authorization": "Bearer t" } },
           },
         }
         """;
 
+    /// <summary>The dump of <see cref="File"/> captured from today's code.</summary>
+    private const string Expected = """
+        {
+          "roslyn": {
+            "Type": "stdio",
+            "Command": "dnx",
+            "Args": [
+              "RoslynCodeLens.Mcp",
+              "--",
+              "C:/x/x.sln"
+            ],
+            "Env": {
+              "ROSLYN_TIMEOUT": "600"
+            },
+            "PassEnvironment": [
+              "PATH"
+            ],
+            "Cwd": "/repo",
+            "Url": null,
+            "Headers": null,
+            "Timeout": "00:00:30",
+            "ShutdownTimeout": "00:00:05",
+            "RunScoped": {
+              "Args": [
+                "RoslynCodeLens.Mcp",
+                "--",
+                "${run.workspace.solution}"
+              ],
+              "Env": {
+                "RUN": "${run.id}"
+              },
+              "Cwd": "${run.workspace.root}/src",
+              "ReadyTool": "list_solutions",
+              "Reload": "tool:rebuild_solution",
+              "ReadyWaitTimeout": "00:10:00",
+              "CallTimeout": "00:00:45",
+              "Remote": true
+            },
+            "EffectiveType": "stdio"
+          },
+          "slow": {
+            "Type": null,
+            "Command": "slow-server",
+            "Args": null,
+            "Env": null,
+            "PassEnvironment": null,
+            "Cwd": null,
+            "Url": null,
+            "Headers": null,
+            "Timeout": "00:01:30",
+            "ShutdownTimeout": "00:00:02",
+            "RunScoped": null,
+            "EffectiveType": "stdio"
+          },
+          "context7": {
+            "Type": "http",
+            "Command": null,
+            "Args": null,
+            "Env": null,
+            "PassEnvironment": null,
+            "Cwd": null,
+            "Url": "https://context7.com/api",
+            "Headers": {
+              "Authorization": "Bearer t"
+            },
+            "Timeout": "00:00:30",
+            "ShutdownTimeout": "00:00:02",
+            "RunScoped": null,
+            "EffectiveType": "http"
+          }
+        }
+        """;
+
     // Red: in McpConfigFile, drop ReadCommentHandling = JsonCommentHandling.Skip; the parse throws on the first comment.
+    // Red: put [JsonPropertyName("timeoutX")] on McpServerDefinition.Timeout; the key no longer binds, and "slow"
+    // dumps the 30-second default instead of 00:01:30.
     // Red: in McpConfigFile, build the options without JsonSerializerDefaults.Web; the camelCase keys then no longer
     // bind and the dump holds only defaults.
     [Fact]
@@ -52,62 +128,6 @@ public sealed class McpConfigFileGoldenTests
     {
         var dump = JsonSerializer.Serialize(McpConfigFile.Parse(File), DumpOptions);
 
-        dump.Should().Be("""
-            {
-              "roslyn": {
-                "Type": "stdio",
-                "Command": "dnx",
-                "Args": [
-                  "RoslynCodeLens.Mcp",
-                  "--",
-                  "C:/x/x.sln"
-                ],
-                "Env": {
-                  "ROSLYN_TIMEOUT": "600"
-                },
-                "PassEnvironment": [
-                  "PATH"
-                ],
-                "Cwd": "/repo",
-                "Url": null,
-                "Headers": null,
-                "Timeout": "00:00:30",
-                "ShutdownTimeout": "00:00:05",
-                "RunScoped": {
-                  "Args": [
-                    "RoslynCodeLens.Mcp",
-                    "--",
-                    "${run.workspace.solution}"
-                  ],
-                  "Env": {
-                    "RUN": "${run.id}"
-                  },
-                  "Cwd": "${run.workspace.root}/src",
-                  "ReadyTool": "list_solutions",
-                  "Reload": "tool:rebuild_solution",
-                  "ReadyWaitTimeout": "00:10:00",
-                  "CallTimeout": "00:00:45",
-                  "Remote": true
-                },
-                "EffectiveType": "stdio"
-              },
-              "context7": {
-                "Type": "http",
-                "Command": null,
-                "Args": null,
-                "Env": null,
-                "PassEnvironment": null,
-                "Cwd": null,
-                "Url": "https://context7.com/api",
-                "Headers": {
-                  "Authorization": "Bearer t"
-                },
-                "Timeout": "00:00:30",
-                "ShutdownTimeout": "00:00:02",
-                "RunScoped": null,
-                "EffectiveType": "http"
-              }
-            }
-            """);
+        dump.Should().Be(Expected);
     }
 }

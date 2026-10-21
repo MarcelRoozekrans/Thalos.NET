@@ -19,7 +19,7 @@ public sealed class StoredRowReadTests(PostgresFixture pg) : IAsyncLifetime
     private const string VisitsJson = """{"implement":1,"review":2}""";
 
     private const string VariablesJson = """
-        {"s":"a\u0022b \u003Ca \u0026 \u0027\u00E9\u0027 \uD83D\uDE80\u003E\nline","n":3,"i":7,"d":1.5,"b":true,"z":null,"l":["x","y"],"o":["x",1,false,null],"m":{"k":"v","n":2,"inner":[1.25]},"e":{"x":[1,2],"y":"\u00E9"}}
+        {"s":"a\u0022b \u003Ca \u0026 \u0027\u00E9\u0027 \uD83D\uDE80\u003E\nline","n":3,"i":7,"d":1.5,"b":true,"z":null,"l":["x","y"],"o":["x",1,false,null],"m":{"k":"v","n":2,"inner":[1.25]},"neg":-4,"negd":-2.5,"whole":2,"sum":0.30000000000000004,"tiny":1E-07,"e":{"x":[1,2],"y":"\u00E9"}}
         """;
 
     private const string ManifestJson = """
@@ -30,7 +30,7 @@ public sealed class StoredRowReadTests(PostgresFixture pg) : IAsyncLifetime
 
     private const string ResumeJson = """{"principal":{"id":"alice","roles":["admin","dev"],"displayName":"Alice \u003C\u00E9\u003E"},"signal":"approved"}""";
 
-    private const string UsageJson = """{"inputTokens":120,"outputTokens":45,"modelId":"claude-test","cacheReadTokens":0,"cacheWriteTokens":0}""";
+    private const string UsageJson = """{"inputTokens":120,"outputTokens":45,"modelId":"claude-test","cacheReadTokens":30,"cacheWriteTokens":12}""";
 
     private static readonly Guid RunId = new(0x6b29fc40, 0xca47, 0x1067, 0xb3, 0x1d, 0x00, 0xdd, 0x01, 0x06, 0x62, 0xda);
 
@@ -79,6 +79,11 @@ public sealed class StoredRowReadTests(PostgresFixture pg) : IAsyncLifetime
                 ["l"] = new List<object?> { "x", "y" },
                 ["o"] = new List<object?> { "x", 1L, false, null },
                 ["m"] = new Dictionary<string, object?>(StringComparer.Ordinal) { ["k"] = "v", ["n"] = 2L, ["inner"] = new List<object?> { 1.25 } },
+                ["neg"] = -4L,
+                ["negd"] = -2.5,
+                ["whole"] = 2L,
+                ["sum"] = 0.1 + 0.2,
+                ["tiny"] = 1e-7,
                 ["e"] = new Dictionary<string, object?>(StringComparer.Ordinal) { ["x"] = new List<object?> { 1L, 2L }, ["y"] = "é" },
             },
             Manifest = new RunManifest
@@ -97,14 +102,15 @@ public sealed class StoredRowReadTests(PostgresFixture pg) : IAsyncLifetime
     }
 
     // Red: drop JsonSerializerDefaults.Web from OrmWorkflowJson's ManifestJsonOptions; usage then reads as zeros
-    // and no model.
+    // and no model. Red: put [JsonPropertyName("cacheRead")] on TurnUsage.CacheReadTokens; the cache-read count then
+    // reads as 0.
     [Fact]
     public async Task A_stored_event_reads_back_with_its_usage_and_actor()
     {
         var events = await _store.ListEventsAsync(RunId, CancellationToken.None);
 
         var stored = events.Should().ContainSingle().Subject;
-        stored.Usage.Should().Be(new TurnUsage(120, 45, "claude-test"));
+        stored.Usage.Should().Be(new TurnUsage(120, 45, "claude-test") { CacheReadTokens = 30, CacheWriteTokens = 12 });
         stored.Actor.Should().BeEquivalentTo(Principal);
     }
 

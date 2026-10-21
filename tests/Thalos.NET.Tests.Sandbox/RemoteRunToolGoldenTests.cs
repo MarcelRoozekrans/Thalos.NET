@@ -57,6 +57,8 @@ public sealed class RemoteRunToolGoldenTests : IDisposable
 
     // Red: in LocalToolSourceBinding.Options, default SerializerOptions to a copy of AIJsonUtilities.DefaultOptions
     // with another Encoder; the escaping of the process output in the results changes.
+    // Red: rename SandboxTools.Test's filter parameter to filterX; the "filter" argument then no longer binds and the
+    // recorded test arguments lose --filter Name~Orders.
     [Fact]
     public async Task Every_sandbox_tool_answers_as_before()
     {
@@ -64,7 +66,8 @@ public sealed class RemoteRunToolGoldenTests : IDisposable
         services.AddLogging();
         services.AddSingleton<TimeProvider>(new FakeTimeProvider(new DateTimeOffset(2026, 10, 21, 9, 0, 0, TimeSpan.Zero)));
         services.AddSingleton<IRunWorkspaceProvider>(new OneWorkspace(new RunWorkspace(RunId, "repo", "remote", "main", "branch", "/work", "/work/app.slnx")));
-        services.AddSingleton<ISandboxProcessRunner>(new FixedRunner(new ProcessOutcome(1, false, "error CS0103: <a & 'é' 🚀>\nBuild FAILED.\n", ErrorLineCount: 1)));
+        var runner = new FixedRunner(new ProcessOutcome(1, false, "error CS0103: <a & 'é' 🚀>\nBuild FAILED.\n", ErrorLineCount: 1));
+        services.AddSingleton<ISandboxProcessRunner>(runner);
         services.AddSingleton(new SandboxToolOptions());
         await using var provider = services.BuildServiceProvider();
         var tools = (await new LocalToolSource(SandboxToolOptions.SourceName, provider, [typeof(SandboxTools)]).GetToolsAsync(CancellationToken.None)).Value
@@ -73,11 +76,13 @@ public sealed class RemoteRunToolGoldenTests : IDisposable
 
         var build = ToolOracle.Result(await tools["build"].InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal)));
         var test = ToolOracle.Result(await tools["test"].InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal) { ["filter"] = "Name~Orders" }));
-        var text = $"build: {build}\ntest: {test}";
+        var text = $"build: {build}\nbuild args: {string.Join(' ', runner.Specs[0].Arguments)}\ntest: {test}\ntest args: {string.Join(' ', runner.Specs[1].Arguments)}";
 
         text.Should().Be("""
             build: "exit: 1\nerrors: 1\n--- output (last 44 bytes) ---\nerror CS0103: <a & 'é' \uD83D\uDE80>\nBuild FAILED.\n"
+            build args: build /work/app.slnx --nologo -v:q -clp:ErrorsOnly
             test: "exit: 1\n(no test summary found)\n--- output (last 44 bytes) ---\nerror CS0103: <a & 'é' \uD83D\uDE80>\nBuild FAILED.\n"
+            test args: test /work/app.slnx --nologo -v:q --filter Name~Orders
             """);
     }
 
@@ -93,8 +98,15 @@ public sealed class RemoteRunToolGoldenTests : IDisposable
         public ValueTask<UnitResult<AgentError>> RemoveAsync(Guid runId, CancellationToken ct) => new(UnitResult<AgentError>.Success());
     }
 
+    /// <summary>Answers every process with one outcome and records each spec, so the golden shows what the arguments bound to.</summary>
     private sealed class FixedRunner(ProcessOutcome outcome) : ISandboxProcessRunner
     {
-        public Task<ProcessOutcome> RunAsync(ProcessSpec spec, CancellationToken ct) => Task.FromResult(outcome);
+        public List<ProcessSpec> Specs { get; } = [];
+
+        public Task<ProcessOutcome> RunAsync(ProcessSpec spec, CancellationToken ct)
+        {
+            Specs.Add(spec);
+            return Task.FromResult(outcome);
+        }
     }
 }

@@ -21,6 +21,10 @@ public sealed class OrmWorkflowJsonGoldenTests
 
     private static readonly RunPrincipal Principal = new("alice", ["admin", "dev"]) { DisplayName = "Alice <é>" };
 
+    private static readonly RunPrincipal Unnamed = new("bob", ["dev"]);
+
+    private static readonly TurnUsage Usage = new(120, 45, "claude-test") { CacheReadTokens = 30, CacheWriteTokens = 12 };
+
     private static RunManifest Manifest() => new()
     {
         Nodes = new Dictionary<string, NodePin>(StringComparer.Ordinal)
@@ -43,6 +47,11 @@ public sealed class OrmWorkflowJsonGoldenTests
         ["l"] = new List<string> { "x", "y" },
         ["o"] = new List<object?> { "x", 1L, false, null },
         ["m"] = new Dictionary<string, object?>(StringComparer.Ordinal) { ["k"] = "v", ["n"] = 2L, ["inner"] = new List<object?> { 1.25 } },
+        ["neg"] = -4L,
+        ["negd"] = -2.5,
+        ["whole"] = 2.0,
+        ["sum"] = 0.1 + 0.2,
+        ["tiny"] = 1e-7,
         ["e"] = JsonDocument.Parse("""{"x":[1,2],"y":"é"}""").RootElement.Clone(),
     };
 
@@ -62,22 +71,26 @@ public sealed class OrmWorkflowJsonGoldenTests
 
     // Red: give SerializeVariables options with Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping; the markup,
     // quote, accent and emoji in "s" and the accent in "e" are then written unescaped.
+    // Red: give SerializeVariables options with NumberHandling = JsonNumberHandling.WriteAsString; every number,
+    // the negative, whole, shortest-round-trip and exponent ones included, is then written quoted.
     [Fact]
     public void Variables_of_every_shape_are_written_as_before() =>
         OrmWorkflowJson.SerializeVariables(Variables()).Should().Be("""
-            {"s":"a\u0022b \u003Ca \u0026 \u0027\u00E9\u0027 \uD83D\uDE80\u003E\nline","n":3,"i":7,"d":1.5,"b":true,"z":null,"l":["x","y"],"o":["x",1,false,null],"m":{"k":"v","n":2,"inner":[1.25]},"e":{"x":[1,2],"y":"\u00E9"}}
+            {"s":"a\u0022b \u003Ca \u0026 \u0027\u00E9\u0027 \uD83D\uDE80\u003E\nline","n":3,"i":7,"d":1.5,"b":true,"z":null,"l":["x","y"],"o":["x",1,false,null],"m":{"k":"v","n":2,"inner":[1.25]},"neg":-4,"negd":-2.5,"whole":2,"sum":0.30000000000000004,"tiny":1E-07,"e":{"x":[1,2],"y":"\u00E9"}}
             """);
 
     // Red: in DeserializeVariables, return JsonSerializer.Deserialize<Dictionary<string, object?>>(json); every value
     // is then a boxed JsonElement and the type assertions fail.
+    // Red: in WorkflowVariableBlock.ToPlainValue, read every number with GetDouble; "neg" and "whole" then come back
+    // as doubles.
     [Fact]
     public void Variables_are_read_back_as_plain_CLR_values()
     {
         var read = OrmWorkflowJson.DeserializeVariables("""
-            {"s":"a\u0022b \u003Ca \u0026 \u0027\u00E9\u0027 \uD83D\uDE80\u003E\nline","n":3,"i":7,"d":1.5,"b":true,"z":null,"l":["x","y"],"o":["x",1,false,null],"m":{"k":"v","n":2,"inner":[1.25]},"e":{"x":[1,2],"y":"\u00E9"}}
+            {"s":"a\u0022b \u003Ca \u0026 \u0027\u00E9\u0027 \uD83D\uDE80\u003E\nline","n":3,"i":7,"d":1.5,"b":true,"z":null,"l":["x","y"],"o":["x",1,false,null],"m":{"k":"v","n":2,"inner":[1.25]},"neg":-4,"negd":-2.5,"whole":2,"sum":0.30000000000000004,"tiny":1E-07,"e":{"x":[1,2],"y":"\u00E9"}}
             """);
 
-        read.Keys.Should().Equal("s", "n", "i", "d", "b", "z", "l", "o", "m", "e");
+        read.Keys.Should().Equal("s", "n", "i", "d", "b", "z", "l", "o", "m", "neg", "negd", "whole", "sum", "tiny", "e");
         read["s"].Should().BeOfType<string>().Which.Should().Be(Tricky);
         read["n"].Should().BeOfType<long>().Which.Should().Be(3L);
         read["i"].Should().BeOfType<long>().Which.Should().Be(7L);
@@ -86,6 +99,11 @@ public sealed class OrmWorkflowJsonGoldenTests
         read["z"].Should().BeNull();
         read["l"].Should().BeOfType<List<object?>>().Which.Should().Equal("x", "y");
         read["o"].Should().BeOfType<List<object?>>().Which.Should().Equal("x", 1L, false, null);
+        read["neg"].Should().BeOfType<long>().Which.Should().Be(-4L);
+        read["negd"].Should().BeOfType<double>().Which.Should().Be(-2.5);
+        read["whole"].Should().BeOfType<long>("2.0 is written as 2, which reads back as an integer").Which.Should().Be(2L);
+        read["sum"].Should().BeOfType<double>().Which.Should().Be(0.1 + 0.2);
+        read["tiny"].Should().BeOfType<double>().Which.Should().Be(1e-7);
         var map = read["m"].Should().BeOfType<Dictionary<string, object?>>().Subject;
         map.Keys.Should().Equal("k", "n", "inner");
         map["k"].Should().BeOfType<string>().Which.Should().Be("v");
@@ -129,19 +147,34 @@ public sealed class OrmWorkflowJsonGoldenTests
         OrmWorkflowJson.DeserializePrincipal("""{"id":"alice","roles":["admin","dev"],"displayName":"Alice \u003C\u00E9\u003E"}""")
             .Should().BeEquivalentTo(Principal);
 
+    // Red: give ManifestJsonOptions DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull; the null display
+    // name is then left out.
+    [Fact]
+    public void A_principal_without_a_display_name_is_written_as_before() =>
+        OrmWorkflowJson.SerializePrincipal(Unnamed).Should().Be("""
+            {"id":"bob","roles":["dev"],"displayName":null}
+            """);
+
+    // Red: in DeserializePrincipal, return the principal with DisplayName = p.DisplayName ?? ""; the null display
+    // name then reads back as empty.
+    [Fact]
+    public void A_principal_without_a_display_name_is_read_as_before() =>
+        OrmWorkflowJson.DeserializePrincipal("""{"id":"bob","roles":["dev"],"displayName":null}""")
+            .Should().BeEquivalentTo(Unnamed);
+
     // Red: drop JsonSerializerDefaults.Web from ManifestJsonOptions; the names are then written PascalCase.
     [Fact]
     public void Usage_is_written_as_before() =>
-        OrmWorkflowJson.SerializeUsage(new TurnUsage(120, 45, "claude-test"))
-            .Should().Be("""
-                {"inputTokens":120,"outputTokens":45,"modelId":"claude-test","cacheReadTokens":0,"cacheWriteTokens":0}
-                """);
+        OrmWorkflowJson.SerializeUsage(Usage).Should().Be("""
+            {"inputTokens":120,"outputTokens":45,"modelId":"claude-test","cacheReadTokens":30,"cacheWriteTokens":12}
+            """);
 
     // Red: drop JsonSerializerDefaults.Web from ManifestJsonOptions; the camelCase names no longer bind.
+    // Red: put [JsonPropertyName("cacheRead")] on TurnUsage.CacheReadTokens; the cache-read count then reads as 0.
     [Fact]
     public void Usage_is_read_as_before() =>
-        OrmWorkflowJson.DeserializeUsage("""{"inputTokens":120,"outputTokens":45,"modelId":"claude-test","cacheReadTokens":0,"cacheWriteTokens":0}""")
-            .Should().Be(new TurnUsage(120, 45, "claude-test"));
+        OrmWorkflowJson.DeserializeUsage("""{"inputTokens":120,"outputTokens":45,"modelId":"claude-test","cacheReadTokens":30,"cacheWriteTokens":12}""")
+            .Should().Be(Usage);
 
     // Red: drop JsonSerializerDefaults.Web from ManifestJsonOptions; the names are then written PascalCase.
     [Fact]
