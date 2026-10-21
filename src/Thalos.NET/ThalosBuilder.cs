@@ -45,7 +45,7 @@ public sealed class ThalosBuilder
     }
 
     /// <summary>Registers an <see cref="IAuthorizationPolicy"/> (looked up by its <c>[Policy]</c> name). Registering the same type twice is a no-op.</summary>
-    public ThalosBuilder AddPolicy<TPolicy>() where TPolicy : class, IAuthorizationPolicy
+    public ThalosBuilder AddPolicy<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TPolicy>() where TPolicy : class, IAuthorizationPolicy
     {
         Services.TryAddEnumerable(ServiceDescriptor.Singleton<IAuthorizationPolicy, TPolicy>());
         return this;
@@ -60,21 +60,21 @@ public sealed class ThalosBuilder
     }
 
     /// <summary>Uses <typeparamref name="TProvider"/> as the (single) chat-client provider, replacing any earlier one.</summary>
-    public ThalosBuilder UseChatClientProvider<TProvider>() where TProvider : class, IChatClientProvider
+    public ThalosBuilder UseChatClientProvider<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TProvider>() where TProvider : class, IChatClientProvider
     {
         Services.Replace(ServiceDescriptor.Singleton<IChatClientProvider, TProvider>());
         return this;
     }
 
     /// <summary>Adds a chat-client decorator (applied in ascending <see cref="IChatClientDecorator.Order"/>). Registering the same type twice is a no-op.</summary>
-    public ThalosBuilder AddChatClientDecorator<TDecorator>() where TDecorator : class, IChatClientDecorator
+    public ThalosBuilder AddChatClientDecorator<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TDecorator>() where TDecorator : class, IChatClientDecorator
     {
         Services.TryAddEnumerable(ServiceDescriptor.Singleton<IChatClientDecorator, TDecorator>());
         return this;
     }
 
     /// <summary>Adds a tool source resolved from the container. Registering the same type twice is a no-op.</summary>
-    public ThalosBuilder AddToolSource<TSource>() where TSource : class, IToolSource
+    public ThalosBuilder AddToolSource<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TSource>() where TSource : class, IToolSource
     {
         Services.TryAddEnumerable(ServiceDescriptor.Singleton<IToolSource, TSource>());
         return this;
@@ -183,7 +183,7 @@ public sealed class ThalosBuilder
     /// The store is a singleton: implementations that need scoped resources (a DbContext, a unit of work) should take
     /// <see cref="IServiceScopeFactory"/> and create a scope per call rather than depending on scoped services directly.
     /// </summary>
-    public ThalosBuilder UseSessionStore<TStore>() where TStore : class, IAgentSessionStore
+    public ThalosBuilder UseSessionStore<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TStore>() where TStore : class, IAgentSessionStore
     {
         Services.Replace(ServiceDescriptor.Singleton<TStore, TStore>());
         Services.Replace(ServiceDescriptor.Singleton<IAgentSessionStore>(sp => new AgentSessionStoreInstrumented(sp.GetRequiredService<TStore>())));

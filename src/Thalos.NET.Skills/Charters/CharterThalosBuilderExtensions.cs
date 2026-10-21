@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -59,7 +60,7 @@ public static class CharterThalosBuilderExtensions
     /// <see cref="UseRoleCharters(ThalosBuilder, Action{CharterOptions}?)"/>: this replaces, <c>UseRoleCharters</c> only
     /// tries to add, so <typeparamref name="TStore"/> wins either way.
     /// </summary>
-    public static ThalosBuilder UseRoleCharterStore<TStore>(this ThalosBuilder builder) where TStore : class, IRoleCharterStore
+    public static ThalosBuilder UseRoleCharterStore<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TStore>(this ThalosBuilder builder) where TStore : class, IRoleCharterStore
     {
         ArgumentNullException.ThrowIfNull(builder);
         builder.Services.Replace(ServiceDescriptor.Singleton<TStore, TStore>());

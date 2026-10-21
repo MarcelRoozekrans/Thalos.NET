@@ -66,7 +66,7 @@ public static partial class SkillThalosBuilderExtensions
     /// <see cref="IServiceScopeFactory"/> for scoped resources. May be called before or after <see cref="UseSkills(ThalosBuilder, Action{SkillOptions}?)"/>:
     /// this replaces, <c>UseSkills</c> only tries to add, so <typeparamref name="TStore"/> wins either way.
     /// </summary>
-    public static ThalosBuilder UseSkillStore<TStore>(this ThalosBuilder builder) where TStore : class, ISkillStore
+    public static ThalosBuilder UseSkillStore<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TStore>(this ThalosBuilder builder) where TStore : class, ISkillStore
     {
         ArgumentNullException.ThrowIfNull(builder);
         builder.Services.Replace(ServiceDescriptor.Singleton<TStore, TStore>());
@@ -75,7 +75,7 @@ public static partial class SkillThalosBuilderExtensions
     }
 
     /// <summary>Uses <typeparamref name="TIndex"/> as the skill index (replacing the default), before or after <c>UseSkills</c>.</summary>
-    public static ThalosBuilder UseSkillIndex<TIndex>(this ThalosBuilder builder) where TIndex : class, ISkillIndex
+    public static ThalosBuilder UseSkillIndex<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TIndex>(this ThalosBuilder builder) where TIndex : class, ISkillIndex
     {
         ArgumentNullException.ThrowIfNull(builder);
         builder.Services.Replace(ServiceDescriptor.Singleton<ISkillIndex, TIndex>());

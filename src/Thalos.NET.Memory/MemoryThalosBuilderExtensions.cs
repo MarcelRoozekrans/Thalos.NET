@@ -50,7 +50,7 @@ public static class MemoryThalosBuilderExtensions
     }
 
     /// <summary>Uses <typeparamref name="TStore"/> as the memory store, wrapped in the telemetry proxy. Singleton — take <see cref="IServiceScopeFactory"/> for scoped resources.</summary>
-    public static ThalosBuilder UseMemoryStore<TStore>(this ThalosBuilder builder) where TStore : class, IMemoryStore
+    public static ThalosBuilder UseMemoryStore<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TStore>(this ThalosBuilder builder) where TStore : class, IMemoryStore
     {
         ArgumentNullException.ThrowIfNull(builder);
         builder.Services.Replace(ServiceDescriptor.Singleton<TStore, TStore>());
@@ -59,7 +59,7 @@ public static class MemoryThalosBuilderExtensions
     }
 
     /// <summary>Uses <typeparamref name="TIndex"/> as the memory index (replacing the default).</summary>
-    public static ThalosBuilder UseMemoryIndex<TIndex>(this ThalosBuilder builder) where TIndex : class, IMemoryIndex
+    public static ThalosBuilder UseMemoryIndex<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TIndex>(this ThalosBuilder builder) where TIndex : class, IMemoryIndex
     {
         ArgumentNullException.ThrowIfNull(builder);
         builder.Services.Replace(ServiceDescriptor.Singleton<IMemoryIndex, TIndex>());

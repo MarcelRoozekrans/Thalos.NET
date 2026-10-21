@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
@@ -49,7 +50,7 @@ public static class ChannelThalosBuilderExtensions
     /// <see cref="UseChannels(ThalosBuilder, Action{ChannelOptions}?)"/>: this replaces, <c>UseChannels</c> only
     /// tries to add, so <typeparamref name="TMap"/> wins either way.
     /// </summary>
-    public static ThalosBuilder UseConversationMap<TMap>(this ThalosBuilder builder) where TMap : class, IConversationMap
+    public static ThalosBuilder UseConversationMap<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TMap>(this ThalosBuilder builder) where TMap : class, IConversationMap
     {
         ArgumentNullException.ThrowIfNull(builder);
         builder.Services.Replace(ServiceDescriptor.Singleton<IConversationMap, TMap>());
