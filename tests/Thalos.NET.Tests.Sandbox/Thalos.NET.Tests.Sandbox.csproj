@@ -11,4 +11,8 @@
   <ItemGroup>
     <Compile Include="..\Thalos.NET.Tests.Git\Workspaces\LocalGitRemote.cs" Link="LocalGitRemote.cs" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- The tool dump every tool golden and guard shares; it lives in Thalos.NET.Tests.Unit. -->
+    <Compile Include="..\Thalos.NET.Tests.Unit\Tools\ToolOracle.cs" Link="ToolOracle.cs" />
+  </ItemGroup>
 </Project>

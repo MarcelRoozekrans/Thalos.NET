@@ -1,0 +1,41 @@
+# Phase 2.10, task B7: replays the review of an existing manufacture branch and ends.
+#
+# The live proof keeps the implement output of a run made with Minos off as the branch manufacture/<run-id>, then starts
+# this process on it under each reviewer setup, to check that the cheaper setup raises every finding the Opus setup raised.
+# The review node is therefore the same one manufacture.yaml has, the same agent, skill, outcomes and lenses, so a replay
+# reviews the branch's code exactly as a manufacture run would. What is left out is everything after the review:
+#
+#   - There is no implement node. The code is already on the branch, and the start checks that branch out as the run's
+#     worktree, from the allow-listed remote, so the reviewer reads the code of the run under comparison.
+#   - There is no retrospect, no gate, no publish and no file-findings. A replay never opens a pull request, never pushes,
+#     never reaches the human approval gate and writes no standing-instructions proposal. Both outcomes end the run
+#     as succeeded; the verdict and its findings are in the run's review evidence records.
+#   - maxVisits is 1. An approval ends at `done`, and so does a rejection: there is no implement node to send it back to, so
+#     the second visit that the manufacture process's loop allows never comes.
+#
+# What the replay is given is the same for every arm of a comparison. The reviewer's opening variables are the intent the
+# caller states, the run mode, and the files_touched the original manufacture run recorded, read back by the run id in the
+# branch name, so the reviewer starts from the files the original review started from. The standing instructions the
+# replay pins are read from the reviewed branch's tip, not from the default branch, so both setups under comparison get
+# identical inputs, which is what the measurement needs. The files_touched value is a snapshot taken at start time: a run
+# still in flight, or one whose implement step repeats later, can change the original's value afterwards.
+#
+# The start refuses a base branch for any other process, and a replay without one, so this process only ever runs on a
+# branch that is exactly manufacture/<run-id>. See ManufactureRunStarter.
+process: review-replay
+version: 1
+
+nodes:
+  review:
+    agent: reviewer
+    skill: manufacture-review
+    outcomes: [approved, rejected]
+    branch:
+      approved: done
+      rejected: done
+    maxVisits: 1
+    onExceeded: done
+    lenses: [correctness, falsifiability, mechanism]
+
+  done:
+    terminal: succeeded

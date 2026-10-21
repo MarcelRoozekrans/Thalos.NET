@@ -1,0 +1,192 @@
+# The first real manufacturing process. A transcription of subagent-driven-development's control
+# flow - implement, review with a bounded fix loop, a human approval gate, then publish and file the deferred findings - expressed
+# as data the engine interprets rather than as a skill's prose.
+#
+# Three constraints shape this file:
+#
+#   1. `implement` edits the run's own worktree, through `workspace__*`, under a write grant. Phase 2.2
+#      shipped this node read-only; phase 2.3 let it apply only a fix Roslyn already offered. Phase 2.5
+#      gives every run its own git worktree on the branch manufacture/<run-id>, created from the run's
+#      allow-listed repository, and the `implementer` agent holds workspace__read_file,
+#      workspace__list_files, workspace__write_file and workspace__edit_file over it.
+#
+#      Phase 2.6 moves that worktree into a per-run container, the sandbox, when
+#      `Thalos:Workflow:Sandbox` is enabled. There any file extension is writable except the protected
+#      paths, which the write tools refuse in both modes: `.git/`, `.gitattributes`, `.gitmodules`,
+#      `.github/`, `.gitlab-ci.yml`, `azure-pipelines.yml`, `.azure-pipelines/`, `.circleci/`,
+#      `Jenkinsfile` and the standing-instructions file `AGENT.md`. When a sandboxed run is published,
+#      publish also refuses a `.gitattributes` or `.gitmodules` at any depth, and symlinks and git
+#      submodule pointers. `implement` may also build and test the change, through `sandbox__build` and
+#      `sandbox__test`, which run a fixed command in a throwaway copy of the worktree inside the sandbox,
+#      so neither changes the files under review. `review` holds only `sandbox__test`. Nothing in the
+#      sandbox reaches the host's tree: `publish` exports the run's change as a patch and applies it to
+#      the API's own clean worktree after a protected-path check, and a change to a protected path is
+#      refused there, whatever the sandbox allowed. With the sandbox off, the local mode of development
+#      hosts, the worktree is the host's own, only the grant's allowed extensions, `.cs` and `.md` by
+#      default (ruling R29), are writable, the protected paths are still refused on top, and the node
+#      holds no `sandbox__*` tool. In both modes paths resolve inside the worktree and `..` and absolute
+#      paths are refused. The Roslyn server the node reaches is the run's own, over the same worktree.
+#
+#      The node is told which mode it is in; it never works it out. The run's start writes the variable
+#      `run_mode`, `sandbox` or `local`, from `Thalos:Workflow:Sandbox:Enabled`, and only the start may
+#      write it. The host states it in the task text of `implement` and of every `review` lens pass, as a
+#      line reading "Run mode: sandbox" or "Run mode: local", outside the block of agent-written
+#      variables. Thalos gives a node no prompt field of its own, so this file cannot carry that line;
+#      Daedalus' RunModeRunner writes it from the variable. The skills key their mode-dependent rules off
+#      the stated mode. When a node's tools disagree with it, `implement` reports `blocked` and `review`
+#      rejects, which has no `blocked` outcome; each names the discrepancy.
+#
+#      The implementer still holds no `git__*` and no `repoaction__*` tool: both families are absent from
+#      its configured `Tools` list, so neither is ever offered to one of its turns. It edits files; it
+#      cannot commit, push or open a pull request.
+#
+#      Edits inside a run are never reverted. A rejected review sends the run back to `implement` over the
+#      same worktree, so up to `maxVisits: 5` rounds of edits accumulate there. A failed run keeps its
+#      worktree for a human; the sweeper removes a run's worktree once the run has succeeded, which it
+#      does only after its pull request is open.
+#
+#   2. `publish` is a host action, not an agent turn. After a human approves at the gate, the
+#      `open-pull-request` action commits the worktree's code changes, commits an approved AGENT.md change
+#      separately, pushes the run's own branch to its allow-listed remote, and opens the pull request or
+#      reuses the one already open. It refuses before any commit or push when the run has no workspace, no
+#      pinned work intent, a repository no longer allow-listed at the workspace's remote, or review evidence
+#      that is unreadable or not an approval. No model decides any of it; no agent holds a tool that could.
+#      `file-findings` holds no agent tool (it uses a host-held GitHub token) and runs only after `publish` reports `published`.
+#
+#   3. Reaching `succeeded` proves the graph walked implement -> review -> retrospect -> gate ->
+#      publish -> file-findings -> done, that each task node's agent called the outcome tool its schema
+#      demanded, and that host code opened a pull request for a non-empty diff. Reaching `succeeded` also means
+#      every deferred finding the gate did not drop was filed or added to an existing issue. It does not prove the
+#      change is right: that rests on the review lenses and on the human at the gate. See section 12 of the
+#      phase 2.3 design document for the honest limits of the review.
+process: manufacture
+# version bumped 2 -> 3 (phase 2.3, task B4): implement and review move onto the squad roles, implement
+# gains an outcome set, and review declares its lenses. Content-hash immutability refuses a same-version
+# content change, so all three ride one bump - a second bump inside one change would be refused.
+#
+# version bumped 3 -> 4 (phase 2.3, final review finding 1): the constraint-1 comment above claimed the
+# implementer "applies changes through roslyn__apply_code_action" without either narrowing it to a
+# Roslyn-offered action or naming the `preview: false` argument the tool needs before it writes anything.
+# The graph is unchanged by this bump; the comment is not, and the same content-hash immutability rule
+# that forced one bump for three graph changes forces this one for a comment-only change. Bumping is the
+# rule working, not an obstacle to route around: a v3 body that no longer matches v3's stored hash is a
+# file the store refuses to activate, leaving the old v3 running and the correction never reaching a run.
+#
+# version bumped 4 -> 5 (phase 2.4, task B4): review's `approved` outcome no longer branches straight to the
+# human gate. It branches to a new `retrospect` node first, which runs as `reviewer` - the same agent that holds
+# no write tool - and sees only the implementer's `learnings` plus the pinned standing instructions, never the
+# implementer's `summary` or `rationale`. It PROPOSES a replacement for the standing instructions file; nothing
+# in this graph writes it. Both of retrospect's outcomes, `proposed` and `none`, still branch to `gate`, so a
+# human approval is required either way and the proposal only ever reaches disk through B5's apply step, on a
+# human's resume. This ports Ralph's AGENT.md self-improvement loop into the workflow - see the phase 2.4
+# design, amendment D4. Content-hash immutability forces the graph edit and this comment to ride one bump.
+#
+# version bumped 5 -> 6 (phase 2.5, task B14): `publish` stops being an agent turn. Version 5 ran `Daedalus
+# Architect` under the `manufacture-publish` skill, which could only write a memory record and claim `published`;
+# no pull request was ever opened. Version 6 makes it the `open-pull-request` host action, with outcomes
+# `published` and `failed`, and an empty diff is `failed`, which ends the run at `adjudicate`. `implement` now edits
+# the run's own worktree through `workspace__*`, so its comments and the header above are rewritten with it. The
+# manufacture-publish skill stays on disk because runs pinned to version 5 still load it.
+#
+# version bumped 6 -> 7 (phase 2.6, task B7): the run's worktree can live in a per-run sandbox container, where
+# any extension is writable except the protected paths and `implement` may build and test with `sandbox__build`
+# and `sandbox__test`. Constraint 1 above is rewritten for it, and the implement and review skills with it. The
+# graph is unchanged; content-hash immutability makes a comment and skill-prose change a version bump all the
+# same.
+#
+# version bumped 7 -> 8 (phase 2.6, ruling R61): the run's mode is stated, not inferred. Version 7's skills told
+# `implement` and `review` to work out sandbox or local mode from whether `sandbox__build` or `sandbox__test` was in
+# their tool list, and the live proof's implementer misread a 74-tool list, decided it was in local mode, and
+# reported `blocked` on a `.csproj` change the sandbox allowed. The start now writes `run_mode`, the host states it in
+# both nodes' task text, and both skills key off the stated mode. Constraint 1 above says how. The graph is unchanged.
+#
+# version bumped 8 -> 9 (phase 2.7): an approving review lens may record deferred findings, real defects outside the
+# change's scope, and after publish a new host action, file-findings, files the ones the gate did not drop as issues
+# linked to the pull request. The reviewer gains issues__get and issues__search to name an existing issue instead of a
+# duplicate. Constraint 3 above is rewritten for the new last step.
+version: 9
+
+nodes:
+  # `outcomes` is new in version 3. Version 2 declared none, so this node completed on any turn output at
+  # all - tolerable while it only wrote a description, not tolerable now it edits the run's worktree through
+  # workspace__*, under the run's write grant. `changed` is an explicit claim that the worktree was edited,
+  # and it is the ONLY edge into `review`: the reviewer is never dispatched except behind an assertion that
+  # there is something to read. `blocked` exists so that claim costs something - with `changed` as the only
+  # way out of the node, an agent that edited nothing would still assert it to escape, and the claim would
+  # mean nothing. A run that changed no code did not manufacture anything, so `blocked` ends it rather than
+  # advancing it. `blocked` is also the honest answer when the work needs a file the grant does not allow,
+  # such as one on the protected-path list, or in local mode a .csproj: the skill tells the implementer to
+  # name the file and the change, for a human to make.
+  implement:
+    agent: implementer
+    skill: manufacture-implement
+    outcomes: [changed, blocked]
+    branch:
+      changed: review
+      blocked: adjudicate
+
+  # `lenses` was parsed and left inert by phase 2.2's loader. Daedalus' ReviewLensRunner reads it: the
+  # node runs one agent turn per lens, in this order, and stops at the first rejection - so a rejection
+  # costs one pass and an approval costs three. This is a host-side dispatch concern, not an engine
+  # change; the engine's invariant is one TRANSITION per transaction, not one turn per node.
+  review:
+    agent: reviewer
+    skill: manufacture-review
+    outcomes: [approved, rejected]
+    branch:
+      approved: retrospect
+      rejected: implement
+    maxVisits: 5
+    onExceeded: adjudicate
+    lenses: [correctness, falsifiability, mechanism]
+
+  # The standing-instructions loop, ported from Ralph's AGENT.md maintenance. Runs as `reviewer`, which holds no
+  # write tool, and sees only the implementer's `learnings` plus the pinned standing instructions - never its summary
+  # or rationale. It PROPOSES; nothing here writes AGENT.md. The proposal rides the gate below, and only a human
+  # resuming with applyStandingInstructions writes it, in host code. See the phase 2.4 design, D4.
+  retrospect:
+    agent: reviewer
+    skill: manufacture-retrospect
+    outcomes: [proposed, none]
+    branch:
+      proposed: gate
+      none: gate
+
+  # A terminal, not a human escalation. subagent-driven-development's own breaker sends a
+  # tripped loop to a human; this node just ends the run as failed instead. A faithful
+  # transcription would make this a second `human_approval`-style gate, which this phase does
+  # not build — naming the gap here rather than calling a dead end "adjudication."
+  adjudicate:
+    terminal: failed
+
+  gate:
+    await: human_approval
+    next: publish
+
+  # Phase 2.5: publishing is host code, not a model. After a human approves at the gate, the open-pull-request
+  # action commits the worktree's code changes, commits an approved AGENT.md change separately, pushes
+  # manufacture/<run-id> to the run's allow-listed remote, and opens or reuses the PR. An empty diff is `failed`.
+  publish:
+    action: open-pull-request
+    outcomes: [published, failed]
+    branch:
+      published: file-findings
+      failed: adjudicate
+
+  # Phase 2.7: host code, not a model. Files each deferred finding of the approving review visit that the gate did not
+  # drop, as a new issue or as a comment on the open issue the reviewer named, then posts one summary on the pull
+  # request. Any failure fails the run here, where the admin retry re-runs this node alone; a retry duplicates nothing.
+  # The repository and pull request come from the run's `pr_url`, re-checked against the allow-list. The node needs a
+  # fine-grained user PAT limited to the allow-listed repositories, with Issues: Read and write besides what publish
+  # needs; not a classic PAT, since issues__get and issues__search accept any repository the token can see. It reads
+  # its own login from GET /user. A human at the gate may
+  # drop findings by naming them in the resume's `dropFindings`; an unknown id is refused there.
+  file-findings:
+    action: file-review-findings
+    outcomes: [filed, none]
+    branch:
+      filed: done
+      none: done
+
+  done:
+    terminal: succeeded
