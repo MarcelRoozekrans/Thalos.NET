@@ -18,10 +18,11 @@ namespace Thalos.Anthropic;
 /// with blank text dropped.
 /// </para>
 /// <para>
-/// Markers inside raw SDK objects the SDK sends verbatim are counted by serialising those objects with the SDK's own
-/// converters: raw content blocks, a tool made by <c>ToolUnion.AsAITool()</c>, and the body of the
-/// <see cref="MessageCreateParams"/> a <see cref="ChatOptions.RawRepresentationFactory"/> returns, whose top-level
-/// <c>cache_control</c> also takes a slot.
+/// Markers inside raw SDK objects the SDK sends verbatim are counted by walking the JSON those objects already hold,
+/// which is what the SDK's own converters write: <c>RawData</c> of a raw <see cref="TextBlockParam"/>, <c>Json</c> of
+/// a raw <see cref="ContentBlockParam"/> and of a tool made by <c>ToolUnion.AsAITool()</c>, and <c>RawBodyData</c> of
+/// the <see cref="MessageCreateParams"/> a <see cref="ChatOptions.RawRepresentationFactory"/> returns, whose top-level
+/// <c>cache_control</c> also takes a slot. No reflection-based serialization is involved.
 /// </para>
 /// </remarks>
 internal static class AnthropicCacheMarkers
@@ -81,7 +82,7 @@ internal static class AnthropicCacheMarkers
 
         if (rawRequest is MessageCreateParams raw)
         {
-            count += Count(JsonSerializer.SerializeToElement(raw.RawBodyData));
+            count += Count(raw.RawBodyData);
         }
 
         return count;
@@ -89,29 +90,36 @@ internal static class AnthropicCacheMarkers
 
     private static int CountInSystemContent(AIContent content) => content switch
     {
-        { RawRepresentation: TextBlockParam raw } => Count(JsonSerializer.SerializeToElement(raw)),
+        { RawRepresentation: TextBlockParam raw } => Count(raw.RawData),
         TextContent => HasContentKey(content),
         _ => 0,
     };
 
     private static int CountInContent(AIContent content) => content switch
     {
-        { RawRepresentation: ContentBlockParam raw } => Count(JsonSerializer.SerializeToElement(raw)),
+        { RawRepresentation: ContentBlockParam raw } => Count(raw.Json),
         TextContent text when string.IsNullOrWhiteSpace(text.Text) => 0,
         _ => HasContentKey(content),
     };
 
     private static int CountInTool(AITool tool) => tool.GetService(typeof(ToolUnion)) is ToolUnion raw
-        ? Count(JsonSerializer.SerializeToElement(raw))
+        ? Count(raw.Json)
         : tool is AIFunctionDeclaration && tool.AdditionalProperties.TryGetValue(ToolKey, out var value) && value is CacheControlEphemeral ? 1 : 0;
 
     private static int HasContentKey(AIContent content) =>
         content.AdditionalProperties?.TryGetValue(ContentKey, out var value) == true && value is CacheControlEphemeral ? 1 : 0;
 
+    /// <summary>Markers in a model's raw properties, counted as <see cref="Count(JsonElement)"/> counts them in the object they write.</summary>
+    private static int Count(IReadOnlyDictionary<string, JsonElement> properties) =>
+        properties.Sum(static p => Marker(p.Key, p.Value) + Count(p.Value));
+
     private static int Count(JsonElement element) => element.ValueKind switch
     {
-        JsonValueKind.Object => element.EnumerateObject().Sum(static p => (p.NameEquals(CacheControlProperty) && p.Value.ValueKind == JsonValueKind.Object ? 1 : 0) + Count(p.Value)),
+        JsonValueKind.Object => element.EnumerateObject().Sum(static p => Marker(p.Name, p.Value) + Count(p.Value)),
         JsonValueKind.Array => element.EnumerateArray().Sum(Count),
         _ => 0,
     };
+
+    private static int Marker(string name, JsonElement value) =>
+        string.Equals(name, CacheControlProperty, StringComparison.Ordinal) && value.ValueKind == JsonValueKind.Object ? 1 : 0;
 }
