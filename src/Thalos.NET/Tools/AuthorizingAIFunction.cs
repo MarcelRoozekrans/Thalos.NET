@@ -49,11 +49,14 @@ public sealed partial class AuthorizingAIFunction(
     private static readonly JsonSerializerOptions CompactJson = new(AIJsonUtilities.DefaultOptions)
     {
         WriteIndented = false,
-        TypeInfoResolver = JsonTypeInfoResolver.Combine(AIJsonUtilities.DefaultOptions.TypeInfoResolver, ToolArgumentsJsonContext.Default),
+        TypeInfoResolver = JsonTypeInfoResolver.Combine(ToolArgumentsJsonContext.Default, AIJsonUtilities.DefaultOptions.TypeInfoResolver),
     };
 
-    /// <summary>The arguments' metadata, so they are written without reflection-based JSON; their values resolve through M.E.AI's resolver.</summary>
-    private static readonly JsonTypeInfo<IDictionary<string, object?>> ArgumentsTypeInfo =
+    /// <summary>
+    /// The arguments' metadata, from <see cref="ToolArgumentsJsonContext"/>: metadata-based, so no reflection is needed
+    /// when it is disabled. The values' runtime types resolve through M.E.AI's resolver, combined after it.
+    /// </summary>
+    internal static readonly JsonTypeInfo<IDictionary<string, object?>> ArgumentsTypeInfo =
         (JsonTypeInfo<IDictionary<string, object?>>)CompactJson.GetTypeInfo(typeof(IDictionary<string, object?>));
 
     private readonly ILogger<AuthorizingAIFunction> _logger = logger ?? NullLogger<AuthorizingAIFunction>.Instance;

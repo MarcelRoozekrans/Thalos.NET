@@ -14,7 +14,7 @@ public sealed class AnthropicCacheMarkersGoldenTests
 {
     private static readonly InputSchema Schema = new(new Dictionary<string, JsonElement>(StringComparer.Ordinal) { ["type"] = JsonSerializer.SerializeToElement("object") });
 
-    // Red: in CountCallerMarkers, serialise new { } instead of raw.RawBodyData; the raw request's two markers are
+    // Red: in CountCallerMarkers, walk an empty dictionary instead of raw.RawBodyData; the raw request's two markers are
     // no longer counted.
     [Fact]
     public void Markers_in_a_raw_request_body_are_counted_as_before()
@@ -31,7 +31,7 @@ public sealed class AnthropicCacheMarkersGoldenTests
         AnthropicCacheMarkers.CountCallerMarkers([new ChatMessage(ChatRole.User, "q")], tools: null, raw).Should().Be(2);
     }
 
-    // Red: in CountInSystemContent, serialise new { } instead of the raw TextBlockParam; its marker is no longer counted.
+    // Red: in CountInSystemContent, walk an empty dictionary instead of raw.RawData; its marker is no longer counted.
     [Fact]
     public void A_marker_in_a_raw_system_block_is_counted_as_before()
     {
@@ -43,7 +43,7 @@ public sealed class AnthropicCacheMarkersGoldenTests
         AnthropicCacheMarkers.CountCallerMarkers([system], tools: null, rawRequest: null).Should().Be(1);
     }
 
-    // Red: in CountInContent, serialise new { } instead of the raw ContentBlockParam; its marker is no longer counted.
+    // Red: in CountInContent, walk an empty object instead of raw.Json; its marker is no longer counted.
     [Fact]
     public void A_marker_in_a_raw_content_block_is_counted_as_before()
     {
@@ -55,7 +55,7 @@ public sealed class AnthropicCacheMarkersGoldenTests
         AnthropicCacheMarkers.CountCallerMarkers([user], tools: null, rawRequest: null).Should().Be(1);
     }
 
-    // Red: in CountInTool, serialise new { } instead of the raw ToolUnion; its marker is no longer counted.
+    // Red: in CountInTool, walk an empty object instead of raw.Json; its marker is no longer counted.
     [Fact]
     public void A_marker_on_a_raw_tool_is_counted_as_before()
     {

@@ -118,10 +118,10 @@ public sealed class McpConfigFileGoldenTests
         }
         """;
 
-    // Red: in McpConfigFile, drop ReadCommentHandling = JsonCommentHandling.Skip; the parse throws on the first comment.
+    // Red: in McpConfigJsonContext, drop ReadCommentHandling = JsonCommentHandling.Skip; the parse throws on the first comment.
     // Red: put [JsonPropertyName("timeoutX")] on McpServerDefinition.Timeout; the key no longer binds, and "slow"
     // dumps the 30-second default instead of 00:01:30.
-    // Red: in McpConfigFile, build the options without JsonSerializerDefaults.Web; the camelCase keys then no longer
+    // Red: in McpConfigJsonContext, generate without JsonSerializerDefaults.Web; the camelCase keys then no longer
     // bind and the dump holds only defaults.
     [Fact]
     public void A_commented_file_with_trailing_commas_parses_as_before()

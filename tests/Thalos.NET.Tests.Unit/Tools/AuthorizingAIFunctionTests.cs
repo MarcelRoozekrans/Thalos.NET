@@ -69,6 +69,14 @@ public sealed class AuthorizingAIFunctionTests
         pub.Of<ToolCallRequestedNotification>().Should().ContainSingle().Which.ArgumentsJson.Should().Be("""{"text":"hi"}""");
     }
 
+    // Red: in AuthorizingAIFunction, combine AIJsonUtilities.DefaultOptions.TypeInfoResolver before
+    // ToolArgumentsJsonContext.Default; M.E.AI's resolver then answers for the dictionary and Thalos' is never asked.
+    [Fact]
+    public void The_arguments_metadata_comes_from_Thalos_own_context()
+    {
+        AuthorizingAIFunction.ArgumentsTypeInfo.OriginatingResolver.Should().BeOfType<ToolArgumentsJsonContext>();
+    }
+
     // Red: in AuthorizingAIFunction, read the arguments' type info from ToolArgumentsJsonContext.Default alone, without
     // AIJsonUtilities.DefaultOptions.TypeInfoResolver; JsonElement has no metadata there and the call throws.
     [Fact]
