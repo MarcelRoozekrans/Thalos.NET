@@ -7,8 +7,12 @@ namespace Thalos.Workflow;
 public sealed class NodeResult
 {
     /// <summary>Creates a result carrying <paramref name="outcome"/> and <paramref name="variables"/>.</summary>
+    /// <exception cref="ArgumentException">
+    /// A value in <paramref name="variables"/> is not JSON-shaped; see <see cref="WorkflowVariableJson.Validate"/>.
+    /// </exception>
     public NodeResult(string? outcome, IReadOnlyDictionary<string, object?> variables)
     {
+        WorkflowVariableJson.Validate(variables, nameof(variables));
         Outcome = outcome;
         Variables = variables;
     }

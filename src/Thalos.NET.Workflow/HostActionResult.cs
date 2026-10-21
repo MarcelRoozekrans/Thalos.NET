@@ -13,4 +13,26 @@ namespace Thalos.Workflow;
 /// Variables to merge into the run's <see cref="WorkflowRun.Variables"/>, under the same rules as a task node's
 /// reported variables. An empty dictionary merges nothing and clears nothing.
 /// </param>
-public sealed record HostActionResult(string Outcome, IReadOnlyDictionary<string, object?> Variables);
+/// <exception cref="ArgumentException">
+/// A value in <paramref name="Variables"/> is not JSON-shaped; see <see cref="WorkflowVariableJson.Validate"/>.
+/// </exception>
+public sealed record HostActionResult(string Outcome, IReadOnlyDictionary<string, object?> Variables)
+{
+    private readonly IReadOnlyDictionary<string, object?> _variables = Checked(Variables);
+
+    /// <summary>
+    /// Variables to merge into the run's <see cref="WorkflowRun.Variables"/>; every value JSON-shaped, as
+    /// <see cref="WorkflowVariableJson.Validate"/> checks.
+    /// </summary>
+    public IReadOnlyDictionary<string, object?> Variables
+    {
+        get => _variables;
+        init => _variables = Checked(value);
+    }
+
+    private static IReadOnlyDictionary<string, object?> Checked(IReadOnlyDictionary<string, object?> variables)
+    {
+        WorkflowVariableJson.Validate(variables, nameof(Variables));
+        return variables;
+    }
+}

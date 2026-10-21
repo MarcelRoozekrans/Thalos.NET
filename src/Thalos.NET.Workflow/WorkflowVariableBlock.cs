@@ -384,25 +384,29 @@ internal static partial class WorkflowVariableBlock
     /// <summary>
     /// One value as a single line of text. A string is written as it stands; a list or a dictionary is rendered
     /// member by member so that shortening it drops whole members and leaves parseable JSON behind; anything else
-    /// goes through <see cref="JsonSerializer"/>, which is culture-invariant, so a number renders the same way on
-    /// every host rather than picking up the ambient culture's decimal separator.
+    /// goes through <see cref="WorkflowVariableJson"/>, which is culture-invariant, so a number renders the same way
+    /// on every host rather than picking up the ambient culture's decimal separator. A
+    /// <see cref="System.Text.Json.Nodes.JsonObject"/> is written whole, ahead of the sequence branch it would
+    /// otherwise fall into as a list of key-value pairs.
     /// </summary>
     /// <remarks>
     /// Member-wise shortening covers the shapes this engine itself produces — <see cref="ToPlainValue"/> yields
     /// <c>List&lt;object?&gt;</c> and <c>Dictionary&lt;string, object?&gt;</c>, and those are what a reported
-    /// variables object and a bag read back from the database both consist of. A host that seeds
-    /// <see cref="IWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/> with some other structured type falls through to the last branch
-    /// and gets a character cut, which for a deeply nested custom type can leave invalid JSON behind the notice.
-    /// Stated rather than glossed: the parseable-after-shortening guarantee is for the engine's own shapes.
+    /// variables object and a bag read back from the database both consist of. Any other JSON-shaped value a host
+    /// seeds <see cref="IWorkflowStore.StartAsync(WorkflowStartRequest,CancellationToken)"/> with — a
+    /// <see cref="JsonElement"/>, a <see cref="System.Text.Json.Nodes.JsonObject"/>, a dictionary of another value
+    /// type — falls through to a branch that gets a character cut, which for a deeply nested value can leave
+    /// invalid JSON behind the notice. Stated rather than glossed: the parseable-after-shortening guarantee is for
+    /// the engine's own shapes.
     /// </remarks>
     private static string RenderValue(object? value) => value switch
     {
         null => "null",
         string s => CutAndMark(Sanitize(s)),
         IReadOnlyDictionary<string, object?> map => RenderMap(map),
-        System.Collections.IDictionary => CutAndMark(Sanitize(JsonSerializer.Serialize(value))),
+        System.Collections.IDictionary or System.Text.Json.Nodes.JsonObject => CutAndMark(Sanitize(WorkflowVariableJson.ToElement(value).GetRawText())),
         System.Collections.IEnumerable sequence => RenderSequence(sequence),
-        _ => CutAndMark(Sanitize(JsonSerializer.Serialize(value))),
+        _ => CutAndMark(Sanitize(WorkflowVariableJson.ToElement(value).GetRawText())),
     };
 
     /// <summary>Renders a list as JSON, dropping whole elements rather than cutting mid-token, and stating how many were dropped.</summary>
@@ -413,7 +417,7 @@ internal static partial class WorkflowVariableBlock
         var kept = 0;
         for (; kept < items.Count; kept++)
         {
-            var text = Sanitize(JsonSerializer.Serialize(items[kept]));
+            var text = Sanitize(WorkflowVariableJson.ToElement(items[kept]).GetRawText());
 
             // +1 for the closing bracket, +1 for the separator this element would need.
             if (sb.Length + text.Length + (kept == 0 ? 0 : 1) + 1 > MaxValueLength)
@@ -446,9 +450,9 @@ internal static partial class WorkflowVariableBlock
         for (; kept < keys.Length; kept++)
         {
             var text = string.Concat(
-                Sanitize(JsonSerializer.Serialize(keys[kept])),
+                Sanitize(WorkflowVariableJson.ToElement(keys[kept]).GetRawText()),
                 ":",
-                Sanitize(JsonSerializer.Serialize(map[keys[kept]])));
+                Sanitize(WorkflowVariableJson.ToElement(map[keys[kept]]).GetRawText()));
 
             if (sb.Length + text.Length + (kept == 0 ? 0 : 1) + 1 > MaxValueLength)
             {
