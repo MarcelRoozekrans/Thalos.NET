@@ -94,17 +94,7 @@ public static class SandboxToolSourceExtensions
         ArgumentNullException.ThrowIfNull(builder);
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceName);
         ToolSourceName.ThrowIfInvalid(sourceName, nameof(sourceName));
-        ArgumentNullException.ThrowIfNull(serializerOptions);
-        ArgumentNullException.ThrowIfNull(tools);
-        if (!typeof(TTools).IsDefined(typeof(ThalosToolTypeAttribute), inherit: false))
-        {
-            throw new ArgumentException($"Type '{typeof(TTools).FullName}' is not marked [ThalosToolType].", nameof(tools));
-        }
-
-        if (tools.Length == 0)
-        {
-            throw new ArgumentException("At least one tool binder is required.", nameof(tools));
-        }
+        LocalToolSources.ThrowIfInvalid(serializerOptions, tools);
 
         Func<TTools, Delegate>[] binders = [.. tools];
         return AddRemote(builder, sourceName, services => LocalToolSources.Create(sourceName, services, serializerOptions, binders));
