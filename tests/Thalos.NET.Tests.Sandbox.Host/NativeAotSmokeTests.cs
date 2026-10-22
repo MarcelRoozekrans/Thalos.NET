@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Sockets;
-using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Extensions.Logging.Abstractions;
 using ModelContextProtocol.Client;
@@ -24,16 +23,14 @@ namespace Thalos.Tests.Sandbox.Host;
 /// Linux x64 only: a native publish links for the machine it runs on. Each run publishes into a fresh
 /// <c>--artifacts-path</c>, because an up-to-date publish prints no warnings and would count zero.
 /// </remarks>
-public sealed class NativeAotSmokeTests(NativeHostPublish publish) : IClassFixture<NativeHostPublish>, IDisposable
+public sealed class NativeAotSmokeTests(SandboxHostNativePublish publish) : IClassFixture<SandboxHostNativePublish>, IDisposable
 {
     private readonly string _temp = Directory.CreateTempSubdirectory("thalos-sbx-native-run-").FullName;
-
-    private static bool Supported => OperatingSystem.IsLinux() && RuntimeInformation.OSArchitecture == Architecture.X64;
 
     [SkippableFact]
     public void The_native_publish_reports_no_trim_or_AOT_warning()
     {
-        Skip.IfNot(Supported, "the native publish targets linux-x64");
+        Skip.IfNot(NativeHostPublish.Supported, "the native publish targets linux-x64");
         // Red: look for a command that does not exist instead of clang: the test fails with the install hint, never
         // with a generic publish failure, and never skips.
         publish.MissingToolchain.Should().BeNull();
@@ -49,7 +46,7 @@ public sealed class NativeAotSmokeTests(NativeHostPublish publish) : IClassFixtu
     [SkippableFact]
     public async Task The_native_host_serves_control_ready_and_the_workspace_tools()
     {
-        Skip.IfNot(Supported, "the native publish targets linux-x64");
+        Skip.IfNot(NativeHostPublish.Supported, "the native publish targets linux-x64");
         // Red: look for a command that does not exist instead of clang: the test fails with the install hint, never
         // with a generic publish failure, and never skips.
         publish.MissingToolchain.Should().BeNull();
@@ -98,114 +95,10 @@ public sealed class NativeAotSmokeTests(NativeHostPublish publish) : IClassFixtu
     public void Dispose() => NativeHostPublish.DeleteQuietly(_temp);
 }
 
-/// <summary>
-/// Publishes the native smoke host once per run, with the command of Daedalus's AOT survey; the project sets PublishAot
-/// itself. The publish goes into a fresh <c>--artifacts-path</c>, because an up-to-date publish prints no warnings and
-/// would count zero.
-/// </summary>
-public sealed class NativeHostPublish : IAsyncLifetime
-{
-    private readonly string _temp = Directory.CreateTempSubdirectory("thalos-sbx-native-").FullName;
-    private string _output = "";
-
-    public int ExitCode { get; private set; } = -1;
-
-    /// <summary>Why the publish was not attempted on Linux x64, or null when the toolchain is there.</summary>
-    public string? MissingToolchain { get; private set; }
-
-    public IReadOnlyList<string> Warnings { get; private set; } = [];
-
-    public string OutputTail => _output.Length > 6000 ? _output[^6000..] : _output;
-
-    public string Binary => Path.Combine(_temp, "publish", "Thalos.NET.Tests.Sandbox.Host.Native");
-
-    public async Task InitializeAsync()
-    {
-        if (!OperatingSystem.IsLinux() || RuntimeInformation.OSArchitecture != Architecture.X64)
-        {
-            return;
-        }
-
-        // A native publish links with clang against zlib; without clang the publish fails deep in ILC's targets.
-        if (FindOnPath("clang") is null)
-        {
-            MissingToolchain = "clang is not on PATH, so Native AOT cannot link on this machine. Install the toolchain, "
-                + "for example `sudo apt-get install -y clang zlib1g-dev`, as ci.yml does on its Linux leg.";
-            return;
-        }
-
-        var start = new ProcessStartInfo("dotnet")
-        {
-            WorkingDirectory = RepoRoot(),
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-        };
-        foreach (var argument in (string[])[
-            "publish", Path.Combine("tests", "Thalos.NET.Tests.Sandbox.Host.Native", "Thalos.NET.Tests.Sandbox.Host.Native.csproj"),
-            "-c", "Release", "-r", "linux-x64",
-            "-p:TreatWarningsAsErrors=false", "-p:WarningsAsErrors=", "-p:TrimmerSingleWarn=false",
-            "--artifacts-path", Path.Combine(_temp, "artifacts"), "-o", Path.Combine(_temp, "publish"), "-tl:off", "--disable-build-servers"])
-        {
-            start.ArgumentList.Add(argument);
-        }
-
-        // The test runner's own MSBuild settings must not leak into the child build.
-        var inherited = start.Environment.Keys.Where(k => k.StartsWith("MSBuild", StringComparison.OrdinalIgnoreCase)).ToList();
-        foreach (var name in inherited)
-        {
-            start.Environment.Remove(name);
-        }
-
-        using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start dotnet publish.");
-        var stdout = process.StandardOutput.ReadToEndAsync();
-        var stderr = process.StandardError.ReadToEndAsync();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(20));
-        await process.WaitForExitAsync(timeout.Token);
-        _output = await stdout + await stderr;
-        ExitCode = process.ExitCode;
-        Warnings = IlWarnings.Distinct(_output, RepoRoot());
-    }
-
-    public Task DisposeAsync()
-    {
-        DeleteQuietly(_temp);
-        return Task.CompletedTask;
-    }
-
-    internal static void DeleteQuietly(string path)
-    {
-        try
-        {
-            Directory.Delete(path, recursive: true);
-        }
-        catch (IOException)
-        {
-            // best effort: a child process may still hold a file for a moment
-        }
-        catch (UnauthorizedAccessException)
-        {
-            // best effort
-        }
-    }
-
-    private static string? FindOnPath(string command) =>
-        (Environment.GetEnvironmentVariable("PATH") ?? "")
-            .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries)
-            .Select(directory => Path.Combine(directory, command))
-            .FirstOrDefault(File.Exists);
-
-    private static string RepoRoot()
-    {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
-        while (directory is not null && !File.Exists(Path.Combine(directory.FullName, "Thalos.NET.slnx")))
-        {
-            directory = directory.Parent;
-        }
-
-        return directory?.FullName ?? throw new InvalidOperationException("Thalos.NET.slnx not found above the test output.");
-    }
-}
+/// <summary>The native smoke host's publish: <c>tests/Thalos.NET.Tests.Sandbox.Host.Native</c>, once per run.</summary>
+public sealed class SandboxHostNativePublish() : NativeHostPublish(
+    Path.Combine("tests", "Thalos.NET.Tests.Sandbox.Host.Native", "Thalos.NET.Tests.Sandbox.Host.Native.csproj"),
+    "Thalos.NET.Tests.Sandbox.Host.Native");
 
 /// <summary>The published native host, run with the <c>THALOS_SANDBOX_*</c> environment on a free loopback port; killed on dispose.</summary>
 internal sealed class NativeHost : IAsyncDisposable
