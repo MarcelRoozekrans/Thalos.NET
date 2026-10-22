@@ -189,6 +189,81 @@ public sealed class WorkflowVariableContractTests
         act.Should().Throw<ArgumentException>().WithMessage("Workflow variable 'v*' nests deeper than 64 levels.*");
     }
 
+    // The leaf tests below put the leaf inside one list, so the variable holds 1 + the leaf's own levels. As with
+    // the lists above, a variable may hold 63 levels: the bag is the 64th.
+
+    // Red: drop the LeafDepth check from WorkflowVariableJson.Walk; the element is then accepted and only the
+    // reader, parsing it back, throws a JsonException.
+    [Fact]
+    public void A_JsonElement_leaf_too_deep_for_the_limit_is_refused_naming_its_path()
+    {
+        var bag = new Dictionary<string, object?>(StringComparer.Ordinal) { ["v"] = new List<object?> { "a", DeepElement(63) } };
+
+        var act = () => new NodeResult("done", bag);
+
+        act.Should().Throw<ArgumentException>().WithMessage("Workflow variable 'v[1]' nests deeper than 64 levels.*");
+    }
+
+    // Red: in WorkflowVariableJson.LeafDepth, return 0 for a JsonNode; the node is then accepted.
+    [Fact]
+    public void A_JsonNode_leaf_too_deep_for_the_limit_is_refused_naming_its_path()
+    {
+        var bag = new Dictionary<string, object?>(StringComparer.Ordinal) { ["v"] = new List<object?> { DeepNode(63) } };
+
+        var act = () => new NodeResult("done", bag);
+
+        act.Should().Throw<ArgumentException>().WithMessage("Workflow variable 'v[0]' nests deeper than 64 levels.*");
+    }
+
+    // Red: in WorkflowVariableJson.Walk, give LeafDepth one level less of budget; both leaves are then refused.
+    [Fact]
+    public void JSON_leaves_that_bring_a_variable_to_exactly_63_levels_are_accepted_and_written()
+    {
+        var bag = new Dictionary<string, object?>(StringComparer.Ordinal)
+        {
+            ["e"] = new List<object?> { DeepElement(62) },
+            ["n"] = new List<object?> { DeepNode(62) },
+        };
+
+        var act = () => new NodeResult("done", bag);
+
+        act.Should().NotThrow();
+        WorkflowVariableJson.ToElement(bag).GetProperty("e")[0].ValueKind.Should().Be(JsonValueKind.Array);
+    }
+
+    // Red: in WorkflowVariableJson.ElementDepth, count only arrays; the nested objects are then accepted.
+    [Fact]
+    public void ToElement_refuses_a_JsonElement_of_nested_objects_too_deep_before_writing()
+    {
+        // A bare value has no bag above it, so 64 levels are allowed and 65 are not.
+        var json = string.Concat(Enumerable.Repeat("{\"k\":", 65)) + "1" + new string('}', 65);
+        using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 128 });
+
+        var act = () => WorkflowVariableJson.ToElement(document.RootElement);
+
+        act.Should().Throw<ArgumentException>().WithMessage("Workflow variable '$' nests deeper than 64 levels.*");
+    }
+
+    /// <summary>A <see cref="JsonElement"/> of <paramref name="levels"/> nested arrays, parsed past the default limit.</summary>
+    private static JsonElement DeepElement(int levels)
+    {
+        var json = new string('[', levels) + new string(']', levels);
+        using var document = JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = 128 });
+        return document.RootElement.Clone();
+    }
+
+    /// <summary>A <see cref="JsonArray"/> of <paramref name="levels"/> nested arrays.</summary>
+    private static JsonArray DeepNode(int levels)
+    {
+        var node = new JsonArray();
+        for (var i = 1; i < levels; i++)
+        {
+            node = new JsonArray(node);
+        }
+
+        return node;
+    }
+
     /// <summary><paramref name="levels"/> lists, each the only member of the one around it.</summary>
     private static List<object?> Nested(int levels)
     {

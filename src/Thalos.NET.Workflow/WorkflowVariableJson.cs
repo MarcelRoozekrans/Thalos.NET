@@ -48,7 +48,9 @@ public static class WorkflowVariableJson
     /// still reads back from a store. It is also where the reflection-based serializer stopped: it wrote a bag holding
     /// 63 nested lists and threw a <see cref="JsonException"/> for 64, which is now an <see cref="ArgumentException"/>
     /// at the entry point instead of a failure in the store. The limit also stops a list that contains itself, which
-    /// would otherwise overflow the stack.
+    /// would otherwise overflow the stack. A <see cref="JsonElement"/> or <see cref="JsonNode"/> leaf counts its own
+    /// arrays and objects against the same limit, so a shallow list holding a deep node is refused here too, rather
+    /// than by the reader that parses it back.
     /// </summary>
     private const int MaxDepth = 64;
 
@@ -129,6 +131,12 @@ public static class WorkflowVariableJson
             return Refusal.NonFinite(value);
         }
 
+        // A JSON leaf's own arrays and objects sit below this level: depth - 1 levels are already used above it.
+        if (LeafDepth(value, MaxDepth - depth + 1) > MaxDepth - depth + 1)
+        {
+            return Refusal.TooDeep();
+        }
+
         if (TryWriteNumber(writer, value) || TryWriteLeaf(writer, value))
         {
             return null;
@@ -180,6 +188,92 @@ public static class WorkflowVariableJson
             default:
                 return false;
         }
+    }
+
+    /// <summary>
+    /// How many levels of arrays and objects a <see cref="JsonElement"/> or <see cref="JsonNode"/> leaf nests, and 0
+    /// for any other value. Stops counting once past <paramref name="budget"/>, so a deep leaf costs no more than the
+    /// limit to measure; any result above <paramref name="budget"/> means too deep.
+    /// </summary>
+    private static int LeafDepth(object value, int budget) => value switch
+    {
+        JsonElement element => ElementDepth(element, budget),
+        JsonNode node => NodeDepth(node, budget),
+        _ => 0,
+    };
+
+    private static int ElementDepth(JsonElement element, int budget)
+    {
+        if (element.ValueKind is not (JsonValueKind.Array or JsonValueKind.Object))
+        {
+            return 0;
+        }
+
+        if (budget <= 0)
+        {
+            return 1;
+        }
+
+        var deepest = 0;
+        if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                deepest = Math.Max(deepest, ElementDepth(item, budget - 1));
+                if (deepest >= budget)
+                {
+                    break;
+                }
+            }
+        }
+        else
+        {
+            foreach (var property in element.EnumerateObject())
+            {
+                deepest = Math.Max(deepest, ElementDepth(property.Value, budget - 1));
+                if (deepest >= budget)
+                {
+                    break;
+                }
+            }
+        }
+
+        return 1 + deepest;
+    }
+
+    private static int NodeDepth(JsonNode? node, int budget)
+    {
+        switch (node)
+        {
+            case JsonArray array:
+                return NestedNodeDepth(array, budget);
+            case JsonObject obj:
+                return NestedNodeDepth(obj.Select(static property => property.Value), budget);
+            case JsonValue value when value.TryGetValue<JsonElement>(out var element):
+                return ElementDepth(element, budget);
+            default:
+                return 0;
+        }
+    }
+
+    private static int NestedNodeDepth(IEnumerable<JsonNode?> members, int budget)
+    {
+        if (budget <= 0)
+        {
+            return 1;
+        }
+
+        var deepest = 0;
+        foreach (var member in members)
+        {
+            deepest = Math.Max(deepest, NodeDepth(member, budget - 1));
+            if (deepest >= budget)
+            {
+                break;
+            }
+        }
+
+        return 1 + deepest;
     }
 
     /// <summary>A number, written through its own overload, or the nearest one for the types the writer has none for.</summary>
