@@ -167,6 +167,16 @@ public sealed class LocalToolSourceOfTTests
         // Red: drop the empty-binder check from AddLocalTools<TTools>.
         none.Should().Throw<ArgumentException>().WithMessage("At least one tool binder is required.*");
     }
+
+    [Fact]
+    public void AddLocalTools_of_T_refuses_an_invalid_source_name_at_registration()
+    {
+        var invalid = () => new ServiceCollection().AddThalos(t => t.AddLocalTools<ScopedTools>("lo__cal", Json, s => s.Count));
+
+        // Red: drop the ToolSourceName check from AddLocalTools<TTools>: the name is accepted here and only refused
+        // when the source is first resolved.
+        invalid.Should().Throw<ArgumentException>().WithMessage("Tool source name 'lo__cal' is invalid*").WithParameterName("sourceName");
+    }
 }
 
 /// <summary>

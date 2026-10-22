@@ -145,9 +145,11 @@ public sealed class ThalosBuilder
     /// </param>
     /// <param name="tools">One binder per tool, such as <c>t =&gt; t.ReadFile</c>.</param>
     /// <returns>This builder.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="serializerOptions"/> or <paramref name="tools"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <typeparamref name="TTools"/> is not marked <see cref="ThalosToolTypeAttribute"/>, no binder is given, or a remote
-    /// run tool source named <paramref name="sourceName"/> was already added.
+    /// <paramref name="sourceName"/> is blank or violates <see cref="ToolSourceName"/>, <typeparamref name="TTools"/> is not
+    /// marked <see cref="ThalosToolTypeAttribute"/>, no binder is given, or a remote run tool source named
+    /// <paramref name="sourceName"/> was already added. Each is checked here, at registration.
     /// </exception>
     /// <remarks>
     /// The tools behave as <see cref="AddLocalTools(string, Type[])"/>'s do: names from <see cref="ThalosToolAttribute"/>,
@@ -161,6 +163,7 @@ public sealed class ThalosBuilder
         where TTools : class
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceName);
+        ToolSourceName.ThrowIfInvalid(sourceName, nameof(sourceName));
         LocalToolSources.ThrowIfInvalid(serializerOptions, tools);
 
         ToolSourceNames.Of(Services).AddLocal(sourceName, nameof(sourceName));

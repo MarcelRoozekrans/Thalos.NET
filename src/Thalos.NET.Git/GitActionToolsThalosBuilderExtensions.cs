@@ -24,8 +24,10 @@ public static class GitActionToolsThalosBuilderExtensions
     /// <param name="builder">The builder to register on.</param>
     /// <param name="sourceName">The source name, such as <c>"git"</c>.</param>
     /// <returns><paramref name="builder"/>.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="builder"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <paramref name="sourceName"/> is blank, or a remote run tool source of that name was already added.
+    /// <paramref name="sourceName"/> is blank or violates <see cref="ToolSourceName"/>, or a remote run tool source or a
+    /// remote MCP entry of that name was already added.
     /// </exception>
     public static ThalosBuilder AddGitActionTools(this ThalosBuilder builder, string sourceName)
     {
