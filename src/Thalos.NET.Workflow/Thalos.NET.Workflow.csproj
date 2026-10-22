@@ -4,6 +4,7 @@
     <PackageId>Thalos.NET.Workflow</PackageId>
     <Description>Durable process-graph engine for Thalos.NET: sequence, branch, loop-back and approval-gate primitives defined in a file rather than in code, with no persistence backend dependency so a consumer can supply one.</Description>
     <PackageTags>agents;workflow;durable;microsoft-agent-framework;zeroalloc</PackageTags>
+    <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />
