@@ -9,7 +9,7 @@ namespace Thalos.Workflow.Yaml;
 /// it can change or disappear in any release.
 /// </summary>
 /// <remarks>
-/// It is public only because YamlDotNet's static generator, <c>Vecc.YamlDotNet.Analyzers.StaticGenerator</c>,
+/// It is public only because YamlDotNet's static generator, <c>Vecc.YamlDotNet.Analyzers.StaticGenerator</c> 18.1.0,
 /// hard-codes <c>public partial class</c> for the context (StaticContextFile.cs:35), so an <c>internal</c>
 /// declaration fails with CS0262, and emits a public <c>StaticTypeInspector</c> into this namespace
 /// (StaticTypeInspectorFile.cs:42). It goes back to <c>internal</c> once upstream respects the declared accessibility.
