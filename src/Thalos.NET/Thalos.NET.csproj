@@ -36,5 +36,7 @@
     <InternalsVisibleTo Include="Thalos.NET.Tests.Sandbox" />
     <!-- The sandbox end-to-end tests begin a TurnScope to call a routed tool as a run's caller. -->
     <InternalsVisibleTo Include="Thalos.NET.Tests.Sandbox.Docker" />
+    <!-- The host's typed-versus-reflective tool guard begins a TurnScope to call the sandbox tools as a run's caller. -->
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Sandbox.Host" />
   </ItemGroup>
 </Project>

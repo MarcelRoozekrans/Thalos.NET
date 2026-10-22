@@ -1,3 +1,4 @@
+using AwesomeAssertions.Execution;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Time.Testing;
@@ -53,6 +54,44 @@ public sealed class RemoteRunToolGoldenTests : IDisposable
             build | Build the run's solution with `dotnet build`. Returns the exit code, a summary and the tail of the output. | {"type":"object","properties":{}} | {"type":"string"}
             test | Run the run's tests with `dotnet test`, optionally filtered. Returns the exit code, a pass/fail summary and the tail of the output. | {"type":"object","properties":{"filter":{"description":"Optional \u0060dotnet test --filter\u0060 expression, e.g. \u0060FullyQualifiedName~Orders\u0060.","type":["string","null"],"default":null}}} | {"type":"string"}
             """);
+    }
+
+    /// <summary>
+    /// The remote sources are dumped, not invoked: a call goes to a live sandbox. Their schemas come from the typed
+    /// source <c>AddRemoteRunTools&lt;TTools&gt;</c> builds, and must be what the reflective one over the same type offered.
+    /// </summary>
+    [Fact]
+    public async Task Remote_run_typed_tools_match_the_reflective_oracle()
+    {
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddThalos(t => t.UseSandboxRunWorkspaces(o =>
+        {
+            o.DataRoot = _dataRoot;
+            o.Image = "thalos-sandbox:test";
+        }));
+        await using var provider = services.BuildServiceProvider();
+        var sources = provider.GetServices<IToolSource>().OfType<RemoteRunToolSource>().ToDictionary(s => s.Name, StringComparer.Ordinal);
+        var oracle = new ServiceCollection();
+        oracle.AddLogging();
+        oracle.AddSingleton<IRunWorkspaceProvider>(new OneWorkspace(new RunWorkspace(RunId, "repo", "remote", "main", "branch", "/work", "/work/app.slnx")));
+        oracle.AddSingleton<ISandboxProcessRunner>(new FixedRunner(new ProcessOutcome(0, false, string.Empty)));
+        oracle.AddSingleton(new SandboxToolOptions());
+        oracle.AddSingleton(new RunWorkspaceToolOptions { AllowedWriteExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase) });
+        await using var oracleProvider = oracle.BuildServiceProvider();
+
+        // Every failing assertion is reported, so each Red below shows on its own line.
+        using var scope = new AssertionScope();
+
+        foreach (var (name, type) in new[] { (RunWorkspaceToolOptions.SourceName, typeof(WorkspaceTools)), (SandboxToolOptions.SourceName, typeof(SandboxTools)) })
+        {
+            var remote = ToolOracle.Dump((await sources[name].GetToolsAsync(CancellationToken.None)).Value);
+            var reflective = ToolOracle.Dump((await new LocalToolSource(name, oracleProvider, [type]).GetToolsAsync(CancellationToken.None)).Value);
+
+            // Red: bind UseSandboxRunWorkspaces' workspace tools in another order, write_file before list_files; the
+            // workspace dump lines change places. Red: bind only Build for the sandbox; the test line is missing.
+            remote.Should().Be(reflective, name);
+        }
     }
 
     // Red: in LocalToolSourceBinding.Options, default SerializerOptions to a copy of AIJsonUtilities.DefaultOptions

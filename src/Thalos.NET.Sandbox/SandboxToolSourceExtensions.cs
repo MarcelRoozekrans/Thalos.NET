@@ -1,4 +1,5 @@
 using System.Diagnostics.CodeAnalysis;
+using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -60,9 +61,61 @@ public static class SandboxToolSourceExtensions
             throw new ArgumentException($"Type '{toolType.FullName}' is not marked [ThalosToolType].", nameof(toolType));
         }
 
+        return AddRemote(builder, sourceName, services => new LocalToolSource(sourceName, services, [toolType]));
+    }
+
+    /// <summary>
+    /// Adds <typeparamref name="TTools"/>' tools as the source named <paramref name="sourceName"/>, served by each run's
+    /// sandbox, without reflection: the reflection-free form of <see cref="AddRemoteRunTools(ThalosBuilder, string, Type)"/>.
+    /// The schemas come from <see cref="LocalToolSources.Create{TTools}"/> over <paramref name="tools"/> and
+    /// <paramref name="serializerOptions"/>, built over the same container of null objects, and calls go to the run's
+    /// sandbox as they do there.
+    /// </summary>
+    /// <remarks>
+    /// The sandbox serves the same tools at <c>/mcp/{sourceName}</c>, so pass the binders and the options the sandbox
+    /// host registers them with, such as <see cref="RunWorkspaceToolOptions.SerializerOptions"/> or
+    /// <see cref="SandboxToolOptions.SerializerOptions"/>, or the schemas the model sees differ from the tools it calls.
+    /// </remarks>
+    /// <typeparam name="TTools">A <see cref="ThalosToolTypeAttribute"/> class, e.g. <see cref="WorkspaceTools"/> or <see cref="SandboxTools"/>.</typeparam>
+    /// <param name="builder">The builder to register on.</param>
+    /// <param name="sourceName">The source's name, e.g. <see cref="RunWorkspaceToolOptions.SourceName"/>.</param>
+    /// <param name="serializerOptions">The options the tools' schemas are built through; their resolver must cover every parameter and result type.</param>
+    /// <param name="tools">One binder per tool, such as <c>t =&gt; t.ReadFile</c>, in the order the model sees them.</param>
+    /// <returns><paramref name="builder"/>.</returns>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="sourceName"/> violates <see cref="ToolSourceName"/>, <typeparamref name="TTools"/> is not marked
+    /// <see cref="ThalosToolTypeAttribute"/>, no binder is given, or another source already has <paramref name="sourceName"/>,
+    /// as for <see cref="AddRemoteRunTools(ThalosBuilder, string, Type)"/>.
+    /// </exception>
+    public static ThalosBuilder AddRemoteRunTools<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TTools>(
+        this ThalosBuilder builder, string sourceName, JsonSerializerOptions serializerOptions, params Func<TTools, Delegate>[] tools)
+        where TTools : class
+    {
+        ArgumentNullException.ThrowIfNull(builder);
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceName);
+        ToolSourceName.ThrowIfInvalid(sourceName, nameof(sourceName));
+        ArgumentNullException.ThrowIfNull(serializerOptions);
+        ArgumentNullException.ThrowIfNull(tools);
+        if (!typeof(TTools).IsDefined(typeof(ThalosToolTypeAttribute), inherit: false))
+        {
+            throw new ArgumentException($"Type '{typeof(TTools).FullName}' is not marked [ThalosToolType].", nameof(tools));
+        }
+
+        if (tools.Length == 0)
+        {
+            throw new ArgumentException("At least one tool binder is required.", nameof(tools));
+        }
+
+        Func<TTools, Delegate>[] binders = [.. tools];
+        return AddRemote(builder, sourceName, services => LocalToolSources.Create(sourceName, services, serializerOptions, binders));
+    }
+
+    /// <summary>Registers the remote source, its schemas from the source <paramref name="schemas"/> builds over the null-object container.</summary>
+    private static ThalosBuilder AddRemote(ThalosBuilder builder, string sourceName, Func<IServiceProvider, IToolSource> schemas)
+    {
         McpThalosBuilderExtensions.AddRemote(builder.Services, sourceName, sp => RemoteRunToolSource.ForLocalSchemas(
             sourceName,
-            new SchemaToolSource(sourceName, toolType),
+            new SchemaToolSource(schemas),
             new DeferredRunToolEndpointResolver(sp),
             McpThalosBuilderExtensions.RemoteOptions(sp),
             McpThalosBuilderExtensions.LoggerFactory(sp),
@@ -71,15 +124,13 @@ public static class SandboxToolSourceExtensions
         return builder;
     }
 
-    /// <summary>A <see cref="LocalToolSource"/> over its own container of null objects; it owns and disposes the container.</summary>
-    [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
-    [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
+    /// <summary>A tool source over its own container of null objects; it owns and disposes the container.</summary>
     private sealed class SchemaToolSource : IToolSource, IAsyncDisposable
     {
         private readonly ServiceProvider _services;
-        private readonly LocalToolSource _tools;
+        private readonly IToolSource _tools;
 
-        public SchemaToolSource(string name, Type toolType)
+        public SchemaToolSource(Func<IServiceProvider, IToolSource> create)
         {
             var services = new ServiceCollection();
             services.AddSingleton<ILoggerFactory>(NullLoggerFactory.Instance);
@@ -89,7 +140,7 @@ public static class SandboxToolSourceExtensions
             services.AddSingleton(new SandboxToolOptions());
             services.AddSingleton(new RunWorkspaceToolOptions { AllowedWriteExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase) });
             _services = services.BuildServiceProvider();
-            _tools = new LocalToolSource(name, _services, [toolType]);
+            _tools = create(_services);
         }
 
         public string Name => _tools.Name;

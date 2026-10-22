@@ -24,8 +24,6 @@ public static class MemoryThalosBuilderExtensions
     /// <see cref="RecallOptions.TopK"/> must be ≥ 1, <see cref="RecallOptions.MinScore"/> in [0, 1], and — when dedupe is enabled —
     /// <see cref="DedupeOptions.Threshold"/> in (0, 1]; otherwise an <see cref="OptionsValidationException"/> is thrown.
     /// </remarks>
-    [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
-    [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     public static ThalosBuilder UseMemory(this ThalosBuilder builder, Action<MemoryOptions>? configure = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -39,8 +37,6 @@ public static class MemoryThalosBuilderExtensions
     }
 
     /// <summary>Same as <see cref="UseMemory(ThalosBuilder, Action{MemoryOptions}?)"/>, options bound from the <c>Thalos:Memory</c> section of <paramref name="configuration"/>.</summary>
-    [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
-    [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     public static ThalosBuilder UseMemory(this ThalosBuilder builder, IConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -66,8 +62,6 @@ public static class MemoryThalosBuilderExtensions
         return builder;
     }
 
-    [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
-    [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     private static ThalosBuilder Register(ThalosBuilder builder, OptionsBuilder<MemoryOptions> options)
     {
         options.PostConfigure(Normalize).ValidateOnStart();

@@ -262,8 +262,7 @@ inbound identity such as a JWT: the run claim decides which run's workspace and 
 reaches.
 `UseLibGit2SharpGit()` (`Thalos.NET.Git.LibGit2Sharp`) registers the LibGit2Sharp `IGitWriteService` that
 `GitActionTools` (`git__create_branch`, `git__commit`, `git__push`, `git__open_pull_request`) writes through; add
-those tools with `AddLocalTools("git", typeof(GitActionTools))` and register an `IPullRequestPublisher` for your
-hosting platform.
+those tools with `AddGitActionTools("git")` and register an `IPullRequestPublisher` for your hosting platform.
 
 Nothing removes a workspace on its own. Register `RunWorkspaceSweeper` (`Thalos.NET.Workflow`) and call its
 `SweepAsync` on a timer: it removes the workspaces of succeeded runs, of failed or cancelled runs that were never

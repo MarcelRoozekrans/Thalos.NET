@@ -36,8 +36,6 @@ public static partial class SkillThalosBuilderExtensions
     /// each one turns itself off, so a host can bind the flag from configuration that is not read until the provider is built.
     /// </para>
     /// </remarks>
-    [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
-    [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     public static ThalosBuilder UseSkills(this ThalosBuilder builder, Action<SkillOptions>? configure = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -51,8 +49,6 @@ public static partial class SkillThalosBuilderExtensions
     }
 
     /// <summary>Same as <see cref="UseSkills(ThalosBuilder, Action{SkillOptions}?)"/>, options bound from the <c>Thalos:Skills</c> section of <paramref name="configuration"/>.</summary>
-    [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
-    [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     public static ThalosBuilder UseSkills(this ThalosBuilder builder, IConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -82,8 +78,6 @@ public static partial class SkillThalosBuilderExtensions
         return builder;
     }
 
-    [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
-    [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     private static ThalosBuilder Register(ThalosBuilder builder, OptionsBuilder<SkillOptions> options)
     {
         options.PostConfigure(Normalize).ValidateOnStart();

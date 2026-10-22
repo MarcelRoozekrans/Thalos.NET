@@ -66,7 +66,7 @@ public static class WorkspaceToolsThalosBuilderExtensions
     private static ThalosBuilder AddTools(ThalosBuilder builder) =>
         builder.AddLocalTools<WorkspaceTools>(
             RunWorkspaceToolOptions.SourceName,
-            Tools.LocalToolSourceBinding.CreateOptions(WorkspaceToolsJsonContext.Default),
+            RunWorkspaceToolOptions.SerializerOptions,
             static t => t.ReadFile,
             static t => t.ListFiles,
             static t => t.WriteFile,

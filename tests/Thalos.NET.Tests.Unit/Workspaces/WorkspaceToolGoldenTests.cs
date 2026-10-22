@@ -1,3 +1,4 @@
+using AwesomeAssertions.Execution;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Thalos.Runtime;
@@ -45,18 +46,7 @@ public sealed class WorkspaceToolGoldenTests : IDisposable
     public async Task Every_workspace_tool_answers_as_before()
     {
         await using var services = Services();
-        var tools = (await ToolsAsync(services)).Cast<AIFunction>().ToDictionary(t => t.Name, StringComparer.Ordinal);
-        using var turn = TurnScope.Begin(SessionId.New(), TurnId.New(), Caller());
-
-        string[] results =
-        [
-            "write_file: " + ToolOracle.Result(await tools["write_file"].InvokeAsync(Args(("path", "notes.md"), ("content", Tricky + "\nsecond line\n")))),
-            "read_file: " + ToolOracle.Result(await tools["read_file"].InvokeAsync(Args(("path", "notes.md")))),
-            "edit_file: " + ToolOracle.Result(await tools["edit_file"].InvokeAsync(Args(("path", "notes.md"), ("oldText", "second"), ("newText", "2nd 'é'")))),
-            "list_files: " + ToolOracle.Result(await tools["list_files"].InvokeAsync(Args())),
-            "write_file refused: " + ToolOracle.Result(await tools["write_file"].InvokeAsync(Args(("path", "run.exe"), ("content", Tricky)))),
-        ];
-        var text = string.Join('\n', results);
+        var text = await AnswersAsync(await ToolsAsync(services));
 
         text.Should().Be("""
             write_file: "wrote 28 bytes to 'notes.md'."
@@ -67,13 +57,67 @@ public sealed class WorkspaceToolGoldenTests : IDisposable
             """);
     }
 
-    private ServiceProvider Services()
+    [Fact]
+    public async Task Workspace_typed_tools_match_the_reflective_oracle()
+    {
+        await using var services = Services(typed: true);
+        var registered = services.GetServices<IToolSource>().Single(s => string.Equals(s.Name, RunWorkspaceToolOptions.SourceName, StringComparison.Ordinal));
+        var typed = (await registered.GetToolsAsync(CancellationToken.None)).Value;
+        var reflective = await ToolsAsync(services);
+
+        // Every failing assertion is reported, so each Red below shows on its own line.
+        using var scope = new AssertionScope();
+
+        // Red: bind UseRunWorkspaceTools' tools in another order, write_file before list_files; the dump lines change places.
+        ToolOracle.Dump(typed).Should().Be(ToolOracle.Dump(reflective));
+
+        var typedAnswers = await AnswersAsync(typed);
+        Directory.Delete(_root, recursive: true);
+        Directory.CreateDirectory(_root);
+        var reflectiveAnswers = await AnswersAsync(reflective);
+
+        // Red: build RunWorkspaceToolOptions.SerializerOptions from WorkspaceToolsJsonContext.Default.Options instead
+        // of LocalToolSources.CreateOptions; its encoder escapes the file text, so the results differ.
+        typedAnswers.Should().Be(reflectiveAnswers);
+
+        // Red: write plain text instead of Tricky; the results no longer carry the characters the encoder decides on.
+        reflectiveAnswers.Should().Contain("<a & 'é' \\uD83D\\uDE80>");
+    }
+
+    /// <summary>A call to every tool, in an empty workspace, over <see cref="Tricky"/>.</summary>
+    private static async Task<string> AnswersAsync(IReadOnlyList<AITool> list)
+    {
+        var tools = list.Cast<AIFunction>().ToDictionary(t => t.Name, StringComparer.Ordinal);
+        using var turn = TurnScope.Begin(SessionId.New(), TurnId.New(), Caller());
+
+        string[] results =
+        [
+            "write_file: " + ToolOracle.Result(await tools["write_file"].InvokeAsync(Args(("path", "notes.md"), ("content", Tricky + "\nsecond line\n")))),
+            "read_file: " + ToolOracle.Result(await tools["read_file"].InvokeAsync(Args(("path", "notes.md")))),
+            "edit_file: " + ToolOracle.Result(await tools["edit_file"].InvokeAsync(Args(("path", "notes.md"), ("oldText", "second"), ("newText", "2nd 'é'")))),
+            "list_files: " + ToolOracle.Result(await tools["list_files"].InvokeAsync(Args())),
+            "write_file refused: " + ToolOracle.Result(await tools["write_file"].InvokeAsync(Args(("path", "run.exe"), ("content", Tricky)))),
+        ];
+        return string.Join('\n', results);
+    }
+
+    /// <summary>The golden's container; <paramref name="typed"/> registers the options through <c>UseRunWorkspaceTools</c>, with its typed source.</summary>
+    private ServiceProvider Services(bool typed = false)
     {
         var workspace = new RunWorkspace(RunId, "repo", "https://example.invalid/repo.git", "main", $"run/{RunId}", _root, null);
         var services = new ServiceCollection();
         services.AddLogging();
         services.AddSingleton<IRunWorkspaceProvider>(new OneWorkspace(workspace));
-        services.AddSingleton(new RunWorkspaceToolOptions { AllowedWriteExtensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".md" } });
+        var extensions = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { ".md" };
+        if (typed)
+        {
+            services.AddThalos(t => t.UseRunWorkspaceTools(extensions));
+        }
+        else
+        {
+            services.AddSingleton(new RunWorkspaceToolOptions { AllowedWriteExtensions = extensions });
+        }
+
         return services.BuildServiceProvider();
     }
 

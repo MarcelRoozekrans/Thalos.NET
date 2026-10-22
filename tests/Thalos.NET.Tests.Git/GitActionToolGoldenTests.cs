@@ -1,3 +1,4 @@
+using AwesomeAssertions.Execution;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using NSubstitute;
@@ -38,17 +39,7 @@ public sealed class GitActionToolGoldenTests
     public async Task Every_git_tool_answers_as_before()
     {
         await using var services = Services();
-        var tools = (await ToolsAsync(services)).Cast<AIFunction>().ToDictionary(t => t.Name, StringComparer.Ordinal);
-
-        string[] results =
-        [
-            "create_branch: " + ToolOracle.Result(await tools["create_branch"].InvokeAsync(Args(("repositoryPath", RepoPath), ("branchName", "feature/é")))),
-            "commit: " + ToolOracle.Result(await tools["commit"].InvokeAsync(Args(("repositoryPath", RepoPath), ("message", "m"), ("authorName", "A")))),
-            "commit created: " + ToolOracle.Result(await tools["commit"].InvokeAsync(Args(("repositoryPath", RepoPath), ("message", "<a & 'é' 🚀>")))),
-            "push: " + ToolOracle.Result(await tools["push"].InvokeAsync(Args(("repositoryPath", RepoPath)))),
-            "open_pull_request: " + ToolOracle.Result(await tools["open_pull_request"].InvokeAsync(Args(("repositoryPath", RepoPath), ("sourceBranch", "feature/é"), ("targetBranch", "main"), ("title", "t"), ("body", "b")))),
-        ];
-        var text = string.Join('\n', results);
+        var text = await AnswersAsync(await ToolsAsync(services));
 
         text.Should().Be("""
             create_branch: "Created and checked out branch 'feature/é' at abc123."
@@ -59,7 +50,49 @@ public sealed class GitActionToolGoldenTests
             """);
     }
 
-    private static ServiceProvider Services()
+    [Fact]
+    public async Task GitActionTools_typed_tools_match_the_reflective_oracle()
+    {
+        await using var services = Services(static t => t.AddGitActionTools("git"));
+        var registered = services.GetServices<IToolSource>().Single(s => string.Equals(s.Name, "git", StringComparison.Ordinal));
+        var typed = (await registered.GetToolsAsync(CancellationToken.None)).Value;
+        var reflective = await ToolsAsync(services);
+
+        // Every failing assertion is reported, so each Red below shows on its own line.
+        using var scope = new AssertionScope();
+
+        // Red: bind AddGitActionTools' tools in another order, Push before Commit; the dump lines change places.
+        ToolOracle.Dump(typed).Should().Be(ToolOracle.Dump(reflective));
+
+        var typedAnswers = await AnswersAsync(typed);
+        var reflectiveAnswers = await AnswersAsync(reflective);
+
+        // Red: build AddGitActionTools' options from GitActionToolsJsonContext.Default.Options instead of
+        // LocalToolSources.CreateOptions; its encoder escapes the service text, so the results differ.
+        typedAnswers.Should().Be(reflectiveAnswers);
+
+        // Red: answer the push with plain text; the results no longer carry the characters the encoder decides on.
+        reflectiveAnswers.Should().Contain("<no> & 'é' \\uD83D\\uDE80");
+    }
+
+    /// <summary>A call to every tool, over service answers holding text the encoder escapes.</summary>
+    private static async Task<string> AnswersAsync(IReadOnlyList<AITool> list)
+    {
+        var tools = list.Cast<AIFunction>().ToDictionary(t => t.Name, StringComparer.Ordinal);
+
+        string[] results =
+        [
+            "create_branch: " + ToolOracle.Result(await tools["create_branch"].InvokeAsync(Args(("repositoryPath", RepoPath), ("branchName", "feature/é")))),
+            "commit: " + ToolOracle.Result(await tools["commit"].InvokeAsync(Args(("repositoryPath", RepoPath), ("message", "m"), ("authorName", "A")))),
+            "commit created: " + ToolOracle.Result(await tools["commit"].InvokeAsync(Args(("repositoryPath", RepoPath), ("message", "<a & 'é' 🚀>")))),
+            "push: " + ToolOracle.Result(await tools["push"].InvokeAsync(Args(("repositoryPath", RepoPath)))),
+            "open_pull_request: " + ToolOracle.Result(await tools["open_pull_request"].InvokeAsync(Args(("repositoryPath", RepoPath), ("sourceBranch", "feature/é"), ("targetBranch", "main"), ("title", "t"), ("body", "b")))),
+        ];
+        return string.Join('\n', results);
+    }
+
+    /// <summary>The golden's container; <paramref name="thalos"/>, when given, registers on it through <c>AddThalos</c>.</summary>
+    private static ServiceProvider Services(Action<ThalosBuilder>? thalos = null)
     {
         var writer = Substitute.For<IGitWriteService>();
         writer.CreateBranchAsync(RepoPath, Arg.Any<string>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
@@ -71,7 +104,13 @@ public sealed class GitActionToolGoldenTests
         var publisher = Substitute.For<IPullRequestPublisher>();
         publisher.OpenPullRequestAsync(RepoPath, Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>())
             .Returns(Result<PullRequestResult, AgentError>.Success(new PullRequestResult("https://example.invalid/pr/1?a=1&b='2'", "1")));
-        return new ServiceCollection().AddSingleton(writer).AddSingleton(publisher).BuildServiceProvider();
+        var services = new ServiceCollection().AddSingleton(writer).AddSingleton(publisher);
+        if (thalos is not null)
+        {
+            services.AddThalos(thalos);
+        }
+
+        return services.BuildServiceProvider();
     }
 
     private static async Task<IReadOnlyList<AITool>> ToolsAsync(IServiceProvider services) =>

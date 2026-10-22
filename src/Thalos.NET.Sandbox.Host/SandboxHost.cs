@@ -114,7 +114,7 @@ public static class SandboxHost
                 thalos.UseRunWorkspaceTools(settings.WriteExtensions, o => AddProtected(o, settings));
             }
 
-            thalos.AddLocalTools<SandboxTools>(SandboxToolOptions.SourceName, LocalToolSourceBinding.CreateOptions(SandboxToolsJsonContext.Default), static t => t.Build, static t => t.Test);
+            thalos.AddLocalTools<SandboxTools>(SandboxToolOptions.SourceName, SandboxToolOptions.SerializerOptions, static t => t.Build, static t => t.Test);
         });
 
         // Fail fast: a tool source that cannot build its tools stops the start, before /control/ready answers.

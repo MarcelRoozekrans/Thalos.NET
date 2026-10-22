@@ -9,5 +9,6 @@
   <ItemGroup>
     <Compile Include="..\Thalos.NET.Tests.Git\Workspaces\LocalGitRemote.cs" Link="LocalGitRemote.cs" />
     <Compile Include="..\Thalos.NET.Tests.Git\Workspaces\ExecutableScript.cs" Link="ExecutableScript.cs" />
+    <Compile Include="..\Thalos.NET.Tests.Unit\Tools\ToolOracle.cs" Link="ToolOracle.cs" />
   </ItemGroup>
 </Project>

@@ -135,12 +135,13 @@ public sealed class ThalosBuilder
     /// form for trimmed and Native AOT hosts; <see cref="AddLocalTools(string, Type[])"/> discovers the same tools by
     /// reflection.
     /// </summary>
-    /// <example><c>thalos.AddLocalTools&lt;MyTools&gt;("mine", MyJsonContext.Default.Options, t =&gt; t.Search, t =&gt; t.Fetch);</c></example>
+    /// <example><c>thalos.AddLocalTools&lt;MyTools&gt;("mine", LocalToolSources.CreateOptions(MyJsonContext.Default), t =&gt; t.Search, t =&gt; t.Fetch);</c></example>
     /// <typeparam name="TTools">The tool class; its public constructor is resolved from the container on every call.</typeparam>
     /// <param name="sourceName">The source name.</param>
     /// <param name="serializerOptions">
-    /// The options the tools' arguments and results go through. Their resolver must cover every parameter and result
-    /// type, typically a <see cref="System.Text.Json.Serialization.JsonSerializerContext"/>.
+    /// The options the tools' arguments and results go through, typically from <see cref="LocalToolSources.CreateOptions"/>
+    /// over a <see cref="System.Text.Json.Serialization.JsonSerializerContext"/>. Their resolver must cover every
+    /// parameter and result type.
     /// </param>
     /// <param name="tools">One binder per tool, such as <c>t =&gt; t.ReadFile</c>.</param>
     /// <returns>This builder.</returns>
@@ -160,17 +161,7 @@ public sealed class ThalosBuilder
         where TTools : class
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceName);
-        ArgumentNullException.ThrowIfNull(serializerOptions);
-        ArgumentNullException.ThrowIfNull(tools);
-        if (!typeof(TTools).IsDefined(typeof(ThalosToolTypeAttribute), inherit: false))
-        {
-            throw new ArgumentException($"Type '{typeof(TTools).FullName}' is not marked [ThalosToolType].", nameof(tools));
-        }
-
-        if (tools.Length == 0)
-        {
-            throw new ArgumentException("At least one tool binder is required.", nameof(tools));
-        }
+        LocalToolSources.ThrowIfInvalid(serializerOptions, tools);
 
         ToolSourceNames.Of(Services).AddLocal(sourceName, nameof(sourceName));
         Func<TTools, Delegate>[] binders = [.. tools];
