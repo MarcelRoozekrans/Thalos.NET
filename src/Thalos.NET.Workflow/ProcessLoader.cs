@@ -81,6 +81,12 @@ public static class ProcessLoader
         var nodes = new Dictionary<string, ProcessNode>(dto.Nodes.Count, StringComparer.Ordinal);
         foreach (var (name, node) in dto.Nodes)
         {
+            // `name:` with nothing after it is a null value, not an empty mapping.
+            if (node is null)
+            {
+                return Result<ProcessDefinition>.Failure($"The process definition's node '{name}' is empty.");
+            }
+
             nodes[name] = node.ToProcessNode();
         }
 
@@ -123,7 +129,7 @@ public static class ProcessLoader
     {
         public string Process { get; set; } = "";
         public int Version { get; set; }
-        public Dictionary<string, ProcessNodeDto> Nodes { get; set; } = [];
+        public Dictionary<string, ProcessNodeDto?> Nodes { get; set; } = [];
     }
 
     internal sealed class ProcessNodeDto
