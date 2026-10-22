@@ -33,6 +33,8 @@
     <PackageVersion Include="LibGit2Sharp" Version="0.32.0" />
     <!-- YAML process-graph definitions — confined to Thalos.NET.Workflow -->
     <PackageVersion Include="YamlDotNet" Version="18.1.0" />
+    <!-- Its source generator: the static context ProcessLoader deserializes through, so no reflection -->
+    <PackageVersion Include="Vecc.YamlDotNet.Analyzers.StaticGenerator" Version="18.1.0" />
     <!-- Raw-SQL ORM + transactional outbox, PostgreSQL persistence — net10.0-only, confined to Thalos.NET.Workflow.Orm -->
     <PackageVersion Include="ZeroAlloc.ORM" Version="2.4.1" />
     <PackageVersion Include="ZeroAlloc.Outbox" Version="4.4.5" />

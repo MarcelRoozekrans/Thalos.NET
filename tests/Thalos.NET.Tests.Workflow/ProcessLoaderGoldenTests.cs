@@ -153,6 +153,39 @@ public sealed class ProcessLoaderGoldenTests
             stop: {"Agent":null,"Skill":null,"Action":null,"Next":null,"Branch":{},"Outcomes":[],"Await":null,"Terminal":"failed","MaxVisits":null,"OnExceeded":null,"Models":[],"Lenses":[],"Quorum":null}
             """);
 
+    // Red: in ProcessLoader, drop IgnoreUnmatchedProperties; the unknown keys then fail the load.
+    [Fact]
+    public void Unknown_keys_at_the_top_and_inside_a_node_are_ignored() =>
+        Dump("""
+            process: p
+            version: 1
+            extra: { deep: [1] }
+            nodes:
+              a: { terminal: x, extra: { deep: [1, { q: r }] } }
+            """).Should().Be("""
+            p v1, start a
+            a: {"Agent":null,"Skill":null,"Action":null,"Next":null,"Branch":{},"Outcomes":[],"Await":null,"Terminal":"x","MaxVisits":null,"OnExceeded":null,"Models":[],"Lenses":[],"Quorum":null}
+            """);
+
+    // Red: in ProcessLoader.Load, change the "Failed to parse the process definition: " prefix; every case differs.
+    // Red, for the last three: in ProcessLoader.Load, drop the catch around the typed deserializer; they throw.
+    [Theory]
+    [InlineData("process: p\nversion: 1\nnodes:\n  a: { terminal: x\n",
+        "While parsing a flow mapping, did not find expected ',' or '}'.")]
+    [InlineData("process: p\nversion: 1\nnodes:\n  a: { terminal: x }\n  a: { terminal: y }\n", "Duplicate key a")]
+    [InlineData("process: p\nversion: abc\nnodes:\n  a: { terminal: x }\n", "Exception during deserialization")]
+    [InlineData("process: p\nversion: 1\nnodes:\n  a: { branch: [x, y] }\n",
+        "Expected 'MappingStart', got 'SequenceStart' (at Line: 4, Col: 16, Idx: 44).")]
+    [InlineData("process: p\nversion: 1\nnodes:\n  a: { outcomes: { x: y } }\n",
+        "Expected 'SequenceStart', got 'MappingStart' (at Line: 4, Col: 18, Idx: 46).")]
+    public void A_malformed_document_fails_with_the_same_message(string yaml, string message)
+    {
+        var loaded = ProcessLoader.Load(yaml);
+
+        loaded.IsFailure.Should().BeTrue();
+        loaded.Error.Should().Be($"Failed to parse the process definition: {message}");
+    }
+
     private static string Dump(string yaml)
     {
         var loaded = ProcessLoader.Load(yaml);

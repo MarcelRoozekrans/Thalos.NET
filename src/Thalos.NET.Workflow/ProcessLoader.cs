@@ -1,3 +1,4 @@
+using Thalos.Workflow.Yaml;
 using YamlDotNet.Core;
 using YamlDotNet.RepresentationModel;
 using YamlDotNet.Serialization;
@@ -29,7 +30,7 @@ namespace Thalos.Workflow;
 /// </remarks>
 public static class ProcessLoader
 {
-    private static readonly IDeserializer TypedDeserializer = new DeserializerBuilder()
+    private static readonly IDeserializer TypedDeserializer = new StaticDeserializerBuilder(new ProcessYamlContext())
         .WithNamingConvention(CamelCaseNamingConvention.Instance)
         .IgnoreUnmatchedProperties()
         .Build();
@@ -118,14 +119,14 @@ public static class ProcessLoader
         return startNode;
     }
 
-    private sealed class ProcessDefinitionDto
+    internal sealed class ProcessDefinitionDto
     {
         public string Process { get; set; } = "";
         public int Version { get; set; }
         public Dictionary<string, ProcessNodeDto> Nodes { get; set; } = [];
     }
 
-    private sealed class ProcessNodeDto
+    internal sealed class ProcessNodeDto
     {
         public string? Agent { get; set; }
         public string? Skill { get; set; }

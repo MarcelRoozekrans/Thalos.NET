@@ -12,6 +12,8 @@
     <!-- The generator does not flow from Thalos.NET.Abstractions: a package's analyzers are private to it. -->
     <PackageReference Include="ZeroAlloc.Telemetry" />
     <PackageReference Include="YamlDotNet" />
+    <!-- Generates ProcessYamlContext, the static context ProcessLoader deserializes through. -->
+    <PackageReference Include="Vecc.YamlDotNet.Analyzers.StaticGenerator" PrivateAssets="all" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Thalos.NET.Tests.Workflow" />
