@@ -5,6 +5,7 @@
     <PackageId>Thalos.NET.Sandbox.Docker</PackageId>
     <Description>Docker runtime for Thalos.NET run sandboxes.</Description>
     <PackageTags>agents;sandbox;container;docker;microsoft-agent-framework;zeroalloc</PackageTags>
+    <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Thalos.NET.Sandbox\Thalos.NET.Sandbox.csproj" />
