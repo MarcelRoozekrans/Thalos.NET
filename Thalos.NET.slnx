@@ -33,6 +33,7 @@
     <Project Path="tests/Thalos.NET.Tests.McpServer/Thalos.NET.Tests.McpServer.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Memory.RagNet/Thalos.NET.Tests.Memory.RagNet.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Memory/Thalos.NET.Tests.Memory.csproj" />
+    <Project Path="tests/Thalos.NET.Tests.Native.Probe/Thalos.NET.Tests.Native.Probe.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Sandbox/Thalos.NET.Tests.Sandbox.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Sandbox.Docker/Thalos.NET.Tests.Sandbox.Docker.csproj" />
     <Project Path="tests/Thalos.NET.Tests.Sandbox.Host/Thalos.NET.Tests.Sandbox.Host.csproj" />
