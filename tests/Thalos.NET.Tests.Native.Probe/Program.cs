@@ -255,7 +255,7 @@ namespace Thalos.Tests.Native.Probe
         /// The tools a host's <see cref="IToolCatalog"/> resolves, in <see cref="ToolOracle"/>'s format: Memory, Skills,
         /// the local workspace tools and the Git action tools on one host, the sandbox's remote workspace and sandbox tools
         /// on another. Then one agent turn on the local host, whose fake chat client asks for a call to a tool of each local
-        /// source but Git, with the arguments as <see cref="JsonElement"/>s, as a model's arrive: the results it is handed
+        /// source, with the arguments as <see cref="JsonElement"/>s, as a model's arrive: the results it is handed
         /// back, with each memory id, a ULID, replaced by <c>{id}</c>.
         /// </summary>
         public static async ValueTask<string> ToolsAsync()
@@ -629,11 +629,46 @@ namespace Thalos.Tests.Native.Probe
             w.WriteStartObject("Variables");
             foreach (var (key, value) in variables)
             {
-                w.WriteStartObject(key);
-                w.WriteString("type", TypeTag(value));
-                w.WritePropertyName("value");
-                WorkflowVariableJson.Write(w, value);
-                w.WriteEndObject();
+                w.WritePropertyName(key);
+                WriteTagged(w, value);
+            }
+
+            w.WriteEndObject();
+        }
+
+        /// <summary>
+        /// A value as <c>{type, value}</c> with its CLR type, and every list item and map entry the same way, so a
+        /// JsonElement, or a double where a long was stored, shows at any depth.
+        /// </summary>
+        private static void WriteTagged(Utf8JsonWriter w, object? value)
+        {
+            w.WriteStartObject();
+            w.WriteString("type", TypeTag(value));
+            w.WritePropertyName("value");
+            switch (value)
+            {
+                case List<object?> list:
+                    w.WriteStartArray();
+                    foreach (var item in list)
+                    {
+                        WriteTagged(w, item);
+                    }
+
+                    w.WriteEndArray();
+                    break;
+                case Dictionary<string, object?> map:
+                    w.WriteStartObject();
+                    foreach (var (key, entry) in map)
+                    {
+                        w.WritePropertyName(key);
+                        WriteTagged(w, entry);
+                    }
+
+                    w.WriteEndObject();
+                    break;
+                default:
+                    WorkflowVariableJson.Write(w, value);
+                    break;
             }
 
             w.WriteEndObject();
@@ -828,13 +863,14 @@ namespace Thalos.Tests.Native.Probe
     /// </summary>
     internal sealed class ScriptedModel
     {
-        /// <summary>A tool of each local source but Git, with arguments the encoder and the binders decide on.</summary>
+        /// <summary>A tool of each local source, with arguments the encoder and the binders decide on.</summary>
         public static readonly (string Tool, string Arguments)[] Calls =
         [
             ("memory__remember", """{"text":"The user writes <a & 'é' 🚀> in reviews.","kind":"preference","tags":["review"]}"""),
             ("memory__list", """{"kind":"preference","page":1}"""),
             ("skills__search", """{"query":"<a & 'é' 🚀>","topK":3}"""),
             ("workspace__read_file", """{"path":"src/a.cs"}"""),
+            ("git__create_branch", """{"repositoryPath":"/probe/repo","branchName":"probe/<a & 'é' 🚀>"}"""),
         ];
 
         private int _answers;
@@ -918,11 +954,12 @@ namespace Thalos.Tests.Native.Probe
         public IReadOnlyDictionary<string, string> Claims { get; } = new Dictionary<string, string>(StringComparer.Ordinal);
     }
 
-    /// <summary>The Git action tools' writer; the probe lists those tools and never calls one.</summary>
+    /// <summary>The Git action tools' writer: creating a branch succeeds without touching Git; the rest are never called.</summary>
     internal sealed class NoGitWrites : IGitWriteService
     {
+        /// <summary>Succeeds, echoing its arguments: the branch as its name, the source ref and the path as its sha.</summary>
         public ValueTask<Result<GitBranchResult, AgentError>> CreateBranchAsync(string repositoryPath, string branchName, string? sourceRef, CancellationToken ct) =>
-            throw new NotSupportedException("The probe does not write to Git.");
+            ValueTask.FromResult(Result<GitBranchResult, AgentError>.Success(new GitBranchResult(branchName, $"{sourceRef ?? "<no source ref>"} in {repositoryPath}")));
 
         public ValueTask<Result<GitCommitResult, AgentError>> CommitAsync(string repositoryPath, string message, GitAuthor? author, CancellationToken ct) =>
             throw new NotSupportedException("The probe does not write to Git.");
@@ -931,7 +968,7 @@ namespace Thalos.Tests.Native.Probe
             throw new NotSupportedException("The probe does not write to Git.");
     }
 
-    /// <summary>The Git action tools' publisher; the probe lists those tools and never calls one.</summary>
+    /// <summary>The Git action tools' publisher; the probe never opens a pull request.</summary>
     internal sealed class NoPullRequests : IPullRequestPublisher
     {
         public ValueTask<Result<PullRequestResult, AgentError>> OpenPullRequestAsync(

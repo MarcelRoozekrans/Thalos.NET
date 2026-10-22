@@ -71,8 +71,7 @@ public abstract class NativeHostPublish(string project, string binaryName) : IAs
         using var process = Process.Start(start) ?? throw new InvalidOperationException("Could not start dotnet publish.");
         var stdout = process.StandardOutput.ReadToEndAsync();
         var stderr = process.StandardError.ReadToEndAsync();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(20));
-        await process.WaitForExitAsync(timeout.Token);
+        await WaitOrKillAsync(process, TimeSpan.FromMinutes(20), stdout, stderr, "dotnet publish");
         _output = await stdout + await stderr;
         ExitCode = process.ExitCode;
         Warnings = IlWarnings.Distinct(_output, RepoRoot());
@@ -82,6 +81,27 @@ public abstract class NativeHostPublish(string project, string binaryName) : IAs
     {
         DeleteQuietly(_temp);
         return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Waits for <paramref name="process"/> to exit. Past <paramref name="limit"/> it kills the process tree, so no
+    /// child build or host outlives the test, and throws <see cref="TimeoutException"/> with the end of the output.
+    /// </summary>
+    internal static async Task WaitOrKillAsync(Process process, TimeSpan limit, Task<string> stdout, Task<string> stderr, string what)
+    {
+        using var timeout = new CancellationTokenSource(limit);
+        try
+        {
+            await process.WaitForExitAsync(timeout.Token);
+        }
+        catch (OperationCanceledException ex) when (timeout.IsCancellationRequested)
+        {
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync();
+            var output = await stdout + await stderr;
+            var tail = output.Length > 6000 ? output[^6000..] : output;
+            throw new TimeoutException($"{what} did not exit within {limit}; it was killed. Its output ends with:\n{tail}", ex);
+        }
     }
 
     /// <summary>The test runner's own MSBuild settings must not leak into a child build.</summary>

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using Xunit.Abstractions;
 
 namespace Thalos.Tests.Workflow.Orm;
@@ -37,6 +38,10 @@ public sealed class NativeProbeTests(PostgresFixture pg, NativeProbePublish publ
             output.WriteLine($"third-party trim or AOT warning: {warning}");
         }
 
+        // Red: reach YamlDotNet's reflection-based DeserializerBuilder from the probe: ILC reports IL2026, IL2067 and
+        // IL3050 inside YamlDotNet, with no location and a YamlDotNet origin.
+        thirdParty.Should().BeEmpty("third-party warning: stop and report (F11); the publish reported:\n{0}", string.Join('\n', thirdParty));
+
         // Red: add a JsonSerializer.Serialize(object) call to the probe: the publish reports IL2026 and IL3050 at the
         // probe's own line.
         thalos.Should().BeEmpty("no Thalos assembly or the probe may warn natively; the publish reported:\n{0}", string.Join('\n', thalos));
@@ -70,8 +75,31 @@ public sealed class NativeProbeTests(PostgresFixture pg, NativeProbePublish publ
         // Red: leave the authz check out of the probe: the native run prints five lines, and the list differs.
         nativeLines.Select(l => l.Split(' ', 2)[0]).Should().Equal(Checks, native.Stdout);
 
-        // Red: make the probe print RuntimeFeature.IsDynamicCodeSupported in the yaml line: True on JIT, False natively.
-        nativeLines.Should().Equal(Lines(jit.Stdout), "the native probe must print what the JIT probe prints");
+        // The content the golden must hold at all, so a golden captured from a probe that lost it cannot pass.
+        using (var outbox = Check(nativeLines, "outbox"))
+        {
+            // Red: in the probe's OutboxAsync, keep only the messages of the implement node: one entry is left.
+            outbox.RootElement.GetArrayLength().Should().Be(2, "the start and the resume each enqueue a dispatch");
+        }
+
+        using (var tools = Check(nativeLines, "tools"))
+        {
+            // Red: drop git__create_branch from ScriptedModel.Calls: calls holds four results.
+            tools.RootElement.GetProperty("calls").EnumerateObject().Count().Should().Be(5, "the turn calls one tool of each local source");
+            // Red: in the probe's ToolsAsync, write ToolOracle.Dump([]) as local: the dump is empty.
+            tools.RootElement.GetProperty("local").GetString().Should().NotBeNullOrEmpty();
+            // Red: in the probe's ToolsAsync, write ToolOracle.Dump([]) as remote: the dump is empty.
+            tools.RootElement.GetProperty("remote").GetString().Should().NotBeNullOrEmpty();
+        }
+
+        var golden = Lines(NativeProbeGolden.Output);
+        // Red: make the probe print RuntimeFeature.IsDynamicCodeSupported in the yaml line: False natively, absent from
+        // the golden. Red: in WorkflowVariableBlock.ToPlainValue, read an array's numbers with GetDouble: the rows line
+        // tags the list's 2 as double. Red: in the probe's NoGitWrites, drop the repository path from the echo.
+        nativeLines.Should().Equal(golden, "the native probe must print the JIT golden");
+        // Red: make the probe print an extra yaml entry only when RuntimeFeature.IsDynamicCodeSupported is true: the
+        // JIT run differs from the golden, the native run does not.
+        Lines(jit.Stdout).Should().Equal(golden, "the JIT probe must print the golden it was captured as");
     }
 
     public void Dispose() => NativeHostPublish.DeleteQuietly(_jitArtifacts);
@@ -95,6 +123,10 @@ public sealed class NativeProbeTests(PostgresFixture pg, NativeProbePublish publ
 
         return (thalos, thirdParty);
     }
+
+    /// <summary>The JSON of the line of <paramref name="check"/>.</summary>
+    private static JsonDocument Check(string[] lines, string check) =>
+        JsonDocument.Parse(lines.Single(l => l.StartsWith(check + " ", StringComparison.Ordinal))[(check.Length + 1)..]);
 
     private static string[] Lines(string text) => text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
 
@@ -120,8 +152,7 @@ public sealed class NativeProbeTests(PostgresFixture pg, NativeProbePublish publ
         using var process = Process.Start(start) ?? throw new InvalidOperationException($"Could not start {command}.");
         var stdout = process.StandardOutput.ReadToEndAsync();
         var stderr = process.StandardError.ReadToEndAsync();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(10));
-        await process.WaitForExitAsync(timeout.Token);
+        await NativeHostPublish.WaitOrKillAsync(process, TimeSpan.FromMinutes(10), stdout, stderr, command);
         return (process.ExitCode, await stdout, await stderr);
     }
 }
