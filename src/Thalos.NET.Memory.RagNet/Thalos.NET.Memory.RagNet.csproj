@@ -6,6 +6,7 @@
     <PackageId>Thalos.NET.Memory.RagNet</PackageId>
     <Description>Rag.NET pgvector adapter for Thalos.NET.Memory: IMemoryIndex over Rag.NET IVectorStore (PgVectorStore) and an IEmbeddingGenerator, with schema initialisation and dimension checks.</Description>
     <PackageTags>agents;memory;rag;pgvector;postgres;ragnet</PackageTags>
+    <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Thalos.NET.Memory\Thalos.NET.Memory.csproj" />
