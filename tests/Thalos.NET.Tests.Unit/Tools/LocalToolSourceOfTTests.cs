@@ -177,6 +177,43 @@ public sealed class LocalToolSourceOfTTests
         // when the source is first resolved.
         invalid.Should().Throw<ArgumentException>().WithMessage("Tool source name 'lo__cal' is invalid*").WithParameterName("sourceName");
     }
+
+    [Fact]
+    public void LocalToolSources_Create_refuses_null_services_an_unmarked_type_or_no_binder()
+    {
+        using var scope = new AssertionScope();
+        var services = new ServiceCollection().BuildServiceProvider();
+
+        var noServices = () => LocalToolSources.Create<ScopedTools>("local", null!, Json, s => s.Count);
+        // Red: drop the services null check from LocalToolSource<TTools>'s constructor, which Create relies on.
+        noServices.Should().Throw<ArgumentNullException>("no container is refused").WithParameterName("services");
+
+        var unmarked = () => LocalToolSources.Create<Counter>("local", services, Json, c => c.ToString);
+        // Red: drop the [ThalosToolType] check from LocalToolSources.ThrowIfInvalid: the constructor still refuses the
+        // type, but against its binders parameter, not tools.
+        unmarked.Should().Throw<ArgumentException>("an unmarked type is refused").WithMessage("*is not marked [ThalosToolType]*").WithParameterName("tools");
+
+        var none = () => LocalToolSources.Create<ScopedTools>("local", services, Json);
+        // Red: drop the empty-binder check from LocalToolSources.ThrowIfInvalid.
+        none.Should().Throw<ArgumentException>("an empty binder list is refused").WithMessage("At least one tool binder is required.*").WithParameterName("tools");
+    }
+
+    [Fact]
+    public void LocalToolSources_CreateOptions_are_read_only_with_the_default_encoder_and_the_given_resolver()
+    {
+        var options = LocalToolSources.CreateOptions(LocalToolsJsonContext.Default);
+
+        using var scope = new AssertionScope();
+
+        // Red: remove MakeReadOnly from CreateOptions.
+        options.IsReadOnly.Should().BeTrue();
+
+        // Red: copy new JsonSerializerOptions instead of AIJsonUtilities.DefaultOptions: the encoder is the default one.
+        options.Encoder.Should().BeSameAs(AIJsonUtilities.DefaultOptions.Encoder);
+
+        // Red: keep AIJsonUtilities.DefaultOptions' resolver: the given one is not used.
+        options.TypeInfoResolver.Should().BeSameAs(LocalToolsJsonContext.Default);
+    }
 }
 
 /// <summary>

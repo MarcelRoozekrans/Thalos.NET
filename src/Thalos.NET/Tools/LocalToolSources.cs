@@ -45,6 +45,9 @@ public static class LocalToolSources
     /// </param>
     /// <param name="tools">One binder per tool, such as <c>t =&gt; t.ReadFile</c>.</param>
     /// <returns>The source. Its tools are built on the first <see cref="IToolSource.GetToolsAsync"/>.</returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="services"/>, <paramref name="serializerOptions"/> or <paramref name="tools"/> is null.
+    /// </exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="name"/> is blank or not a valid source name, <typeparamref name="TTools"/> is not marked
     /// <see cref="ThalosToolTypeAttribute"/>, or no binder is given.
@@ -58,7 +61,6 @@ public static class LocalToolSources
         string name, IServiceProvider services, JsonSerializerOptions serializerOptions, params Func<TTools, Delegate>[] tools)
         where TTools : class
     {
-        ArgumentNullException.ThrowIfNull(services);
         ThrowIfInvalid(serializerOptions, tools);
         return new LocalToolSource<TTools>(name, services, serializerOptions, [.. tools]);
     }
