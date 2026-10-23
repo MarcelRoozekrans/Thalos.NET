@@ -420,6 +420,22 @@ nothing.
 is optional — leave it `null` and the store mints one, or supply your own so you can prepare a resource keyed by
 the run's id, such as a git worktree, before the first node is ever dispatched.
 
+**Run variables must be JSON-shaped.** The same rule applies to every value that enters a run's bag from host
+code: `InitialVariables`, `WorkflowRunStartOptions.Variables`, the `NodeResult` constructor and a host action's
+`HostActionResult`. A value must be a string, a number, a bool, null, a `JsonElement`, a `JsonNode`, or a list or
+string-keyed dictionary of those; a `byte[]` counts as a string and is written as Base64. NaN, the infinities and
+nesting deeper than 63 levels are refused too. Anything else, such as a `Guid`, a `DateTime`, an enum or a
+record, throws `ArgumentException` where it enters, before anything is written:
+
+```text
+Workflow variable '<path>' has type '<full type name>', which is not JSON-shaped. Allowed: string, number,
+bool, null, JsonElement, JsonNode, and lists or dictionaries of those.
+```
+
+Convert such a value to a string or a `JsonElement` first. `WorkflowVariableJson.Validate` applies the same check to
+a bag you want to test in advance. A list must be re-enumerable. The values a run reads back from its store are
+string, `long`, `double`, `bool`, `List<object?>` and `Dictionary<string, object?>`, never `JsonElement`.
+
 ## 8. Passing work from one node to the next
 
 Every task node's instruction text carries the run's accumulated variables, and a node with declared `outcomes`
