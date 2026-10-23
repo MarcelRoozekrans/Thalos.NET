@@ -278,7 +278,7 @@ A runnable REPL lives in [`samples/Thalos.Sample.Console`](samples/Thalos.Sample
 
 ## Security: AI.Sentinel needs an embedding generator for full coverage
 
-Most of AI.Sentinel 2.3.0's *security* detectors (jailbreak roleplay, exfiltration, tool poisoning, …) are semantic.
+Most of AI.Sentinel 3.x's *security* detectors (jailbreak roleplay, exfiltration, tool poisoning, …) are semantic.
 Without `SentinelOptions.EmbeddingGenerator` they return *Clean* and only the lexical/operational detectors run.
 `SEC-01 PromptInjection` and `SEC-05 Jailbreak` are the exception: both carry a rule layer that catches the unambiguous
 phrasings (`ignore all previous instructions`, `DAN mode`, …) with no embedding generator configured, so
@@ -294,6 +294,14 @@ OpenAI, …) for complete protection:
     o.OnHigh = SentinelAction.Alert;
 })
 ```
+
+`Thalos.NET.Sentinel` takes AI.Sentinel 3.x defaults. Since 3.0 the PII and credential detectors redact by default: an
+email address or an API key in a prompt reaches the model as a placeholder and the turn succeeds rather than taking the
+severity action. Set `o.RedactByDefault = false` to give those findings their severity action again. A recalled memory
+cannot be redacted, so the memory scanner always gives them their severity action; it also honours a detector's own
+`DetectorConfiguration.Action`, as Sentinel's chat path does. Since 3.0 the PII detector matches every email address at
+Medium severity, so with `o.OnMedium = SentinelAction.Quarantine` any recalled memory that contains an email address is
+quarantined, whatever `RedactByDefault` says.
 
 ## Memory
 

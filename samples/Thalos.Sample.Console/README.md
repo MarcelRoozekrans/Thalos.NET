@@ -86,7 +86,7 @@ Try:
 
 ## Security note: AI.Sentinel is stronger with an embedding generator
 
-Most of AI.Sentinel 2.3.0's *security* detectors are semantic: they need `SentinelOptions.EmbeddingGenerator` and return
+Most of AI.Sentinel 3.x's *security* detectors are semantic: they need `SentinelOptions.EmbeddingGenerator` and return
 Clean without one, leaving the lexical/operational detectors active (Sentinel logs a warning when the pipeline is first
 built).
 
