@@ -6,8 +6,8 @@ namespace Thalos.Tests.Workflow.Orm;
 
 /// <summary>
 /// Thalos' compile-time paths as real Native AOT output: <c>tests/Thalos.NET.Tests.Native.Probe</c> roots YAML loading,
-/// workflow rows and the outbox, tools, options binding and tool authorization, is published for <c>linux-x64</c>, and
-/// prints one canonical line per check. The published binary and a JIT <c>dotnet run</c> of the same project, against one
+/// workflow rows and the outbox, tools, options binding, tool authorization and AI.Sentinel, is published for
+/// <c>linux-x64</c>, and prints one canonical line per check. The published binary and a JIT <c>dotnet run</c> of the same project, against one
 /// PostgreSQL container, must print the same lines.
 /// </summary>
 /// <remarks>
@@ -20,7 +20,7 @@ public sealed class NativeProbeTests(PostgresFixture pg, NativeProbePublish publ
     private readonly string _jitArtifacts = Directory.CreateTempSubdirectory("thalos-native-probe-jit-").FullName;
 
     /// <summary>The checks the probe prints, in order.</summary>
-    private static readonly string[] Checks = ["yaml", "rows", "outbox", "tools", "options", "authz"];
+    private static readonly string[] Checks = ["yaml", "rows", "outbox", "tools", "options", "authz", "sentinel"];
 
     [SkippableFact]
     public void The_probe_publishes_with_no_warning_from_the_assemblies_it_roots()
@@ -92,6 +92,8 @@ public sealed class NativeProbeTests(PostgresFixture pg, NativeProbePublish publ
             tools.RootElement.GetProperty("remote").GetString().Should().NotBeNullOrEmpty();
         }
 
+        AssertSentinel(nativeLines);
+
         var golden = Lines(NativeProbeGolden.Output);
         // Red: make the probe print RuntimeFeature.IsDynamicCodeSupported in the yaml line: False natively, absent from
         // the golden. Red: in WorkflowVariableBlock.ToPlainValue, read an array's numbers with GetDouble: the rows line
@@ -100,6 +102,23 @@ public sealed class NativeProbeTests(PostgresFixture pg, NativeProbePublish publ
         // Red: make the probe print an extra yaml entry only when RuntimeFeature.IsDynamicCodeSupported is true: the
         // JIT run differs from the golden, the native run does not.
         Lines(jit.Stdout).Should().Equal(golden, "the JIT probe must print the golden it was captured as");
+    }
+
+    /// <summary>The content the sentinel line must hold, so a golden captured from a probe that lost it cannot pass.</summary>
+    private static void AssertSentinel(string[] nativeLines)
+    {
+        using var sentinel = Check(nativeLines, "sentinel");
+        // Red: in SentinelThalosBuilderExtensions.UseAISentinel, set o.RedactByDefault = false before configure runs: the
+        // model is sent the address itself.
+        sentinel.RootElement.GetProperty("sent")[0].GetString().Should().Contain("[EMAIL_1_{tag}]").And.NotContain("jane.doe");
+        // Red: in the probe's MailFunction, keep the to argument only when it does not contain an @: the tool line is null.
+        sentinel.RootElement.GetProperty("tool").GetString().Should().Be("jane.doe@example.com", "PII placeholders are restored before the tool runs");
+        // Red: in the probe's SentinelAsync, call UseAISentinel(o => o.RestoreRedactedValues = false): the reply keeps the
+        // placeholder, "Mailed [EMAIL_1_<tag>].".
+        sentinel.RootElement.GetProperty("reply").GetString().Should().Be("Mailed jane.doe@example.com.", "the reply is restored for the caller");
+        // Red: in SentinelErrorMappingChatClient.Map, build the quarantine as AgentError.ProviderError: blocked starts
+        // with ProviderError.
+        sentinel.RootElement.GetProperty("blocked").GetString().Should().Be("Quarantined Critical: SEC-01");
     }
 
     public void Dispose() => NativeHostPublish.DeleteQuietly(_jitArtifacts);
