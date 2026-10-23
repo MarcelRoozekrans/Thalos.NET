@@ -1,3 +1,6 @@
+using System.Text.Json;
+using Thalos.Tools;
+
 namespace Thalos.Sandbox;
 
 /// <summary>Limits for the in-sandbox <c>build</c> and <c>test</c> tools.</summary>
@@ -5,6 +8,13 @@ public sealed class SandboxToolOptions
 {
     /// <summary>The tool source name the tools register under.</summary>
     public const string SourceName = "sandbox";
+
+    /// <summary>
+    /// The serializer options <see cref="SandboxTools"/>' arguments and results go through, from its source-generated
+    /// metadata by <see cref="LocalToolSources.CreateOptions"/>, read-only: for the sandbox host's local tools and the
+    /// API's remote schemas.
+    /// </summary>
+    public static JsonSerializerOptions SerializerOptions { get; } = LocalToolSources.CreateOptions(SandboxToolsJsonContext.Default);
 
     /// <summary>How long <c>dotnet build</c> may run.</summary>
     public TimeSpan BuildTimeout { get; set; } = TimeSpan.FromMinutes(10);

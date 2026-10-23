@@ -1,4 +1,3 @@
-using System.Diagnostics.CodeAnalysis;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Hosting;
@@ -56,8 +55,6 @@ public static class SandboxThalosBuilderExtensions
     /// <see cref="SandboxOptions.DataRoot"/> is not absolute, <see cref="SandboxOptions.Image"/> is blank, or
     /// <see cref="SandboxOptions.ProtectedPaths"/> holds a <c>..</c> segment.
     /// </exception>
-    [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
-    [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     public static ThalosBuilder UseSandboxRunWorkspaces(this ThalosBuilder builder, Action<SandboxOptions> configure)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -108,8 +105,15 @@ public static class SandboxThalosBuilderExtensions
         services.Replace(ServiceDescriptor.Singleton<IRunToolServerReadiness>(sp => sp.GetRequiredService<SandboxRunWorkspaceProvider>()));
         services.TryAddEnumerable(ServiceDescriptor.Singleton<IHostedService, SandboxReconcileService>());
 
-        builder.AddRemoteRunTools(RunWorkspaceToolOptions.SourceName, typeof(WorkspaceTools));
-        builder.AddRemoteRunTools(SandboxToolOptions.SourceName, typeof(SandboxTools));
+        // The binders and options the sandbox host registers the same tools with, in declaration order.
+        builder.AddRemoteRunTools<WorkspaceTools>(
+            RunWorkspaceToolOptions.SourceName,
+            RunWorkspaceToolOptions.SerializerOptions,
+            static t => t.ReadFile,
+            static t => t.ListFiles,
+            static t => t.WriteFile,
+            static t => t.EditFile);
+        builder.AddRemoteRunTools<SandboxTools>(SandboxToolOptions.SourceName, SandboxToolOptions.SerializerOptions, static t => t.Build, static t => t.Test);
         return builder;
     }
 

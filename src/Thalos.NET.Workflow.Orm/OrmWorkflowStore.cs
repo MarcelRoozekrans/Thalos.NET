@@ -1,6 +1,5 @@
 using System.Data.Async.Adapters;
 using System.Diagnostics;
-using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
@@ -45,17 +44,6 @@ public sealed partial class OrmWorkflowStore(
         SELECT id, process, process_version, correlation_key, current_node, current_seq, status, awaiting_signal, visits, variables, last_error, manifest, started_by, last_resumed_by, last_resumed_at, xmin::text::bigint AS xmin, trace_parent
         FROM workflow_run
         """;
-
-    /// <summary>
-    /// <see cref="RunManifest"/>'s JSON shape on the wire and in the <c>manifest</c> column,
-    /// <see cref="RunPrincipal"/>'s in the <c>started_by</c> column, and <c>LastResumeEnvelope</c>'s in
-    /// <c>last_resumed_by</c>, and <see cref="TurnUsage"/>'s in <c>workflow_run_event.usage</c>: web defaults (camelCase property names), matching <c>Thalos.Mcp.McpConfigFile</c>'s
-    /// convention for the same <see cref="JsonSerializerDefaults.Web"/> preset elsewhere in this repository.
-    /// <see cref="AgentId"/> carries its own generated
-    /// <see cref="System.Text.Json.Serialization.JsonConverterAttribute"/>, so it round-trips through its
-    /// 26-character ULID form without this options instance needing to say anything about it.
-    /// </summary>
-    private static readonly JsonSerializerOptions ManifestJsonOptions = new(JsonSerializerDefaults.Web);
 
     /// <summary>
     /// <see cref="StartAsync(WorkflowStartRequest,CancellationToken)"/>'s <c>current_seq</c> for a brand-new run: it is on its first node's execution.
@@ -303,16 +291,16 @@ public sealed partial class OrmWorkflowStore(
         insert.Parameters.AddWithValue("currentNode", startNode);
         insert.Parameters.AddWithValue("currentSeq", InitialCurrentSeq);
         insert.Parameters.AddWithValue("status", nameof(WorkflowStatus.Running));
-        insert.Parameters.AddWithValue("visits", JsonSerializer.Serialize(new Dictionary<string, int>(StringComparer.Ordinal) { [startNode] = 1 }));
-        insert.Parameters.AddWithValue("variables", JsonSerializer.Serialize(initialVariables));
+        insert.Parameters.AddWithValue("visits", OrmWorkflowJson.SerializeVisits(new Dictionary<string, int>(StringComparer.Ordinal) { [startNode] = 1 }));
+        insert.Parameters.AddWithValue("variables", OrmWorkflowJson.SerializeVariables(initialVariables));
         // Written once, here, and never touched again — ApplyTransitionAsync's UPDATE (CompleteNodeAsync,
         // ResumeAsync) and the FailAsync/CancelAsync UPDATEs all name every column they change explicitly and
         // none of them lists manifest or started_by, so this INSERT is the only statement in this class that
         // ever writes either.
-        insert.Parameters.AddWithValue("manifest", manifest is null ? DBNull.Value : JsonSerializer.Serialize(manifest, ManifestJsonOptions));
+        insert.Parameters.AddWithValue("manifest", manifest is null ? DBNull.Value : OrmWorkflowJson.SerializeManifest(manifest));
         // startedBy is required on WorkflowStartRequest and guarded non-null above — unlike manifest, this is
         // never DBNull.Value on the path that actually inserts a row (ruling R26).
-        insert.Parameters.AddWithValue("startedBy", JsonSerializer.Serialize(startedBy, ManifestJsonOptions));
+        insert.Parameters.AddWithValue("startedBy", OrmWorkflowJson.SerializePrincipal(startedBy));
         // The W3C traceparent current at this INSERT (0.15.0): the dispatcher links each node's span to it. Read here,
         // inside the store, so no caller has to pass it; written once, like manifest and started_by.
         insert.Parameters.AddWithValue("traceParent", (object?)CurrentTraceParent() ?? DBNull.Value);
@@ -901,7 +889,7 @@ public sealed partial class OrmWorkflowStore(
                 Status = Enum.Parse<WorkflowStatus>(reader.GetString(3)),
                 CurrentNode = reader.GetString(4),
                 AwaitingSignal = reader.IsDBNull(5) ? null : reader.GetString(5),
-                StartedBy = reader.IsDBNull(6) ? null : JsonSerializer.Deserialize<RunPrincipal>(reader.GetString(6), ManifestJsonOptions),
+                StartedBy = reader.IsDBNull(6) ? null : OrmWorkflowJson.DeserializePrincipal(reader.GetString(6)),
                 CreatedAt = reader.GetFieldValue<DateTimeOffset>(7),
                 UpdatedAt = reader.GetFieldValue<DateTimeOffset>(8),
             });
@@ -949,9 +937,9 @@ public sealed partial class OrmWorkflowStore(
         Status: reader.GetString(4),
         Outcome: reader.IsDBNull(5) ? null : reader.GetString(5),
         Error: reader.IsDBNull(6) ? null : reader.GetString(6),
-        Usage: reader.IsDBNull(7) ? null : JsonSerializer.Deserialize<TurnUsage>(reader.GetString(7), ManifestJsonOptions),
+        Usage: reader.IsDBNull(7) ? null : OrmWorkflowJson.DeserializeUsage(reader.GetString(7)),
         CreatedAt: reader.GetFieldValue<DateTimeOffset>(8),
-        Actor: reader.IsDBNull(9) ? null : JsonSerializer.Deserialize<RunPrincipal>(reader.GetString(9), ManifestJsonOptions));
+        Actor: reader.IsDBNull(9) ? null : OrmWorkflowJson.DeserializePrincipal(reader.GetString(9)));
 
     private async Task<NpgsqlConnection> OpenConnectionAsync(CancellationToken ct)
     {
@@ -1024,7 +1012,7 @@ public sealed partial class OrmWorkflowStore(
     private async Task EnqueueDispatchAsync(NpgsqlConnection connection, NpgsqlTransaction tx, Guid runId, long seq, string node, CancellationToken ct)
     {
         var outboxStore = CreateOutboxStore(connection);
-        var payload = JsonSerializer.SerializeToUtf8Bytes(new WorkflowDispatchMessage(runId, seq, node));
+        var payload = OrmWorkflowJson.SerializeDispatch(new WorkflowDispatchMessage(runId, seq, node));
         await outboxStore.EnqueueAsync(WorkflowDispatch.TypeName, payload, tx, ct).ConfigureAwait(false);
     }
 
@@ -1045,8 +1033,8 @@ public sealed partial class OrmWorkflowStore(
         update.Parameters.AddWithValue("newSeq", newSeq);
         update.Parameters.AddWithValue("status", status.ToString());
         update.Parameters.AddWithValue("awaitingSignal", (object?)awaitingSignal ?? DBNull.Value);
-        update.Parameters.AddWithValue("visits", JsonSerializer.Serialize(visits));
-        update.Parameters.AddWithValue("variables", JsonSerializer.Serialize(variables));
+        update.Parameters.AddWithValue("visits", OrmWorkflowJson.SerializeVisits(visits));
+        update.Parameters.AddWithValue("variables", OrmWorkflowJson.SerializeVariables(variables));
         update.Parameters.AddWithValue("id", runId);
         update.Parameters.AddWithValue("expectedXmin", expectedXmin);
 
@@ -1076,7 +1064,7 @@ public sealed partial class OrmWorkflowStore(
             SET last_resumed_by = @by::jsonb, last_resumed_at = now()
             WHERE id = @id
             """;
-        update.Parameters.AddWithValue("by", JsonSerializer.Serialize(new LastResumeEnvelope(resumedBy, signal), ManifestJsonOptions));
+        update.Parameters.AddWithValue("by", OrmWorkflowJson.SerializeResumeEnvelope(new LastResumeEnvelope(resumedBy, signal)));
         update.Parameters.AddWithValue("id", runId);
 
         await update.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
@@ -1102,10 +1090,10 @@ public sealed partial class OrmWorkflowStore(
         cmd.Parameters.AddWithValue("status", status.ToString());
         cmd.Parameters.AddWithValue("awaitingSignal", (object?)awaitingSignal ?? DBNull.Value);
         cmd.Parameters.AddWithValue("outcome", (object?)outcome ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("variables", variables is null ? DBNull.Value : JsonSerializer.Serialize(variables));
+        cmd.Parameters.AddWithValue("variables", variables is null ? DBNull.Value : OrmWorkflowJson.SerializeVariables(variables));
         cmd.Parameters.AddWithValue("error", (object?)error ?? DBNull.Value);
-        cmd.Parameters.AddWithValue("usage", usage is null ? DBNull.Value : JsonSerializer.Serialize(usage.Value, ManifestJsonOptions));
-        cmd.Parameters.AddWithValue("actor", actor is null ? DBNull.Value : JsonSerializer.Serialize(actor, ManifestJsonOptions));
+        cmd.Parameters.AddWithValue("usage", usage is null ? DBNull.Value : OrmWorkflowJson.SerializeUsage(usage.Value));
+        cmd.Parameters.AddWithValue("actor", actor is null ? DBNull.Value : OrmWorkflowJson.SerializePrincipal(actor));
         try
         {
             await cmd.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
@@ -1145,37 +1133,15 @@ public sealed partial class OrmWorkflowStore(
         CurrentSeq: reader.GetInt64(5),
         Status: Enum.Parse<WorkflowStatus>(reader.GetString(6)),
         AwaitingSignal: reader.IsDBNull(7) ? null : reader.GetString(7),
-        Visits: JsonSerializer.Deserialize<Dictionary<string, int>>(reader.GetString(8)) ?? [],
-        Variables: DeserializeVariables(reader.GetString(9)),
+        Visits: OrmWorkflowJson.DeserializeVisits(reader.GetString(8)) ?? [],
+        Variables: OrmWorkflowJson.DeserializeVariables(reader.GetString(9)),
         LastError: reader.IsDBNull(10) ? null : reader.GetString(10),
-        Manifest: reader.IsDBNull(11) ? null : JsonSerializer.Deserialize<RunManifest>(reader.GetString(11), ManifestJsonOptions),
-        StartedBy: reader.IsDBNull(12) ? null : JsonSerializer.Deserialize<RunPrincipal>(reader.GetString(12), ManifestJsonOptions),
+        Manifest: reader.IsDBNull(11) ? null : OrmWorkflowJson.DeserializeManifest(reader.GetString(11)),
+        StartedBy: reader.IsDBNull(12) ? null : OrmWorkflowJson.DeserializePrincipal(reader.GetString(12)),
         LastResumedBy: reader.IsDBNull(13) ? null : reader.GetString(13),
         LastResumedAt: reader.IsDBNull(14) ? null : reader.GetFieldValue<DateTimeOffset>(14),
         Xmin: reader.GetInt64(15),
         TraceParent: reader.IsDBNull(16) ? null : reader.GetString(16));
-
-    /// <summary>
-    /// Deserializing straight to <c>Dictionary&lt;string, object?&gt;</c> leaves every value a boxed
-    /// <see cref="JsonElement"/>, not the plain CLR value a consumer reading <see cref="WorkflowRun.Variables"/>
-    /// would expect — comparing a boxed <see cref="JsonElement"/> string against a bare <see cref="string"/>
-    /// never succeeds. Parses to a <see cref="JsonElement"/> instead and hands it to
-    /// <c>WorkflowVariableBlock.ReadObject</c>, so the bag holds ordinary strings, numbers, booleans, nulls,
-    /// dictionaries and lists.
-    /// </summary>
-    /// <remarks>
-    /// That method, and not a copy of it here, on purpose: it is also what <c>WorkflowNodeDispatcher</c> unwraps
-    /// a reported variables object with on the way <em>in</em>. Two copies would let a value come back out of
-    /// this column as a different CLR type than it went in as — which is precisely what happened while the
-    /// unwrapping did live in two places.
-    /// </remarks>
-    private static Dictionary<string, object?> DeserializeVariables(string json)
-    {
-        using var document = JsonDocument.Parse(json);
-        return document.RootElement.ValueKind == JsonValueKind.Object
-            ? WorkflowVariableBlock.ReadObject(document.RootElement)
-            : new Dictionary<string, object?>(StringComparer.Ordinal);
-    }
 
     /// <summary>Whether <paramref name="status"/> is one a run cannot leave: no further transition, completion, or termination is meaningful once reached.</summary>
     private static bool IsTerminal(WorkflowStatus status) =>
@@ -1216,16 +1182,10 @@ public sealed partial class OrmWorkflowStore(
             return null;
         }
 
-        var envelope = JsonSerializer.Deserialize<LastResumeEnvelope>(lastResumedBy, ManifestJsonOptions)
+        var envelope = OrmWorkflowJson.DeserializeResumeEnvelope(lastResumedBy)
             ?? throw new InvalidOperationException("last_resumed_by held a JSON null; ResumeAsync never writes one.");
         return new RunResume(envelope.Principal, lastResumedAt.Value, envelope.Signal);
     }
-
-    /// <summary>
-    /// <c>last_resumed_by</c>'s JSON shape: the principal and the signal it resumed, packed into one column so a
-    /// third dedicated column is not needed just to carry the signal alongside the approver.
-    /// </summary>
-    private sealed record LastResumeEnvelope(RunPrincipal Principal, string Signal);
 
     private sealed record RunRow(
         Guid Id,

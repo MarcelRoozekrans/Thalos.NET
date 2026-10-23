@@ -45,7 +45,7 @@ public sealed class ThalosBuilder
     }
 
     /// <summary>Registers an <see cref="IAuthorizationPolicy"/> (looked up by its <c>[Policy]</c> name). Registering the same type twice is a no-op.</summary>
-    public ThalosBuilder AddPolicy<TPolicy>() where TPolicy : class, IAuthorizationPolicy
+    public ThalosBuilder AddPolicy<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TPolicy>() where TPolicy : class, IAuthorizationPolicy
     {
         Services.TryAddEnumerable(ServiceDescriptor.Singleton<IAuthorizationPolicy, TPolicy>());
         return this;
@@ -60,21 +60,21 @@ public sealed class ThalosBuilder
     }
 
     /// <summary>Uses <typeparamref name="TProvider"/> as the (single) chat-client provider, replacing any earlier one.</summary>
-    public ThalosBuilder UseChatClientProvider<TProvider>() where TProvider : class, IChatClientProvider
+    public ThalosBuilder UseChatClientProvider<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TProvider>() where TProvider : class, IChatClientProvider
     {
         Services.Replace(ServiceDescriptor.Singleton<IChatClientProvider, TProvider>());
         return this;
     }
 
     /// <summary>Adds a chat-client decorator (applied in ascending <see cref="IChatClientDecorator.Order"/>). Registering the same type twice is a no-op.</summary>
-    public ThalosBuilder AddChatClientDecorator<TDecorator>() where TDecorator : class, IChatClientDecorator
+    public ThalosBuilder AddChatClientDecorator<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TDecorator>() where TDecorator : class, IChatClientDecorator
     {
         Services.TryAddEnumerable(ServiceDescriptor.Singleton<IChatClientDecorator, TDecorator>());
         return this;
     }
 
     /// <summary>Adds a tool source resolved from the container. Registering the same type twice is a no-op.</summary>
-    public ThalosBuilder AddToolSource<TSource>() where TSource : class, IToolSource
+    public ThalosBuilder AddToolSource<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TSource>() where TSource : class, IToolSource
     {
         Services.TryAddEnumerable(ServiceDescriptor.Singleton<IToolSource, TSource>());
         return this;
@@ -135,18 +135,21 @@ public sealed class ThalosBuilder
     /// form for trimmed and Native AOT hosts; <see cref="AddLocalTools(string, Type[])"/> discovers the same tools by
     /// reflection.
     /// </summary>
-    /// <example><c>thalos.AddLocalTools&lt;MyTools&gt;("mine", MyJsonContext.Default.Options, t =&gt; t.Search, t =&gt; t.Fetch);</c></example>
+    /// <example><c>thalos.AddLocalTools&lt;MyTools&gt;("mine", LocalToolSources.CreateOptions(MyJsonContext.Default), t =&gt; t.Search, t =&gt; t.Fetch);</c></example>
     /// <typeparam name="TTools">The tool class; its public constructor is resolved from the container on every call.</typeparam>
     /// <param name="sourceName">The source name.</param>
     /// <param name="serializerOptions">
-    /// The options the tools' arguments and results go through. Their resolver must cover every parameter and result
-    /// type, typically a <see cref="System.Text.Json.Serialization.JsonSerializerContext"/>.
+    /// The options the tools' arguments and results go through, typically from <see cref="LocalToolSources.CreateOptions"/>
+    /// over a <see cref="System.Text.Json.Serialization.JsonSerializerContext"/>. Their resolver must cover every
+    /// parameter and result type.
     /// </param>
     /// <param name="tools">One binder per tool, such as <c>t =&gt; t.ReadFile</c>.</param>
     /// <returns>This builder.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="serializerOptions"/> or <paramref name="tools"/> is null.</exception>
     /// <exception cref="ArgumentException">
-    /// <typeparamref name="TTools"/> is not marked <see cref="ThalosToolTypeAttribute"/>, no binder is given, or a remote
-    /// run tool source named <paramref name="sourceName"/> was already added.
+    /// <paramref name="sourceName"/> is blank or violates <see cref="ToolSourceName"/>, <typeparamref name="TTools"/> is not
+    /// marked <see cref="ThalosToolTypeAttribute"/>, no binder is given, or a remote run tool source named
+    /// <paramref name="sourceName"/> was already added. Each is checked here, at registration.
     /// </exception>
     /// <remarks>
     /// The tools behave as <see cref="AddLocalTools(string, Type[])"/>'s do: names from <see cref="ThalosToolAttribute"/>,
@@ -160,17 +163,8 @@ public sealed class ThalosBuilder
         where TTools : class
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(sourceName);
-        ArgumentNullException.ThrowIfNull(serializerOptions);
-        ArgumentNullException.ThrowIfNull(tools);
-        if (!typeof(TTools).IsDefined(typeof(ThalosToolTypeAttribute), inherit: false))
-        {
-            throw new ArgumentException($"Type '{typeof(TTools).FullName}' is not marked [ThalosToolType].", nameof(tools));
-        }
-
-        if (tools.Length == 0)
-        {
-            throw new ArgumentException("At least one tool binder is required.", nameof(tools));
-        }
+        ToolSourceName.ThrowIfInvalid(sourceName, nameof(sourceName));
+        LocalToolSources.ThrowIfInvalid(serializerOptions, tools);
 
         ToolSourceNames.Of(Services).AddLocal(sourceName, nameof(sourceName));
         Func<TTools, Delegate>[] binders = [.. tools];
@@ -183,7 +177,7 @@ public sealed class ThalosBuilder
     /// The store is a singleton: implementations that need scoped resources (a DbContext, a unit of work) should take
     /// <see cref="IServiceScopeFactory"/> and create a scope per call rather than depending on scoped services directly.
     /// </summary>
-    public ThalosBuilder UseSessionStore<TStore>() where TStore : class, IAgentSessionStore
+    public ThalosBuilder UseSessionStore<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TStore>() where TStore : class, IAgentSessionStore
     {
         Services.Replace(ServiceDescriptor.Singleton<TStore, TStore>());
         Services.Replace(ServiceDescriptor.Singleton<IAgentSessionStore>(sp => new AgentSessionStoreInstrumented(sp.GetRequiredService<TStore>())));

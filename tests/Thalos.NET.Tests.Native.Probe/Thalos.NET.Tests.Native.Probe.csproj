@@ -1,0 +1,49 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- The native probe: Thalos' compile-time paths, YAML loading, workflow rows and the outbox, tools, options binding,
+       tool authorization and AI.Sentinel, each printed as one canonical line. Published as Native AOT by NativeProbeTests
+       in Thalos.NET.Tests.Workflow.Orm, which compares its output with a JIT run of this project. PublishAot here, not on the
+       command line, so the trim and AOT analyzers run on this project and ILC sees the whole program, as a consumer
+       referencing the packages does. -->
+  <PropertyGroup>
+    <!-- One framework, not the inherited TargetFrameworks list: publish refuses a cross-targeting project. -->
+    <TargetFrameworks></TargetFrameworks>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <IsTestProject>false</IsTestProject>
+    <IsPackable>false</IsPackable>
+    <PublishAot>true</PublishAot>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Every packable project except Anthropic and Testing. -->
+    <ProjectReference Include="..\..\src\Thalos.NET\Thalos.NET.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Abstractions\Thalos.NET.Abstractions.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Channels\Thalos.NET.Channels.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Channels.Telegram\Thalos.NET.Channels.Telegram.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Git\Thalos.NET.Git.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Git.LibGit2Sharp\Thalos.NET.Git.LibGit2Sharp.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Mcp\Thalos.NET.Mcp.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Memory\Thalos.NET.Memory.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Memory.RagNet\Thalos.NET.Memory.RagNet.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Sandbox\Thalos.NET.Sandbox.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Sandbox.Docker\Thalos.NET.Sandbox.Docker.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Sandbox.Host\Thalos.NET.Sandbox.Host.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Sentinel\Thalos.NET.Sentinel.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Skills\Thalos.NET.Skills.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Workflow\Thalos.NET.Workflow.csproj" />
+    <ProjectReference Include="..\..\src\Thalos.NET.Workflow.Orm\Thalos.NET.Workflow.Orm.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="..\Thalos.NET.Tests.Unit\Tools\ToolOracle.cs" Link="ToolOracle.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- tests/Directory.Build.props adds test packages; remove them for this exe -->
+    <PackageReference Remove="Microsoft.NET.Test.Sdk" />
+    <PackageReference Remove="xunit" />
+    <PackageReference Remove="xunit.runner.visualstudio" />
+    <PackageReference Remove="coverlet.collector" />
+    <PackageReference Remove="NSubstitute" />
+    <PackageReference Remove="AwesomeAssertions" />
+    <Using Remove="Xunit" />
+    <Using Remove="AwesomeAssertions" />
+  </ItemGroup>
+</Project>

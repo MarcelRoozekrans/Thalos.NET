@@ -8,7 +8,9 @@ namespace Thalos.Sentinel;
 /// <summary>
 /// Registers AI.Sentinel innermost, closest to the provider (Order -1000): it scans exactly what goes to the model — including
 /// anything decorators further out inject — and only provider exceptions get wrapped by Sentinel. MAF's function-invocation loop sits
-/// outside all decorators, so every model round-trip (tool results included) is scanned.
+/// outside all decorators, so every model round-trip (tool results included) is scanned. Because Sentinel sits inside function
+/// invocation, PII placeholders in the model's tool-call arguments are restored before the tool runs; secret placeholders are
+/// never restored into tool arguments, by AI.Sentinel's design.
 /// </summary>
 public sealed class SentinelChatClientDecorator : IChatClientDecorator
 {

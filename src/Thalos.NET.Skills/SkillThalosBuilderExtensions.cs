@@ -36,8 +36,6 @@ public static partial class SkillThalosBuilderExtensions
     /// each one turns itself off, so a host can bind the flag from configuration that is not read until the provider is built.
     /// </para>
     /// </remarks>
-    [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
-    [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     public static ThalosBuilder UseSkills(this ThalosBuilder builder, Action<SkillOptions>? configure = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -51,8 +49,6 @@ public static partial class SkillThalosBuilderExtensions
     }
 
     /// <summary>Same as <see cref="UseSkills(ThalosBuilder, Action{SkillOptions}?)"/>, options bound from the <c>Thalos:Skills</c> section of <paramref name="configuration"/>.</summary>
-    [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
-    [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     public static ThalosBuilder UseSkills(this ThalosBuilder builder, IConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -66,7 +62,7 @@ public static partial class SkillThalosBuilderExtensions
     /// <see cref="IServiceScopeFactory"/> for scoped resources. May be called before or after <see cref="UseSkills(ThalosBuilder, Action{SkillOptions}?)"/>:
     /// this replaces, <c>UseSkills</c> only tries to add, so <typeparamref name="TStore"/> wins either way.
     /// </summary>
-    public static ThalosBuilder UseSkillStore<TStore>(this ThalosBuilder builder) where TStore : class, ISkillStore
+    public static ThalosBuilder UseSkillStore<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TStore>(this ThalosBuilder builder) where TStore : class, ISkillStore
     {
         ArgumentNullException.ThrowIfNull(builder);
         builder.Services.Replace(ServiceDescriptor.Singleton<TStore, TStore>());
@@ -75,15 +71,13 @@ public static partial class SkillThalosBuilderExtensions
     }
 
     /// <summary>Uses <typeparamref name="TIndex"/> as the skill index (replacing the default), before or after <c>UseSkills</c>.</summary>
-    public static ThalosBuilder UseSkillIndex<TIndex>(this ThalosBuilder builder) where TIndex : class, ISkillIndex
+    public static ThalosBuilder UseSkillIndex<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TIndex>(this ThalosBuilder builder) where TIndex : class, ISkillIndex
     {
         ArgumentNullException.ThrowIfNull(builder);
         builder.Services.Replace(ServiceDescriptor.Singleton<ISkillIndex, TIndex>());
         return builder;
     }
 
-    [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
-    [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     private static ThalosBuilder Register(ThalosBuilder builder, OptionsBuilder<SkillOptions> options)
     {
         options.PostConfigure(Normalize).ValidateOnStart();

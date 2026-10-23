@@ -1,3 +1,6 @@
+using System.Text.Json;
+using Thalos.Tools;
+
 namespace Thalos.Workspaces;
 
 /// <summary>Options for <see cref="WorkspaceTools"/>, the <c>workspace__*</c> file tools.</summary>
@@ -5,6 +8,13 @@ public sealed class RunWorkspaceToolOptions
 {
     /// <summary>The tool source name the tools are registered under: <c>workspace__read_file</c>, etc.</summary>
     public const string SourceName = "workspace";
+
+    /// <summary>
+    /// The serializer options <see cref="WorkspaceTools"/>' arguments and results go through, from its source-generated
+    /// metadata by <see cref="LocalToolSources.CreateOptions"/>, read-only: for a host that registers the tools itself,
+    /// such as Thalos.NET.Sandbox's <c>AddRemoteRunTools&lt;WorkspaceTools&gt;</c>.
+    /// </summary>
+    public static JsonSerializerOptions SerializerOptions { get; } = LocalToolSources.CreateOptions(WorkspaceToolsJsonContext.Default);
 
     /// <summary>
     /// The host-wide ceiling of writable file extensions, each with its leading dot (e.g. <c>".cs"</c>), compared

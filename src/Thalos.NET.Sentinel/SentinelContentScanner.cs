@@ -8,9 +8,13 @@ namespace Thalos.Sentinel;
 
 /// <summary>
 /// Runs untrusted text (recalled memories) through AI.Sentinel's detection pipeline — the same detectors that scan model
-/// traffic — as a single user message, and quarantines it when the top detection's configured action
-/// (<see cref="SentinelOptions.OnCritical"/> … <see cref="SentinelOptions.OnLow"/>) is <see cref="SentinelAction.Quarantine"/>.
-/// The verdict detail is <c>"{Severity}: {DetectorId}"</c>; the detector's reason text goes to the log only.
+/// traffic — as a single user message, and quarantines it when any detection's effective action is
+/// <see cref="SentinelAction.Quarantine"/>. The effective action is the one Sentinel itself applies,
+/// <see cref="SentinelOptions.EffectiveAction(DetectionResult)"/>: a detector's own <see cref="DetectorConfiguration.Action"/>
+/// when set, otherwise the severity mapping <see cref="SentinelOptions.OnCritical"/> … <see cref="SentinelOptions.OnLow"/>.
+/// A redacting detector (PII, credentials) cannot redact stored text, so its finding falls back to the severity mapping, as
+/// Sentinel does whenever redaction is not possible. The verdict detail is <c>"{Severity}: {DetectorId}"</c> of the most severe
+/// quarantining detection; the detector's reason text goes to the log only.
 /// </summary>
 /// <remarks>
 /// This runs the detection pipeline directly and bypasses Sentinel's InterventionEngine: non-quarantine outcomes (Log/Alert)
@@ -28,28 +32,17 @@ internal sealed partial class SentinelContentScanner(IDetectionPipeline pipeline
         }
 
         var sessionId = TurnScope.Current?.SessionId.ToString() ?? "thalos-untrusted-content";
-        var context = new SentinelContext(options.DefaultSenderId, options.DefaultReceiverId, new AI.Sentinel.Domain.SessionId(sessionId), [new ChatMessage(ChatRole.User, content)], [], null);
+        var context = new SentinelContext(options.DefaultSenderId, options.DefaultReceiverId, new AI.Sentinel.Domain.SessionId(sessionId), [new ChatMessage(ChatRole.User, content)], []);
         var result = await pipeline.RunAsync(context, ct).ConfigureAwait(false);
         if (result.IsClean)
         {
             return UntrustedContentVerdict.Allow();
         }
 
-        var top = result.Detections.Where(d => !d.IsClean).MaxBy(d => d.Severity);
+        // Same choice as Sentinel's own pipeline: the most severe detection among those whose effective action is the
+        // decisive one. Quarantine ranks above every other action, so any quarantining detection decides.
+        var top = result.Detections.Where(d => !d.IsClean && options.EffectiveAction(d) == SentinelAction.Quarantine).MaxBy(d => d.Severity);
         if (top is null)
-        {
-            return UntrustedContentVerdict.Allow();
-        }
-
-        var action = top.Severity switch
-        {
-            Severity.Critical => options.OnCritical,
-            Severity.High => options.OnHigh,
-            Severity.Medium => options.OnMedium,
-            Severity.Low => options.OnLow,
-            _ => SentinelAction.PassThrough,
-        };
-        if (action != SentinelAction.Quarantine)
         {
             return UntrustedContentVerdict.Allow();
         }

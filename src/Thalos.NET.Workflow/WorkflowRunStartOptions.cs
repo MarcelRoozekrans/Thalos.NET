@@ -6,6 +6,8 @@ namespace Thalos.Workflow;
 /// </summary>
 public sealed record WorkflowRunStartOptions
 {
+    private readonly IReadOnlyDictionary<string, object?>? _variables;
+
     /// <summary>The process name to run.</summary>
     public required string Process { get; init; }
 
@@ -13,7 +15,18 @@ public sealed record WorkflowRunStartOptions
     public required string CorrelationKey { get; init; }
 
     /// <summary><see langword="null"/> = the run starts with no variables.</summary>
-    public IReadOnlyDictionary<string, object?>? Variables { get; init; }
+    /// <exception cref="ArgumentException">
+    /// A value is not JSON-shaped; see <see cref="WorkflowVariableJson.Validate"/>.
+    /// </exception>
+    public IReadOnlyDictionary<string, object?>? Variables
+    {
+        get => _variables;
+        init
+        {
+            WorkflowVariableJson.Validate(value, nameof(Variables));
+            _variables = value;
+        }
+    }
 
     /// <summary><see langword="null"/> = the manifest pins no documents.</summary>
     public IReadOnlyDictionary<string, string>? Documents { get; init; }

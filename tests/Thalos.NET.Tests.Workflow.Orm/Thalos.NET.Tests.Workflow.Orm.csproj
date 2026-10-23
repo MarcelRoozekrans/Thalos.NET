@@ -9,5 +9,11 @@
     <ProjectReference Include="..\..\src\Thalos.NET.Testing\Thalos.NET.Testing.csproj" />
     <PackageReference Include="Testcontainers.PostgreSql" />
     <PackageReference Include="Npgsql" />
+    <PackageReference Include="Xunit.SkippableFact" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- NativeProbeTests publishes tests/Thalos.NET.Tests.Native.Probe with the smoke tests' fixture. -->
+    <Compile Include="..\Thalos.NET.Tests.Sandbox.Host\NativeHostPublish.cs" Link="NativeHostPublish.cs" />
+    <Compile Include="..\Thalos.NET.Tests.Sandbox.Host\IlWarnings.cs" Link="IlWarnings.cs" />
   </ItemGroup>
 </Project>

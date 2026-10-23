@@ -6,6 +6,7 @@
     <PackageId>Thalos.NET.Workflow.Orm</PackageId>
     <Description>ZeroAlloc.ORM-backed IWorkflowStore for Thalos.NET.Workflow: raw-SQL persistence over PostgreSQL with a transactional outbox dispatch (ZeroAlloc.Outbox.Orm) so a run's transition and the work behind its next node commit or roll back together. No EF Core in this package's dependency tree.</Description>
     <PackageTags>agents;workflow;durable;postgres;orm;outbox;microsoft-agent-framework;zeroalloc</PackageTags>
+    <IsAotCompatible>true</IsAotCompatible>
     <!-- MA0004: raw ADO.NET (NpgsqlConnection/NpgsqlTransaction) throughout this package means "await using"
          disposal cannot itself carry .ConfigureAwait(false) without giving up member access to the connection
          for the rest of the method — the same rationale tests/Directory.Build.props documents for its own

@@ -225,6 +225,74 @@ sharpest item in the phase: applying 1004 ahead of the code rollout breaks proce
 instance still running pre-1004 code. Full mechanism and rollout guidance: [Schema migrations and rolling
 deploys](#schema-migrations-and-rolling-deploys) below.
 
+0.19.0 ships the same eighteen packages. Every packable package except `Thalos.NET.Testing` is now built with
+`IsAotCompatible`, so the trim and AOT analyzers guard each of them on `net8.0` and `net10.0`. The native probe
+under `tests/` publishes a host that references every packable project except `Thalos.NET.Anthropic` and
+`Thalos.NET.Testing` as Native AOT, and CI compares its output with a JIT run.
+
+**Breaking changes in 0.19.0:**
+
+- **A run variable must be JSON-shaped.** Variables are now checked where they enter: the `NodeResult`
+  constructor, `HostActionResult`, `WorkflowStartRequest.InitialVariables` and `WorkflowRunStartOptions.Variables`.
+  The store and the prompt block write them through the new `WorkflowVariableJson`, with no `JsonSerializer`
+  call, so they work under trimming and Native AOT. The stored bytes and the rendered block are unchanged, and a
+  run's in-memory and read-back values keep their CLR types.
+
+  A value must be a string, a number, a bool, null, a `JsonElement`, a `JsonNode`, or a list or string-keyed
+  dictionary of those. A `byte[]` counts as a string and is written as Base64. NaN and the infinities are refused,
+  and a value may nest at most 63 levels. Anything else, such as a `Guid`, a `DateTime`, an enum or a record,
+  now throws `ArgumentException` where it enters, with this message:
+
+  ```text
+  Workflow variable '<path>' has type '<full type name>', which is not JSON-shaped. Allowed: string, number,
+  bool, null, JsonElement, JsonNode, and lists or dictionaries of those.
+  ```
+
+  Before 0.19.0 such a value was serialized by reflection. To migrate, convert it before passing it: `Guid.ToString()`,
+  `DateTime.ToString("O")`, an enum's name, and for a record a `JsonElement` from
+  `JsonSerializer.SerializeToElement(value, yourContext.YourRecord)`. `WorkflowVariableJson.Validate` checks a bag
+  with the same rule if you want to test one before a run starts. A list must be re-enumerable, because the
+  check walks it more than once.
+- **`Thalos.NET.Sentinel` moves to AI.Sentinel 3.2.1 and takes its 3.x defaults.** PII and credential detectors
+  redact by default: an email address or an API key in a prompt reaches the model as a placeholder and the turn
+  succeeds, instead of taking the severity action. The placeholders in tool-call arguments are restored before the
+  tool runs. Set `RedactByDefault = false` in the `UseAISentinel` callback to restore the severity action.
+  3.0 also widened `PiiLeakageDetector` to every email address at Medium severity. The memory scanner cannot
+  redact, so with `OnMedium = Quarantine` any recalled memory that contains an email address is now quarantined,
+  whatever `RedactByDefault` says. The scanner also honours a detector's own `DetectorConfiguration.Action` and
+  quarantines on any quarantining detection, not only the most severe one. Host code that uses AI.Sentinel types
+  directly meets the AI.Sentinel 3.0 breaking changes, for example `DetectorConfiguration.Enabled` is `bool?` and
+  `SentinelContext` loses its `LlmId` argument. The Thalos public API is unchanged.
+
+**Added in 0.19.0:**
+
+- **`LocalToolSources`** in `Thalos.NET`: `CreateOptions(resolver)` builds the `JsonSerializerOptions` a typed tool
+  source needs from a source-generated context, and `Create<TTools>` builds an `IToolSource` from method groups.
+- **`AddRemoteRunTools<TTools>`** in `Thalos.NET.Sandbox` registers a remote run-tool source without reflection, the
+  way `AddLocalTools<TTools>` does for a local one. The `Type` overload keeps its attributes.
+- **`AddGitActionTools(sourceName)`** in `Thalos.NET.Git` registers `GitActionTools` through the typed path.
+- **`RunWorkspaceToolOptions.SerializerOptions` and `SandboxToolOptions.SerializerOptions`** expose the options the
+  workspace and sandbox tools use, for a host that registers them itself.
+- **`WorkflowDispatchMessage.JsonTypeInfo`** is the generated metadata for the outbox payload. A host that reads or
+  writes the payload should use it instead of a reflection-based `JsonSerializer` call.
+
+**Changed in 0.19.0:**
+
+- **`UseMemory`, `UseSkills` and `UseSandboxRunWorkspaces` no longer carry `[RequiresUnreferencedCode]` or
+  `[RequiresDynamicCode]`**, and neither do the `MemoryToolSource` and `SkillToolSource` constructors or the
+  `UseMemory` and `UseSkills` overloads that take `IConfiguration`. A caller that suppressed the warnings can drop the
+  suppression. `UseSandboxRunWorkspaces` registers its sources through `AddRemoteRunTools<TTools>`.
+- **The builder methods that register a generic implementation annotate the type parameter** with
+  `DynamicallyAccessedMembers(PublicConstructors)`, such as `UseMemoryStore<TStore>` and `UseSkillIndex<TIndex>`. A
+  caller that passes its own open generic parameter needs the same annotation.
+- **`Thalos.NET.Workflow.Yaml.ProcessYamlContext` is public only as generated plumbing.** `ProcessLoader` reads
+  process files through this YamlDotNet static context instead of reflection. It is hidden from IntelliSense and is
+  not a supported API; do not reference it. It goes back to `internal` once upstream YamlDotNet respects the declared
+  accessibility, tracked as Thalos #397 and [aaubry/YamlDotNet#1152](https://github.com/aaubry/YamlDotNet/issues/1152).
+- **A process node written as `name:` with nothing after it now reports an error** that names the node, instead of
+  `ProcessLoader.Load` throwing `NullReferenceException`. A deployer should expect `SyncAsync` to report it for such a
+  file, as for the shapes under [Process files that used to sync and now report an error](#process-files-that-used-to-sync-and-now-report-an-error).
+
 ## Local development against a consumer (Daedalus)
 
 `scripts/pack-local.ps1` packs `0.3.0-local.<timestamp>` (the `VersionPrefix` in `Directory.Build.props`) into `C:\Projects\Prive\.nuget-local`

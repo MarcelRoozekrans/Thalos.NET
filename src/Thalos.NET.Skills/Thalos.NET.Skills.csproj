@@ -4,6 +4,8 @@
     <PackageId>Thalos.NET.Skills</PackageId>
     <Description>Agent-scoped procedure documents for Thalos.NET: SKILL.md files synced into an ISkillStore, an always-present catalogue injected as an AIContextProvider, skills__load/skills__search tools, in-memory store and cosine index.</Description>
     <PackageTags>agents;skills;procedures;prompt;microsoft-agent-framework;zeroalloc</PackageTags>
+    <IsAotCompatible>true</IsAotCompatible>
+    <EnableConfigurationBindingGenerator>true</EnableConfigurationBindingGenerator>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />

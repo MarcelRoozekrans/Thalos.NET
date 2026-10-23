@@ -24,8 +24,6 @@ public static class MemoryThalosBuilderExtensions
     /// <see cref="RecallOptions.TopK"/> must be ≥ 1, <see cref="RecallOptions.MinScore"/> in [0, 1], and — when dedupe is enabled —
     /// <see cref="DedupeOptions.Threshold"/> in (0, 1]; otherwise an <see cref="OptionsValidationException"/> is thrown.
     /// </remarks>
-    [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
-    [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     public static ThalosBuilder UseMemory(this ThalosBuilder builder, Action<MemoryOptions>? configure = null)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -39,8 +37,6 @@ public static class MemoryThalosBuilderExtensions
     }
 
     /// <summary>Same as <see cref="UseMemory(ThalosBuilder, Action{MemoryOptions}?)"/>, options bound from the <c>Thalos:Memory</c> section of <paramref name="configuration"/>.</summary>
-    [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
-    [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     public static ThalosBuilder UseMemory(this ThalosBuilder builder, IConfiguration configuration)
     {
         ArgumentNullException.ThrowIfNull(builder);
@@ -50,7 +46,7 @@ public static class MemoryThalosBuilderExtensions
     }
 
     /// <summary>Uses <typeparamref name="TStore"/> as the memory store, wrapped in the telemetry proxy. Singleton — take <see cref="IServiceScopeFactory"/> for scoped resources.</summary>
-    public static ThalosBuilder UseMemoryStore<TStore>(this ThalosBuilder builder) where TStore : class, IMemoryStore
+    public static ThalosBuilder UseMemoryStore<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TStore>(this ThalosBuilder builder) where TStore : class, IMemoryStore
     {
         ArgumentNullException.ThrowIfNull(builder);
         builder.Services.Replace(ServiceDescriptor.Singleton<TStore, TStore>());
@@ -59,15 +55,13 @@ public static class MemoryThalosBuilderExtensions
     }
 
     /// <summary>Uses <typeparamref name="TIndex"/> as the memory index (replacing the default).</summary>
-    public static ThalosBuilder UseMemoryIndex<TIndex>(this ThalosBuilder builder) where TIndex : class, IMemoryIndex
+    public static ThalosBuilder UseMemoryIndex<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TIndex>(this ThalosBuilder builder) where TIndex : class, IMemoryIndex
     {
         ArgumentNullException.ThrowIfNull(builder);
         builder.Services.Replace(ServiceDescriptor.Singleton<IMemoryIndex, TIndex>());
         return builder;
     }
 
-    [RequiresUnreferencedCode("Discovers tool methods via reflection.")]
-    [RequiresDynamicCode("Tool parameters and results are serialized via reflection-based JSON.")]
     private static ThalosBuilder Register(ThalosBuilder builder, OptionsBuilder<MemoryOptions> options)
     {
         options.PostConfigure(Normalize).ValidateOnStart();

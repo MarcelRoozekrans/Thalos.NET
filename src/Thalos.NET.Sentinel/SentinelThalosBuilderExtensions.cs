@@ -14,12 +14,22 @@ public static class SentinelThalosBuilderExtensions
     /// recalled memories before injecting them. Calling this twice is a no-op (the first configuration wins).
     /// </summary>
     /// <remarks>
-    /// AI.Sentinel 2.3.0's security detectors are mostly semantic: without <see cref="SentinelOptions.EmbeddingGenerator"/>
+    /// AI.Sentinel 3.x's security detectors are mostly semantic: without <see cref="SentinelOptions.EmbeddingGenerator"/>
     /// set in <paramref name="configure"/> they return Clean and only the lexical/operational detectors are active
     /// (Sentinel warns per agent pipeline when it is first built). SEC-01 PromptInjection and SEC-05 Jailbreak are the
     /// exception — both carry a rule layer that catches unambiguous phrasings with no generator configured; only
     /// paraphrases need one. Set <see cref="SentinelOptions.EmbeddingGenerator"/> for full semantic coverage across
     /// every detector, including paraphrased SEC-01/SEC-05 attempts.
+    /// <para>
+    /// AI.Sentinel 3.x defaults apply unchanged. In particular the PII and credential detectors redact by default: an email
+    /// address or an API key in a prompt reaches the model as a placeholder and the turn succeeds, instead of taking the
+    /// severity action. Set <see cref="SentinelOptions.RedactByDefault"/> to <see langword="false"/> in
+    /// <paramref name="configure"/> to give their findings the severity action again. Recalled memories cannot be redacted, so
+    /// the <see cref="IUntrustedContentScanner"/> always gives those findings their severity action. Since 3.0 the PII detector
+    /// matches every email address at Medium severity, so with <see cref="SentinelOptions.OnMedium"/> set to
+    /// <see cref="SentinelAction.Quarantine"/> any recalled memory that contains an email address is quarantined, whatever
+    /// <see cref="SentinelOptions.RedactByDefault"/> says.
+    /// </para>
     /// </remarks>
     public static ThalosBuilder UseAISentinel(this ThalosBuilder builder, Action<SentinelOptions>? configure = null)
     {

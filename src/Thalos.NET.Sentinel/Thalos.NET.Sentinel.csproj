@@ -4,6 +4,7 @@
     <PackageId>Thalos.NET.Sentinel</PackageId>
     <Description>AI.Sentinel security middleware at the model boundary for Thalos.NET agents.</Description>
     <PackageTags>agents;security;ai-sentinel;prompt-injection</PackageTags>
+    <IsAotCompatible>true</IsAotCompatible>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />

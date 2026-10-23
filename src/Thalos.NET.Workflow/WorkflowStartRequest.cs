@@ -7,6 +7,8 @@ namespace Thalos.Workflow;
 /// </summary>
 public sealed record WorkflowStartRequest
 {
+    private readonly IReadOnlyDictionary<string, object?>? _initialVariables;
+
     /// <summary>The process name to run.</summary>
     public required string Process { get; init; }
 
@@ -20,7 +22,18 @@ public sealed record WorkflowStartRequest
     public required string StartNode { get; init; }
 
     /// <summary>The run's opening <see cref="WorkflowRun.Variables"/> bag, or <see langword="null"/> for a run that starts with nothing.</summary>
-    public IReadOnlyDictionary<string, object?>? InitialVariables { get; init; }
+    /// <exception cref="ArgumentException">
+    /// A value is not JSON-shaped; see <see cref="WorkflowVariableJson.Validate"/>.
+    /// </exception>
+    public IReadOnlyDictionary<string, object?>? InitialVariables
+    {
+        get => _initialVariables;
+        init
+        {
+            WorkflowVariableJson.Validate(value, nameof(InitialVariables));
+            _initialVariables = value;
+        }
+    }
 
     /// <summary>The run's write-once pin, or <see langword="null"/> to start a run with no manifest.</summary>
     public RunManifest? Manifest { get; init; }

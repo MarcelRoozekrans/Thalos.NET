@@ -66,7 +66,7 @@ internal sealed partial class SentinelErrorMappingChatClient(IChatClient inner, 
     }
 
     /// <summary>
-    /// AI.Sentinel 2.0.1 catches every exception from the inner client and rethrows it as
+    /// AI.Sentinel, from 2.0.1 through 3.2.1, catches every exception from the inner client and rethrows it as
     /// <c>SentinelError.PipelineFailure.ToException()</c> = <see cref="InvalidOperationException"/> with message
     /// <c>"Inner client failed."</c> (buffered) or <c>"Inner client streaming failed."</c> (streaming) and the original as inner.
     /// </summary>
@@ -74,7 +74,7 @@ internal sealed partial class SentinelErrorMappingChatClient(IChatClient inner, 
 
     /// <summary>
     /// Quarantine: detail is <c>"{Severity}: {DetectorId}"</c> of the top detection — never the detector's reason text (SEC-02 echoes
-    /// credential fragments, PlaceholderText echoes matches); the reason is logged instead. AI.Sentinel 2.0.1 puts only the top
+    /// credential fragments, PlaceholderText echoes matches); the reason is logged instead. AI.Sentinel, 2.0.1 through 3.2.1, puts only the top
     /// detection in <see cref="SentinelException.PipelineResult"/>. Rate-limit rejections carry no result and are not quarantines.
     /// </summary>
     private AgentTurnException Map(SentinelException ex)

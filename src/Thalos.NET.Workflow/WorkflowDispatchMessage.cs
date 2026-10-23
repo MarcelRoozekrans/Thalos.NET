@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization.Metadata;
+
 namespace Thalos.Workflow;
 
 /// <summary>
@@ -18,7 +20,15 @@ namespace Thalos.Workflow;
 /// longer matches the run's current sequence number can be dropped as a no-op rather than acted on twice.
 /// </param>
 /// <param name="Node">The node to run the agent/skill pair for.</param>
-public sealed record WorkflowDispatchMessage(Guid RunId, long Seq, string Node);
+public sealed record WorkflowDispatchMessage(Guid RunId, long Seq, string Node)
+{
+    /// <summary>
+    /// The payload's source-generated metadata, in default options: write and read the payload with this, through
+    /// <c>JsonSerializer.SerializeToUtf8Bytes(message, WorkflowDispatchMessage.JsonTypeInfo)</c> and its
+    /// <c>Deserialize</c> counterpart, so neither side needs reflection and both agree on the bytes.
+    /// </summary>
+    public static JsonTypeInfo<WorkflowDispatchMessage> JsonTypeInfo => WorkflowJsonContext.Default.WorkflowDispatchMessage;
+}
 
 /// <summary>Outbox message type names a workflow store enqueues under.</summary>
 public static class WorkflowDispatch

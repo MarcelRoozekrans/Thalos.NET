@@ -1,6 +1,6 @@
 using System.Text.RegularExpressions;
 
-namespace Thalos.Tests.Sandbox.Host;
+namespace Thalos.Tests;
 
 /// <summary>
 /// Counts a publish log's trim and AOT warnings, IL2xxx and IL3xxx, as Daedalus's <c>eng/aot/count-warnings.sh</c> does,

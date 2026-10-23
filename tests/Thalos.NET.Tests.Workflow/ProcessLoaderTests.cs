@@ -72,4 +72,21 @@ public sealed class ProcessLoaderTests
 
         p.Nodes["work"].Action.Should().BeNull();
     }
+
+    // Red: in ProcessLoader.Load, drop the null check on a node's value; the load throws NullReferenceException.
+    [Fact]
+    public void An_empty_node_fails_naming_the_node()
+    {
+        var load = () => ProcessLoader.Load("""
+            process: p
+            version: 1
+            nodes:
+              work:
+              done: { terminal: succeeded }
+            """);
+
+        var result = load.Should().NotThrow().Subject;
+        result.IsFailure.Should().BeTrue();
+        result.Error.Should().Be("The process definition's node 'work' is empty.");
+    }
 }

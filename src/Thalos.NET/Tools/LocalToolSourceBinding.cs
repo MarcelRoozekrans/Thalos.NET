@@ -66,20 +66,6 @@ internal static class LocalToolSourceBinding
     }
 
     /// <summary>
-    /// The serializer options for a reflection-free tool source: <see cref="AIJsonUtilities.DefaultOptions"/>' settings,
-    /// the ones a reflected tool's arguments and results go through, with <paramref name="resolver"/> as the only
-    /// resolver, read-only.
-    /// </summary>
-    /// <param name="resolver">The tools' metadata, typically a source-generated <see cref="System.Text.Json.Serialization.JsonSerializerContext"/>.</param>
-    public static JsonSerializerOptions CreateOptions(IJsonTypeInfoResolver resolver)
-    {
-        ArgumentNullException.ThrowIfNull(resolver);
-        var options = new JsonSerializerOptions(AIJsonUtilities.DefaultOptions) { TypeInfoResolver = resolver };
-        options.MakeReadOnly();
-        return options;
-    }
-
-    /// <summary>
     /// Runs one call of an instance tool method in a fresh DI scope: creates the instance from the scope, binds the
     /// function to it, invokes it with the scope as <see cref="AIFunctionArguments.Services"/>, and disposes the instance,
     /// then the scope.

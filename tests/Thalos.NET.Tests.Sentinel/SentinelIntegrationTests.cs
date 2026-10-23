@@ -9,7 +9,7 @@ using ZeroAlloc.Authorization;
 
 namespace Thalos.Tests.Sentinel;
 
-/// <summary>Real AI.Sentinel 2.3.0 pipeline (all detectors, intervention engine, audit store) in front of a scripted model.</summary>
+/// <summary>Real AI.Sentinel 3.x pipeline (all detectors, intervention engine, audit store) in front of a scripted model.</summary>
 public sealed class SentinelIntegrationTests
 {
     private sealed class Caller : ISecurityContext
@@ -20,7 +20,7 @@ public sealed class SentinelIntegrationTests
     }
 
     /// <summary>
-    /// Most of AI.Sentinel 2.3.0's security detectors are embedding-based and return Clean when
+    /// Most of AI.Sentinel 3.x's security detectors are embedding-based and return Clean when
     /// <see cref="SentinelOptions.EmbeddingGenerator"/> is null (SEC-01 PromptInjection and SEC-05 Jailbreak are the
     /// exception — their rule layer catches unambiguous phrasings even without one). This deterministic stand-in embeds
     /// a text as a 0/1 vector over a few marker phrases (case-insensitive substring match), so a prompt containing a
@@ -106,6 +106,24 @@ public sealed class SentinelIntegrationTests
         r.Error.Detail.Should().NotBeNullOrEmpty("detail carries the top detector id / severity").And.Contain("SEC-01");
         (await store.LoadMessagesAsync(s, default)).Value.Should().BeEmpty();
         (await store.GetAsync(s, default)).Value.State.Should().Be(SessionState.Idle);
+    }
+
+    [Fact]
+    public async Task Personal_data_is_redacted_before_the_model_by_default_not_quarantined()
+    {
+        // AI.Sentinel 3.0: "A prompt with an email address or an API key reaches the model with a placeholder and the call
+        // succeeds." Thalos.NET.Sentinel takes that default, so even a quarantining OnMedium lets the turn through.
+        // Red: set o.RedactByDefault = false in SentinelThalosBuilderExtensions.UseAISentinel before configure runs.
+        var (sp, client, agentId) = Build(o => o.OnMedium = SentinelAction.Quarantine);
+        client.ThenText("Noted.");
+        var rt = sp.GetRequiredService<IAgentRuntime>();
+        var s = (await rt.CreateSessionAsync(agentId, new Caller(), default)).Value;
+
+        var r = await rt.RunTurnAsync(new AgentTurnRequest(s, "Please email the report to jane.doe@example.com.", new Caller()), default);
+
+        r.IsSuccess.Should().BeTrue(r.IsFailure ? r.Error.ToString() : "");
+        var sent = client.Requests.Should().ContainSingle().Subject.Messages.Last(m => m.Role == ChatRole.User).Text;
+        sent.Should().NotContain("jane.doe@example.com").And.Contain("[EMAIL_");
     }
 
     [Fact]

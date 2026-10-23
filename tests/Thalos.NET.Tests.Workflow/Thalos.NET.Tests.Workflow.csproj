@@ -4,4 +4,8 @@
     <ProjectReference Include="..\..\src\Thalos.NET.Testing\Thalos.NET.Testing.csproj" />
     <PackageReference Include="Microsoft.Extensions.TimeProvider.Testing" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Daedalus' own process files, copied verbatim, for the ProcessLoader goldens. -->
+    <None Include="Fixtures\processes\*.yaml" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>
