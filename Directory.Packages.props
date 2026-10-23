@@ -1,14 +1,14 @@
 <Project>
   <ItemGroup>
     <!-- ZeroAlloc ecosystem -->
-    <PackageVersion Include="ZeroAlloc.Results" Version="1.4.4" />
-    <PackageVersion Include="ZeroAlloc.ValueObjects" Version="2.2.2" />
+    <PackageVersion Include="ZeroAlloc.Results" Version="1.4.5" />
+    <PackageVersion Include="ZeroAlloc.ValueObjects" Version="2.2.5" />
     <PackageVersion Include="ZeroAlloc.Mediator" Version="6.6.3" />
     <PackageVersion Include="ZeroAlloc.Authorization" Version="2.1.8" />
     <PackageVersion Include="ZeroAlloc.AsyncEvents" Version="1.1.11" />
     <PackageVersion Include="ZeroAlloc.StateMachine" Version="1.6.6" />
-    <PackageVersion Include="ZeroAlloc.Telemetry" Version="1.12.5" />
-    <PackageVersion Include="ZeroAlloc.Validation" Version="2.3.3" />
+    <PackageVersion Include="ZeroAlloc.Telemetry" Version="1.12.6" />
+    <PackageVersion Include="ZeroAlloc.Validation" Version="2.3.4" />
     <PackageVersion Include="ZeroAlloc.Inject" Version="1.11.5" />
     <PackageVersion Include="ZeroAlloc.Inject.Generator" Version="1.11.5" />
     <PackageVersion Include="ZeroAlloc.Analyzers" Version="1.11.2" />
@@ -20,11 +20,11 @@
     <PackageVersion Include="ModelContextProtocol" Version="2.2.0" />
     <!-- the sandbox host's MCP-over-HTTP routes — confined to Thalos.NET.Sandbox.Host -->
     <PackageVersion Include="ModelContextProtocol.AspNetCore" Version="2.3.0" />
-    <PackageVersion Include="Anthropic" Version="12.60.0" />
+    <PackageVersion Include="Anthropic" Version="13.1.0" />
     <PackageVersion Include="AI.Sentinel" Version="2.3.2" />
     <!-- Rag.NET (net10.0 only) — confined to Thalos.NET.Memory.RagNet -->
-    <PackageVersion Include="Rag.NET.Abstractions" Version="1.1.3" />
-    <PackageVersion Include="Rag.NET.VectorStores.PgVector" Version="1.1.3" />
+    <PackageVersion Include="Rag.NET.Abstractions" Version="1.3.0" />
+    <PackageVersion Include="Rag.NET.VectorStores.PgVector" Version="1.3.0" />
     <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.13" />
     <!-- container tests -->
     <PackageVersion Include="Testcontainers.PostgreSql" Version="4.16.0" />
@@ -36,9 +36,9 @@
     <!-- Its source generator: the static context ProcessLoader deserializes through, so no reflection -->
     <PackageVersion Include="Vecc.YamlDotNet.Analyzers.StaticGenerator" Version="18.1.0" />
     <!-- Raw-SQL ORM + transactional outbox, PostgreSQL persistence — net10.0-only, confined to Thalos.NET.Workflow.Orm -->
-    <PackageVersion Include="ZeroAlloc.ORM" Version="2.4.1" />
-    <PackageVersion Include="ZeroAlloc.Outbox" Version="4.4.5" />
-    <PackageVersion Include="ZeroAlloc.Outbox.Orm" Version="4.4.5" />
+    <PackageVersion Include="ZeroAlloc.ORM" Version="2.8.0" />
+    <PackageVersion Include="ZeroAlloc.Outbox" Version="4.4.6" />
+    <PackageVersion Include="ZeroAlloc.Outbox.Orm" Version="4.4.6" />
     <PackageVersion Include="AdoNet.Async.Adapters" Version="1.5.2" />
     <!-- Docker Engine client, the version Testcontainers 4.15.0 depends on — confined to Thalos.NET.Sandbox.Docker -->
     <PackageVersion Include="Docker.DotNet.Enhanced" Version="4.3.3" />
@@ -60,7 +60,7 @@
     <PackageVersion Include="Microsoft.Extensions.TimeProvider.Testing" Version="10.11.0" />
 
     <!-- Analyzers / build -->
-    <PackageVersion Include="Meziantou.Analyzer" Version="3.0.315" />
+    <PackageVersion Include="Meziantou.Analyzer" Version="3.0.316" />
     <PackageVersion Include="Roslynator.Analyzers" Version="5.0.1" />
     <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.402" />
 
