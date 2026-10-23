@@ -15,7 +15,7 @@ namespace Thalos.Tests.Unit.Anthropic;
 /// </summary>
 public sealed class OptionsBindingGoldenTests
 {
-    private static readonly JsonSerializerOptions DumpOptions = new() { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    private static readonly JsonSerializerOptions DumpOptions = new() { WriteIndented = true, NewLine = "\n", Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     // Red: rename AnthropicOptions.SectionName to "Thalos:AnthropicX"; nothing binds and the dump shows the defaults.
     [Fact]

@@ -14,7 +14,7 @@ namespace Thalos.Tests.Memory;
 /// </summary>
 public sealed class OptionsBindingGoldenTests
 {
-    private static readonly JsonSerializerOptions DumpOptions = new() { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    private static readonly JsonSerializerOptions DumpOptions = new() { WriteIndented = true, NewLine = "\n", Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     // Red: rename MemoryOptions.SectionName to "Thalos:MemoryX"; nothing binds and the dump shows the defaults.
     [Fact]

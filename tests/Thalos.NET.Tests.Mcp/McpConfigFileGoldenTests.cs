@@ -12,7 +12,7 @@ namespace Thalos.Tests.Mcp;
 /// </summary>
 public sealed class McpConfigFileGoldenTests
 {
-    private static readonly JsonSerializerOptions DumpOptions = new() { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    private static readonly JsonSerializerOptions DumpOptions = new() { WriteIndented = true, NewLine = "\n", Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     private const string File = """
         {

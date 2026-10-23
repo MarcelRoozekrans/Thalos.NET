@@ -15,7 +15,7 @@ namespace Thalos.Tests.Channels.Telegram;
 /// </summary>
 public sealed class OptionsBindingGoldenTests
 {
-    private static readonly JsonSerializerOptions DumpOptions = new() { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    private static readonly JsonSerializerOptions DumpOptions = new() { WriteIndented = true, NewLine = "\n", Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     // Red: rename TelegramOptions.SectionName to "Thalos:Channels:TelegramX"; nothing binds and the dump shows the
     // in-code entries only.

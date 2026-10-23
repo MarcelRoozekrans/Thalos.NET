@@ -18,7 +18,7 @@ namespace Thalos.Tests.Skills;
 /// </summary>
 public sealed class OptionsBindingGoldenTests
 {
-    private static readonly JsonSerializerOptions DumpOptions = new() { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
+    private static readonly JsonSerializerOptions DumpOptions = new() { WriteIndented = true, NewLine = "\n", Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping };
 
     private static readonly string Base = Path.GetFullPath("golden-roots");
 
