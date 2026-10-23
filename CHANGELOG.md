@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.19.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.18.0...v0.19.0) (2026-10-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* **workflow:** a run variable must be a string, a number, a bool, null, a JsonElement, a JsonNode, or a list or string-keyed dictionary of those. Any other value, such as a Guid, a DateTime, an enum or a record, now throws ArgumentException where it enters, naming the variable's path and type.
+* **deps:** move to AI.Sentinel 3.2.1
+* Thalos.NET.Sentinel takes AI.Sentinel 3.x defaults. PII and credential detectors redact by default; set RedactByDefault = false in the UseAISentinel callback to restore the severity action. Every email address is now a Medium finding, so with OnMedium = Quarantine a recalled memory that contains one is quarantined. The memory scanner honours per-detector actions and quarantines on any quarantining detection. Host code that uses AI.Sentinel types directly meets the AI.Sentinel 3.0 breaking changes.
+
+### Features
+
+* mark every package except Thalos.NET.Testing AOT-compatible ([5de9989](https://github.com/MarcelRoozekrans/Thalos.NET/commit/5de99896b922c7ccbe3b528f4d8d6e992dfe7180))
+* register Memory, Skills, Sandbox and Git tools without reflection ([5de9989](https://github.com/MarcelRoozekrans/Thalos.NET/commit/5de99896b922c7ccbe3b528f4d8d6e992dfe7180))
+* **workflow:** accept JSON-shaped run variables only ([5de9989](https://github.com/MarcelRoozekrans/Thalos.NET/commit/5de99896b922c7ccbe3b528f4d8d6e992dfe7180))
+
+
+### Bug Fixes
+
+* **anthropic:** mark cache breakpoints without reflection ([5de9989](https://github.com/MarcelRoozekrans/Thalos.NET/commit/5de99896b922c7ccbe3b528f4d8d6e992dfe7180))
+* bind configuration through the binder generator ([5de9989](https://github.com/MarcelRoozekrans/Thalos.NET/commit/5de99896b922c7ccbe3b528f4d8d6e992dfe7180))
+* check a typed local source's name when it is registered ([5de9989](https://github.com/MarcelRoozekrans/Thalos.NET/commit/5de99896b922c7ccbe3b528f4d8d6e992dfe7180))
+* **deps:** move to AI.Sentinel 3.2.1 ([5de9989](https://github.com/MarcelRoozekrans/Thalos.NET/commit/5de99896b922c7ccbe3b528f4d8d6e992dfe7180))
+* **mcp:** parse .mcp.json through a JSON context ([5de9989](https://github.com/MarcelRoozekrans/Thalos.NET/commit/5de99896b922c7ccbe3b528f4d8d6e992dfe7180))
+* read tool arguments through generated metadata ([5de9989](https://github.com/MarcelRoozekrans/Thalos.NET/commit/5de99896b922c7ccbe3b528f4d8d6e992dfe7180))
+* **workflow:** load processes through a YAML static context ([5de9989](https://github.com/MarcelRoozekrans/Thalos.NET/commit/5de99896b922c7ccbe3b528f4d8d6e992dfe7180))
+* **workflow:** report an empty process node instead of crashing ([5de9989](https://github.com/MarcelRoozekrans/Thalos.NET/commit/5de99896b922c7ccbe3b528f4d8d6e992dfe7180))
+
 ## [0.18.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.17.0...v0.18.0) (2026-10-18)
 
 
