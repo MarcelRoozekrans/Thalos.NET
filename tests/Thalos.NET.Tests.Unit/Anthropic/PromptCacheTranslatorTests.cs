@@ -266,6 +266,26 @@ public sealed class PromptCacheTranslatorTests
     }
 
     [Fact]
+    public async Task Instructions_follow_a_system_message_in_mid_conversation_as_with_caching_off()
+    {
+        var (on, onHandler) = Provider(enabled: true);
+        var (off, offHandler) = Provider(enabled: false);
+        List<ChatMessage> messages = [new(ChatRole.System, "caller system"), new(ChatRole.User, "q"), new(ChatRole.System, "sys2")];
+
+        await on.GetResponseAsync(messages, HintedOptions(), CancellationToken.None);
+        await off.GetResponseAsync(messages, HintedOptions(), CancellationToken.None);
+
+        static List<string?> Texts(RecordingHandler handler) =>
+            [.. Body(handler).GetProperty("system").EnumerateArray().Select(static block => block.GetProperty("text").GetString())];
+        using var scope = new AssertionScope();
+        // Red: in MarkMessages, insert the instructions after the leading system messages only, with
+        // FindIndex of the first non-system message; caching on then sends caller system, sys, sys2.
+        Texts(onHandler).Should().Equal("caller system", "sys2", "sys");
+        // Red: in AnthropicRequestMapper.Map, put the instructions first in system; caching off then sends them first.
+        Texts(offHandler).Should().Equal("caller system", "sys2", "sys");
+    }
+
+    [Fact]
     public async Task A_one_hour_ttl_is_sent_on_every_marker()
     {
         var (client, handler) = Provider(enabled: true, ttl: "1h");

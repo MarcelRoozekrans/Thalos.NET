@@ -34,7 +34,11 @@ public sealed class AnthropicChatClientProvider : IChatClientProvider, IDisposab
     {
     }
 
-    /// <summary>A provider whose client sends every request through <paramref name="httpClient"/>; used by tests to record requests.</summary>
+    /// <summary>
+    /// A provider whose client sends every request through <paramref name="httpClient"/>; used by tests to record
+    /// requests. Creating the client sets the HttpClient's <see cref="HttpClient.Timeout"/> and its <c>x-api-key</c>
+    /// and <c>anthropic-version</c> default headers, so it must be a fresh HttpClient that has not sent a request yet.
+    /// </summary>
     internal AnthropicChatClientProvider(IOptions<AnthropicOptions> options, HttpClient httpClient)
         : this(options, Environment.GetEnvironmentVariable, httpClient ?? throw new ArgumentNullException(nameof(httpClient)))
     {

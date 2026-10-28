@@ -18,8 +18,9 @@ namespace Thalos.Anthropic;
 /// <b>Breakpoints.</b> A hinted tool is replaced, in a cloned tool list, by a wrapper whose additional properties carry
 /// the breakpoint; only an <see cref="AIFunction"/> can be wrapped. Hinted instructions
 /// (<see cref="PromptCacheHints.InstructionsBreakpoint"/>) move out of <see cref="ChatOptions.Instructions"/> into a
-/// system message whose text carries the breakpoint, inserted after any leading system messages: that is where the
-/// adapter appends the instructions, so the system prompt keeps its order. A hinted message
+/// system message whose text carries the breakpoint, inserted after the last system message, wherever it stands: the
+/// adapter lifts every system message into the system prompt in order and appends the instructions after them all, so
+/// the system prompt keeps the order it has with caching off. A hinted message
 /// (<see cref="PromptCacheHints.Breakpoint"/>) is copied, and the last content the adapter sends as a block is replaced
 /// in the copy by a marked clone: in a system message the last text, blank or not; in any other message the last
 /// non-blank <see cref="TextContent"/>, <see cref="FunctionCallContent"/> or <see cref="FunctionResultContent"/> (see
@@ -136,8 +137,7 @@ internal sealed class AnthropicPromptCacheTranslator(IChatClient inner, CacheCon
 
         if (instructions is not null)
         {
-            var leadingSystem = result.FindIndex(static m => m.Role != ChatRole.System);
-            result.Insert(leadingSystem < 0 ? result.Count : leadingSystem, new ChatMessage(ChatRole.System, [WithBreakpoint(new TextContent(instructions), control)]));
+            result.Insert(result.FindLastIndex(static m => m.Role == ChatRole.System) + 1, new ChatMessage(ChatRole.System, [WithBreakpoint(new TextContent(instructions), control)]));
         }
 
         return result;

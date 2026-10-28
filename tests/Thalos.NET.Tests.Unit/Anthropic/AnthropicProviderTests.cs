@@ -117,6 +117,64 @@ public sealed class AnthropicProviderTests
         handler.Requests.Should().Be(attempts);
     }
 
+    [Fact]
+    public void A_negative_MaxRetries_fails_options_validation()
+    {
+        var services = new ServiceCollection().AddLogging();
+        services.AddThalos(t => t.UseAnthropic(o => { o.ApiKey = "sk-test"; o.MaxRetries = -1; }).UseInMemorySessionStore());
+        using var sp = services.BuildServiceProvider();
+
+        var act = () => sp.GetRequiredService<IOptions<AnthropicOptions>>().Value;
+        // Red: in AnthropicOptions.Describe, drop the MaxRetries check; the options then resolve.
+        act.Should().Throw<OptionsValidationException>().WithMessage("*MaxRetries*-1*");
+    }
+
+    [Fact]
+    public void A_negative_MaxRetries_is_refused_by_a_directly_constructed_provider()
+    {
+        var act = () => new AnthropicChatClientProvider(Options.Create(new AnthropicOptions { ApiKey = "sk-test", MaxRetries = -1 }));
+        // Red: in AnthropicOptions.Describe, test MaxRetries < -1; -1 is then accepted.
+        act.Should().Throw<ArgumentException>().WithMessage("*MaxRetries*-1*");
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void A_non_positive_Timeout_fails_options_validation(int seconds)
+    {
+        var services = new ServiceCollection().AddLogging();
+        services.AddThalos(t => t.UseAnthropic(o => { o.ApiKey = "sk-test"; o.Timeout = TimeSpan.FromSeconds(seconds); }).UseInMemorySessionStore());
+        using var sp = services.BuildServiceProvider();
+
+        var act = () => sp.GetRequiredService<IOptions<AnthropicOptions>>().Value;
+        // Red: in AnthropicOptions.Describe, drop the Timeout check; both rows then resolve.
+        act.Should().Throw<OptionsValidationException>().WithMessage("*Timeout*" + TimeSpan.FromSeconds(seconds) + "*");
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void A_non_positive_Timeout_is_refused_by_a_directly_constructed_provider(int seconds)
+    {
+        var options = new AnthropicOptions { ApiKey = "sk-test", Timeout = TimeSpan.FromSeconds(seconds) };
+        var act = () => new AnthropicChatClientProvider(Options.Create(options));
+        // Red: in AnthropicOptions.Describe, test Timeout < TimeSpan.Zero; the zero row is then accepted.
+        act.Should().Throw<ArgumentException>().WithMessage("*Timeout*" + TimeSpan.FromSeconds(seconds) + "*");
+    }
+
+    [Fact]
+    public void An_infinite_Timeout_is_accepted_and_is_the_http_timeout()
+    {
+        using var http = new HttpClient(new OverloadedHandler());
+        using var provider = new AnthropicChatClientProvider(
+            Options.Create(new AnthropicOptions { ApiKey = "sk-test", Timeout = Timeout.InfiniteTimeSpan }), http);
+
+        using var client = provider.CreateChatClient(Agent());
+
+        // Red: in AnthropicOptions.Describe, drop the InfiniteTimeSpan exception; the provider ctor then throws.
+        http.Timeout.Should().Be(Timeout.InfiniteTimeSpan);
+    }
+
     /// <summary>Answers every request with 529 overloaded_error and counts the requests.</summary>
     private sealed class OverloadedHandler : HttpMessageHandler
     {
