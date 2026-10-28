@@ -133,9 +133,9 @@ public sealed class NativeProbeTests(PostgresFixture pg, NativeProbePublish publ
             // Red: in AnthropicResponseMapper.ToContent, build the text block's TextContent from string.Empty: call.text is "".
             call.GetProperty("text").GetString().Should().Be("Pong");
             // Red: in AnthropicResponseMapper, ignore TextDelta in the streaming case: stream.text is "".
+            // Red: in the probe's RecordedAnthropicHandler, never treat a request as streaming: the stream ends before
+            // message_stop and the line is a stream_incomplete error, with no stream entry.
             anthropic.RootElement.GetProperty("stream").GetProperty("text").GetString().Should().Be("1 2 3 4 5");
-            // Red: in the probe's RecordedAnthropicHandler, serve text.response.json for a streaming request too: the
-            // stream ends before message_stop and the line is an error, with no stream entry.
             // Red: in AnthropicResponseMapper.ToChatResponse, set FinishReason to null: the call's finish is null.
             call.GetProperty("finish").GetString().Should().Be("stop");
             // Red: in AnthropicResponseMapper.ToUsageDetails, set TotalTokenCount to null: total is null.
