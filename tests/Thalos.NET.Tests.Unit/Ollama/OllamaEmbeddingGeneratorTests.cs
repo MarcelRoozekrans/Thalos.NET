@@ -57,6 +57,8 @@ public sealed class OllamaEmbeddingGeneratorTests
         // Red: leave Usage unset, or map prompt_eval_count to OutputTokenCount.
         result.Usage.Should().NotBeNull();
         result.Usage!.InputTokenCount.Should().Be(8);
+        // Red: drop the TotalTokenCount assignment in GenerateAsync.
+        result.Usage.TotalTokenCount.Should().Be(8);
     }
 
     [Fact]

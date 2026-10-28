@@ -13,6 +13,9 @@ namespace Thalos.Ollama;
 /// A failed request throws <see cref="HttpRequestException"/> carrying Ollama's error text and, when a response
 /// described the failure, its status; a transport failure or timeout has no status. A generator built from an
 /// endpoint owns its <see cref="HttpClient"/> and disposes it; one built over a borrowed client leaves it alone.
+/// Only <see cref="EmbeddingGenerationOptions.ModelId"/> is honoured: <see cref="EmbeddingGenerationOptions.Dimensions"/>
+/// and <see cref="EmbeddingGenerationOptions.AdditionalProperties"/> are ignored, because Ollama's <c>/api/embed</c>
+/// has no such field.
 /// </remarks>
 public sealed class OllamaEmbeddingGenerator : IEmbeddingGenerator<string, Embedding<float>>
 {
