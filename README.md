@@ -32,7 +32,7 @@ A Hermes-style, ZeroAlloc-native agent framework for .NET, built on
 | `Thalos.NET.Sandbox.Docker` | `ISandboxRuntime` over Docker: per-run containers behind a loopback gateway, with an egress proxy that allows only NuGet (net10.0 only) | Thalos.NET.Sandbox, `Docker.DotNet.Enhanced` |
 | `Thalos.NET.Sandbox.Host` | The in-container host: workspace, build and Roslyn tools over MCP behind a per-sandbox bearer token (net10.0 only) | Thalos.NET.Sandbox, `ModelContextProtocol.AspNetCore` |
 
-Targets `net8.0` and `net10.0` (`Thalos.NET.Memory.RagNet`, `Thalos.NET.Workflow.Orm` and the three `Thalos.NET.Sandbox*` packages: `net10.0` only — RagNet because Rag.NET is net10.0-only, Workflow.Orm because ZeroAlloc.ORM / ZeroAlloc.Outbox.Orm / AdoNet.Async.Adapters ship net10.0-only builds).
+Targets `net8.0` and `net10.0` (`Thalos.NET.Anthropic`, `Thalos.NET.Memory.RagNet`, `Thalos.NET.Workflow.Orm` and the three `Thalos.NET.Sandbox*` packages: `net10.0` only — Anthropic because ZeroAlloc.Rest.Anthropic is net10.0-only, RagNet because Rag.NET is net10.0-only, Workflow.Orm because ZeroAlloc.ORM / ZeroAlloc.Outbox.Orm / AdoNet.Async.Adapters ship net10.0-only builds).
 
 ## Core contracts
 

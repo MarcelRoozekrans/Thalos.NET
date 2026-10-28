@@ -7,4 +7,17 @@
     <PackageReference Include="Microsoft.Extensions.Logging" />
     <PackageReference Include="Xunit.SkippableFact" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- The Anthropic transcripts recorded in ZeroAlloc.Rest, copied unedited; TranscriptScrubTests guards them -->
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>TranscriptsSourceDirectory</_Parameter1>
+      <_Parameter2>$(MSBuildProjectDirectory)/Anthropic/Transcripts</_Parameter2>
+    </AssemblyAttribute>
+    <None Include="Anthropic/Transcripts/**" Exclude="Anthropic/Transcripts/**/*.cs" Link="Transcripts/%(RecursiveDir)%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <!-- PreserveNewest never removes a copy whose source is gone, so clear the output folder first. It has to run
+       before _CopyOutOfDateSourceItemsToOutputDirectory, which does the copy; after it, the clear deletes the copy. -->
+  <Target Name="ClearStaleTranscripts" BeforeTargets="_CopyOutOfDateSourceItemsToOutputDirectory">
+    <RemoveDir Directories="$(OutDir)Transcripts" />
+  </Target>
 </Project>
