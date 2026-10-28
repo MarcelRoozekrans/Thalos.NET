@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Extensions.AI;
 using Thalos.Anthropic;
 using ZeroAlloc.Rest.Anthropic;
@@ -137,10 +138,10 @@ public sealed class AnthropicChatClientTests
             ]),
         ]);
 
-        // AIJsonUtilities.DefaultOptions writes indented, as the SDK's tool results were.
+        // AIJsonUtilities.DefaultOptions writes indented, with Environment.NewLine, as the SDK's tool results were.
         // Red: serialize through a copy of those options with WriteIndented off; the object is then on one line.
         // Red: map a null result to null content; the third entry is then null instead of "null".
-        ToolResultContents(request).Should().Equal("42", "{\n  \"a\": 1\n}", "null");
+        ToolResultContents(request).Should().Equal("42", "{" + Environment.NewLine + "  \"a\": 1" + Environment.NewLine + "}", "null");
     }
 
     [Fact]
@@ -206,7 +207,7 @@ public sealed class AnthropicChatClientTests
     [Fact]
     public void An_AIFunction_becomes_a_tool_with_its_json_schema()
     {
-        var function = AIFunctionFactory.Create((string city) => city, "lookup", "Looks a city up.");
+        var function = Declaration("lookup", "Looks a city up.", """{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]}""");
         var request = Map([new(ChatRole.User, "u")], new ChatOptions { Tools = [function] });
 
         var tool = request.Tools.Should().ContainSingle().Subject;
@@ -214,8 +215,10 @@ public sealed class AnthropicChatClientTests
         tool.Name.Should().Be("lookup");
         // Red: drop the description; this is then null.
         tool.Description.Should().Be("Looks a city up.");
-        // Red: send an empty object schema instead of JsonSchema; the texts then differ.
-        tool.InputSchema.GetRawText().Should().Be(function.JsonSchema.GetRawText());
+        // Red: send the function's JsonSchema untransformed; "additionalProperties":false is then missing.
+        // Red: send an empty object schema instead; the texts then differ.
+        tool.InputSchema.GetRawText().Should().Be(
+            """{"type":"object","properties":{"city":{"type":"string"}},"required":["city"],"additionalProperties":false}""");
         // Red: always mark a tool with a five minute cache control; this is then not null.
         tool.CacheControl.Should().BeNull();
     }
@@ -257,9 +260,52 @@ public sealed class AnthropicChatClientTests
             ],
             new ChatOptions { MaxOutputTokens = 128, Tools = [tool] });
 
-        // Red: write IsError = exception is not null, false included; "is_error":false then joins the bytes.
-        // Red: send an empty object schema instead of the function's JsonSchema; the bytes then differ.
-        handler.Bodies.Should().ContainSingle().Which.Should().Be(Read("tool-result.request.json"));
+        // The recording was made with the schema untransformed; everything but tools[].input_schema must match it.
+        var sent = WithoutInputSchemas(handler.Bodies.Should().ContainSingle().Subject, out var sentSchema);
+        var recorded = WithoutInputSchemas(Read("tool-result.request.json"), out _);
+        // Red: write IsError = exception is not null, false included; "is_error":false then joins the request.
+        // Red: drop the tool description; the requests then differ.
+        sent.Should().Be(recorded);
+        // Red: send the function's JsonSchema untransformed; "additionalProperties":false is then missing.
+        sentSchema.Should().Be(
+            """{"type":"object","properties":{"location":{"type":"string"}},"required":["location"],"additionalProperties":false}""");
+    }
+
+    [Fact]
+    public void An_unsupported_schema_keyword_is_removed_and_appended_to_the_description()
+    {
+        var schema = ToolSchema(Declaration("f", null,
+            """{"type":"object","properties":{"name":{"type":"string","description":"Who.","minLength":2,"format":"email"},"tags":{"type":"array","items":{"type":"string"},"minItems":3}}}"""));
+
+        // Red: keep keywords outside the string whitelist; "minLength" is then still on "name".
+        // Red: drop a removed keyword without appending it; the description then reads only "Who.".
+        // Red: remove a supported format such as email; "format" is then missing.
+        schema["properties"]!["name"]!.ToJsonString().Should().Be(
+            """{"type":"string","description":"Who.\n\n{minLength: 2}","format":"email"}""");
+        // Red: keep any minItems; "minItems":3 is then still there and no description is added.
+        schema["properties"]!["tags"]!.ToJsonString().Should().Be(
+            """{"type":"array","items":{"type":"string"},"description":"{minItems: 3}"}""");
+    }
+
+    [Fact]
+    public void A_oneOf_schema_becomes_anyOf()
+    {
+        var schema = ToolSchema(Declaration("f", null,
+            """{"type":"object","properties":{"v":{"oneOf":[{"type":"string"},{"type":"integer"}]}}}"""));
+
+        // Red: leave oneOf in place; it is then removed as unsupported and the union lands in the description.
+        schema["properties"]!["v"]!.ToJsonString().Should().Be("""{"anyOf":[{"type":"string"},{"type":"integer"}]}""");
+    }
+
+    [Fact]
+    public void A_nested_object_schema_disallows_additional_properties()
+    {
+        var schema = ToolSchema(Declaration("f", null,
+            """{"type":"object","properties":{"address":{"type":"object","properties":{"city":{"type":"string"}}}}}"""));
+
+        // Red: set DisallowAdditionalProperties to false; the nested object then has no "additionalProperties".
+        schema["properties"]!["address"]!.ToJsonString().Should().Be(
+            """{"type":"object","properties":{"city":{"type":"string"}},"additionalProperties":false}""");
     }
 
     [Fact]
@@ -416,6 +462,17 @@ public sealed class AnthropicChatClientTests
     }
 
     [Fact]
+    public async Task A_response_without_a_model_reports_the_request_model()
+    {
+        var (client, _) = Client(() => Json(Message("""[{"type":"text","text":"x"}]""", "end_turn").Replace("\"model\":\"claude-test\"", "\"model\":\"\"", StringComparison.Ordinal)));
+
+        var response = await client.GetResponseAsync([new(ChatRole.User, "u")], new ChatOptions { ModelId = "claude-asked" });
+
+        // Red: report the response's model unconditionally; this is then "".
+        response.ModelId.Should().Be("claude-asked");
+    }
+
+    [Fact]
     public async Task An_unknown_block_is_skipped()
     {
         var (client, _) = Client(() => Json(Message("""[{"type":"thinking","thinking":"hmm","signature":"s"},{"type":"text","text":"ok"}]""", "end_turn")));
@@ -525,6 +582,21 @@ public sealed class AnthropicChatClientTests
         usage.TotalTokenCount.Should().Be(65);
         // Red: drop the CacheCreationInputTokens additional count; the key is then missing.
         usage.AdditionalCounts.Should().ContainKey(AnthropicChatClient.CacheCreationInputTokensKey).WhoseValue.Should().Be(20);
+    }
+
+    [Fact]
+    public async Task A_message_delta_without_output_tokens_keeps_the_message_start_count()
+    {
+        var (client, _) = Client(() => Sse(SseText(
+            ("message_start", """{"type":"message_start","message":{"id":"msg_1","type":"message","role":"assistant","content":[],"model":"claude-test","stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":3,"output_tokens":7}}}"""),
+            ("message_delta", """{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":3}}"""),
+            ("message_stop", """{"type":"message_stop"}"""))));
+
+        var updates = await Collect(client.GetStreamingResponseAsync([new(ChatRole.User, "u")]));
+
+        // The SDK reported null here; ZeroAlloc's delta usage has an optional output_tokens, so the start count stays.
+        // Red: take OutputTokens from the delta alone; this is then null.
+        updates.SelectMany(u => u.Contents).OfType<UsageContent>().Single().Details.OutputTokenCount.Should().Be(7);
     }
 
     [Fact]
@@ -642,6 +714,31 @@ public sealed class AnthropicChatClientTests
     }
 
     // ---- Helpers --------------------------------------------------------------------------------------------------
+
+    private static AIFunctionDeclaration Declaration(string name, string? description, string schema)
+    {
+        using var document = JsonDocument.Parse(schema);
+        return AIFunctionFactory.CreateDeclaration(name, description, document.RootElement.Clone());
+    }
+
+    /// <summary>The input schema the request sends for <paramref name="function"/>, as a node tree.</summary>
+    private static JsonNode ToolSchema(AIFunctionDeclaration function) =>
+        JsonNode.Parse(Map([new(ChatRole.User, "u")], new ChatOptions { Tools = [function] }).Tools![0].InputSchema.GetRawText())!;
+
+    /// <summary><paramref name="body"/> with every tool's <c>input_schema</c> removed; the first one is returned apart.</summary>
+    private static string WithoutInputSchemas(string body, out string? firstSchema)
+    {
+        var node = JsonNode.Parse(body)!.AsObject();
+        firstSchema = null;
+        foreach (var tool in node["tools"]?.AsArray() ?? [])
+        {
+            var toolObject = tool!.AsObject();
+            firstSchema ??= toolObject["input_schema"]?.ToJsonString();
+            toolObject.Remove("input_schema");
+        }
+
+        return node.ToJsonString();
+    }
 
     private static MessageRequest Map(IEnumerable<ChatMessage> messages, ChatOptions? options = null) =>
         AnthropicRequestMapper.Map(messages, options, DefaultModel, DefaultMaxTokens);

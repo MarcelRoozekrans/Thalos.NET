@@ -25,7 +25,8 @@ namespace Thalos.Anthropic;
 /// </para>
 /// <para>
 /// <b>Options.</b> Model and max tokens fall back to the client's defaults; temperature, top-p and stop sequences are
-/// sent when set. Of the tools, only an <see cref="AIFunctionDeclaration"/> is sent, with its JSON schema as it is.
+/// sent when set. Of the tools, only an <see cref="AIFunctionDeclaration"/> is sent, its JSON schema transformed by
+/// <see cref="AnthropicToolSchema"/> as the SDK did; the SDK's other tool properties have no place in the request model.
 /// Raw representations, a <see cref="ChatOptions.RawRepresentationFactory"/> and every other option are ignored.
 /// </para>
 /// <para>
@@ -132,7 +133,7 @@ internal static class AnthropicRequestMapper
         {
             if (tool is AIFunctionDeclaration function)
             {
-                (mapped ??= []).Add(new ToolDefinition(function.Name, function.Description, function.JsonSchema, BreakpointOf(function.AdditionalProperties)));
+                (mapped ??= []).Add(new ToolDefinition(function.Name, function.Description, AnthropicToolSchema.For(function), BreakpointOf(function.AdditionalProperties)));
             }
         }
 
