@@ -18,10 +18,10 @@ public sealed class AnthropicOptions
     /// <summary>Max output tokens used when <see cref="AgentDefinition.MaxOutputTokens"/> is null.</summary>
     public int DefaultMaxOutputTokens { get; set; } = 8192;
 
-    /// <summary>Per-request timeout; null → SDK default.</summary>
+    /// <summary>The longest one request attempt may take; null → ten minutes. For a stream it bounds the wait for the response headers.</summary>
     public TimeSpan? Timeout { get; set; }
 
-    /// <summary>SDK retry count; null → SDK default.</summary>
+    /// <summary>How often a 429, 529 or other 5xx response is retried after the first attempt; null → 2. Must not be negative.</summary>
     public int? MaxRetries { get; set; }
 
     /// <summary>Prompt caching, bound from <c>Thalos:Anthropic:PromptCaching</c>. On by default with a five-minute time-to-live.</summary>

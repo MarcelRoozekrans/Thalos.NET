@@ -1,7 +1,10 @@
+using System.Net;
+using System.Text;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Thalos.Anthropic;
+using ZeroAlloc.Rest.Anthropic;
 
 namespace Thalos.Tests.Unit.Anthropic;
 
@@ -67,5 +70,70 @@ public sealed class AnthropicProviderTests
 
         var dispose = () => provider.Dispose();
         dispose.Should().NotThrow();
+    }
+
+    [Fact]
+    public void A_provider_without_a_timeout_uses_ten_minutes()
+    {
+        using var http = new HttpClient(new OverloadedHandler());
+        using var provider = new AnthropicChatClientProvider(Options.Create(new AnthropicOptions { ApiKey = "sk-test" }), http);
+
+        using var client = provider.CreateChatClient(Agent());
+
+        // Red: in CreateClient, set Timeout = _options.Timeout ?? TimeSpan.FromSeconds(100); the HttpClient default then stays.
+        http.Timeout.Should().Be(TimeSpan.FromMinutes(10));
+    }
+
+    [Fact]
+    public void A_provider_timeout_is_the_http_timeout()
+    {
+        using var http = new HttpClient(new OverloadedHandler());
+        using var provider = new AnthropicChatClientProvider(
+            Options.Create(new AnthropicOptions { ApiKey = "sk-test", Timeout = TimeSpan.FromSeconds(42) }), http);
+
+        using var client = provider.CreateChatClient(Agent());
+
+        // Red: in CreateClient, leave AnthropicClientOptions.Timeout at its default; the timeout is then ten minutes.
+        http.Timeout.Should().Be(TimeSpan.FromSeconds(42));
+    }
+
+    [Theory]
+    [InlineData(0, 1)]
+    [InlineData(1, 2)]
+    public async Task MaxRetries_sets_the_attempts(int maxRetries, int attempts)
+    {
+        var handler = new OverloadedHandler();
+        using var http = new HttpClient(handler);
+        using var provider = new AnthropicChatClientProvider(
+            Options.Create(new AnthropicOptions { ApiKey = "sk-test", MaxRetries = maxRetries }), http);
+        using var client = provider.CreateChatClient(Agent());
+
+        var act = () => client.GetResponseAsync([new(ChatRole.User, "q")], cancellationToken: CancellationToken.None);
+
+        // Red: in AnthropicChatClient.GetResponseAsync, return an empty ChatResponse on failure instead of throwing.
+        await act.Should().ThrowAsync<AnthropicApiException>();
+        // Red: in CreateClient, leave AnthropicClientOptions.MaxRetries at its default of 2; both rows then make three
+        // requests. For the second row alone: always set MaxRetries = 0.
+        handler.Requests.Should().Be(attempts);
+    }
+
+    /// <summary>Answers every request with 529 overloaded_error and counts the requests.</summary>
+    private sealed class OverloadedHandler : HttpMessageHandler
+    {
+        private int _requests;
+
+        public int Requests => _requests;
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _requests);
+            return Task.FromResult(new HttpResponseMessage((HttpStatusCode)529)
+            {
+                Content = new StringContent(
+                    "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}",
+                    Encoding.UTF8,
+                    "application/json"),
+            });
+        }
     }
 }

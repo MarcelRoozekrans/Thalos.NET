@@ -239,13 +239,11 @@ pipelines get the same client from `ChatClientBuilder.UsePromptCaching()`, place
 `Thalos:Anthropic:PromptCaching` as `{ "Enabled": true, "Ttl": "5m" }`, which is the default, and `Ttl` may also be
 `"1h"`; any other value fails options validation at startup. Anthropic accepts at most four breakpoints, so when more
 are hinted the translator keeps, in order, the last tool, the instructions, the latest message, the message before
-the first transient one, and then caller-placed hints in list order. Markers a caller sets directly through the SDK
-count toward the four: through `WithCacheControl` or a function's `CacheControl` property, and inside raw SDK objects
-the SDK sends verbatim (raw content blocks, a `ToolUnion.AsAITool()` tool, and the request a `RawRepresentationFactory`
-returns, including its top-level `cache_control`). A request with no hints is sent unchanged. Usage keeps the SDK's
-`InputTokenCount`, which already totals uncached, cache-write and cache-read input, and `CachedInputTokenCount`, the
-cache reads; the translator adds the cache writes under `TurnUsage.CacheWriteCountKey`, also when `Enabled` is false,
-which turns off only the hint translation.
+the first transient one, and then caller-placed hints in list order. Only the translator places markers: a caller
+cannot set a `cache_control` of its own, so the four are always the translator's. A request with no hints is sent
+unchanged. Usage reports `InputTokenCount` as the total of uncached, cache-write and cache-read input, and
+`CachedInputTokenCount` as the cache reads; the translator adds the cache writes under `TurnUsage.CacheWriteCountKey`,
+also when `Enabled` is false, which turns off only the hint translation.
 
 **Run workspaces and git.** `UseGitWorktreeWorkspaces` (`Thalos.NET.Git`) makes a git worktree per workflow run the
 `IRunWorkspaceProvider`, and `git`-CLI commits and pushes from it the `IRunWorkspaceGit`, replacing any earlier

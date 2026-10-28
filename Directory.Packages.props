@@ -20,8 +20,7 @@
     <PackageVersion Include="ModelContextProtocol" Version="2.2.0" />
     <!-- the sandbox host's MCP-over-HTTP routes — confined to Thalos.NET.Sandbox.Host -->
     <PackageVersion Include="ModelContextProtocol.AspNetCore" Version="2.3.0" />
-    <PackageVersion Include="Anthropic" Version="13.3.0" />
-    <!-- our own AOT-clean Anthropic Messages and Ollama embed clients; Thalos.NET.Anthropic moves onto the first -->
+    <!-- our own AOT-clean Anthropic Messages and Ollama embed clients; Thalos.NET.Anthropic runs on the first -->
     <PackageVersion Include="ZeroAlloc.Rest.Anthropic" Version="3.5.0" />
     <PackageVersion Include="ZeroAlloc.Rest.Ollama" Version="3.5.0" />
     <!-- the floors ZeroAlloc.Rest.Anthropic and .Ollama 3.5.0 set; ZeroAlloc.Results 1.4.5 above is theirs too -->

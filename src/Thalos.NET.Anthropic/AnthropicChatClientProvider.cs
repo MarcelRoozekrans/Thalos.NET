@@ -1,15 +1,14 @@
-using global::Anthropic;
-using global::Anthropic.Core;
-using global::Anthropic.Models.Messages;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.Options;
+using ZeroAlloc.Rest.Anthropic;
 
 namespace Thalos.Anthropic;
 
-/// <summary><see cref="IChatClientProvider"/> backed by the official Anthropic SDK (<see cref="AnthropicClient"/>).</summary>
+/// <summary><see cref="IChatClientProvider"/> backed by the Anthropic Messages API client <see cref="AnthropicClient"/>.</summary>
 /// <remarks>
-/// The provider owns one lazily-created <see cref="AnthropicClient"/> (the HTTP transport), shared by every agent, and disposes it
-/// with itself. Each <see cref="CreateChatClient"/> call returns a thin <see cref="IChatClient"/> over that shared client, wrapped in
+/// The provider owns one lazily-created <see cref="AnthropicClient"/> over one <see cref="HttpClient"/> (the HTTP transport),
+/// shared by every agent, and disposes that transport with itself unless a caller supplied it. Each
+/// <see cref="CreateChatClient"/> call returns a thin <see cref="IChatClient"/> over that shared client, wrapped in
 /// the prompt-cache translator, which translates cache hints only when <see cref="AnthropicPromptCachingOptions.Enabled"/> is set
 /// and always reports cache writes; per the
 /// <see cref="IChatClientProvider"/> contract the returned client is owned and disposed by the caller, and disposing it does
@@ -21,7 +20,8 @@ public sealed class AnthropicChatClientProvider : IChatClientProvider, IDisposab
     private readonly Func<string, string?> _getEnvironmentVariable;
     private readonly Lazy<AnthropicClient> _client;
     private readonly HttpClient? _httpClient;
-    private readonly CacheControlEphemeral _cacheControl;
+    private readonly CacheControl _cacheControl;
+    private HttpClient? _ownedHttpClient;
 
     /// <summary>Creates a provider that resolves the API key from <paramref name="options"/> or the ANTHROPIC_API_KEY environment variable.</summary>
     public AnthropicChatClientProvider(IOptions<AnthropicOptions> options)
@@ -34,13 +34,13 @@ public sealed class AnthropicChatClientProvider : IChatClientProvider, IDisposab
     {
     }
 
-    /// <summary>A provider whose SDK client sends every request through <paramref name="httpClient"/>; used by tests to record requests.</summary>
+    /// <summary>A provider whose client sends every request through <paramref name="httpClient"/>; used by tests to record requests.</summary>
     internal AnthropicChatClientProvider(IOptions<AnthropicOptions> options, HttpClient httpClient)
         : this(options, Environment.GetEnvironmentVariable, httpClient ?? throw new ArgumentNullException(nameof(httpClient)))
     {
     }
 
-    /// <summary>Validates the options and prepares the lazily-created SDK client; <paramref name="httpClient"/> null keeps the SDK's own.</summary>
+    /// <summary>Validates the options and prepares the lazily-created client; <paramref name="httpClient"/> null makes it its own.</summary>
     /// <exception cref="ArgumentException">The options are invalid, as <see cref="AnthropicOptions.Describe"/> reports.</exception>
     private AnthropicChatClientProvider(IOptions<AnthropicOptions> options, Func<string, string?> getEnvironmentVariable, HttpClient? httpClient)
     {
@@ -54,10 +54,9 @@ public sealed class AnthropicChatClientProvider : IChatClientProvider, IDisposab
 
         _getEnvironmentVariable = getEnvironmentVariable;
         _httpClient = httpClient;
-        _cacheControl = new CacheControlEphemeral
-        {
-            Ttl = string.Equals(_options.PromptCaching.Ttl, AnthropicPromptCachingOptions.OneHour, StringComparison.Ordinal) ? Ttl.Ttl1h : Ttl.Ttl5m,
-        };
+        _cacheControl = string.Equals(_options.PromptCaching.Ttl, AnthropicPromptCachingOptions.OneHour, StringComparison.Ordinal)
+            ? CacheControl.OneHour
+            : CacheControl.FiveMinutes;
         _client = new Lazy<AnthropicClient>(CreateClient, LazyThreadSafetyMode.ExecutionAndPublication);
     }
 
@@ -75,18 +74,12 @@ public sealed class AnthropicChatClientProvider : IChatClientProvider, IDisposab
     public IChatClient CreateChatClient(AgentDefinition agent)
     {
         ArgumentNullException.ThrowIfNull(agent);
-        var client = _client.Value.AsIChatClient(agent.Model ?? _options.DefaultModel, agent.MaxOutputTokens ?? _options.DefaultMaxOutputTokens);
+        var client = new AnthropicChatClient(_client.Value, agent.Model ?? _options.DefaultModel, agent.MaxOutputTokens ?? _options.DefaultMaxOutputTokens);
         return new AnthropicPromptCacheTranslator(client, _options.PromptCaching.Enabled ? _cacheControl : null);
     }
 
-    /// <summary>Disposes the shared <see cref="AnthropicClient"/> if it was created.</summary>
-    public void Dispose()
-    {
-        if (_client.IsValueCreated)
-        {
-            _client.Value.Dispose();
-        }
-    }
+    /// <summary>Disposes the <see cref="HttpClient"/> the shared <see cref="AnthropicClient"/> was created over, if the provider made it.</summary>
+    public void Dispose() => _ownedHttpClient?.Dispose();
 
     private AnthropicClient CreateClient()
     {
@@ -96,12 +89,7 @@ public sealed class AnthropicChatClientProvider : IChatClientProvider, IDisposab
             throw new InvalidOperationException("Anthropic API key missing. Set Thalos:Anthropic:ApiKey or the ANTHROPIC_API_KEY environment variable.");
         }
 
-        var clientOptions = new ClientOptions { ApiKey = apiKey };
-        if (_httpClient is not null)
-        {
-            clientOptions.HttpClient = _httpClient;
-        }
-
+        var clientOptions = new AnthropicClientOptions { ApiKey = apiKey };
         if (_options.Timeout is { } timeout)
         {
             clientOptions.Timeout = timeout;
@@ -112,6 +100,7 @@ public sealed class AnthropicChatClientProvider : IChatClientProvider, IDisposab
             clientOptions.MaxRetries = retries;
         }
 
-        return new AnthropicClient(clientOptions);
+        var httpClient = _httpClient ?? (_ownedHttpClient = new HttpClient());
+        return AnthropicClient.Create(httpClient, clientOptions);
     }
 }
