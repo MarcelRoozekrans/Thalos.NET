@@ -19,5 +19,6 @@
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Thalos.NET.Tests.Unit" />
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Native.Probe" />
   </ItemGroup>
 </Project>

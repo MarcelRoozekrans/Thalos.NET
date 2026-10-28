@@ -1,5 +1,6 @@
 using System.Data.Async.Adapters;
 using System.Globalization;
+using System.Net;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
@@ -9,11 +10,13 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using Thalos;
+using Thalos.Anthropic;
 using Thalos.Channels;
 using Thalos.Channels.Telegram;
 using Thalos.Git;
 using Thalos.Git.Workspaces;
 using Thalos.Memory;
+using Thalos.Ollama;
 using Thalos.Sandbox;
 using Thalos.Sentinel;
 using Thalos.Skills;
@@ -27,6 +30,7 @@ using ZeroAlloc.Authorization;
 using ZeroAlloc.Mediator;
 using ZeroAlloc.ORM.Migrations;
 using ZeroAlloc.Outbox.Orm;
+using ZeroAlloc.Rest.Anthropic;
 using ZeroAlloc.Results;
 
 // The native probe. Given --connection <postgres> and --processes <dir>, it prints one line per check,
@@ -49,6 +53,8 @@ await CheckAsync("tools", Checks.ToolsAsync);
 await CheckAsync("options", () => ValueTask.FromResult(Checks.Options()));
 await CheckAsync("authz", Checks.AuthzAsync);
 await CheckAsync("sentinel", Checks.SentinelAsync);
+await CheckAsync("anthropic", Checks.AnthropicAsync);
+await CheckAsync("ollama", Checks.OllamaAsync);
 return failed ? 1 : 0;
 
 async ValueTask CheckAsync(string name, Func<ValueTask<string>> check)
@@ -859,6 +865,93 @@ namespace Thalos.Tests.Native.Probe
             return copy;
         }
 
+        /// <summary>
+        /// <see cref="AnthropicChatClient"/> over <c>ZeroAlloc.Rest.Anthropic</c>, through an in-process handler that serves
+        /// the recorded <c>text</c> and <c>stream-text</c> responses, which are embedded, so the binary reads no file. One
+        /// call and one stream: the text, the finish reason and the four usage numbers of each.
+        /// </summary>
+        public static async ValueTask<string> AnthropicAsync()
+        {
+            using var http = new HttpClient(new RecordedAnthropicHandler());
+            var api = AnthropicClient.Create(http, new AnthropicClientOptions { ApiKey = "sk-probe", MaxRetries = 0 });
+            using var client = new AnthropicChatClient(api, "claude-haiku-5-5", 1024);
+            IList<ChatMessage> messages = [new(ChatRole.User, "ping")];
+
+            var call = await client.GetResponseAsync(messages);
+            var updates = new List<ChatResponseUpdate>();
+            await foreach (var update in client.GetStreamingResponseAsync(messages))
+            {
+                updates.Add(update);
+            }
+
+            var stream = updates.ToChatResponse();
+            return Json(w =>
+            {
+                w.WriteStartObject();
+                WriteTurn(w, "call", call);
+                WriteTurn(w, "stream", stream);
+                w.WriteEndObject();
+            });
+        }
+
+        /// <summary>
+        /// <see cref="OllamaEmbeddingGenerator"/> over <c>ZeroAlloc.Rest.Ollama</c> and a stub handler: two inputs embedded,
+        /// the count, the dimensions and the first value of each vector, then the prompt tokens the stub reports.
+        /// </summary>
+        public static async ValueTask<string> OllamaAsync()
+        {
+            using var http = new HttpClient(new StubOllamaHandler()) { BaseAddress = new Uri("http://ollama.probe:11434/") };
+            using var generator = new OllamaEmbeddingGenerator(http, "nomic-embed-text");
+
+            var result = await generator.GenerateAsync(["first", "second"]);
+
+            return Json(w =>
+            {
+                w.WriteStartObject();
+                w.WriteNumber("count", result.Count);
+                w.WriteStartArray("dimensions");
+                foreach (var embedding in result)
+                {
+                    w.WriteNumberValue(embedding.Vector.Length);
+                }
+
+                w.WriteEndArray();
+                w.WriteStartArray("first");
+                foreach (var embedding in result)
+                {
+                    w.WriteNumberValue(embedding.Vector.Span[0]);
+                }
+
+                w.WriteEndArray();
+                w.WriteNumber("promptTokens", result.Usage?.InputTokenCount ?? -1);
+                w.WriteEndObject();
+            });
+        }
+
+        private static void WriteTurn(Utf8JsonWriter w, string name, ChatResponse response)
+        {
+            w.WriteStartObject(name);
+            w.WriteString("text", response.Text);
+            w.WriteString("finish", response.FinishReason?.Value);
+            WriteCount(w, "input", response.Usage?.InputTokenCount);
+            WriteCount(w, "output", response.Usage?.OutputTokenCount);
+            WriteCount(w, "total", response.Usage?.TotalTokenCount);
+            WriteCount(w, "cached", response.Usage?.CachedInputTokenCount);
+            w.WriteEndObject();
+        }
+
+        private static void WriteCount(Utf8JsonWriter w, string name, long? value)
+        {
+            if (value is { } count)
+            {
+                w.WriteNumber(name, count);
+            }
+            else
+            {
+                w.WriteNull(name);
+            }
+        }
+
         private static string Json(Action<Utf8JsonWriter> write)
         {
             using var stream = new MemoryStream();
@@ -869,6 +962,47 @@ namespace Thalos.Tests.Native.Probe
 
             return Encoding.UTF8.GetString(stream.ToArray());
         }
+    }
+
+    /// <summary>
+    /// The Anthropic API as recorded: answers a streaming request with the embedded <c>stream-text</c> recording and any
+    /// other with <c>text</c>. Both are read from the assembly's resources, which the project links from the unit tests.
+    /// </summary>
+    internal sealed class RecordedAnthropicHandler : HttpMessageHandler
+    {
+        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            var body = request.Content is null ? string.Empty : await request.Content.ReadAsStringAsync(cancellationToken);
+            var streaming = body.Contains("\"stream\":true", StringComparison.Ordinal);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    Resource(streaming ? "stream-text.response.sse" : "text.response.json"),
+                    Encoding.UTF8,
+                    streaming ? "text/event-stream" : "application/json"),
+            };
+        }
+
+        private static string Resource(string name)
+        {
+            using var stream = typeof(RecordedAnthropicHandler).Assembly.GetManifestResourceStream(name)
+                ?? throw new InvalidOperationException($"The probe does not embed {name}.");
+            using var reader = new StreamReader(stream, Encoding.UTF8);
+            return reader.ReadToEnd();
+        }
+    }
+
+    /// <summary>An Ollama server whose <c>/api/embed</c> answers two three-dimensional vectors.</summary>
+    internal sealed class StubOllamaHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) =>
+            Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """{"model":"nomic-embed-text","embeddings":[[0.1,0.2,0.3],[0.4,0.5,0.6]],"prompt_eval_count":8}""",
+                    Encoding.UTF8,
+                    "application/json"),
+            });
     }
 
     /// <summary>A function that answers its <c>text</c> argument, as the <see cref="JsonElement"/> it arrived as.</summary>

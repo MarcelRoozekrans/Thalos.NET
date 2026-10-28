@@ -20,7 +20,7 @@ public sealed class NativeProbeTests(PostgresFixture pg, NativeProbePublish publ
     private readonly string _jitArtifacts = Directory.CreateTempSubdirectory("thalos-native-probe-jit-").FullName;
 
     /// <summary>The checks the probe prints, in order.</summary>
-    private static readonly string[] Checks = ["yaml", "rows", "outbox", "tools", "options", "authz", "sentinel"];
+    private static readonly string[] Checks = ["yaml", "rows", "outbox", "tools", "options", "authz", "sentinel", "anthropic", "ollama"];
 
     [SkippableFact]
     public void The_probe_publishes_with_no_warning_from_the_assemblies_it_roots()
@@ -93,6 +93,7 @@ public sealed class NativeProbeTests(PostgresFixture pg, NativeProbePublish publ
         }
 
         AssertSentinel(nativeLines);
+        AssertAdapters(nativeLines);
 
         var golden = Lines(NativeProbeGolden.Output);
         // Red: make the probe print RuntimeFeature.IsDynamicCodeSupported in the yaml line: False natively, absent from
@@ -119,6 +120,29 @@ public sealed class NativeProbeTests(PostgresFixture pg, NativeProbePublish publ
         // Red: in SentinelErrorMappingChatClient.Map, build the quarantine as AgentError.ProviderError: blocked starts
         // with ProviderError.
         sentinel.RootElement.GetProperty("blocked").GetString().Should().Be("Quarantined Critical: SEC-01");
+    }
+
+    /// <summary>The content the adapter lines must hold, so a golden captured from a probe that lost it cannot pass.</summary>
+    private static void AssertAdapters(string[] nativeLines)
+    {
+        using (var anthropic = Check(nativeLines, "anthropic"))
+        {
+            var call = anthropic.RootElement.GetProperty("call");
+            // Red: in the probe's RecordedAnthropicHandler, serve text.response.json for a streaming request too: the
+            // stream ends before message_stop and the line is an error, with no stream entry.
+            anthropic.RootElement.GetProperty("stream").GetProperty("text").GetString().Should().Be("1 2 3 4 5");
+            call.GetProperty("text").GetString().Should().Be("Pong");
+            // Red: in AnthropicResponseMapper.ToChatResponse, set FinishReason to null: the call's finish is null.
+            call.GetProperty("finish").GetString().Should().Be("stop");
+            // Red: in AnthropicResponseMapper.ToUsageDetails, set TotalTokenCount to null: total is null.
+            call.GetProperty("total").GetInt64().Should().Be(23, "the recording reports 18 input and 5 output tokens");
+        }
+
+        using var ollama = Check(nativeLines, "ollama");
+        // Red: in OllamaEmbeddingGenerator.GenerateAsync, keep only the first embedding: the count is 1.
+        ollama.RootElement.GetProperty("count").GetInt32().Should().Be(2);
+        // Red: in the probe's StubOllamaHandler, answer two-dimensional vectors: the dimensions are 2.
+        ollama.RootElement.GetProperty("dimensions")[0].GetInt32().Should().Be(3);
     }
 
     public void Dispose() => NativeHostPublish.DeleteQuietly(_jitArtifacts);
