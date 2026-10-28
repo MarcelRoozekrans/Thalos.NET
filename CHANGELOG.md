@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.20.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.19.0...v0.20.0) (2026-10-28)
+
+
+### ⚠ BREAKING CHANGES
+
+* **anthropic:** Thalos.NET.Anthropic no longer depends on the Anthropic SDK. RawRepresentation now holds ZeroAlloc.Rest.Anthropic types, and the SDK no longer flows transitively. Cache markers set by the caller are ignored: WithCacheControl, raw SDK content blocks, ToolUnion tools and a RawRepresentationFactory returning MessageCreateParams. The translator places every breakpoint from PromptCacheHints, up to four.
+
+### Features
+
+* **anthropic:** own Anthropic client over ZeroAlloc.Rest; add Thalos.NET.Ollama ([#431](https://github.com/MarcelRoozekrans/Thalos.NET/issues/431)) ([abf47c6](https://github.com/MarcelRoozekrans/Thalos.NET/commit/abf47c6b55eea92d6358f8ba5b62b66691ab6bbd))
+
 ## [0.19.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.18.0...v0.19.0) (2026-10-23)
 
 
