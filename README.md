@@ -17,8 +17,8 @@ A Hermes-style, ZeroAlloc-native agent framework for .NET, built on
 | `Thalos.NET` | Runtime: agent factory, tool catalog + authorization, session state machine, in-memory store, `AddThalos(...)` | Abstractions, `Microsoft.Agents.AI` |
 | `Thalos.NET.Testing` | `ScriptedChatClient`, `RecordingNotificationPublisher`, reusable `IAgentSessionStore` contract tests + `MemoryStoreContractTests`, `MemoryIndexContractTests`, `SkillStoreContractTests`, `SkillIndexContractTests`, `HashedBagOfWordsEmbeddingGenerator` (ships xunit + AwesomeAssertions references by design) | Thalos.NET, Thalos.NET.Memory, Thalos.NET.Skills |
 | `Thalos.NET.Mcp` | MCP servers (stdio / http / sse, Claude Code-style `.mcp.json`) as tool sources | Thalos.NET, `ModelContextProtocol` |
-| `Thalos.NET.Anthropic` | Anthropic Claude chat-client provider | Thalos.NET, `Anthropic` |
-| `Thalos.NET.Ollama` | Ollama embedding generator: an `IEmbeddingGenerator<string, Embedding<float>>` over `POST /api/embed`, registered with `UseOllamaEmbeddings(endpoint, model)` (net10.0 only) | `ZeroAlloc.Rest.Ollama` |
+| `Thalos.NET.Anthropic` | Anthropic Claude chat-client provider | Thalos.NET, `ZeroAlloc.Rest.Anthropic` |
+| `Thalos.NET.Ollama` | Ollama embedding generator: an `IEmbeddingGenerator<string, Embedding<float>>` over `POST /api/embed`, registered with `UseOllamaEmbeddings(endpoint, model)` | `ZeroAlloc.Rest.Ollama` |
 | `Thalos.NET.Sentinel` | AI.Sentinel scanning at the model boundary, quarantine → `AgentError`; scans recalled memories | Thalos.NET, `AI.Sentinel` |
 | `Thalos.NET.Memory` | Curated long-term memory: `IMemoryStore`/`IMemoryIndex`/`IMemoryService`, auto-recall `AIContextProvider`, `memory__*` tools, in-memory implementations | Thalos.NET |
 | `Thalos.NET.Memory.RagNet` | pgvector index via Rag.NET `PgVectorStore` (net10.0 only) | Thalos.NET.Memory, `Rag.NET.VectorStores.PgVector` |
@@ -33,7 +33,7 @@ A Hermes-style, ZeroAlloc-native agent framework for .NET, built on
 | `Thalos.NET.Sandbox.Docker` | `ISandboxRuntime` over Docker: per-run containers behind a loopback gateway, with an egress proxy that allows only NuGet (net10.0 only) | Thalos.NET.Sandbox, `Docker.DotNet.Enhanced` |
 | `Thalos.NET.Sandbox.Host` | The in-container host: workspace, build and Roslyn tools over MCP behind a per-sandbox bearer token (net10.0 only) | Thalos.NET.Sandbox, `ModelContextProtocol.AspNetCore` |
 
-Targets `net8.0` and `net10.0` (`Thalos.NET.Anthropic`, `Thalos.NET.Ollama`, `Thalos.NET.Memory.RagNet`, `Thalos.NET.Workflow.Orm` and the three `Thalos.NET.Sandbox*` packages: `net10.0` only — Anthropic and Ollama because ZeroAlloc.Rest.Anthropic and ZeroAlloc.Rest.Ollama are net10.0-only, RagNet because Rag.NET is net10.0-only, Workflow.Orm because ZeroAlloc.ORM / ZeroAlloc.Outbox.Orm / AdoNet.Async.Adapters ship net10.0-only builds).
+Targets `net8.0` and `net10.0` (`Thalos.NET.Memory.RagNet`, `Thalos.NET.Workflow.Orm` and the three `Thalos.NET.Sandbox*` packages: `net10.0` only — RagNet because Rag.NET is net10.0-only, Workflow.Orm because ZeroAlloc.ORM / ZeroAlloc.Outbox.Orm / AdoNet.Async.Adapters ship net10.0-only builds).
 
 ## Core contracts
 

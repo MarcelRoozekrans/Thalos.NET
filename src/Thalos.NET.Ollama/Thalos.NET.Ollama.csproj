@@ -1,7 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <!-- ZeroAlloc.Rest.Ollama 3.5.0 ships a net10.0 build only -->
-    <TargetFrameworks>net10.0</TargetFrameworks>
     <RootNamespace>Thalos.Ollama</RootNamespace>
     <PackageId>Thalos.NET.Ollama</PackageId>
     <Description>Ollama embedding generator for Thalos.NET.</Description>
