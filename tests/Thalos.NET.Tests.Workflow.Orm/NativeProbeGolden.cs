@@ -5,6 +5,16 @@ namespace Thalos.Tests.Workflow.Orm;
 /// <see cref="NativeProbeTests"/> asserts the native run and the JIT run against it, so both being wrong the same way
 /// fails. Regenerate it from the JIT run's output when a check changes on purpose.
 /// </summary>
+/// <remarks>
+/// Red for the anthropic line, each applied to the JIT probe and seen to change the line: in AnthropicResponseMapper,
+/// build the sync text block from string.Empty (call.text is ""); ignore TextDelta when streaming (stream.text is "");
+/// set FinishReason to null in ToChatResponse (call.finish is null); set InputTokenCount, OutputTokenCount,
+/// CachedInputTokenCount or TotalTokenCount to null in ToUsageDetails (that number is null in both turns, the total
+/// also follows a null input or output).
+/// Red for the ollama line, in OllamaEmbeddingGenerator.GenerateAsync: break after the first embedding (count 1,
+/// dimensions [3], first [0.1]); insert each embedding at index 0 (first [0.4,0.1]); skip the usage block
+/// (promptTokens -1); in the probe's StubOllamaHandler, answer 2-d vectors (dimensions [2,2]).
+/// </remarks>
 internal static class NativeProbeGolden
 {
     public const string Output = """

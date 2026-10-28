@@ -125,13 +125,17 @@ public sealed class NativeProbeTests(PostgresFixture pg, NativeProbePublish publ
     /// <summary>The content the adapter lines must hold, so a golden captured from a probe that lost it cannot pass.</summary>
     private static void AssertAdapters(string[] nativeLines)
     {
+        // Every Red below was applied to the JIT probe, whose output this test compares, and the printed line changed as
+        // named; this test itself needs Docker and a native publish, so it is not run locally.
         using (var anthropic = Check(nativeLines, "anthropic"))
         {
             var call = anthropic.RootElement.GetProperty("call");
+            // Red: in AnthropicResponseMapper.ToContent, build the text block's TextContent from string.Empty: call.text is "".
+            call.GetProperty("text").GetString().Should().Be("Pong");
+            // Red: in AnthropicResponseMapper, ignore TextDelta in the streaming case: stream.text is "".
+            anthropic.RootElement.GetProperty("stream").GetProperty("text").GetString().Should().Be("1 2 3 4 5");
             // Red: in the probe's RecordedAnthropicHandler, serve text.response.json for a streaming request too: the
             // stream ends before message_stop and the line is an error, with no stream entry.
-            anthropic.RootElement.GetProperty("stream").GetProperty("text").GetString().Should().Be("1 2 3 4 5");
-            call.GetProperty("text").GetString().Should().Be("Pong");
             // Red: in AnthropicResponseMapper.ToChatResponse, set FinishReason to null: the call's finish is null.
             call.GetProperty("finish").GetString().Should().Be("stop");
             // Red: in AnthropicResponseMapper.ToUsageDetails, set TotalTokenCount to null: total is null.
@@ -139,7 +143,7 @@ public sealed class NativeProbeTests(PostgresFixture pg, NativeProbePublish publ
         }
 
         using var ollama = Check(nativeLines, "ollama");
-        // Red: in OllamaEmbeddingGenerator.GenerateAsync, keep only the first embedding: the count is 1.
+        // Red: in OllamaEmbeddingGenerator.GenerateAsync, break after the first embedding: count is 1.
         ollama.RootElement.GetProperty("count").GetInt32().Should().Be(2);
         // Red: in the probe's StubOllamaHandler, answer two-dimensional vectors: the dimensions are 2.
         ollama.RootElement.GetProperty("dimensions")[0].GetInt32().Should().Be(3);
