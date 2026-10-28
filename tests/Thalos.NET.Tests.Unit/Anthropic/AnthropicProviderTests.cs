@@ -1,7 +1,10 @@
+using System.Net;
+using System.Text;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using Thalos.Anthropic;
+using ZeroAlloc.Rest.Anthropic;
 
 namespace Thalos.Tests.Unit.Anthropic;
 
@@ -67,5 +70,128 @@ public sealed class AnthropicProviderTests
 
         var dispose = () => provider.Dispose();
         dispose.Should().NotThrow();
+    }
+
+    [Fact]
+    public void A_provider_without_a_timeout_uses_ten_minutes()
+    {
+        using var http = new HttpClient(new OverloadedHandler());
+        using var provider = new AnthropicChatClientProvider(Options.Create(new AnthropicOptions { ApiKey = "sk-test" }), http);
+
+        using var client = provider.CreateChatClient(Agent());
+
+        // Red: in CreateClient, set Timeout = _options.Timeout ?? TimeSpan.FromSeconds(100); the HttpClient default then stays.
+        http.Timeout.Should().Be(TimeSpan.FromMinutes(10));
+    }
+
+    [Fact]
+    public void A_provider_timeout_is_the_http_timeout()
+    {
+        using var http = new HttpClient(new OverloadedHandler());
+        using var provider = new AnthropicChatClientProvider(
+            Options.Create(new AnthropicOptions { ApiKey = "sk-test", Timeout = TimeSpan.FromSeconds(42) }), http);
+
+        using var client = provider.CreateChatClient(Agent());
+
+        // Red: in CreateClient, leave AnthropicClientOptions.Timeout at its default; the timeout is then ten minutes.
+        http.Timeout.Should().Be(TimeSpan.FromSeconds(42));
+    }
+
+    [Theory]
+    [InlineData(0, 1)]
+    [InlineData(1, 2)]
+    public async Task MaxRetries_sets_the_attempts(int maxRetries, int attempts)
+    {
+        var handler = new OverloadedHandler();
+        using var http = new HttpClient(handler);
+        using var provider = new AnthropicChatClientProvider(
+            Options.Create(new AnthropicOptions { ApiKey = "sk-test", MaxRetries = maxRetries }), http);
+        using var client = provider.CreateChatClient(Agent());
+
+        var act = () => client.GetResponseAsync([new(ChatRole.User, "q")], cancellationToken: CancellationToken.None);
+
+        // Red: in AnthropicChatClient.GetResponseAsync, return an empty ChatResponse on failure instead of throwing.
+        await act.Should().ThrowAsync<AnthropicApiException>();
+        // Red: in CreateClient, leave AnthropicClientOptions.MaxRetries at its default of 2; both rows then make three
+        // requests. For the second row alone: always set MaxRetries = 0.
+        handler.Requests.Should().Be(attempts);
+    }
+
+    [Fact]
+    public void A_negative_MaxRetries_fails_options_validation()
+    {
+        var services = new ServiceCollection().AddLogging();
+        services.AddThalos(t => t.UseAnthropic(o => { o.ApiKey = "sk-test"; o.MaxRetries = -1; }).UseInMemorySessionStore());
+        using var sp = services.BuildServiceProvider();
+
+        var act = () => sp.GetRequiredService<IOptions<AnthropicOptions>>().Value;
+        // Red: in AnthropicOptions.Describe, drop the MaxRetries check; the options then resolve.
+        act.Should().Throw<OptionsValidationException>().WithMessage("*MaxRetries*-1*");
+    }
+
+    [Fact]
+    public void A_negative_MaxRetries_is_refused_by_a_directly_constructed_provider()
+    {
+        var act = () => new AnthropicChatClientProvider(Options.Create(new AnthropicOptions { ApiKey = "sk-test", MaxRetries = -1 }));
+        // Red: in AnthropicOptions.Describe, test MaxRetries < -1; -1 is then accepted.
+        act.Should().Throw<ArgumentException>().WithMessage("*MaxRetries*-1*");
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void A_non_positive_Timeout_fails_options_validation(int seconds)
+    {
+        var services = new ServiceCollection().AddLogging();
+        services.AddThalos(t => t.UseAnthropic(o => { o.ApiKey = "sk-test"; o.Timeout = TimeSpan.FromSeconds(seconds); }).UseInMemorySessionStore());
+        using var sp = services.BuildServiceProvider();
+
+        var act = () => sp.GetRequiredService<IOptions<AnthropicOptions>>().Value;
+        // Red: in AnthropicOptions.Describe, drop the Timeout check; both rows then resolve.
+        act.Should().Throw<OptionsValidationException>().WithMessage("*Timeout*" + TimeSpan.FromSeconds(seconds) + "*");
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void A_non_positive_Timeout_is_refused_by_a_directly_constructed_provider(int seconds)
+    {
+        var options = new AnthropicOptions { ApiKey = "sk-test", Timeout = TimeSpan.FromSeconds(seconds) };
+        var act = () => new AnthropicChatClientProvider(Options.Create(options));
+        // Red: in AnthropicOptions.Describe, test Timeout < TimeSpan.Zero; the zero row is then accepted.
+        act.Should().Throw<ArgumentException>().WithMessage("*Timeout*" + TimeSpan.FromSeconds(seconds) + "*");
+    }
+
+    [Fact]
+    public void An_infinite_Timeout_is_accepted_and_is_the_http_timeout()
+    {
+        using var http = new HttpClient(new OverloadedHandler());
+        using var provider = new AnthropicChatClientProvider(
+            Options.Create(new AnthropicOptions { ApiKey = "sk-test", Timeout = Timeout.InfiniteTimeSpan }), http);
+
+        using var client = provider.CreateChatClient(Agent());
+
+        // Red: in AnthropicOptions.Describe, drop the InfiniteTimeSpan exception; the provider ctor then throws.
+        http.Timeout.Should().Be(Timeout.InfiniteTimeSpan);
+    }
+
+    /// <summary>Answers every request with 529 overloaded_error and counts the requests.</summary>
+    private sealed class OverloadedHandler : HttpMessageHandler
+    {
+        private int _requests;
+
+        public int Requests => _requests;
+
+        protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        {
+            Interlocked.Increment(ref _requests);
+            return Task.FromResult(new HttpResponseMessage((HttpStatusCode)529)
+            {
+                Content = new StringContent(
+                    "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}",
+                    Encoding.UTF8,
+                    "application/json"),
+            });
+        }
     }
 }

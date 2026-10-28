@@ -9,7 +9,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\Thalos.NET\Thalos.NET.csproj" />
-    <PackageReference Include="Anthropic" />
+    <PackageReference Include="ZeroAlloc.Rest.Anthropic" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Abstractions" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Binder" />
     <PackageReference Include="Microsoft.Extensions.Options" />
@@ -17,5 +17,6 @@
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Thalos.NET.Tests.Unit" />
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Native.Probe" />
   </ItemGroup>
 </Project>

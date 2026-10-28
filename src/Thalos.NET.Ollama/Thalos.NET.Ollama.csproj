@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <RootNamespace>Thalos.Ollama</RootNamespace>
+    <PackageId>Thalos.NET.Ollama</PackageId>
+    <Description>Ollama embedding generator for Thalos.NET.</Description>
+    <PackageTags>agents;ollama;embeddings</PackageTags>
+    <IsAotCompatible>true</IsAotCompatible>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" />
+    <PackageReference Include="ZeroAlloc.Rest.Ollama" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Unit" />
+    <InternalsVisibleTo Include="Thalos.NET.Tests.Native.Probe" />
+  </ItemGroup>
+</Project>

@@ -1,45 +1,20 @@
-using System.Text.Json;
-using global::Anthropic.Models.Messages;
 using Microsoft.Extensions.AI;
 
 namespace Thalos.Anthropic;
 
 /// <summary>
-/// What the Anthropic SDK 12.50.0 chat client does with a request's content and tools, as far as <c>cache_control</c>
-/// is concerned: which content it would send as a block <see cref="AnthropicPromptCacheTranslator"/> can mark, and how
-/// many markers the caller already set through the SDK's own seams, counted the way they reach the wire.
+/// Which content of a message <see cref="AnthropicChatClient"/> sends as a block, so that
+/// <see cref="AnthropicPromptCacheTranslator"/> marks one that reaches the wire.
 /// </summary>
 /// <remarks>
-/// <para>
-/// <b>System messages</b> send only text: content whose raw representation is a <see cref="TextBlockParam"/> is sent
-/// verbatim, any other <see cref="TextContent"/> is mapped with its cache control, blank or not, and every other
-/// content type is dropped. <b>Other messages</b> send content whose raw representation is a
-/// <see cref="ContentBlockParam"/> verbatim; everything else is mapped, a raw <see cref="TextBlockParam"/> included,
-/// with blank text dropped.
-/// </para>
-/// <para>
-/// Markers inside raw SDK objects the SDK sends verbatim are counted by walking the JSON those objects already hold,
-/// which is what the SDK's own converters write: <c>RawData</c> of a raw <see cref="TextBlockParam"/>, <c>Json</c> of
-/// a raw <see cref="ContentBlockParam"/> and of a tool made by <c>ToolUnion.AsAITool()</c>, and <c>RawBodyData</c> of
-/// the <see cref="MessageCreateParams"/> a <see cref="ChatOptions.RawRepresentationFactory"/> returns, whose top-level
-/// <c>cache_control</c> also takes a slot. No reflection-based serialization is involved.
-/// </para>
+/// <b>System messages</b> send every <see cref="TextContent"/>, blank or not, and drop every other content type.
+/// <b>Other messages</b> send non-blank <see cref="TextContent"/>, <see cref="FunctionCallContent"/> and
+/// <see cref="FunctionResultContent"/>, and drop the rest; an assistant's text is trimmed at the end first, which drops
+/// the same blank text.
 /// </remarks>
 internal static class AnthropicCacheMarkers
 {
-    private const string CacheControlProperty = "cache_control";
-
-    /// <summary>
-    /// The content additional-property key <c>WithCacheControl</c> writes. The SDK keeps the constant private and its
-    /// getter internal, so the key is read back from the public API once.
-    /// </summary>
-    internal static readonly string ContentKey =
-        new TextContent("x").WithCacheControl(new CacheControlEphemeral()).AdditionalProperties!.Keys.Single();
-
-    /// <summary>The tool additional-property key the SDK reads a function's cache control from.</summary>
-    internal const string ToolKey = nameof(Tool.CacheControl);
-
-    /// <summary>The index of the last content in <paramref name="message"/> the SDK would send as a block it marks, or -1.</summary>
+    /// <summary>The index of the last content in <paramref name="message"/> the adapter sends as a block, or -1.</summary>
     public static int MarkableContentIndex(ChatMessage message)
     {
         var system = message.Role == ChatRole.System;
@@ -47,9 +22,8 @@ internal static class AnthropicCacheMarkers
         {
             var content = message.Contents[i];
             var markable = system
-                ? content is TextContent && content.RawRepresentation is not TextBlockParam
-                : content.RawRepresentation is not ContentBlockParam
-                    && (content is TextContent text ? !string.IsNullOrWhiteSpace(text.Text) : content is FunctionCallContent or FunctionResultContent);
+                ? content is TextContent
+                : content is TextContent text ? !string.IsNullOrWhiteSpace(text.Text) : content is FunctionCallContent or FunctionResultContent;
             if (markable)
             {
                 return i;
@@ -58,68 +32,4 @@ internal static class AnthropicCacheMarkers
 
         return -1;
     }
-
-    /// <summary>Markers the caller set itself, through the SDK's seams or inside raw SDK objects, that will reach the wire.</summary>
-    /// <param name="messages">The request's messages.</param>
-    /// <param name="tools">The request's tools, if any.</param>
-    /// <param name="rawRequest">What the options' <see cref="ChatOptions.RawRepresentationFactory"/> returned for this request, if anything.</param>
-    public static int CountCallerMarkers(IList<ChatMessage> messages, IList<AITool>? tools, object? rawRequest)
-    {
-        var count = 0;
-        foreach (var message in messages)
-        {
-            var system = message.Role == ChatRole.System;
-            foreach (var content in message.Contents)
-            {
-                count += system ? CountInSystemContent(content) : CountInContent(content);
-            }
-        }
-
-        foreach (var tool in tools ?? [])
-        {
-            count += CountInTool(tool);
-        }
-
-        if (rawRequest is MessageCreateParams raw)
-        {
-            count += Count(raw.RawBodyData);
-        }
-
-        return count;
-    }
-
-    private static int CountInSystemContent(AIContent content) => content switch
-    {
-        { RawRepresentation: TextBlockParam raw } => Count(raw.RawData),
-        TextContent => HasContentKey(content),
-        _ => 0,
-    };
-
-    private static int CountInContent(AIContent content) => content switch
-    {
-        { RawRepresentation: ContentBlockParam raw } => Count(raw.Json),
-        TextContent text when string.IsNullOrWhiteSpace(text.Text) => 0,
-        _ => HasContentKey(content),
-    };
-
-    private static int CountInTool(AITool tool) => tool.GetService(typeof(ToolUnion)) is ToolUnion raw
-        ? Count(raw.Json)
-        : tool is AIFunctionDeclaration && tool.AdditionalProperties.TryGetValue(ToolKey, out var value) && value is CacheControlEphemeral ? 1 : 0;
-
-    private static int HasContentKey(AIContent content) =>
-        content.AdditionalProperties?.TryGetValue(ContentKey, out var value) == true && value is CacheControlEphemeral ? 1 : 0;
-
-    /// <summary>Markers in a model's raw properties, counted as <see cref="Count(JsonElement)"/> counts them in the object they write.</summary>
-    private static int Count(IReadOnlyDictionary<string, JsonElement> properties) =>
-        properties.Sum(static p => Marker(p.Key, p.Value) + Count(p.Value));
-
-    private static int Count(JsonElement element) => element.ValueKind switch
-    {
-        JsonValueKind.Object => element.EnumerateObject().Sum(static p => Marker(p.Name, p.Value) + Count(p.Value)),
-        JsonValueKind.Array => element.EnumerateArray().Sum(Count),
-        _ => 0,
-    };
-
-    private static int Marker(string name, JsonElement value) =>
-        string.Equals(name, CacheControlProperty, StringComparison.Ordinal) && value.ValueKind == JsonValueKind.Object ? 1 : 0;
 }

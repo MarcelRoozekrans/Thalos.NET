@@ -5,6 +5,16 @@ namespace Thalos.Tests.Workflow.Orm;
 /// <see cref="NativeProbeTests"/> asserts the native run and the JIT run against it, so both being wrong the same way
 /// fails. Regenerate it from the JIT run's output when a check changes on purpose.
 /// </summary>
+/// <remarks>
+/// Red for the anthropic line, each applied to the JIT probe and seen to change the line: in AnthropicResponseMapper,
+/// build the sync text block from string.Empty (call.text is ""); ignore TextDelta when streaming (stream.text is "");
+/// set FinishReason to null in ToChatResponse (call.finish is null); set InputTokenCount, OutputTokenCount,
+/// CachedInputTokenCount or TotalTokenCount to null in ToUsageDetails (that number is null in both turns, the total
+/// also follows a null input or output).
+/// Red for the ollama line, in OllamaEmbeddingGenerator.GenerateAsync: break after the first embedding (count 1,
+/// dimensions [3], first [0.1]); insert each embedding at index 0 (first [0.4,0.1]); skip the usage block
+/// (promptTokens -1); in the probe's StubOllamaHandler, answer 2-d vectors (dimensions [2,2]).
+/// </remarks>
 internal static class NativeProbeGolden
 {
     public const string Output = """
@@ -15,5 +25,7 @@ internal static class NativeProbeGolden
         options {"channels":{"Enabled":false,"DefaultAgent":"assistant","IdleTimeout":"02:30:00","FlushInterval":"00:00:00.2500000"},"telegram":{"Enabled":true,"BotToken":"123:abc","AllowedUserIds":[7,42,9000000000],"PrincipalId":"telegram-owner","Roles":["in-code","admin"],"PollTimeoutSeconds":30},"memory":{"Enabled":true,"SharedOwnerId":"daedalus","Recall":{"TopK":8,"MinScore":0.45,"MaxChars":1500},"Dedupe":{"Enabled":false,"Threshold":0.9},"ExposeTools":false},"skills":{"Enabled":true,"Roots":["/probe/skills/in-code","/probe/skills/team","/probe/skills/code"],"Catalogue":{"MaxChars":1200},"Search":{"TopK":3,"MinScore":0.5},"ExposeTools":false,"SyncOnStartup":false}}
         authz {"tool":"probe__echo","authorized":"{\"text\":\"a\\\"b <a & 'é' \\uD83D\\uDE80>\\nline\",\"lines\":[1,2.5,-3],\"options\":{\"deep\":true,\"skip\":null,\"tags\":[\"x\"]}}","published":["{\"text\":\"a\\\"b <a & 'é' \\uD83D\\uDE80>\\nline\",\"lines\":[1,2.5,-3],\"options\":{\"deep\":true,\"skip\":null,\"tags\":[\"x\"]}}"],"result":"\"a\\\"b <a & 'é' \uD83D\uDE80>\\nline\""}
         sentinel {"sent":["Mail <a & 'é' \uD83D\uDE80> to [EMAIL_1_{tag}].","Mail <a & 'é' \uD83D\uDE80> to [EMAIL_1_{tag}]."],"tool":"jane.doe@example.com","reply":"Mailed jane.doe@example.com.","blocked":"Quarantined Critical: SEC-01","memoryInjection":"Critical: SEC-01","memoryEmail":"allowed"}
+        anthropic {"call":{"text":"Pong","finish":"stop","input":18,"output":5,"total":23,"cached":0},"stream":{"text":"1 2 3 4 5","finish":"stop","input":25,"output":11,"total":36,"cached":0}}
+        ollama {"count":2,"dimensions":[3,3],"first":[0.1,0.4],"promptTokens":8}
         """;
 }

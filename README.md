@@ -17,7 +17,8 @@ A Hermes-style, ZeroAlloc-native agent framework for .NET, built on
 | `Thalos.NET` | Runtime: agent factory, tool catalog + authorization, session state machine, in-memory store, `AddThalos(...)` | Abstractions, `Microsoft.Agents.AI` |
 | `Thalos.NET.Testing` | `ScriptedChatClient`, `RecordingNotificationPublisher`, reusable `IAgentSessionStore` contract tests + `MemoryStoreContractTests`, `MemoryIndexContractTests`, `SkillStoreContractTests`, `SkillIndexContractTests`, `HashedBagOfWordsEmbeddingGenerator` (ships xunit + AwesomeAssertions references by design) | Thalos.NET, Thalos.NET.Memory, Thalos.NET.Skills |
 | `Thalos.NET.Mcp` | MCP servers (stdio / http / sse, Claude Code-style `.mcp.json`) as tool sources | Thalos.NET, `ModelContextProtocol` |
-| `Thalos.NET.Anthropic` | Anthropic Claude chat-client provider | Thalos.NET, `Anthropic` |
+| `Thalos.NET.Anthropic` | Anthropic Claude chat-client provider | Thalos.NET, `ZeroAlloc.Rest.Anthropic` |
+| `Thalos.NET.Ollama` | Ollama embedding generator: an `IEmbeddingGenerator<string, Embedding<float>>` over `POST /api/embed`, registered with `UseOllamaEmbeddings(endpoint, model)` | `ZeroAlloc.Rest.Ollama` |
 | `Thalos.NET.Sentinel` | AI.Sentinel scanning at the model boundary, quarantine → `AgentError`; scans recalled memories | Thalos.NET, `AI.Sentinel` |
 | `Thalos.NET.Memory` | Curated long-term memory: `IMemoryStore`/`IMemoryIndex`/`IMemoryService`, auto-recall `AIContextProvider`, `memory__*` tools, in-memory implementations | Thalos.NET |
 | `Thalos.NET.Memory.RagNet` | pgvector index via Rag.NET `PgVectorStore` (net10.0 only) | Thalos.NET.Memory, `Rag.NET.VectorStores.PgVector` |
@@ -239,13 +240,11 @@ pipelines get the same client from `ChatClientBuilder.UsePromptCaching()`, place
 `Thalos:Anthropic:PromptCaching` as `{ "Enabled": true, "Ttl": "5m" }`, which is the default, and `Ttl` may also be
 `"1h"`; any other value fails options validation at startup. Anthropic accepts at most four breakpoints, so when more
 are hinted the translator keeps, in order, the last tool, the instructions, the latest message, the message before
-the first transient one, and then caller-placed hints in list order. Markers a caller sets directly through the SDK
-count toward the four: through `WithCacheControl` or a function's `CacheControl` property, and inside raw SDK objects
-the SDK sends verbatim (raw content blocks, a `ToolUnion.AsAITool()` tool, and the request a `RawRepresentationFactory`
-returns, including its top-level `cache_control`). A request with no hints is sent unchanged. Usage keeps the SDK's
-`InputTokenCount`, which already totals uncached, cache-write and cache-read input, and `CachedInputTokenCount`, the
-cache reads; the translator adds the cache writes under `TurnUsage.CacheWriteCountKey`, also when `Enabled` is false,
-which turns off only the hint translation.
+the first transient one, and then caller-placed hints in list order. Only the translator places markers: a caller
+cannot set a `cache_control` of its own, so the four are always the translator's. A request with no hints is sent
+unchanged. Usage reports `InputTokenCount` as the total of uncached, cache-write and cache-read input, and
+`CachedInputTokenCount` as the cache reads; the translator adds the cache writes under `TurnUsage.CacheWriteCountKey`,
+also when `Enabled` is false, which turns off only the hint translation.
 
 **Run workspaces and git.** `UseGitWorktreeWorkspaces` (`Thalos.NET.Git`) makes a git worktree per workflow run the
 `IRunWorkspaceProvider`, and `git`-CLI commits and pushes from it the `IRunWorkspaceGit`, replacing any earlier
@@ -293,6 +292,16 @@ OpenAI, …) for complete protection:
     o.OnCritical = SentinelAction.Quarantine;    // surfaces as AgentError.Quarantined ("<Severity>: <DetectorId>")
     o.OnHigh = SentinelAction.Alert;
 })
+```
+
+`Thalos.NET.Ollama` provides one over a local Ollama server's `POST /api/embed`. `UseOllamaEmbeddings` registers the
+generator as the singleton `IEmbeddingGenerator<string, Embedding<float>>` and returns that same instance, so a host
+can hand it to AI.Sentinel while it is still registering services:
+
+```csharp
+using Thalos.Ollama;
+
+var embeddingGenerator = services.UseOllamaEmbeddings(new Uri("http://localhost:11434/"), "nomic-embed-text");
 ```
 
 `Thalos.NET.Sentinel` takes AI.Sentinel 3.x defaults. Since 3.0 the PII and credential detectors redact by default: an

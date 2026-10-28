@@ -1,0 +1,1 @@
+{"model":"claude-haiku-5-5","max_tokens":128,"messages":[{"role":"user","content":[{"type":"text","text":"What is the weather in Amsterdam? Use the tool."}]}],"tools":[{"name":"get_weather","description":"Gets the current weather for a location.","input_schema":{"type":"object","properties":{"location":{"type":"string"}},"required":["location"]}}],"stream":true}

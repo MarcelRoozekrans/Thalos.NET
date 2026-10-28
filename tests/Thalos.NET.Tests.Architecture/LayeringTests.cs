@@ -1,10 +1,10 @@
 using System.Runtime.CompilerServices;
-using Assembly = System.Reflection.Assembly;
-using Type = System.Type;
 using ArchUnitNET.Domain;
 using ArchUnitNET.Loader;
 using ArchUnitNET.xUnit;
 using static ArchUnitNET.Fluent.ArchRuleDefinition;
+using Assembly = System.Reflection.Assembly;
+using Type = System.Type;
 
 namespace Thalos.Tests.Architecture;
 
@@ -14,6 +14,7 @@ public sealed class LayeringTests
     private static readonly Assembly CoreAssembly = typeof(ThalosBuilder).Assembly;
     private static readonly Assembly McpAssembly = typeof(Thalos.Mcp.McpToolSource).Assembly;
     private static readonly Assembly AnthropicAssembly = typeof(Thalos.Anthropic.AnthropicChatClientProvider).Assembly;
+    private static readonly Assembly OllamaAssembly = typeof(Thalos.Ollama.OllamaEmbeddingGenerator).Assembly;
     private static readonly Assembly SentinelAssembly = typeof(Thalos.Sentinel.SentinelChatClientDecorator).Assembly;
     private static readonly Assembly MemoryAssembly = typeof(Thalos.Memory.MemoryService).Assembly;
     private static readonly Assembly RagNetAssembly = typeof(Thalos.Memory.RagNet.RagNetMemoryIndex).Assembly;
@@ -35,6 +36,7 @@ public sealed class LayeringTests
         CoreAssembly,
         McpAssembly,
         AnthropicAssembly,
+        OllamaAssembly,
         SentinelAssembly,
         MemoryAssembly,
         RagNetAssembly,
@@ -51,7 +53,8 @@ public sealed class LayeringTests
 
     // Anchored so that "Anthropic" does not also match "Thalos.Anthropic" etc.
     private const string MafNamespace = @"^Microsoft\.Agents\.AI(\.|$)";
-    private const string AnthropicNamespace = @"^Anthropic(\.|$)";
+    private const string AnthropicNamespace = @"^ZeroAlloc\.Rest\.Anthropic(\.|$)";
+    private const string OllamaNamespace = @"^ZeroAlloc\.Rest\.Ollama(\.|$)";
     private const string SentinelNamespace = @"^AI\.Sentinel(\.|$)";
     private const string McpNamespace = @"^ModelContextProtocol(\.|$)";
     private const string RagNetNamespace = @"^Rag\.NET(\.|$)";
@@ -63,6 +66,7 @@ public sealed class LayeringTests
     public void Abstractions_do_not_depend_on_MAF_or_providers() =>
         Types().That().Are(Abstractions).Should().NotDependOnAnyTypesThat().ResideInNamespaceMatching(MafNamespace)
             .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(AnthropicNamespace)
+            .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(OllamaNamespace)
             .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(SentinelNamespace)
             .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(McpNamespace)
             .Check(Arch);
@@ -70,19 +74,66 @@ public sealed class LayeringTests
     [Fact]
     public void Core_does_not_depend_on_providers_or_sentinel_or_mcp() =>
         Types().That().Are(Core).Should().NotDependOnAnyTypesThat().ResideInNamespaceMatching(AnthropicNamespace)
+            .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(OllamaNamespace)
             .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(SentinelNamespace)
             .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(McpNamespace)
             .Check(Arch);
 
     [Fact]
+    public void Only_the_Anthropic_adapter_uses_the_Anthropic_client()
+    {
+        // Red: reference a ZeroAlloc.Rest.Anthropic type from Core, for example a field of AnthropicClient in ThalosBuilder.
+        Types().That().DoNotResideInAssembly(AnthropicAssembly)
+            .Should().NotDependOnAnyTypesThat().ResideInNamespaceMatching(AnthropicNamespace)
+            .Check(Arch);
+
+        // The rule is only as wide as the loaded set: it must hold the adapter, or the rule matches nothing.
+        // Red: leave AnthropicAssembly out of LoadedAssemblies: the adapter's types are then not loaded.
+        Arch.Types.Should().Contain(t => t.FullName == typeof(Thalos.Anthropic.AnthropicChatClientProvider).FullName);
+    }
+
+    [Fact]
+    public void Only_the_Ollama_adapter_uses_the_Ollama_client()
+    {
+        // Red: reference a ZeroAlloc.Rest.Ollama type from Core, for example a field of OllamaClient in ThalosBuilder.
+        Types().That().DoNotResideInAssembly(OllamaAssembly)
+            .Should().NotDependOnAnyTypesThat().ResideInNamespaceMatching(OllamaNamespace)
+            .Check(Arch);
+
+        // Red: leave OllamaAssembly out of LoadedAssemblies: the adapter's types are then not loaded.
+        Arch.Types.Should().Contain(t => t.FullName == typeof(Thalos.Ollama.OllamaEmbeddingGenerator).FullName);
+    }
+
+    [Fact]
+    public void No_Thalos_assembly_references_the_Anthropic_SDK_or_OllamaSharp()
+    {
+        for (var i = 0; i < LoadedAssemblies.Length; i++)
+        {
+            var referenced = Array.ConvertAll(LoadedAssemblies[i].GetReferencedAssemblies(), r => r.Name!);
+            // Red: add a PackageReference to Anthropic back to one of the shipping csproj files, and use a type of it.
+            referenced.Should().NotContain(["Anthropic", "OllamaSharp"], $"{LoadedAssemblies[i].GetName().Name} must not reference the Anthropic SDK or OllamaSharp");
+        }
+    }
+
+    [Fact]
     public void Adapters_do_not_depend_on_each_other()
     {
-        Types().That().ResideInAssembly(AnthropicAssembly)
+        Types().That().ResideInAssembly(AnthropicAssembly).Or().ResideInAssembly(OllamaAssembly)
             .Should().NotDependOnAnyTypesThat().ResideInAssembly(SentinelAssembly)
             .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(McpAssembly)
             .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(MemoryAssembly)
             .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(RagNetAssembly)
             .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(SkillsAssembly)
+            .Check(Arch);
+
+        // Red: reference OllamaEmbeddingGenerator from AnthropicChatClientProvider.
+        Types().That().ResideInAssembly(AnthropicAssembly)
+            .Should().NotDependOnAnyTypesThat().ResideInAssembly(OllamaAssembly)
+            .Check(Arch);
+
+        // Red: reference AnthropicChatClientProvider from OllamaEmbeddingGenerator.
+        Types().That().ResideInAssembly(OllamaAssembly)
+            .Should().NotDependOnAnyTypesThat().ResideInAssembly(AnthropicAssembly)
             .Check(Arch);
 
         Types().That().ResideInAssembly(SentinelAssembly).Or().ResideInAssembly(McpAssembly)
@@ -95,10 +146,12 @@ public sealed class LayeringTests
         Types().That().ResideInAssembly(RagNetAssembly)
             .Should().NotDependOnAnyTypesThat().ResideInAssembly(SentinelAssembly)
             .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(AnthropicAssembly)
+            .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(OllamaAssembly)
             .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(McpAssembly)
             .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(SkillsAssembly)
             .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(SentinelNamespace)
             .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(AnthropicNamespace)
+            .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(OllamaNamespace)
             .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(McpNamespace)
             .Check(Arch);
     }
@@ -110,10 +163,12 @@ public sealed class LayeringTests
             .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(NpgsqlNamespace)
             .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(SentinelNamespace)
             .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(AnthropicNamespace)
+            .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(OllamaNamespace)
             .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(McpNamespace)
             .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(RagNetAssembly)
             .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(SentinelAssembly)
             .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(AnthropicAssembly)
+            .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(OllamaAssembly)
             .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(McpAssembly)
             .Check(Arch);
 
@@ -124,11 +179,13 @@ public sealed class LayeringTests
             .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(RagNetAssembly)
             .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(SentinelAssembly)
             .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(AnthropicAssembly)
+            .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(OllamaAssembly)
             .AndShould().NotDependOnAnyTypesThat().ResideInAssembly(McpAssembly)
             .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(RagNetNamespace)
             .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(NpgsqlNamespace)
             .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(SentinelNamespace)
             .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(AnthropicNamespace)
+            .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(OllamaNamespace)
             .AndShould().NotDependOnAnyTypesThat().ResideInNamespaceMatching(McpNamespace)
             .Check(Arch);
 
@@ -190,6 +247,7 @@ public sealed class LayeringTests
             RagNetAssembly.GetName().Name!,
             SentinelAssembly.GetName().Name!,
             AnthropicAssembly.GetName().Name!,
+            OllamaAssembly.GetName().Name!,
             McpAssembly.GetName().Name!,
             TestingAssembly.GetName().Name!,
         });
@@ -199,7 +257,7 @@ public sealed class LayeringTests
     public void Core_and_abstractions_do_not_reference_the_feature_packages()
     {
         var featureNames = new[] { MemoryAssembly.GetName().Name, RagNetAssembly.GetName().Name, SkillsAssembly.GetName().Name };
-        var nonFeature = new[] { AbstractionsAssembly, CoreAssembly, SentinelAssembly, AnthropicAssembly, McpAssembly };
+        var nonFeature = new[] { AbstractionsAssembly, CoreAssembly, SentinelAssembly, AnthropicAssembly, OllamaAssembly, McpAssembly };
         for (var i = 0; i < nonFeature.Length; i++)
         {
             var referenced = Array.ConvertAll(nonFeature[i].GetReferencedAssemblies(), r => r.Name);
@@ -221,7 +279,7 @@ public sealed class LayeringTests
     public void Abstractions_do_not_reference_the_core_or_adapters()
     {
         var referenced = AbstractionsAssembly.GetReferencedAssemblies().Select(a => a.Name).ToArray();
-        referenced.Should().NotContain(new[] { CoreAssembly.GetName().Name, McpAssembly.GetName().Name, AnthropicAssembly.GetName().Name, SentinelAssembly.GetName().Name, MemoryAssembly.GetName().Name, RagNetAssembly.GetName().Name, SkillsAssembly.GetName().Name, TestingAssembly.GetName().Name });
+        referenced.Should().NotContain(new[] { CoreAssembly.GetName().Name, McpAssembly.GetName().Name, AnthropicAssembly.GetName().Name, OllamaAssembly.GetName().Name, SentinelAssembly.GetName().Name, MemoryAssembly.GetName().Name, RagNetAssembly.GetName().Name, SkillsAssembly.GetName().Name, TestingAssembly.GetName().Name });
         referenced.Should().NotContain("Microsoft.Agents.AI");
     }
 
@@ -321,7 +379,7 @@ public sealed class LayeringTests
     public void Shipping_assemblies_do_not_reference_test_frameworks(string assemblyName)
     {
         // Thalos.NET.Testing references xunit + AwesomeAssertions by design (it ships contract tests); nothing else may.
-        var assembly = new[] { AbstractionsAssembly, CoreAssembly, McpAssembly, AnthropicAssembly, SentinelAssembly, MemoryAssembly, RagNetAssembly, SkillsAssembly }
+        var assembly = new[] { AbstractionsAssembly, CoreAssembly, McpAssembly, AnthropicAssembly, OllamaAssembly, SentinelAssembly, MemoryAssembly, RagNetAssembly, SkillsAssembly }
             .Single(a => string.Equals(a.GetName().Name, assemblyName, StringComparison.Ordinal));
         var referenced = assembly.GetReferencedAssemblies().Select(a => a.Name!).ToArray();
 
@@ -339,6 +397,7 @@ public sealed class LayeringTests
         CoreAssembly.GetName().Name!,
         McpAssembly.GetName().Name!,
         AnthropicAssembly.GetName().Name!,
+        OllamaAssembly.GetName().Name!,
         SentinelAssembly.GetName().Name!,
         MemoryAssembly.GetName().Name!,
         RagNetAssembly.GetName().Name!,
