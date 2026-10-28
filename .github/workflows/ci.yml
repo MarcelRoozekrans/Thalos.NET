@@ -213,7 +213,7 @@ jobs:
             echo "ok: $pkg"
           done
           count=$(ls *.nupkg | wc -l)
-          [ "$count" -eq 18 ] || { echo "::error::expected 18 packages, found $count"; failed=1; }
+          [ "$count" -eq 19 ] || { echo "::error::expected 19 packages, found $count"; failed=1; }
           exit $failed
 
       # Rehearse the push: same command shape as the release (quoted glob, --skip-duplicate) against a
@@ -225,7 +225,7 @@ jobs:
           feed="$RUNNER_TEMP/rehearsal-feed"; mkdir -p "$feed"
           dotnet nuget push "artifacts/packages/*.nupkg" --source "$feed" --skip-duplicate
           dotnet nuget push "artifacts/packages/*.nupkg" --source "$feed" --skip-duplicate
-          [ "$(ls "$feed" | wc -l)" -eq 18 ] || { echo "::error::rehearsal feed does not hold 18 packages"; exit 1; }
+          [ "$(ls "$feed" | wc -l)" -eq 19 ] || { echo "::error::rehearsal feed does not hold 19 packages"; exit 1; }
 
       - name: Upload packages
         uses: actions/upload-artifact@v7

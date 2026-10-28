@@ -294,6 +294,16 @@ OpenAI, …) for complete protection:
 })
 ```
 
+`Thalos.NET.Ollama` provides one over a local Ollama server's `POST /api/embed`. `UseOllamaEmbeddings` registers the
+generator as the singleton `IEmbeddingGenerator<string, Embedding<float>>` and returns that same instance, so a host
+can hand it to AI.Sentinel while it is still registering services:
+
+```csharp
+using Thalos.Ollama;
+
+var embeddingGenerator = services.UseOllamaEmbeddings(new Uri("http://localhost:11434/"), "nomic-embed-text");
+```
+
 `Thalos.NET.Sentinel` takes AI.Sentinel 3.x defaults. Since 3.0 the PII and credential detectors redact by default: an
 email address or an API key in a prompt reaches the model as a placeholder and the turn succeeds rather than taking the
 severity action. Set `o.RedactByDefault = false` to give those findings their severity action again. A recalled memory

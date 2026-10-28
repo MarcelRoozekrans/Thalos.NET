@@ -293,6 +293,43 @@ under `tests/` publishes a host that references every packable project except `T
   `ProcessLoader.Load` throwing `NullReferenceException`. A deployer should expect `SyncAsync` to report it for such a
   file, as for the shapes under [Process files that used to sync and now report an error](#process-files-that-used-to-sync-and-now-report-an-error).
 
+0.20.0 ships nineteen packages: `Thalos.NET.Ollama` joins the eighteen, on `net8.0` and `net10.0`. `ci.yml`'s
+`pack-validate` job lists it, and both package-count checks expect nineteen. `Thalos.NET.Anthropic` no longer depends
+on the Anthropic SDK: it talks to the Messages API through `ZeroAlloc.Rest.Anthropic`, an AOT-clean client, so the
+native probe now references every packable project except `Thalos.NET.Testing` and exercises the Anthropic adapter,
+sync and streaming, and the Ollama generator.
+
+**Breaking changes in 0.20.0:**
+
+- **`Thalos.NET.Anthropic` no longer depends on the Anthropic SDK.** The SDK no longer flows to a host transitively; a
+  host that uses SDK types itself must reference the `Anthropic` package directly. `RawRepresentation` on a response,
+  its content and a streaming update now holds `ZeroAlloc.Rest.Anthropic` types instead of SDK types.
+- **Cache markers set by the caller are ignored.** `WithCacheControl`, raw SDK content blocks, SDK `ToolUnion` tools
+  and a `RawRepresentationFactory` returning `MessageCreateParams` no longer reach the wire. The prompt-cache
+  translator places every breakpoint from `PromptCacheHints`, up to four, so the limit can no longer be exceeded by a
+  caller.
+
+**Added in 0.20.0:**
+
+- **`Thalos.NET.Ollama`:** `OllamaEmbeddingGenerator`, an `IEmbeddingGenerator<string, Embedding<float>>` over
+  `POST /api/embed` that reports the prompt token count as usage, and `services.UseOllamaEmbeddings(endpoint, model)`,
+  which registers it as the singleton generator and returns the same instance. See the README,
+  [Security](../README.md#security-ai-sentinel-needs-an-embedding-generator-for-full-coverage).
+
+**Changed in 0.20.0:**
+
+- **The Anthropic defaults are the SDK's:** a request attempt may take ten minutes, and a 429, 529 or other 5xx
+  response is retried twice, honouring `retry-after`. `Thalos:Anthropic:Timeout` and `Thalos:Anthropic:MaxRetries`
+  still override them. A negative `MaxRetries`, or a `Timeout` that is zero or negative but not infinite, now fails
+  options validation at startup.
+- **A stream that ends without `message_stop` throws** an `AnthropicApiException` of type `stream_incomplete`, instead
+  of ending as a short answer that looks complete.
+- **Tool schemas are reshaped as SDK 13.3.0 did,** so the tools a model sees are unchanged.
+- **A system message in the middle of a conversation** is lifted into the top-level system prompt, in order, ahead of
+  `ChatOptions.Instructions`; the Messages API has no system role inside `messages`.
+- **A tool result is sent as text.** A result with several MCP text items sends them joined by newlines, in one
+  `tool_result` block.
+
 ## Local development against a consumer (Daedalus)
 
 `scripts/pack-local.ps1` packs `0.3.0-local.<timestamp>` (the `VersionPrefix` in `Directory.Build.props`) into `C:\Projects\Prive\.nuget-local`
