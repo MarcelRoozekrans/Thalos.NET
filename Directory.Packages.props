@@ -26,7 +26,7 @@
     <!-- the floors ZeroAlloc.Rest.Anthropic and .Ollama 3.6.0 set; ZeroAlloc.Results 1.4.5 above is theirs too -->
     <PackageVersion Include="ZeroAlloc.Rest" Version="3.6.1" />
     <PackageVersion Include="ZeroAlloc.Rest.SystemTextJson" Version="3.6.0" />
-    <PackageVersion Include="ZeroAlloc.Rest.DependencyInjection" Version="3.6.0" />
+    <PackageVersion Include="ZeroAlloc.Rest.DependencyInjection" Version="3.6.1" />
     <PackageVersion Include="ZeroAlloc.Rest.Resilience" Version="3.6.0" />
     <PackageVersion Include="ZeroAlloc.Resilience" Version="3.4.0" />
     <PackageVersion Include="ZeroAlloc.Collections" Version="1.2.4" />
