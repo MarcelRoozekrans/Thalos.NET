@@ -3,7 +3,7 @@
     <!-- ZeroAlloc ecosystem -->
     <PackageVersion Include="ZeroAlloc.Results" Version="1.4.5" />
     <PackageVersion Include="ZeroAlloc.ValueObjects" Version="2.2.5" />
-    <PackageVersion Include="ZeroAlloc.Mediator" Version="6.6.4" />
+    <PackageVersion Include="ZeroAlloc.Mediator" Version="6.6.5" />
     <PackageVersion Include="ZeroAlloc.Authorization" Version="2.1.8" />
     <PackageVersion Include="ZeroAlloc.AsyncEvents" Version="1.1.11" />
     <PackageVersion Include="ZeroAlloc.StateMachine" Version="1.6.6" />
