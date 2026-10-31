@@ -22,7 +22,7 @@
     <PackageVersion Include="ModelContextProtocol.AspNetCore" Version="2.3.0" />
     <!-- our own AOT-clean Anthropic Messages and Ollama embed clients; Thalos.NET.Anthropic runs on the first -->
     <PackageVersion Include="ZeroAlloc.Rest.Anthropic" Version="3.6.3" />
-    <PackageVersion Include="ZeroAlloc.Rest.Ollama" Version="3.6.1" />
+    <PackageVersion Include="ZeroAlloc.Rest.Ollama" Version="3.6.3" />
     <!-- the floors ZeroAlloc.Rest.Anthropic and .Ollama 3.6.0 set; ZeroAlloc.Results 1.4.5 above is theirs too -->
     <PackageVersion Include="ZeroAlloc.Rest" Version="3.6.3" />
     <PackageVersion Include="ZeroAlloc.Rest.SystemTextJson" Version="3.6.2" />
