@@ -9,8 +9,8 @@
     <PackageVersion Include="ZeroAlloc.StateMachine" Version="1.7.0" />
     <PackageVersion Include="ZeroAlloc.Telemetry" Version="1.12.6" />
     <PackageVersion Include="ZeroAlloc.Validation" Version="2.4.0" />
-    <PackageVersion Include="ZeroAlloc.Inject" Version="1.11.5" />
-    <PackageVersion Include="ZeroAlloc.Inject.Generator" Version="1.11.5" />
+    <PackageVersion Include="ZeroAlloc.Inject" Version="1.11.6" />
+    <PackageVersion Include="ZeroAlloc.Inject.Generator" Version="1.11.6" />
     <PackageVersion Include="ZeroAlloc.Analyzers" Version="1.11.2" />
 
     <!-- Agent framework + AI abstractions -->
