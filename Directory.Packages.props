@@ -45,7 +45,7 @@
     <!-- Its source generator: the static context ProcessLoader deserializes through, so no reflection -->
     <PackageVersion Include="Vecc.YamlDotNet.Analyzers.StaticGenerator" Version="18.1.0" />
     <!-- Raw-SQL ORM + transactional outbox, PostgreSQL persistence — net10.0-only, confined to Thalos.NET.Workflow.Orm -->
-    <PackageVersion Include="ZeroAlloc.ORM" Version="2.10.2" />
+    <PackageVersion Include="ZeroAlloc.ORM" Version="2.13.0" />
     <PackageVersion Include="ZeroAlloc.Outbox" Version="4.4.6" />
     <PackageVersion Include="ZeroAlloc.Outbox.Orm" Version="4.4.6" />
     <PackageVersion Include="AdoNet.Async.Adapters" Version="1.5.6" />
