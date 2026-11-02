@@ -17,7 +17,7 @@
     <PackageVersion Include="Microsoft.Agents.AI" Version="1.27.0" />
     <PackageVersion Include="Microsoft.Extensions.AI" Version="10.11.0" />
     <PackageVersion Include="Microsoft.Extensions.AI.Abstractions" Version="10.11.0" />
-    <PackageVersion Include="ModelContextProtocol" Version="2.2.0" />
+    <PackageVersion Include="ModelContextProtocol" Version="2.3.0" />
     <!-- the sandbox host's MCP-over-HTTP routes — confined to Thalos.NET.Sandbox.Host -->
     <PackageVersion Include="ModelContextProtocol.AspNetCore" Version="2.3.0" />
     <!-- our own AOT-clean Anthropic Messages and Ollama embed clients; Thalos.NET.Anthropic runs on the first -->
