@@ -54,9 +54,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     timeout-minutes: 30
-    permissions:
-      contents: read
-      id-token: write   # Codecov upload via OIDC, no token secret
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -108,13 +105,45 @@ jobs:
         with:
           reports: TestResults/**/coverage.cobertura.xml
 
-      # Both legs upload; Codecov merges them. The Docker-tagged tests add to the Linux report only.
+      # Each leg keeps its Cobertura reports; codecov-upload sends both to Codecov in one upload.
+      - name: Keep the coverage reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-${{ matrix.os }}
+          path: TestResults/**/coverage.cobertura.xml
+          if-no-files-found: error
+          retention-days: 1
+
+  # One Codecov upload with the reports of both legs. With one upload per leg, Codecov posted
+  # codecov/project as soon as the faster leg's report arrived and did not update it for the other,
+  # so the status judged a partial report. Both legs count: the Windows leg covers the Windows code
+  # paths, and the Docker-tagged tests run on the Linux leg only.
+  codecov-upload:
+    needs: build-test
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write   # Codecov upload via OIDC, no token secret
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Fetch the coverage reports of both legs
+        uses: actions/download-artifact@v8
+        with:
+          pattern: coverage-*
+          path: coverage
+
       - name: Upload coverage to Codecov
-        if: '!cancelled()'
         uses: codecov/codecov-action@v7
         with:
           use_oidc: true
-          files: "TestResults/**/coverage.cobertura.xml"
+          files: "coverage/**/coverage.cobertura.xml"
           disable_search: true   # only the files above, not every *.xml the search finds
           fail_ci_if_error: false
 
