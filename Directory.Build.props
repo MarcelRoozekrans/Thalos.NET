@@ -12,6 +12,10 @@
     <EnableNETAnalyzers>true</EnableNETAnalyzers>
     <AnalysisLevel>latest-recommended</AnalysisLevel>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <!-- The same NuGetAudit settings ci-baseline uses in CI, so a local restore reports the same advisories. -->
+    <NuGetAudit>true</NuGetAudit>
+    <NuGetAuditMode>all</NuGetAuditMode>
+    <NuGetAuditLevel>moderate</NuGetAuditLevel>
     <EmitCompilerGeneratedFiles>true</EmitCompilerGeneratedFiles>
     <!-- $(BaseIntermediateOutputPath) is not yet defined when Directory.Build.props is imported, so spell out obj\ -->
     <CompilerGeneratedFilesOutputPath>$(MSBuildProjectDirectory)/obj/generated</CompilerGeneratedFilesOutputPath>

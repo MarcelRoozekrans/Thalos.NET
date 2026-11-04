@@ -98,7 +98,8 @@ jobs:
       # refuses. Observed on the very first release through this path: the pull request that added
       # the path was itself the commit that raced ahead of the tag.
       ref: ${{ needs.release-please.outputs.tag_name }}
+    # contents: write lets publish-nuget attach the SBOM to the release; a called workflow cannot widen what it is given.
     permissions:
-      contents: read
+      contents: write
       id-token: write
     secrets: inherit
