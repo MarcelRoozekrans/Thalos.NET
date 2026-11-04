@@ -54,9 +54,6 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     timeout-minutes: 30
-    permissions:
-      contents: read
-      id-token: write   # Codecov upload via OIDC, no token secret
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -100,13 +97,53 @@ jobs:
           if [ "$RUNNER_OS" = "Windows" ]; then filter='--filter Category!=Docker'; fi
           dotnet test Thalos.NET.slnx --no-build -c Release --logger "trx;LogFileName=tests.trx" --settings coverage.runsettings --results-directory TestResults $filter
 
-      # Both legs upload; Codecov merges them. The Docker-tagged tests add to the Linux report only.
+      # Merges the Cobertura reports and fails below the line-coverage floor, or when codecov.yml would let a drop in
+      # coverage pass quietly. Linux leg only: ci-baseline's coverage gate runs on Linux runners only.
+      - name: Coverage gate
+        if: runner.os == 'Linux'
+        uses: MarcelRoozekrans/ci-baseline/actions/coverage-gate@v1
+        with:
+          reports: TestResults/**/coverage.cobertura.xml
+
+      # Each leg keeps its Cobertura reports; codecov-upload sends both to Codecov in one upload.
+      - name: Keep the coverage reports
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-${{ matrix.os }}
+          path: TestResults/**/coverage.cobertura.xml
+          if-no-files-found: error
+          retention-days: 1
+
+  # One Codecov upload with the reports of both legs. With one upload per leg, Codecov posted
+  # codecov/project as soon as the faster leg's report arrived and did not update it for the other,
+  # so the status judged a partial report. Both legs count: the Windows leg covers the Windows code
+  # paths, and the Docker-tagged tests run on the Linux leg only.
+  codecov-upload:
+    needs: build-test
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      id-token: write   # Codecov upload via OIDC, no token secret
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Fetch the coverage reports of both legs
+        uses: actions/download-artifact@v8
+        with:
+          pattern: coverage-*
+          path: coverage
+
       - name: Upload coverage to Codecov
-        if: '!cancelled()'
         uses: codecov/codecov-action@v7
         with:
           use_oidc: true
-          files: "TestResults/**/coverage.cobertura.xml"
+          files: "coverage/**/coverage.cobertura.xml"
           disable_search: true   # only the files above, not every *.xml the search finds
           fail_ci_if_error: false
 
@@ -238,7 +275,8 @@ jobs:
   # repository variable. Both gating jobs must be green on this exact commit first, and the commit
   # must be the one release-please tagged (checked below). Trusted Publishing mints a short-lived key
   # from an OIDC token, so this job needs id-token: write; a job-level permissions block replaces the
-  # workflow-level one, hence contents: read is restated. Procedure: docs/release.md.
+  # workflow-level one, hence contents is restated, as write so the SBOM can be attached to the
+  # release. Procedure: docs/release.md.
   publish-nuget:
     # Keyed on the input alone, deliberately. `inputs` is null on push and pull_request, so only a
     # dispatch or a workflow_call that explicitly asks can reach the publish. Testing
@@ -250,7 +288,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
-      contents: read
+      contents: write   # attach the SBOM to the GitHub release
       id-token: write
     steps:
       - name: Checkout
@@ -322,3 +360,12 @@ jobs:
             --source https://api.nuget.org/v3/index.json \
             --api-key "$NUGET_API_KEY" \
             --skip-duplicate
+
+      # A CycloneDX SBOM of the solution, attached to the GitHub release. The tag is v$PACKAGE_VERSION, the one the gate
+      # above proved HEAD carries: on the release-please path github.ref_name is main, not the tag. release-please
+      # created the release before this run started.
+      - name: Attach the SBOM to the GitHub release
+        uses: MarcelRoozekrans/ci-baseline/actions/sbom@v1
+        with:
+          solution: Thalos.NET.slnx
+          tag: v${{ env.PACKAGE_VERSION }}
