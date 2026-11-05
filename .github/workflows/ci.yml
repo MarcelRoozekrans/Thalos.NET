@@ -95,7 +95,7 @@ jobs:
         run: |
           filter=""
           if [ "$RUNNER_OS" = "Windows" ]; then filter='--filter Category!=Docker'; fi
-          dotnet test Thalos.NET.slnx --no-build -c Release --logger "trx;LogFileName=tests.trx" --settings coverage.runsettings --results-directory TestResults $filter
+          dotnet test Thalos.NET.slnx --no-build -c Release --logger "trx;LogFileName=tests.trx" --collect "XPlat Code Coverage" --settings coverage.runsettings --results-directory TestResults $filter
 
       # Merges the Cobertura reports and fails below the line-coverage floor, or when codecov.yml would let a drop in
       # coverage pass quietly. Linux leg only: ci-baseline's coverage gate runs on Linux runners only.
