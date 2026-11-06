@@ -151,7 +151,7 @@ jobs:
   # commit messages, so a malformed type is a commit the release tooling cannot read. Lints only the
   # commits a pull request adds, never the existing history. Rules: .commitlintrc.yml.
   commitlint:
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' && github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
