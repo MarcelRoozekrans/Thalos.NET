@@ -33,7 +33,7 @@
     <PackageVersion Include="AI.Sentinel" Version="4.2.0" />
     <!-- Rag.NET (net10.0 only) — confined to Thalos.NET.Memory.RagNet -->
     <PackageVersion Include="Rag.NET.Abstractions" Version="1.5.0" />
-    <PackageVersion Include="Rag.NET.VectorStores.PgVector" Version="1.4.0" />
+    <PackageVersion Include="Rag.NET.VectorStores.PgVector" Version="1.5.0" />
     <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.14" />
     <!-- container tests -->
     <PackageVersion Include="Testcontainers.PostgreSql" Version="4.16.0" />
@@ -46,8 +46,8 @@
     <PackageVersion Include="Vecc.YamlDotNet.Analyzers.StaticGenerator" Version="18.1.0" />
     <!-- Raw-SQL ORM + transactional outbox, PostgreSQL persistence — net10.0-only, confined to Thalos.NET.Workflow.Orm -->
     <PackageVersion Include="ZeroAlloc.ORM" Version="2.14.0" />
-    <PackageVersion Include="ZeroAlloc.Outbox" Version="4.5.0" />
-    <PackageVersion Include="ZeroAlloc.Outbox.Orm" Version="4.5.0" />
+    <PackageVersion Include="ZeroAlloc.Outbox" Version="4.6.0" />
+    <PackageVersion Include="ZeroAlloc.Outbox.Orm" Version="4.6.0" />
     <PackageVersion Include="AdoNet.Async.Adapters" Version="1.5.6" />
     <!-- Docker Engine client, the version Testcontainers 4.15.0 depends on — confined to Thalos.NET.Sandbox.Docker -->
     <PackageVersion Include="Docker.DotNet.Enhanced" Version="4.3.3" />
