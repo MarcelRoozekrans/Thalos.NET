@@ -18,3 +18,5 @@ jobs:
     uses: MarcelRoozekrans/ci-baseline/.github/workflows/baseline.yml@v1
     with:
       solution: Thalos.NET.slnx
+      # global.json pins SDK 11, which the reusable workflow's default 10.0.x does not install.
+      dotnet-version: global-json

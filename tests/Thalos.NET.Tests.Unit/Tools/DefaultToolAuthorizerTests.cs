@@ -24,7 +24,7 @@ public sealed class DefaultToolAuthorizerTests
             new(UnitResult<AuthorizationFailure>.Failure(new AuthorizationFailure("never", "should not be consulted")));
     }
 
-    private static readonly JsonElement NoArgs = JsonDocument.Parse("{}").RootElement;
+    private static readonly JsonElement NoArgs = JsonElement.Parse("{}");
     private static ISecurityContext Dev => new Runtime.TestSecurityContext("u", "developer");
     private static ISecurityContext Guest => new Runtime.TestSecurityContext("g");
 

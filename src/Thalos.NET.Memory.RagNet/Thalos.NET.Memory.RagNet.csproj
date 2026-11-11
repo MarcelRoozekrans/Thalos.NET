@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <!-- Rag.NET 0.1.x targets net10.0 only -->
-    <TargetFrameworks>net10.0</TargetFrameworks>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
     <RootNamespace>Thalos.Memory.RagNet</RootNamespace>
     <PackageId>Thalos.NET.Memory.RagNet</PackageId>
     <Description>Rag.NET pgvector adapter for Thalos.NET.Memory: IMemoryIndex over Rag.NET IVectorStore (PgVectorStore) and an IEmbeddingGenerator, with schema initialisation and dimension checks.</Description>

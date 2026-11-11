@@ -1,4 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks />
+    <TargetFramework>net11.0</TargetFramework>
+  </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Thalos.NET.Workflow.Orm\Thalos.NET.Workflow.Orm.csproj" />
     <!-- Not a code dependency — DurabilityAcrossProcessesTests starts this as a child process via Process.Start

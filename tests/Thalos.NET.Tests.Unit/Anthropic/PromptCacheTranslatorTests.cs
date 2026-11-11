@@ -48,7 +48,7 @@ public sealed class PromptCacheTranslatorTests
         return message;
     }
 
-    private static JsonElement Body(RecordingHandler handler) => JsonDocument.Parse(handler.LastBody).RootElement;
+    private static JsonElement Body(RecordingHandler handler) => JsonElement.Parse(handler.LastBody);
 
     private static int CountCacheControl(JsonElement element) => element.ValueKind switch
     {
@@ -462,7 +462,7 @@ public sealed class PromptCacheTranslatorTests
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             LastBody = await request.Content!.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            var streaming = JsonDocument.Parse(LastBody).RootElement.TryGetProperty("stream", out var stream) && stream.ValueKind == JsonValueKind.True;
+            var streaming = JsonElement.Parse(LastBody).TryGetProperty("stream", out var stream) && stream.ValueKind == JsonValueKind.True;
             return new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = streaming

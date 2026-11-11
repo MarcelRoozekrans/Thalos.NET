@@ -422,7 +422,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         await UntilAsync(() => registry.ReloadsWaitingForLeases == 1, "the reload to wait for the held lease");
 
         var removal = registry.OnRemovingAsync(Workspace(), CancellationToken.None).AsTask();
-        (await Task.WhenAny(removal, Task.Delay(HangGuard))).Should().BeSameAs(removal, "removal does not wait for a held lease, which is held until the test ends");
+        (await TaskTimeouts.WhenAnyOrDelayAsync(removal, HangGuard)).Should().BeSameAs(removal, "removal does not wait for a held lease, which is held until the test ends");
         (await waiting).IsFailure.Should().BeTrue("the waiting reload was cancelled, not served");
         IsRunning(pid).Should().BeFalse("the server is stopped even though a lease is still held");
     }
@@ -754,7 +754,7 @@ public sealed class RunMcpServerRegistryTests : IAsyncLifetime
         var pid = await PidAsync(registry);
         await KillWrapperOnlyAsync(pid); // the server outlives the SDK's dispose, so the registry's own kill and wait run
         var removal = registry.OnRemovingAsync(workspace, CancellationToken.None).AsTask();
-        var returned = await Task.WhenAny(removal, Task.Delay(HangGuard)) == removal;
+        var returned = await TaskTimeouts.WhenAnyOrDelayAsync(removal, HangGuard) == removal;
 
         using (new AssertionScope())
         {

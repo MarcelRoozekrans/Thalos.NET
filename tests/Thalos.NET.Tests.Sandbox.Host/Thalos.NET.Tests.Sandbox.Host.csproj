@@ -1,4 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks />
+    <TargetFramework>net11.0</TargetFramework>
+  </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Thalos.NET.Sandbox.Host\Thalos.NET.Sandbox.Host.csproj" />
     <!-- The Roslyn stand-in: the stdio test server, built first and run with `dotnet <dll>`. -->

@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk.Web">
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFrameworks>net10.0</TargetFrameworks>
+    <TargetFrameworks>net11.0</TargetFrameworks>
     <IsPackable>false</IsPackable>
     <RootNamespace>Thalos.Sample.SandboxHost</RootNamespace>
     <!-- MA0004: a top-level host without a SynchronizationContext — ConfigureAwait(false) would only add noise -->

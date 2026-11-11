@@ -4,16 +4,22 @@
 # TEST_LABEL is set by the tests and applied last in each stage, so both stages' final images carry the test's label
 # and its clean-up removes them, with their layers.
 
-FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+FROM mcr.microsoft.com/dotnet/sdk:11.0 AS build
 WORKDIR /src
 COPY global.json Directory.Build.props Directory.Packages.props ./
 COPY src/ src/
 COPY samples/Thalos.Sample.SandboxHost/ samples/Thalos.Sample.SandboxHost/
-RUN dotnet publish samples/Thalos.Sample.SandboxHost/Thalos.Sample.SandboxHost.csproj -c Release -f net10.0 -o /out --nologo
+RUN dotnet publish samples/Thalos.Sample.SandboxHost/Thalos.Sample.SandboxHost.csproj -c Release -f net11.0 -o /out --nologo
 ARG TEST_LABEL=
 LABEL thalos.sandbox.test=${TEST_LABEL}
 
+# The final image stays on the .NET 10 SDK: RoslynCodeLens.Mcp targets net10.0 and its MSBuildLocator only accepts SDKs
+# up to its own runtime, so it finds no MSBuild next to an 11 SDK. The 11 shared runtimes are copied in for the host,
+# which the build stage above publishes for net11.0.
+FROM mcr.microsoft.com/dotnet/aspnet:11.0 AS runtime11
+
 FROM mcr.microsoft.com/dotnet/sdk:10.0
+COPY --from=runtime11 /usr/share/dotnet/shared/ /usr/share/dotnet/shared/
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git \
  && rm -rf /var/lib/apt/lists/*

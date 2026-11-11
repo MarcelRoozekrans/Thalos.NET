@@ -1,4 +1,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks />
+    <TargetFramework>net11.0</TargetFramework>
+  </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Thalos.NET.Mcp\Thalos.NET.Mcp.csproj" />
     <ProjectReference Include="..\..\src\Thalos.NET.Testing\Thalos.NET.Testing.csproj" />

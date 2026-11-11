@@ -111,7 +111,7 @@ public sealed class McpToolSourceTests(McpServerFixture fixture) : IClassFixture
         var dispose = source.DisposeAsync().AsTask();
 
         var both = Task.WhenAll(connect, dispose);
-        var finished = await Task.WhenAny(both, Task.Delay(TimeSpan.FromMinutes(2)));
+        var finished = await TaskTimeouts.WhenAnyOrDelayAsync(both, TimeSpan.FromMinutes(2));
         finished.Should().BeSameAs(both, "dispose must abort the in-flight connect and both must complete");
 
         var r = await connect;

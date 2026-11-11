@@ -441,7 +441,7 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
         await using var sp = Services(new RemoteRunToolOptions { CallTimeout = TimeSpan.FromSeconds(2) });
 
         var call = CallAsAsync(sp, a.RunId, "workspace", "list_files");
-        var finished = await Task.WhenAny(call, Task.Delay(TimeSpan.FromSeconds(60)));
+        var finished = await TaskTimeouts.WhenAnyOrDelayAsync(call, TimeSpan.FromSeconds(60));
 
         finished.Should().BeSameAs(call, "the call timeout interrupts the stalled copy");
         (await call).Should().Be("error: the run's sandbox did not answer 'list_files' within 00:00:02; the call was cancelled.");
