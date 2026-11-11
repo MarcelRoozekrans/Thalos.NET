@@ -174,7 +174,7 @@ internal static class AnthropicRequestMapper
         }
         else
         {
-            JsonSerializer.Serialize(writer, value, AIJsonUtilities.DefaultOptions.GetTypeInfo(typeof(object)));
+            JsonSerializer.Serialize(writer, value, ObjectTypeInfo);
         }
     }
 
@@ -192,5 +192,13 @@ internal static class AnthropicRequestMapper
 
     private static string ContentText(AIContent content) => content is TextContent text ? text.Text : Json(content);
 
-    private static string Json(object? value) => JsonSerializer.Serialize(value, AIJsonUtilities.DefaultOptions.GetTypeInfo(typeof(object)));
+    private static string Json(object? value) => JsonSerializer.Serialize(value, ObjectTypeInfo);
+
+#if NET11_0_OR_GREATER
+    private static System.Text.Json.Serialization.Metadata.JsonTypeInfo ObjectTypeInfo { get; } =
+        AIJsonUtilities.DefaultOptions.GetTypeInfo<object>();
+#else
+    private static System.Text.Json.Serialization.Metadata.JsonTypeInfo ObjectTypeInfo { get; } =
+        AIJsonUtilities.DefaultOptions.GetTypeInfo(typeof(object));
+#endif
 }

@@ -52,7 +52,7 @@ public sealed class OrmWorkflowJsonGoldenTests
         ["whole"] = 2.0,
         ["sum"] = 0.1 + 0.2,
         ["tiny"] = 1e-7,
-        ["e"] = JsonDocument.Parse("""{"x":[1,2],"y":"é"}""").RootElement.Clone(),
+        ["e"] = JsonElement.Parse("""{"x":[1,2],"y":"é"}"""),
     };
 
     // Red: give WorkflowOrmJsonContext [JsonSourceGenerationOptions(WriteIndented = true)]; the text gains line

@@ -21,7 +21,7 @@ A Hermes-style, ZeroAlloc-native agent framework for .NET, built on
 | `Thalos.NET.Ollama` | Ollama embedding generator: an `IEmbeddingGenerator<string, Embedding<float>>` over `POST /api/embed`, registered with `UseOllamaEmbeddings(endpoint, model)` | `ZeroAlloc.Rest.Ollama` |
 | `Thalos.NET.Sentinel` | AI.Sentinel scanning at the model boundary, quarantine → `AgentError`; scans recalled memories | Thalos.NET, `AI.Sentinel` |
 | `Thalos.NET.Memory` | Curated long-term memory: `IMemoryStore`/`IMemoryIndex`/`IMemoryService`, auto-recall `AIContextProvider`, `memory__*` tools, in-memory implementations | Thalos.NET |
-| `Thalos.NET.Memory.RagNet` | pgvector index via Rag.NET `PgVectorStore` (net10.0 only) | Thalos.NET.Memory, `Rag.NET.VectorStores.PgVector` |
+| `Thalos.NET.Memory.RagNet` | pgvector index via Rag.NET `PgVectorStore` (net10.0 and net11.0) | Thalos.NET.Memory, `Rag.NET.VectorStores.PgVector` |
 | `Thalos.NET.Skills` | Agent-scoped procedure documents: `SKILL.md` files synced into an `ISkillStore`, an always-present catalogue, `skills__*` tools, in-process cosine search | Thalos.NET |
 | `Thalos.NET.Channels` | Channel hosting: `ChannelPump` binds inbound `IChannelSource` messages to agent sessions, the six chat commands, delta coalescing, an in-box console channel | Thalos.NET |
 | `Thalos.NET.Channels.Telegram` | Telegram Bot API transport: a source (`getUpdates` long-poll, three admission gates) and an adapter (MarkdownV2, message splitting, edited streaming) for `Thalos.NET.Channels` | Thalos.NET.Channels |
@@ -29,11 +29,11 @@ A Hermes-style, ZeroAlloc-native agent framework for .NET, built on
 | `Thalos.NET.Git.LibGit2Sharp` | `IGitWriteService` implementation over LibGit2Sharp | Thalos.NET.Git, `LibGit2Sharp` |
 | `Thalos.NET.Workflow` | Durable process-graph engine: sequence, branch, loop-back and approval-gate primitives defined in a YAML file rather than in code — a graph model, loader, validator, pure interpreter and node dispatcher. No persistence backend dependency, so a consumer who does not want to reach for `Thalos.NET.Workflow.Orm` can supply their own `IWorkflowStore`. Hosts nothing itself — wiring it end to end is [docs/workflow.md](docs/workflow.md) | Thalos.NET, Thalos.NET.Skills, `YamlDotNet` |
 | `Thalos.NET.Workflow.Orm` | `IWorkflowStore` implementation over ZeroAlloc.ORM: raw-SQL persistence on PostgreSQL with a transactional outbox dispatch, so a run's transition and the work behind its next node commit or roll back together. No EF Core anywhere in its dependency tree. Ships no outbox consumer — see [docs/workflow.md](docs/workflow.md) | Thalos.NET.Workflow, `ZeroAlloc.ORM`, `ZeroAlloc.Outbox.Orm`, `Npgsql` |
-| `Thalos.NET.Sandbox` | Run sandboxes: a per-run container holds the workspace, build and Roslyn, so agent-written code never runs on the host. `UseSandboxRunWorkspaces`, park and patch hand-off, protected-path publish guard (net10.0 only) — see [docs/workflow.md](docs/workflow.md#run-sandboxes) | Thalos.NET, Thalos.NET.Git, Thalos.NET.Mcp |
-| `Thalos.NET.Sandbox.Docker` | `ISandboxRuntime` over Docker: per-run containers behind a loopback gateway, with an egress proxy that allows only NuGet (net10.0 only) | Thalos.NET.Sandbox, `Docker.DotNet.Enhanced` |
-| `Thalos.NET.Sandbox.Host` | The in-container host: workspace, build and Roslyn tools over MCP behind a per-sandbox bearer token (net10.0 only) | Thalos.NET.Sandbox, `ModelContextProtocol.AspNetCore` |
+| `Thalos.NET.Sandbox` | Run sandboxes: a per-run container holds the workspace, build and Roslyn, so agent-written code never runs on the host. `UseSandboxRunWorkspaces`, park and patch hand-off, protected-path publish guard (net10.0 and net11.0) — see [docs/workflow.md](docs/workflow.md#run-sandboxes) | Thalos.NET, Thalos.NET.Git, Thalos.NET.Mcp |
+| `Thalos.NET.Sandbox.Docker` | `ISandboxRuntime` over Docker: per-run containers behind a loopback gateway, with an egress proxy that allows only NuGet (net10.0 and net11.0) | Thalos.NET.Sandbox, `Docker.DotNet.Enhanced` |
+| `Thalos.NET.Sandbox.Host` | The in-container host: workspace, build and Roslyn tools over MCP behind a per-sandbox bearer token (net10.0 and net11.0) | Thalos.NET.Sandbox, `ModelContextProtocol.AspNetCore` |
 
-Targets `net8.0` and `net10.0` (`Thalos.NET.Memory.RagNet`, `Thalos.NET.Workflow.Orm` and the three `Thalos.NET.Sandbox*` packages: `net10.0` only — RagNet because Rag.NET is net10.0-only, Workflow.Orm because ZeroAlloc.ORM / ZeroAlloc.Outbox.Orm / AdoNet.Async.Adapters ship net10.0-only builds).
+Targets `net8.0`, `net10.0` and `net11.0` (`Thalos.NET.Memory.RagNet`, `Thalos.NET.Workflow.Orm` and the three `Thalos.NET.Sandbox*` packages: `net10.0` and `net11.0` only — RagNet because Rag.NET is net10.0-only, Workflow.Orm because ZeroAlloc.ORM / ZeroAlloc.Outbox.Orm / AdoNet.Async.Adapters ship net10.0-only builds).
 
 ## Core contracts
 
@@ -368,7 +368,7 @@ remember still stores (`IndexPending = true`, `MemoryIndexPendingEvent`), recall
 `IMemoryService.ReindexAsync(new ReindexOptions { PendingOnly = true })` repairs the index once a generator (or the
 vector store) is back — hosts typically run it from a hosted service.
 
-**Rag.NET adapter** (`Thalos.NET.Memory.RagNet`, `net10.0` only): `.UseRagNetMemory(connectionString, vectorDimensions)`
+**Rag.NET adapter** (`Thalos.NET.Memory.RagNet`, `net10.0` and `net11.0`): `.UseRagNetMemory(connectionString, vectorDimensions)`
 (or the options overload) registers `RagNetMemoryIndex` over Rag.NET's `PgVectorStore`; every search filters on the
 owner, so a shared table can never leak across owners. Caveats: `rag_chunks` stores a copy of each memory's text next to
 its vector, so purge memories through `ForgetAsync(hard: true)`/`IMemoryIndex.RemoveAsync`, not by deleting host store rows
@@ -676,7 +676,7 @@ Same setup as [Rag.NET](https://github.com/MarcelRoozekrans/Rag.NET); the runboo
 - Releases are cut by [release-please](.github/workflows/release-please.yml) from conventional commits (enforced on
   PRs by commitlint): dispatch → review/merge the release PR → dispatch → `vX.Y.Z` tag + GitHub release.
 - CI (`.github/workflows/ci.yml`) builds and tests on Ubuntu and Windows on every push/PR, packs and validates all
-  eleven packages (per-package TFM check: `Thalos.NET.Memory.RagNet` ships `net10.0` only), and rehearses the nuget.org push against a local feed. Publishing to nuget.org is a manual dispatch with
+  eleven packages (per-package TFM check: `Thalos.NET.Memory.RagNet` ships `net10.0` and `net11.0`), and rehearses the nuget.org push against a local feed. Publishing to nuget.org is a manual dispatch with
   `publish_to_nuget=true` on the tagged release commit, using nuget.org Trusted Publishing (no stored API key).
 
 Status: **0.5.1 — API is unstable until 1.0.** 1.0 is deliberately deferred until Daedalus's Milestone 2 (a

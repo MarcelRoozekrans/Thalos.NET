@@ -11,7 +11,7 @@ namespace Thalos.Sandbox.Host;
 /// stops one run's code from calling another run's sandbox.
 /// </summary>
 /// <remarks>
-/// The comparison is <see cref="CryptographicOperations.FixedTimeEquals"/> over SHA-256 digests of the presented and
+/// The comparison is <see cref="CryptographicOperations.FixedTimeEquals(ReadOnlySpan{byte}, ReadOnlySpan{byte})"/> over SHA-256 digests of the presented and
 /// the expected token, so neither the content nor the length of the token shows in the time a refusal takes.
 /// </remarks>
 /// <param name="next">The rest of the pipeline.</param>

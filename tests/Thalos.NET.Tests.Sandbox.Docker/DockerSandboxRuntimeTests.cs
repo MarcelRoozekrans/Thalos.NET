@@ -501,7 +501,9 @@ public sealed class DockerSandboxRuntimeTests(DockerSandboxFixture fixture) : IC
         var b = Task.Run(async () => { who.Value = "B"; return await runtime.CreateAsync(spec, Ct); });
 
         // Unserialised, B reaches its pre-check while A is paused; serialised, it cannot, and this wait times out.
-        await Task.WhenAny(bPrechecked.Task, Task.Delay(TimeSpan.FromSeconds(3)));
+        using var waitCts = new CancellationTokenSource();
+        await Task.WhenAny(bPrechecked.Task, Task.Delay(TimeSpan.FromSeconds(3), waitCts.Token));
+        await waitCts.CancelAsync();
         releaseA.TrySetResult();
         var resultA = await a.WaitAsync(TimeSpan.FromMinutes(1));
         releaseB.TrySetResult();

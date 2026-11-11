@@ -97,7 +97,7 @@ public sealed class AuthorizingAIFunctionTests
         var arguments = new AIFunctionArguments(StringComparer.Ordinal);
         foreach (var (name, json) in values)
         {
-            arguments[name] = JsonDocument.Parse(json).RootElement.Clone();
+            arguments[name] = JsonElement.Parse(json);
         }
 
         await fn.InvokeAsync(arguments);

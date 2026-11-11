@@ -28,7 +28,7 @@ public sealed class SandboxProcessRunnerTests
             run.IsCompleted.Should().BeFalse("nothing times out before the clock is advanced");
 
             clock.Advance(spec.Timeout + TimeSpan.FromSeconds(1));
-            var finished = await Task.WhenAny(run, Task.Delay(TimeSpan.FromSeconds(30)));
+            var finished = await TaskTimeouts.WhenAnyOrDelayAsync(run, TimeSpan.FromSeconds(30));
             finished.Should().BeSameAs(run, "the runner must return once the timeout passes");
 
             var outcome = await run;

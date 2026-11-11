@@ -40,7 +40,7 @@ public sealed class RunScopedMcpCompositionTests : IAsyncLifetime
         // The two-minute delay is a hang guard: a deadlock never resolves, and a correct resolve needs a pool thread that a
         // loaded runner can withhold for seconds.
         var resolving = Task.Run(() => sp.GetRequiredService<IRunWorkspaceProvider>());
-        (await Task.WhenAny(resolving, Task.Delay(TimeSpan.FromMinutes(2)))).Should().BeSameAs(resolving, "the registry must not resolve the provider while the provider is resolving its observers");
+        (await TaskTimeouts.WhenAnyOrDelayAsync(resolving, TimeSpan.FromMinutes(2))).Should().BeSameAs(resolving, "the registry must not resolve the provider while the provider is resolving its observers");
         var provider = await resolving;
         var runId = Guid.NewGuid();
         var created = await provider.CreateAsync(new RunWorkspaceRequest(runId, "sandbox", remote.Url, "main", $"manufacture/{runId}", null), CancellationToken.None);
