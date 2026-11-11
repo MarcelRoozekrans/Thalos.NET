@@ -56,8 +56,13 @@ public sealed partial class AuthorizingAIFunction(
     /// The arguments' metadata, from <see cref="ToolArgumentsJsonContext"/>: metadata-based, so no reflection is needed
     /// when it is disabled. The values' runtime types resolve through M.E.AI's resolver, combined after it.
     /// </summary>
+#if NET11_0_OR_GREATER
+    internal static readonly JsonTypeInfo<IDictionary<string, object?>> ArgumentsTypeInfo =
+        CompactJson.GetTypeInfo<IDictionary<string, object?>>();
+#else
     internal static readonly JsonTypeInfo<IDictionary<string, object?>> ArgumentsTypeInfo =
         (JsonTypeInfo<IDictionary<string, object?>>)CompactJson.GetTypeInfo(typeof(IDictionary<string, object?>));
+#endif
 
     private readonly ILogger<AuthorizingAIFunction> _logger = logger ?? NullLogger<AuthorizingAIFunction>.Instance;
 

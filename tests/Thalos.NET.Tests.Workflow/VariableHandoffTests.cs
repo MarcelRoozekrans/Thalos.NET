@@ -726,7 +726,7 @@ public sealed class VariableHandoffTests : IAsyncLifetime
         var array = json[..noticeAt].TrimEnd();
         var parse = () => JsonDocument.Parse(array).Dispose();
         parse.Should().NotThrow("whole elements are dropped, so what remains is still a JSON array");
-        JsonDocument.Parse(array).RootElement.GetArrayLength().Should().BeGreaterThan(0).And.BeLessThan(25);
+        JsonElement.Parse(array).GetArrayLength().Should().BeGreaterThan(0).And.BeLessThan(25);
         json.Should().Contain("of=\"25\"", "the notice states how many there were in total");
     }
 

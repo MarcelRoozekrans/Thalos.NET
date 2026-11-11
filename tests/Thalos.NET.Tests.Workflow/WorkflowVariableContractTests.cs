@@ -406,7 +406,7 @@ public sealed class WorkflowVariableContractTests
         ["o"] = new List<object?> { "x", 1L, false, null },
         ["dict"] = new Dictionary<string, int>(StringComparer.Ordinal) { ["z"] = 1, ["a"] = 2 },
         ["map"] = new Dictionary<string, object?>(StringComparer.Ordinal) { ["k"] = "v", ["inner"] = new List<object?> { 1.25 } },
-        ["e"] = JsonDocument.Parse("""{"x":[1,2],"y":"é"}""").RootElement.Clone(),
+        ["e"] = JsonElement.Parse("""{"x":[1,2],"y":"é"}"""),
         ["node"] = new JsonObject { ["k"] = "v", ["a"] = new JsonArray(1, "é") },
     };
 }

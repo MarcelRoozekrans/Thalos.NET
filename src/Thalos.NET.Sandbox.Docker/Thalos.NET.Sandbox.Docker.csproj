@@ -1,6 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
-    <TargetFrameworks>net10.0</TargetFrameworks>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
     <RootNamespace>Thalos.Sandbox.Docker</RootNamespace>
     <PackageId>Thalos.NET.Sandbox.Docker</PackageId>
     <Description>Docker runtime for Thalos.NET run sandboxes.</Description>

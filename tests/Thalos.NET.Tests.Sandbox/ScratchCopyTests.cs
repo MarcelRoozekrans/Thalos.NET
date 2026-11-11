@@ -49,7 +49,7 @@ public sealed class ScratchCopyTests : IDisposable
         }
 
         var create = Task.Run(() => ScratchCopy.CreateAsync(Source, Scratch, long.MaxValue, CancellationToken.None));
-        var finished = await Task.WhenAny(create, Task.Delay(TimeSpan.FromSeconds(30)));
+        var finished = await TaskTimeouts.WhenAnyOrDelayAsync(create, TimeSpan.FromSeconds(30));
 
         finished.Should().BeSameAs(create, "the copy must not block on the FIFO");
         using var copy = (await create).Value;
@@ -82,7 +82,7 @@ public sealed class ScratchCopyTests : IDisposable
         }
 
         var create = Task.Run(() => ScratchCopy.CreateAsync(Source, Scratch, long.MaxValue, CancellationToken.None, SwapForFifo));
-        var finished = await Task.WhenAny(create, Task.Delay(TimeSpan.FromSeconds(30)));
+        var finished = await TaskTimeouts.WhenAnyOrDelayAsync(create, TimeSpan.FromSeconds(30));
 
         finished.Should().BeSameAs(create, "opening the swapped-in FIFO must not block");
         var created = await create;

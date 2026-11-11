@@ -1,7 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <!-- ZeroAlloc.ORM / ZeroAlloc.Outbox.Orm / AdoNet.Async.Adapters ship net10.0-only builds -->
-    <TargetFrameworks>net10.0</TargetFrameworks>
+    <TargetFrameworks>net10.0;net11.0</TargetFrameworks>
     <RootNamespace>Thalos.Workflow.Orm</RootNamespace>
     <PackageId>Thalos.NET.Workflow.Orm</PackageId>
     <Description>ZeroAlloc.ORM-backed IWorkflowStore for Thalos.NET.Workflow: raw-SQL persistence over PostgreSQL with a transactional outbox dispatch (ZeroAlloc.Outbox.Orm) so a run's transition and the work behind its next node commit or roll back together. No EF Core in this package's dependency tree.</Description>

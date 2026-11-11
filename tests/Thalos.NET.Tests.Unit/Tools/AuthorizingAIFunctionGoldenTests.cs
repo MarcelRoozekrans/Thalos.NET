@@ -35,7 +35,7 @@ public sealed class AuthorizingAIFunctionGoldenTests
             ["none"] = null,
             ["list"] = new[] { "x", "y" },
             ["map"] = new Dictionary<string, object?>(StringComparer.Ordinal) { ["k"] = "v", ["n"] = 2 },
-            ["element"] = JsonDocument.Parse("""{"x":[1,2],"y":"z"}""").RootElement.Clone(),
+            ["element"] = JsonElement.Parse("""{"x":[1,2],"y":"z"}"""),
         };
 
         await function.InvokeAsync(arguments);

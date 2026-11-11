@@ -781,7 +781,7 @@ public sealed class RunScopedMcpToolSourceTests : IAsyncLifetime
         while (!call.IsCompleted && sw.Elapsed < HangGuard)
         {
             clock.Advance(TimeSpan.FromSeconds(1));
-            await Task.WhenAny(call, Task.Delay(50));
+            await TaskTimeouts.WhenAnyOrDelayAsync(call, TimeSpan.FromMilliseconds(50));
         }
 
         return await call.WaitAsync(TimeSpan.Zero); // throws TimeoutException if the call outlived the hang guard

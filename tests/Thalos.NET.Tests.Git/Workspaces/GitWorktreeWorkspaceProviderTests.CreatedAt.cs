@@ -31,7 +31,10 @@ public sealed partial class GitWorktreeWorkspaceProviderTests
 
             // Proves the create is parked, not merely slower than the poll above: unparked, a whole create against a
             // local remote finishes well inside this bound, so a lock that no longer parks it turns this red.
-            (await Task.WhenAny(create, Task.Delay(TimeSpan.FromSeconds(5)))).Should().NotBeSameAs(create, "the held mirror lock must park the create");
+            using var boundCts = new CancellationTokenSource();
+            var settled = await Task.WhenAny(create, Task.Delay(TimeSpan.FromSeconds(5), boundCts.Token));
+            await boundCts.CancelAsync();
+            settled.Should().NotBeSameAs(create, "the held mirror lock must park the create");
             clock.Advance(TimeSpan.FromMinutes(30));
         }
 
