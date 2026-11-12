@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.20.0...v0.21.0) (2026-11-12)
+
+
+### Features
+
+* support net11.0 ([56f764b](https://github.com/MarcelRoozekrans/Thalos.NET/commit/56f764b8f2fe61553dc302fa351473b50d0ffa3f))
+
 ## [0.20.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.19.0...v0.20.0) (2026-10-28)
 
 
