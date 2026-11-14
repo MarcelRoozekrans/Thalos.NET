@@ -403,19 +403,6 @@ public sealed class ChannelPumpCommandTests
 
     // Polls instead of a fixed delay for the same reason PumpHarness.WaitForDeliveryAsync does: the pump runs on
     // its own background task, so a fixed sleep is either flaky (too short) or wastefully slow (too long).
-    private static async Task WaitUntilAsync(Func<bool> condition)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (DateTime.UtcNow < deadline)
-        {
-            if (condition())
-            {
-                return;
-            }
-
-            await Task.Delay(10).ConfigureAwait(false);
-        }
-
-        throw new TimeoutException("condition was not met within 5s");
-    }
+    private static Task WaitUntilAsync(Func<bool> condition) =>
+        Eventually.UntilAsync(condition, "condition was not met");
 }

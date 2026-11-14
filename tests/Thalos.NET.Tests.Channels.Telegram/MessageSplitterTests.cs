@@ -127,7 +127,7 @@ public sealed class MessageSplitterTests
         act.Should().NotThrow();
     }
 
-    [Fact(Timeout = 5000)]
+    [Fact(Timeout = 30_000)]
     public async Task A_language_tag_too_long_for_a_small_limit_reopens_bare_and_completes_without_hanging()
     {
         // A 56-character language tag against a 60-character limit leaves no room to reopen "```<tag>\n" plus a
@@ -135,7 +135,8 @@ public sealed class MessageSplitterTests
         // progress guard, would either loop forever (avail == 0, FindBoundary never advances) or throw from
         // LastIndexOf (avail < 0). xUnit's Timeout only applies to async tests, so the actual call runs on a
         // background thread via Task.Run: a regression turns into a failing (timed-out) test instead of a test
-        // run that never returns.
+        // run that never returns. The timeout is a hang guard, not a speed bound: the split takes microseconds, but
+        // on a loaded CI runner the Task.Run can wait seconds for a pool thread, and 5 seconds failed there (#532).
         var lang = new string('L', 56);
         var code = new string('x', 300);
         var text = "```" + lang + "\n" + code + "\n```";

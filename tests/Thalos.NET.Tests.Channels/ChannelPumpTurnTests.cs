@@ -113,28 +113,15 @@ public sealed class ChannelPumpTurnTests
     }
 
     // Polls rather than blocking on a single ValueTask because the pump delivers through DeliverAsync on its own
-    // reader-loop task; a fixed deadline turns "the pump never delivered" into a clear timeout instead of a hang,
-    // and the tight 10ms poll keeps the test fast on the (overwhelmingly common) path where the turn completes almost
-    // immediately.
-    private static async Task WaitForTerminal(FakeChannel channel)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (DateTime.UtcNow < deadline)
-        {
-            lock (channel.Delivered)
+    // reader-loop task.
+    private static Task WaitForTerminal(FakeChannel channel) =>
+        Eventually.UntilAsync(
+            () =>
             {
-                foreach (var delivered in channel.Delivered)
+                lock (channel.Delivered)
                 {
-                    if (delivered is TurnCompletedEvent or TurnFailedEvent)
-                    {
-                        return;
-                    }
+                    return channel.Delivered.Exists(d => d is TurnCompletedEvent or TurnFailedEvent);
                 }
-            }
-
-            await Task.Delay(10);
-        }
-
-        throw new TimeoutException("no terminal event was delivered within 5s");
-    }
+            },
+            "no terminal event was delivered");
 }
