@@ -460,6 +460,26 @@ public sealed class SandboxRunWorkspaceProviderTests : IAsyncLifetime
         File.ReadAllText(large).Should().Contain("Marker.cs");
     }
 
+    // ---------- reconcile service ----------
+
+    /// <summary>
+    /// A host can call StopAsync on a hosted service it has already disposed: a WebApplicationFactory teardown did, and
+    /// the ObjectDisposedException failed the test that owned it. Dispose cancels the reconcile, as BackgroundService's
+    /// does, and StopAsync then has nothing left to stop.
+    /// Red: dispose the token source in Dispose; StopAsync throws ObjectDisposedException from CancelAsync.
+    /// </summary>
+    [Fact]
+    public async Task The_reconcile_service_stops_quietly_after_it_was_disposed()
+    {
+        var service = new SandboxReconcileService(Provider(), NullLogger<SandboxReconcileService>.Instance);
+        await service.StartAsync(CancellationToken.None);
+        service.Dispose();
+
+        var stop = () => service.StopAsync(CancellationToken.None);
+
+        await stop.Should().NotThrowAsync();
+    }
+
     // ---------- registration ----------
 
     /// <summary>

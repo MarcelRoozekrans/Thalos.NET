@@ -30,8 +30,12 @@ internal sealed partial class SandboxReconcileService(SandboxRunWorkspaceProvide
         await _run.WaitAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
     }
 
-    /// <inheritdoc />
-    public void Dispose() => _stopping.Dispose();
+    /// <summary>
+    /// Cancels the reconcile, as <see cref="BackgroundService"/> does, and leaves the token source undisposed: a host can
+    /// still call <see cref="StopAsync"/> after this, and cancelling a disposed source throws. The source has no timer
+    /// and no wait handle, so it holds nothing that needs releasing.
+    /// </summary>
+    public void Dispose() => _stopping.Cancel();
 
     private async Task RunAsync(CancellationToken ct)
     {
