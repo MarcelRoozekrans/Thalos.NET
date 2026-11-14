@@ -84,7 +84,7 @@
     <PackageVersion Include="TngTech.ArchUnitNET.xUnit" Version="0.13.5" />
     <PackageVersion Include="coverlet.collector" Version="10.1.0" />
     <!-- source-text scanning only (DaedalusIndependenceTests) — not a compiler dependency of any shipping assembly -->
-    <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="5.9.0" />
+    <PackageVersion Include="Microsoft.CodeAnalysis.CSharp" Version="5.12.0" />
     <!-- runs the sandbox host in-process in its tests -->
     <PackageVersion Include="Microsoft.AspNetCore.TestHost" Version="10.0.15" />
   </ItemGroup>
