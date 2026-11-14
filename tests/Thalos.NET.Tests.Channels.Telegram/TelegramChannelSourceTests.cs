@@ -52,18 +52,29 @@ public sealed class TelegramChannelSourceTests
             $"{{\"ok\":true,\"result\":[{{\"update_id\":{updateId},\"message\":{{\"message_id\":1,{textField}\"chat\":{{\"id\":42,\"type\":\"{chatType}\"}},\"from\":{{\"id\":{userId},\"is_bot\":false}}}}}}]}}");
     }
 
-    private static async Task<List<InboundMessage>> Drain(TelegramChannelSource source, int expected)
+    /// <summary>
+    /// Reads until <paramref name="expected"/> messages arrived, or <see cref="TestDeadlines.Hang"/> passed, then goes on
+    /// reading for <paramref name="quiet"/> to catch any message that should not be there. One enumeration does both:
+    /// a source refuses a second.
+    /// </summary>
+    private static async Task<List<InboundMessage>> Drain(TelegramChannelSource source, int expected, TimeSpan quiet = default)
     {
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        using var cts = new CancellationTokenSource(TestDeadlines.Hang);
         var messages = new List<InboundMessage>();
+        await using var enumerator = source.ReadAsync(cts.Token).GetAsyncEnumerator();
         try
         {
-            await foreach (var m in source.ReadAsync(cts.Token))
+            while (messages.Count < expected && await enumerator.MoveNextAsync())
             {
-                messages.Add(m);
-                if (messages.Count >= expected)
+                messages.Add(enumerator.Current);
+            }
+
+            if (quiet > TimeSpan.Zero)
+            {
+                cts.CancelAfter(quiet);
+                while (await enumerator.MoveNextAsync())
                 {
-                    break;
+                    messages.Add(enumerator.Current);
                 }
             }
         }
@@ -90,21 +101,21 @@ public sealed class TelegramChannelSourceTests
     public async Task A_user_who_is_not_allow_listed_is_dropped_and_never_answered()
     {
         var source = Build(new StubHandler(StubHandler.Json(Update(1, userId: 999))), allowed: 7);
-        (await Drain(source, 1)).Should().BeEmpty();
+        (await Drain(source, expected: 0, TestDeadlines.QuietWindow)).Should().BeEmpty();
     }
 
     [Fact]
     public async Task A_group_chat_is_dropped_even_when_the_sender_is_allow_listed()
     {
         var source = Build(new StubHandler(StubHandler.Json(Update(1, userId: 7, chatType: "group"))), allowed: 7);
-        (await Drain(source, 1)).Should().BeEmpty();
+        (await Drain(source, expected: 0, TestDeadlines.QuietWindow)).Should().BeEmpty();
     }
 
     [Fact]
     public async Task A_message_with_no_text_is_skipped_rather_than_crashing_the_loop()
     {
         var source = Build(new StubHandler(StubHandler.Json(Update(1, userId: 7, text: null))), allowed: 7);
-        (await Drain(source, 1)).Should().BeEmpty();
+        (await Drain(source, expected: 0, TestDeadlines.QuietWindow)).Should().BeEmpty();
     }
 
     [Fact]
@@ -141,7 +152,7 @@ public sealed class TelegramChannelSourceTests
         var handler = new StubHandler(StubHandler.Json(Update(11, userId: 7)));
         var source = Build(handler, allowed: 7);
 
-        using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        using var cts = new CancellationTokenSource(TestDeadlines.Hang);
         await using var enumerator = source.ReadAsync(cts.Token).GetAsyncEnumerator();
 
         (await enumerator.MoveNextAsync()).Should().BeTrue();
@@ -162,10 +173,10 @@ public sealed class TelegramChannelSourceTests
         // by a future regression, since the resulting NullReferenceException would just be caught there instead.
         // Only the logged event ids can tell "dropped by its own guard" apart from "blew up and got caught".
         //
-        // Draining far past what this scenario can legitimately produce (only two valid updates are queued; every
-        // request after that gets StubHandler's default empty response) also makes the message-count assertion
-        // meaningful: the run exhausts on the CTS timeout rather than stopping the instant *anything* arrives, so
-        // an extra, spurious message slipping out of the malformed batch would change the asserted count.
+        // Draining on for a quiet window after the two valid updates arrive (every request after them gets
+        // StubHandler's default empty response) also makes the message-count assertion meaningful: the run does not
+        // stop the instant the expected messages arrive, so an extra, spurious message slipping out of the malformed
+        // batch would change the asserted count.
         const string malformedBatch =
             """{"ok":true,"result":[null,{"update_id":5,"message":{"message_id":9,"text":"hi","from":{"id":7,"is_bot":false}}}]}""";
 
@@ -175,7 +186,7 @@ public sealed class TelegramChannelSourceTests
             StubHandler.Json(Update(7, userId: 7)));
 
         var (source, logger) = BuildWithCapturingLogger(handler, allowed: 7);
-        var messages = await Drain(source, expected: 100);
+        var messages = await Drain(source, expected: 2, TestDeadlines.QuietWindow);
 
         messages.Should().HaveCount(2);
         messages[0].ExternalMessageId.Should().Be("1");
@@ -254,7 +265,7 @@ public sealed class TelegramChannelSourceTests
         var handler = new StubHandler(StubHandler.Json(Update(1, userId: 7)));
         var (source, logger) = BuildWithCapturingLogger(handler, enabled: false, allowed: 7);
 
-        var messages = await Drain(source, expected: 1); // never satisfied; Drain times out and returns empty
+        var messages = await Drain(source, expected: 0, TestDeadlines.QuietWindow);
 
         messages.Should().BeEmpty();
         handler.Requests.Should().BeEmpty("Enabled: false must mean no Bot API call is ever made, not a poll whose result is silently dropped");

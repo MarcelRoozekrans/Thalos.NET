@@ -185,45 +185,25 @@ public sealed class PumpHarness : IDisposable
     }
 
     // Polls instead of a fixed delay: the pump delivers on its own reader-loop task, so a fixed sleep is either
-    // too short (flaky) or wastefully long. A deadline turns "the pump never delivered" into a clear timeout
-    // instead of a hang.
-    private async Task WaitForDeliveryAsync(int countBefore)
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (DateTime.UtcNow < deadline)
-        {
-            lock (Channel.Delivered)
+    // too short (flaky) or wastefully long.
+    private Task WaitForDeliveryAsync(int countBefore) =>
+        Eventually.UntilAsync(
+            () =>
             {
-                if (Channel.Delivered.Count > countBefore)
+                lock (Channel.Delivered)
                 {
-                    return;
+                    return Channel.Delivered.Count > countBefore;
                 }
-            }
-
-            await Task.Delay(10).ConfigureAwait(false);
-        }
-
-        throw new TimeoutException("the pump never delivered a response to the message within 5s");
-    }
+            },
+            "the pump never delivered a response to the message");
 
     // Polls Pump.IsTurnRunning (internal, test-only) rather than Delivered: a command message never registers in
     // _running at all, so this resolves immediately for those, and only actually waits for an ordinary message's
     // detached turn task to finish removing itself.
-    private async Task WaitForNotRunningAsync()
-    {
-        var deadline = DateTime.UtcNow.AddSeconds(5);
-        while (DateTime.UtcNow < deadline)
-        {
-            if (!Pump.IsTurnRunning(Channel.ChannelId, Channel.Conversation))
-            {
-                return;
-            }
-
-            await Task.Delay(10).ConfigureAwait(false);
-        }
-
-        throw new TimeoutException("the pump never finished the turn (conversation still registered as running) within 5s");
-    }
+    private Task WaitForNotRunningAsync() =>
+        Eventually.UntilAsync(
+            () => !Pump.IsTurnRunning(Channel.ChannelId, Channel.Conversation),
+            "the pump never finished the turn (conversation still registered as running)");
 
     // NSubstitute's ValueTask<T> support only takes a SYNCHRONOUS Func<CallInfo, T> (no async/Task/ValueTask
     // overload exists for it), so a genuinely awaited gate is not an option here the way BlockNextTurn's Emit
