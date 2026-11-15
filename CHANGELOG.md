@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.1](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.21.0...v0.21.1) (2026-11-15)
+
+
+### Bug Fixes
+
+* **sandbox:** let the reconcile service stop after it was disposed ([1cea995](https://github.com/MarcelRoozekrans/Thalos.NET/commit/1cea995d535d79d0ce2d86d8638b8ed9a36a328a))
+
 ## [0.21.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.20.0...v0.21.0) (2026-11-12)
 
 
