@@ -1,7 +1,7 @@
 #Requires -Version 7
 <#
 .SYNOPSIS
-  Packs every Thalos.NET package into the local folder feed used by Daedalus (Plan B) at version 0.3.0-<Suffix> (nine packages since 0.3.0).
+  Packs every Thalos.NET package into the local folder feed used by Daedalus (Plan B) at version 0.3.0-<Suffix> (nineteen packages).
 .PARAMETER Suffix
   Pre-release suffix; defaults to local.<yyyyMMddHHmmss> so every run produces a new, monotonically increasing version.
 .PARAMETER Feed
