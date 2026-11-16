@@ -22,7 +22,7 @@ Prerequisites: the SDK pinned by the only `global.json` (`11.0.100`, `rollForwar
 and .NET 11 runtimes, including ASP.NET Core, because every test project targets `net10.0` and `net11.0`
 (`tests/Directory.Build.props`); some test projects, the helpers and both samples target `net11.0` only. Libraries also build for
 `net8.0`, but nothing runs on it, so no .NET 8 runtime is needed. The Native AOT smoke test needs `clang` and
-`zlib1g-dev` on Linux (installed by CI). Docker with Linux containers is needed for the 22 tests tagged
+`zlib1g-dev` on Linux (installed by CI). The `pack-validate` commands need `jq`. Docker with Linux containers is needed for the 22 tests tagged
 `Category=Docker`.
 
 CI job `build-test` (ubuntu-latest and windows-latest):
@@ -44,6 +44,7 @@ CI job `pack-validate` (ubuntu-latest; needs `fetch-depth: 0` for GitVersion):
 ```bash
 dotnet tool restore
 PACKAGE_VERSION=$(dotnet dotnet-gitversion /output json | jq -r '.SemVer')
+[[ "$PACKAGE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+ ]] || { echo "not a version: '$PACKAGE_VERSION'"; exit 1; }
 dotnet pack Thalos.NET.slnx -c Release -o artifacts/packages -p:Version="$PACKAGE_VERSION"
 ```
 
