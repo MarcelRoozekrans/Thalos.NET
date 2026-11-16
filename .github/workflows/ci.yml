@@ -227,12 +227,12 @@ jobs:
         run: |
           set -euo pipefail
           cd artifacts/packages
+          dlls="$RUNNER_TEMP/package-dlls"; mkdir -p "$dlls"
           expected="Thalos.NET Thalos.NET.Abstractions Thalos.NET.Testing Thalos.NET.Mcp Thalos.NET.Anthropic Thalos.NET.Ollama Thalos.NET.Sentinel Thalos.NET.Memory Thalos.NET.Memory.RagNet Thalos.NET.Skills Thalos.NET.Channels Thalos.NET.Channels.Telegram Thalos.NET.Git Thalos.NET.Git.LibGit2Sharp Thalos.NET.Workflow Thalos.NET.Workflow.Orm Thalos.NET.Sandbox Thalos.NET.Sandbox.Docker Thalos.NET.Sandbox.Host"
           failed=0
           for id in $expected; do
-            pkg="$id.$PACKAGE_VERSION.nupkg"; sym="$id.$PACKAGE_VERSION.snupkg"
+            pkg="$id.$PACKAGE_VERSION.nupkg"
             [ -f "$pkg" ] || { echo "::error::missing $pkg"; failed=1; continue; }
-            [ -f "$sym" ] || { echo "::error::missing symbols $sym"; failed=1; }
             listing=$(unzip -l "$pkg")
             # Rag.NET, ZeroAlloc.ORM and the run sandboxes start at net10.0, so those ship net10.0 and net11.0; every other package ships net8.0 as well.
             tfms="net8.0 net10.0 net11.0"
@@ -244,6 +244,7 @@ jobs:
               for must in "lib/$tfm/$id.dll" "lib/$tfm/$id.xml"; do
                 grep -q " $must" <<< "$listing" || { echo "::error::$pkg lacks $must"; failed=1; }
               done
+              unzip -q -o "$pkg" "lib/$tfm/$id.dll" -d "$dlls/$id" || { echo "::error::$pkg: could not extract lib/$tfm/$id.dll"; failed=1; }
             done
             grep -q "runtimeconfig.json" <<< "$listing" && { echo "::error::$pkg ships a runtimeconfig.json"; failed=1; }
             nuspec=$(unzip -p "$pkg" "$id.nuspec")
@@ -255,6 +256,13 @@ jobs:
           done
           count=$(ls *.nupkg | wc -l)
           [ "$count" -eq 19 ] || { echo "::error::expected 19 packages, found $count"; failed=1; }
+          # The PDB is embedded in each DLL instead of shipping as a .snupkg, so Go to Definition finds the
+          # source without a symbol server setting. Check every packed DLL carries it with a Source Link
+          # map to this repository, deterministic and with /_/ paths.
+          cd "$GITHUB_WORKSPACE"
+          mapfile -t packed < <(find "$dlls" -name '*.dll' | sort)
+          dotnet run scripts/check-embedded-pdb/check-embedded-pdb.cs -- \
+            "https://raw.githubusercontent.com/MarcelRoozekrans/Thalos.NET/" "${packed[@]}" || failed=1
           exit $failed
 
       # Rehearse the push: same command shape as the release (quoted glob, --skip-duplicate) against a
@@ -350,7 +358,7 @@ jobs:
         with:
           user: ${{ vars.NUGET_USER }}
 
-      # The .snupkg files are pushed automatically alongside each .nupkg from the same directory.
+      # The PDBs are embedded in the DLLs, so there is no separate symbol package to push.
       # --skip-duplicate: nuget.org never forgets a published version, so a push that dies partway
       # must be re-runnable.
       - name: Push every package to nuget.org
