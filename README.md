@@ -594,7 +594,7 @@ need it alongside the session. An adapter's own addressing state should be keyed
 
 ## Local development against Daedalus
 
-All eleven packages are published to nuget.org (Daedalus, the first consumer, pins released versions there). To try
+All nineteen packages are published to nuget.org (Daedalus, the first consumer, pins released versions there). To try
 an unreleased change against a consumer before cutting a release, build from a local folder feed instead:
 
 ```powershell
@@ -605,8 +605,7 @@ pwsh scripts/pack-local.ps1          # → C:\Projects\Prive\.nuget-local\Thalos
 > produces today, on 0.5.1. `pack-local.ps1` runs `dotnet pack` with only `-p:VersionSuffix`, never invoking
 > GitVersion the way CI does (`ci.yml` computes `-p:Version` from `dotnet dotnet-gitversion`); with no `Version`
 > override, MSBuild falls back to `Directory.Build.props`'s `<VersionPrefix>0.3.0</VersionPrefix>` — itself unchanged
-> since three releases ago and never read by the real release pipeline. The script's own comment still says "nine
-> packages since 0.3.0". None of this affects a real release (GitVersion always wins there), but a locally-packed
+> since three releases ago and never read by the real release pipeline. None of this affects a real release (GitVersion always wins there), but a locally-packed
 > feed genuinely carries `0.3.0-local.*` version numbers today; this is a documentation task, so the fix belongs in
 > a follow-up, not here.
 
@@ -674,10 +673,11 @@ Same setup as [Rag.NET](https://github.com/MarcelRoozekrans/Rag.NET); the runboo
 - Versions come from git history via [GitVersion](GitVersion.yml) (`dotnet tool restore && dotnet dotnet-gitversion`);
   nothing is hand-edited. Stable versions only — no prereleases are published.
 - Releases are cut by [release-please](.github/workflows/release-please.yml) from conventional commits (enforced on
-  PRs by commitlint): dispatch → review/merge the release PR → dispatch → `vX.Y.Z` tag + GitHub release.
+  PRs by commitlint): every push to `main` keeps a release PR open; merging it cuts the `vX.Y.Z` tag and the GitHub release.
 - CI (`.github/workflows/ci.yml`) builds and tests on Ubuntu and Windows on every push/PR, packs and validates all
-  eleven packages (per-package TFM check: `Thalos.NET.Memory.RagNet` ships `net10.0` and `net11.0`), and rehearses the nuget.org push against a local feed. Publishing to nuget.org is a manual dispatch with
-  `publish_to_nuget=true` on the tagged release commit, using nuget.org Trusted Publishing (no stored API key).
+  nineteen packages (per-package TFM check: `Thalos.NET.Memory.RagNet` ships `net10.0` and `net11.0`), and rehearses the nuget.org push against a local feed. Publishing to nuget.org is the `publish-nuget` job, which
+  release-please calls once it has cut the tag (a manual dispatch with `publish_to_nuget=true` on the tagged commit does the same),
+  using nuget.org Trusted Publishing (no stored API key).
 
 Status: **0.5.1 — API is unstable until 1.0.** 1.0 is deliberately deferred until Daedalus's Milestone 2 (a
 multi-agent manufacturing pipeline built on Thalos.NET) has exercised `IAgentRuntime`, `ISubagentRunner`,
