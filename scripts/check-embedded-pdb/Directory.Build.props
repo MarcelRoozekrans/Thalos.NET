@@ -1,0 +1,4 @@
+<!-- Stops the repo's Directory.Build.props from reaching check-embedded-pdb.cs: that file sets three target
+     frameworks, central package management and analyzers for the library projects, none of which this
+     one-file app needs. -->
+<Project />
