@@ -2,6 +2,8 @@
 // that sends every C# source document to this repository on GitHub. That is what lets a consumer press
 // Go to Definition on a package type and land in the original source.
 // usage: dotnet run scripts/check-embedded-pdb/check-embedded-pdb.cs -- <expected Source Link prefix> <dll>...
+// Pass the prefix including the commit, https://raw.githubusercontent.com/<owner>/<repo>/<sha>/, so a map to
+// another revision fails.
 // Exits 0 when every DLL passes, 1 when any fails, and 2 on a usage error.
 using System.Buffers.Binary;
 using System.IO.Compression;
@@ -109,12 +111,13 @@ static List<string> Check(string dll, string expectedPrefix, out int documentCou
         }
     }
 
-    // A document with embedded source needs no URL. Every other C# document must sit under the deterministic /_/
-    // root that ContinuousIntegrationBuild writes, and resolve through the map.
+    // A document with embedded source needs no URL. Every other document, C# or Razor or any other source the
+    // compiler saw, must sit under the deterministic /_/ root that ContinuousIntegrationBuild writes, and resolve
+    // through the map.
     foreach (var handle in pdb.Documents)
     {
         var name = pdb.GetString(pdb.GetDocument(handle).Name);
-        if (withEmbeddedSource.Contains(handle) || !name.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+        if (withEmbeddedSource.Contains(handle))
         {
             continue;
         }
