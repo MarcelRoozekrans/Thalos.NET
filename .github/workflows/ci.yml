@@ -258,11 +258,14 @@ jobs:
           [ "$count" -eq 19 ] || { echo "::error::expected 19 packages, found $count"; failed=1; }
           # The PDB is embedded in each DLL instead of shipping as a .snupkg, so Go to Definition finds the
           # source without a symbol server setting. Check every packed DLL carries it with a Source Link
-          # map to this repository, deterministic and with /_/ paths.
+          # map to this repository at the commit this job packed from, deterministic and with /_/ paths for
+          # every document. The pack ran in this job, in this checkout, so its HEAD is the commit Source Link
+          # stamped; a map to main or to another commit fails.
           cd "$GITHUB_WORKSPACE"
+          commit=$(git rev-parse HEAD)
           mapfile -t packed < <(find "$dlls" -name '*.dll' | sort)
           dotnet run scripts/check-embedded-pdb/check-embedded-pdb.cs -- \
-            "https://raw.githubusercontent.com/MarcelRoozekrans/Thalos.NET/" "${packed[@]}" || failed=1
+            "https://raw.githubusercontent.com/MarcelRoozekrans/Thalos.NET/$commit/" "${packed[@]}" || failed=1
           exit $failed
 
       # Rehearse the push: same command shape as the release (quoted glob, --skip-duplicate) against a
