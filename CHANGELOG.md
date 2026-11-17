@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.2](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.21.1...v0.21.2) (2026-11-17)
+
+
+### Bug Fixes
+
+* **sentinel:** move to AI.Sentinel 5.2.1, which no longer pins exact versions ([#538](https://github.com/MarcelRoozekrans/Thalos.NET/issues/538)) ([b12eafd](https://github.com/MarcelRoozekrans/Thalos.NET/commit/b12eafd07d735bf7896b29232e25a9d1c7e26615))
+
 ## [0.21.1](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.21.0...v0.21.1) (2026-11-15)
 
 
