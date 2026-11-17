@@ -71,7 +71,6 @@
     <!-- Analyzers / build -->
     <PackageVersion Include="Meziantou.Analyzer" Version="3.0.341" />
     <PackageVersion Include="Roslynator.Analyzers" Version="5.0.1" />
-    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.404" />
 
     <!-- Tests -->
     <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="18.12.0" />

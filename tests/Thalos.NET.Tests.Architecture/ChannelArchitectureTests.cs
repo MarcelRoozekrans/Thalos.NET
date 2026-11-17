@@ -91,7 +91,7 @@ public sealed class ChannelArchitectureTests
     /// imported <c>.props</c>/<c>.targets</c> file. The repo root
     /// <c>Directory.Build.props</c> is auto-imported by every project, Thalos.NET.Channels included (it has no
     /// <c>Directory.Build.props</c> of its own to override it), and today declares <c>Meziantou.Analyzer</c>,
-    /// <c>Roslynator.Analyzers</c>, <c>ZeroAlloc.Analyzers</c> and <c>Microsoft.SourceLink.GitHub</c> as repo-wide
+    /// <c>Roslynator.Analyzers</c> and <c>ZeroAlloc.Analyzers</c> as repo-wide
     /// <c>PackageReference</c>s. Most of those do not match <c>Microsoft.Extensions.*</c>/<c>ZeroAlloc.*</c> by name,
     /// yet none of them reach a consumer, because every one is declared <c>PrivateAssets="all"</c>. THAT attribute —
     /// not the leaf csproj — is what actually keeps Channels' consumer-facing footprint narrow today, and nothing
@@ -107,7 +107,7 @@ public sealed class ChannelArchitectureTests
 
         var repoWideReferences = XDocument.Load(buildPropsPath).Descendants("PackageReference").ToArray();
 
-        // A rule over an empty set would pass vacuously; Directory.Build.props declares analyzer/SourceLink tooling
+        // A rule over an empty set would pass vacuously; Directory.Build.props declares analyzer tooling
         // today, so this proves the candidate set the assertion below runs over is not empty.
         repoWideReferences.Should().NotBeEmpty("Directory.Build.props should declare the repo-wide analyzer/tooling packages");
 
