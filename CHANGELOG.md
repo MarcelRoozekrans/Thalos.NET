@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.3](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.21.2...v0.21.3) (2026-11-19)
+
+
+### Bug Fixes
+
+* embed PDBs so Go to Definition shows the package source ([1a363e2](https://github.com/MarcelRoozekrans/Thalos.NET/commit/1a363e27a95799e0dd09f2846637a152f01d8c32))
+
 ## [0.21.2](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.21.1...v0.21.2) (2026-11-17)
 
 
