@@ -7,7 +7,7 @@
     <PackageVersion Include="ZeroAlloc.Authorization" Version="2.1.8" />
     <PackageVersion Include="ZeroAlloc.AsyncEvents" Version="1.2.1" />
     <PackageVersion Include="ZeroAlloc.StateMachine" Version="1.8.1" />
-    <PackageVersion Include="ZeroAlloc.Telemetry" Version="1.12.7" />
+    <PackageVersion Include="ZeroAlloc.Telemetry" Version="1.14.1" />
     <PackageVersion Include="ZeroAlloc.Validation" Version="2.5.0" />
     <PackageVersion Include="ZeroAlloc.Inject" Version="1.11.5" />
     <PackageVersion Include="ZeroAlloc.Inject.Generator" Version="1.11.5" />
@@ -33,7 +33,7 @@
     <PackageVersion Include="AI.Sentinel" Version="5.2.2" />
     <!-- Rag.NET (net10.0 only) — confined to Thalos.NET.Memory.RagNet -->
     <PackageVersion Include="Rag.NET.Abstractions" Version="1.10.3" />
-    <PackageVersion Include="Rag.NET.VectorStores.PgVector" Version="1.10.1" />
+    <PackageVersion Include="Rag.NET.VectorStores.PgVector" Version="1.10.3" />
     <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.15" />
     <!-- container tests -->
     <PackageVersion Include="Testcontainers.PostgreSql" Version="4.17.0" />
