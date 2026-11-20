@@ -37,7 +37,7 @@
     <PackageVersion Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.15" />
     <!-- container tests -->
     <PackageVersion Include="Testcontainers.PostgreSql" Version="4.17.0" />
-    <PackageVersion Include="Npgsql" Version="10.0.3" />
+    <PackageVersion Include="Npgsql" Version="10.0.4" />
     <!-- native git backend — confined to Thalos.NET.Git.LibGit2Sharp -->
     <PackageVersion Include="LibGit2Sharp" Version="0.32.0" />
     <!-- YAML process-graph definitions — confined to Thalos.NET.Workflow -->
