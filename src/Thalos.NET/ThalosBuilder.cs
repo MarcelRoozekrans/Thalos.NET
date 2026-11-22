@@ -74,6 +74,10 @@ public sealed class ThalosBuilder
     }
 
     /// <summary>Adds a tool source resolved from the container. Registering the same type twice is a no-op.</summary>
+    /// <remarks>
+    /// The source's name is only known once the container builds it, so a name another source already has is refused when
+    /// the <see cref="IToolCatalog"/> is resolved, with an <see cref="InvalidOperationException"/>.
+    /// </remarks>
     public ThalosBuilder AddToolSource<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TSource>() where TSource : class, IToolSource
     {
         Services.TryAddEnumerable(ServiceDescriptor.Singleton<IToolSource, TSource>());
@@ -81,14 +85,21 @@ public sealed class ThalosBuilder
     }
 
     /// <summary>Adds a tool source instance.</summary>
+    /// <exception cref="ArgumentException">A tool source of any kind added through a named registration already has <paramref name="source"/>'s name.</exception>
+    /// <remarks>A source added later without a name at registration, by type or by factory, is checked when the <see cref="IToolCatalog"/> is resolved.</remarks>
     public ThalosBuilder AddToolSource(IToolSource source)
     {
         ArgumentNullException.ThrowIfNull(source);
+        ToolSourceNames.Of(Services).Add(source.Name, ToolSourceNames.Instance, nameof(source));
         Services.AddSingleton(source);
         return this;
     }
 
     /// <summary>Adds a tool source created by <paramref name="factory"/> once the container is built.</summary>
+    /// <remarks>
+    /// The source's name is only known once <paramref name="factory"/> runs, so a name another source already has is refused
+    /// when the <see cref="IToolCatalog"/> is resolved, with an <see cref="InvalidOperationException"/>.
+    /// </remarks>
     public ThalosBuilder AddToolSource(Func<IServiceProvider, IToolSource> factory)
     {
         ArgumentNullException.ThrowIfNull(factory);
@@ -98,9 +109,9 @@ public sealed class ThalosBuilder
 
     /// <summary>In-process tools from <see cref="ThalosToolTypeAttribute"/> classes, exposed as <c>{sourceName}__{tool}</c>.</summary>
     /// <exception cref="ArgumentException">
-    /// A type in <paramref name="toolTypes"/> is not marked <see cref="ThalosToolTypeAttribute"/>, or a remote run tool
-    /// source named <paramref name="sourceName"/> was already added, such as Thalos.NET.Sandbox's <c>AddRemoteRunTools</c>
-    /// or a remote MCP entry: the catalog keeps the first source of a name, so the two must never share one.
+    /// A type in <paramref name="toolTypes"/> is not marked <see cref="ThalosToolTypeAttribute"/>, or a tool source of any
+    /// kind named <paramref name="sourceName"/> was already added: another local source, an MCP entry, a source instance,
+    /// or a remote run tool source such as Thalos.NET.Sandbox's <c>AddRemoteRunTools</c>. Tool source names are unique.
     /// </exception>
     /// <remarks>
     /// <see cref="LocalToolSource"/>'s own construction-time guard — which rejects a <see cref="ThalosToolAttribute"/>
@@ -123,7 +134,7 @@ public sealed class ThalosBuilder
             }
         }
 
-        ToolSourceNames.Of(Services).AddLocal(sourceName, nameof(sourceName));
+        ToolSourceNames.Of(Services).Add(sourceName, ToolSourceNames.Local, nameof(sourceName));
         Services.AddSingleton<IToolSource>(sp => new LocalToolSource(sourceName, sp, toolTypes));
         return this;
     }
@@ -148,7 +159,7 @@ public sealed class ThalosBuilder
     /// <exception cref="ArgumentNullException"><paramref name="serializerOptions"/> or <paramref name="tools"/> is null.</exception>
     /// <exception cref="ArgumentException">
     /// <paramref name="sourceName"/> is blank or violates <see cref="ToolSourceName"/>, <typeparamref name="TTools"/> is not
-    /// marked <see cref="ThalosToolTypeAttribute"/>, no binder is given, or a remote run tool source named
+    /// marked <see cref="ThalosToolTypeAttribute"/>, no binder is given, or a tool source of any kind named
     /// <paramref name="sourceName"/> was already added. Each is checked here, at registration.
     /// </exception>
     /// <remarks>
@@ -166,7 +177,7 @@ public sealed class ThalosBuilder
         ToolSourceName.ThrowIfInvalid(sourceName, nameof(sourceName));
         LocalToolSources.ThrowIfInvalid(serializerOptions, tools);
 
-        ToolSourceNames.Of(Services).AddLocal(sourceName, nameof(sourceName));
+        ToolSourceNames.Of(Services).Add(sourceName, ToolSourceNames.Local, nameof(sourceName));
         Func<TTools, Delegate>[] binders = [.. tools];
         Services.AddSingleton<IToolSource>(sp => new LocalToolSource<TTools>(sourceName, sp, serializerOptions, binders));
         return this;

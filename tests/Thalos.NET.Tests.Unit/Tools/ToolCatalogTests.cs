@@ -71,12 +71,21 @@ public sealed class ToolCatalogTests
         r.Error.Detail.Should().Be("down");
     }
 
+    /// <summary>Issue 190: two sources of one name are refused when the catalog is built, not resolved first-wins.</summary>
     [Fact]
-    public async Task Duplicate_qualified_names_keep_first_and_are_reported()
+    public void Two_sources_with_the_same_name_are_refused_when_the_catalog_is_built()
     {
-        var catalog = Catalog(Source("x", "t"), Source("x", "t"));
+        var act = () => Catalog(Source("x", "t"), Source("ok", "t"), Source("x", "u"));
+
+        act.Should().Throw<InvalidOperationException>().WithMessage("Two tool sources are named 'x'. Tool source names must be unique*");
+    }
+
+    [Fact]
+    public async Task A_tool_name_one_source_returns_twice_keeps_the_first()
+    {
+        var catalog = Catalog(Source("x", "t", "t"));
         var r = await catalog.ResolveAsync(Agent(), default);
-        r.Value.Should().HaveCount(1);
+        r.Value.Should().ContainSingle().Which.Name.Should().Be("x__t");
     }
 
     [Fact]

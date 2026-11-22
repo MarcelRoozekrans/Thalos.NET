@@ -34,9 +34,8 @@ public static class McpThalosBuilderExtensions
     /// </para>
     /// </remarks>
     /// <exception cref="ArgumentException">
-    /// <paramref name="name"/> violates <see cref="ToolSourceName"/>, a run-scoped entry shares <paramref name="name"/> with an MCP
-    /// entry already added, in either order; a remote entry shares it with a local tool source or a remote run tool source,
-    /// in either order; or <paramref name="definition"/> is incomplete/unsupported, or is remote and also configures a
+    /// <paramref name="name"/> violates <see cref="ToolSourceName"/>; a tool source of any kind named <paramref name="name"/>
+    /// was already added, such as another MCP entry, a local tool source or a remote run tool source; or <paramref name="definition"/> is incomplete/unsupported, or is remote and also configures a
     /// local copy.
     /// </exception>
     public static ThalosBuilder AddMcpServer(this ThalosBuilder builder, string name, McpServerDefinition definition)
@@ -48,23 +47,18 @@ public static class McpThalosBuilderExtensions
         var services = builder.Services;
         var servers = McpServers(services);
         var runScoped = definition.RunScoped;
-        if (servers.McpNames.TryGetValue(name, out var earlierRunScoped) && (earlierRunScoped || runScoped is not null))
-        {
-            // Plain with plain stays first-wins, as before. With a run-scoped entry either way round, the catalog's
-            // first-wins could hand run callers the plain source, which is the host server.
-            throw new ArgumentException(
-                $"An MCP server named '{name}' was already added; a run-scoped entry cannot share its name with another MCP entry.", nameof(name));
-        }
+        var kind = runScoped?.Remote == true ? ToolSourceNames.Remote : ToolSourceNames.Mcp;
+        var names = ToolSourceNames.Of(services);
 
-        if (runScoped?.Remote == true)
+        // Both checked before anything is recorded, so a refused entry leaves no trace.
+        names.ThrowIfTaken(name, kind, nameof(name));
+        if (runScoped is { Remote: true })
         {
-            // Checked before the name is recorded, so a refused entry leaves no trace.
             runScoped.ThrowIfInvalidRemote(name, nameof(definition));
-            ToolSourceNames.Of(services).AddRemote(name, nameof(name));
             servers.RemoteNames.Add(name);
         }
 
-        servers.McpNames.TryAdd(name, runScoped is not null);
+        names.Add(name, kind, nameof(name));
         if (runScoped is null)
         {
             // works without AddLogging(): the MCP SDK and the source itself only need a factory, not a configured one
@@ -137,20 +131,10 @@ public static class McpThalosBuilderExtensions
     /// <param name="services">The service collection.</param>
     /// <param name="name">The source's name.</param>
     /// <param name="factory">Makes the source; see <see cref="RegisterRemote"/>.</param>
-    /// <exception cref="ArgumentException">An MCP entry, a local tool source or a remote run tool source already has <paramref name="name"/>.</exception>
+    /// <exception cref="ArgumentException">A tool source of any kind added through a named registration already has <paramref name="name"/>.</exception>
     internal static void AddRemote(IServiceCollection services, string name, Func<IServiceProvider, RemoteRunToolSource> factory)
     {
-        var servers = McpServers(services);
-        var names = ToolSourceNames.Of(services);
-        names.ThrowIfTakenForRemote(name, nameof(name)); // a local source, or a remote one: AddRemoteRunTools or a remote entry
-        if (servers.McpNames.ContainsKey(name))
-        {
-            throw new ArgumentException(
-                $"An MCP server named '{name}' was already added; a remote run tool source cannot share its name.", nameof(name));
-        }
-
-        names.AddRemote(name, nameof(name));
-        servers.McpNames.Add(name, true); // as a run-scoped entry, so a later MCP entry by this name is refused
+        ToolSourceNames.Of(services).Add(name, ToolSourceNames.Remote, nameof(name));
         RegisterRemote(services, name, factory);
     }
 
@@ -238,9 +222,6 @@ public static class McpThalosBuilderExtensions
     /// <summary>The MCP entries added to one service collection.</summary>
     private sealed class McpServerSet
     {
-        /// <summary>Every MCP entry's source name, plain or run-scoped, mapped to whether the first entry by that name is run-scoped.</summary>
-        public Dictionary<string, bool> McpNames { get; } = new(StringComparer.Ordinal);
-
         /// <summary>The run-scoped entries, keyed by source name, for the one registry.</summary>
         public Dictionary<string, McpServerDefinition> Definitions { get; } = new(StringComparer.Ordinal);
 

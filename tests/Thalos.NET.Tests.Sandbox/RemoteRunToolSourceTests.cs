@@ -783,20 +783,19 @@ public sealed class RemoteRunToolSourceTests : IAsyncLifetime
         var twice = () => new ServiceCollection().AddThalos(t => t
             .AddMcpServer("roslyn", HostDefinition(new RunScopedMcpDefinition { Remote = true }))
             .AddRemoteRunTools("roslyn", typeof(WorkspaceTools)));
-        twice.Should().Throw<ArgumentException>().WithMessage("A remote run tool source named 'roslyn' was already added.*");
+        twice.Should().Throw<ArgumentException>().WithMessage("A remote run tool source named 'roslyn' was already added;*");
         var remoteTwice = () => new ServiceCollection().AddThalos(t => t
             .AddRemoteRunTools("workspace", typeof(WorkspaceTools))
             .AddRemoteRunTools("workspace", typeof(WorkspaceTools)));
-        remoteTwice.Should().Throw<ArgumentException>().WithMessage("A remote run tool source named 'workspace' was already added.*");
+        remoteTwice.Should().Throw<ArgumentException>().WithMessage("A remote run tool source named 'workspace' was already added;*");
     }
 
     /// <summary>
-    /// Ruling R32. Red 1: in ThalosBuilder.AddLocalTools, drop the ToolSourceNames.AddLocal call; a local source after a
-    /// remote one is then accepted. Red 2: in ToolSourceNames.AddRemote, drop the local-name check; a remote source after
-    /// a local one is then accepted. Red 3: in McpThalosBuilderExtensions.AddRemote, drop the McpNames check; a remote
-    /// source after a plain MCP entry is then accepted. Red 4: in AddRemote, do not record the name in McpNames; a plain
-    /// MCP entry after a remote source is then accepted. Red 5: in AddMcpServer, drop the ToolSourceNames.AddRemote call
-    /// for a remote entry; a local source after it, and a remote entry after a local source, are then accepted.
+    /// Ruling R32, widened by issue 190 to every kind of source. Red 1: in ThalosBuilder.AddLocalTools, drop the
+    /// ToolSourceNames.Add call; a local source after a remote one is then accepted. Red 2: in ToolSourceNames.ThrowIfTaken,
+    /// return early; every clash below is then accepted. Red 3: in McpThalosBuilderExtensions.AddRemote, drop the
+    /// ToolSourceNames.Add call; a plain MCP entry or a local source after remote tools is then accepted. Red 4: in
+    /// AddMcpServer, drop the ThrowIfTaken call; an MCP entry after remote tools or a local source is then accepted.
     /// </summary>
     [Fact]
     public void A_remote_source_never_shares_its_name_with_a_local_or_MCP_source_in_either_order()
