@@ -67,7 +67,7 @@ internal sealed class TrackedStdioClientTransport(StdioClientTransport inner) : 
     {
         if (Volatile.Read(ref _session) is not { } session || Volatile.Read(ref _closedAt) is not { } closed)
         {
-            DiagTrace.Write($"closed-process: no session ({_session is null}) or no close stamp ({_closedAt is null})"");
+            DiagTrace.Write($"closed-process: no session ({_session is null}) or no close stamp ({_closedAt is null})");
             return null;
         }
 
@@ -83,7 +83,7 @@ internal sealed class TrackedStdioClientTransport(StdioClientTransport inner) : 
         }
 
         var completion = session.MessageReader.Completion;
-        DiagTrace.Write($"closed-process: completion {completion.Status}, exception {completion.Exception?.InnerException?.GetType().Name ?? "none"}, details {(completion.Exception?.InnerException as ClientTransportClosedException)?.Details?.GetType().Name ?? "none"}"");
+        DiagTrace.Write($"closed-process: completion {completion.Status}, exception {completion.Exception?.InnerException?.GetType().Name ?? "none"}, details {(completion.Exception?.InnerException as ClientTransportClosedException)?.Details?.GetType().Name ?? "none"}");
         // A stdio session always closes with this exception, carrying the process id.
         return session.MessageReader.Completion.Exception?.InnerException is ClientTransportClosedException { Details: StdioClientCompletionDetails { ProcessId: { } pid } }
             ? (pid, closedAt)
