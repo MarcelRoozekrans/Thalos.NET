@@ -11,7 +11,7 @@ public sealed class InMemorySessionStore(TimeProvider clock) : IAgentSessionStor
     {
         public required volatile AgentSessionRecord Record;
         public readonly List<ChatMessage> Messages = [];
-        public readonly object Gate = new();
+        public readonly Lock Gate = new();
     }
 
     private readonly ConcurrentDictionary<SessionId, Entry> _sessions = new();

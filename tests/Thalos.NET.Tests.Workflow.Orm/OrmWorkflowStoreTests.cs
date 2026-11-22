@@ -363,12 +363,56 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     {
         var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-fail", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
-        await _store.FailAsync(runId, "boom", CancellationToken.None);
+        (await _store.FailAsync(runId, 1, "boom", usage: null, CancellationToken.None)).Should().BeTrue();
 
         var run = await _store.FindAsync(runId, CancellationToken.None);
         run!.Status.Should().Be(WorkflowStatus.Failed);
         run.LastError.Should().Be("boom");
         (await CountAsync("SELECT count(*) FROM workflow_run_event WHERE run_id = @id", runId)).Should().Be(2);
+    }
+
+    /// <summary>
+    /// Issue 197: delivery A completed the node at seq 1 and the run moved on to seq 2; delivery B ran the same node
+    /// from the seq-1 read and failed it. B's stale failure must not fail the advanced run. Red: drop the
+    /// <c>CurrentSeq != expectedSeq</c> check in <c>FailCoreAsync</c>; the run ends Failed at review.
+    /// </summary>
+    [Fact]
+    public async Task FailAsync_for_a_seq_the_run_has_left_is_a_no_op_and_the_run_keeps_running()
+    {
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-fail-stale", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
+        var toReview = new WorkflowTransition("review", WorkflowStatus.Running, null, WorkflowEventKind.Completed);
+        await _store.CompleteNodeAsync(runId, 1, toReview, new NodeResult("ok", Empty), CancellationToken.None);
+        var eventsBefore = await CountAsync("SELECT count(*) FROM workflow_run_event WHERE run_id = @id", runId);
+
+        var failed = await _store.FailAsync(runId, 1, "stale duplicate delivery", usage: null, CancellationToken.None);
+
+        failed.Should().BeFalse();
+        var run = await _store.FindAsync(runId, CancellationToken.None);
+        run!.Status.Should().Be(WorkflowStatus.Running);
+        run.CurrentNode.Should().Be("review");
+        run.CurrentSeq.Should().Be(2);
+        run.LastError.Should().BeNull();
+        (await CountAsync("SELECT count(*) FROM workflow_run_event WHERE run_id = @id", runId)).Should().Be(eventsBefore, "a refused failure writes no event");
+    }
+
+    /// <summary>
+    /// Issue 197, the second path: a turn running at seq N outlives a stranded sweep that fails the run, and a retry
+    /// that brings it back to Running at a later seq. The old turn's failure must not fail the retried run.
+    /// </summary>
+    [Fact]
+    public async Task FailAsync_from_a_turn_that_outlived_a_stranded_sweep_and_a_retry_leaves_the_retried_run_running()
+    {
+        var store = NewStore();
+        var (runId, _, seq) = await WorkflowRunSeeds.FailedAtHostActionAsync(store, pg, "c-fail-after-retry");
+        (await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = seq, RetriedBy = TestPrincipals.Approver }, CancellationToken.None)).IsSuccess.Should().BeTrue();
+
+        var failed = await store.FailAsync(runId, seq, "the old turn failed late", usage: null, CancellationToken.None);
+
+        failed.Should().BeFalse();
+        var run = await store.FindAsync(runId, CancellationToken.None);
+        run!.Status.Should().Be(WorkflowStatus.Running);
+        run.CurrentSeq.Should().Be(seq + 2);
+        run.LastError.Should().BeNull();
     }
 
     [Fact]
@@ -378,7 +422,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
 
         // FailAsync flips status but never touches current_seq — an in-flight completion for the seq the run
         // was on when it failed would otherwise still pass CompleteNodeAsync's seq check.
-        await _store.FailAsync(runId, "boom", CancellationToken.None);
+        await _store.FailAsync(runId, 1, "boom", usage: null, CancellationToken.None);
 
         var toReview = new WorkflowTransition("review", WorkflowStatus.Running, null, WorkflowEventKind.Completed);
         var act = () => _store.CompleteNodeAsync(runId, 1, toReview, new NodeResult("ok", Empty), CancellationToken.None).AsTask();
@@ -395,10 +439,10 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     {
         var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-fail-twice", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
-        await _store.FailAsync(runId, "boom", CancellationToken.None);
+        await _store.FailAsync(runId, 1, "boom", usage: null, CancellationToken.None);
         // A naive retry would insert a second event at the same (run_id, seq) — the terminal-state guard is
         // what turns this into a no-op instead of a unique-constraint violation.
-        await _store.FailAsync(runId, "boom again", CancellationToken.None);
+        await _store.FailAsync(runId, 1, "boom again", usage: null, CancellationToken.None);
 
         var run = await _store.FindAsync(runId, CancellationToken.None);
         run!.Status.Should().Be(WorkflowStatus.Failed);
@@ -411,7 +455,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     {
         var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-cancel-after-fail", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
 
-        await _store.FailAsync(runId, "boom", CancellationToken.None);
+        await _store.FailAsync(runId, 1, "boom", usage: null, CancellationToken.None);
         await _store.CancelAsync(runId, "operator abort", CancellationToken.None);
 
         var run = await _store.FindAsync(runId, CancellationToken.None);
@@ -430,7 +474,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         // Succeeded is the one terminal-guard branch with a plausible "this call was a mistake" reading — a
         // late or misdirected FailAsync must not downgrade a run that already succeeded. Pinned in a test
         // rather than left to the guard's comment alone.
-        await _store.FailAsync(runId, "boom", CancellationToken.None);
+        await _store.FailAsync(runId, 2, "boom", usage: null, CancellationToken.None);
 
         var run = await _store.FindAsync(runId, CancellationToken.None);
         run!.Status.Should().Be(WorkflowStatus.Succeeded, "a run that already succeeded must not be overwritten to Failed");
@@ -489,7 +533,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     public async Task FailStrandedAsync_no_ops_on_an_already_terminal_run()
     {
         var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "manufacture", Version = 1, CorrelationKey = "c-stranded-terminal", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
-        await _store.FailAsync(runId, "boom", CancellationToken.None);
+        await _store.FailAsync(runId, 1, "boom", usage: null, CancellationToken.None);
 
         // FailAsync never advances current_seq (see its own remarks), so the stranded sweep's snapshot would
         // still show seq 1 here — the terminal-state guard, not the seq guard, is what must catch this case.
@@ -618,7 +662,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
         var store = NewStore();
         var runId = await WorkflowRunSeeds.ParkedAtGateAsync(store, pg, "c-retry-resume");
         (await store.ResumeAsync(runId, new WorkflowResumeRequest { Signal = WorkflowRunSeeds.GateSignal, Payload = null, ResumedBy = TestPrincipals.Approver }, CancellationToken.None)).IsSuccess.Should().BeTrue();
-        await store.FailAsync(runId, "boom", CancellationToken.None);
+        await store.FailAsync(runId, 3, "boom", usage: null, CancellationToken.None);
 
         // The approval process has no action node, so this retry is refused. The run still holds its LastResume.
         // This guards that the refusal path writes nothing; the success path is guarded by the next assertion.
@@ -686,7 +730,7 @@ public sealed class OrmWorkflowStoreTests(PostgresFixture pg) : IAsyncLifetime
     {
         var store = await ActivatePublishingProcessAsync();
         var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "publishing", Version = 1, CorrelationKey = "c-retry-agent", StartNode = "start", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
-        await store.FailAsync(runId, "turn failed", CancellationToken.None);
+        await store.FailAsync(runId, 1, "turn failed", usage: null, CancellationToken.None);
 
         var result = await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 1, RetriedBy = TestPrincipals.Approver }, CancellationToken.None);
 

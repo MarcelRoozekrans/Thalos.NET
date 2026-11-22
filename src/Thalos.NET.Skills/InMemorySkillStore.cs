@@ -9,7 +9,7 @@ public sealed class InMemorySkillStore(TimeProvider clock) : ISkillStore
 {
     private readonly ConcurrentDictionary<SkillName, SkillDocument> _skills = new();
     private readonly ConcurrentDictionary<(SkillName Name, string Hash), SkillDocument> _versions = new();
-    private readonly object _gate = new(); // DeactivateMissing is a read-modify-write over the whole set
+    private readonly Lock _gate = new(); // DeactivateMissing is a read-modify-write over the whole set
 
     /// <inheritdoc />
     public ValueTask<Result<SkillDocument, AgentError>> UpsertAsync(SkillDocument skill, CancellationToken ct)

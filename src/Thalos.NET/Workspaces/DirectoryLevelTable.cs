@@ -34,7 +34,7 @@ namespace Thalos.Workspaces;
 internal sealed class DirectoryLevelTable
 {
     private readonly Dictionary<string, Entry> _entries = new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
 
     /// <summary>The process-wide table <see cref="WorkspaceTools"/> uses unless a test gives an instance its own.</summary>
     public static DirectoryLevelTable Shared { get; } = new();
@@ -74,8 +74,8 @@ internal sealed class DirectoryLevelTable
         // Counted first, then wait out a removal already in progress. The remover took this lock under the gate,
         // before this caller's count, so it will not re-check the count; it finishes, and only then does this pin
         // go on to open or create the level.
-        Monitor.Enter(entry.RemovalLock);
-        Monitor.Exit(entry.RemovalLock);
+        entry.RemovalLock.Enter();
+        entry.RemovalLock.Exit();
         return new Lease(this, key, entry);
     }
 
@@ -100,7 +100,7 @@ internal sealed class DirectoryLevelTable
             }
 
             // Cannot block: every other thread that takes this lock has counted itself first, and the count is 1.
-            Monitor.Enter(entry.RemovalLock);
+            entry.RemovalLock.Enter();
         }
 
         try
@@ -109,7 +109,7 @@ internal sealed class DirectoryLevelTable
         }
         finally
         {
-            Monitor.Exit(entry.RemovalLock);
+            entry.RemovalLock.Exit();
         }
     }
 
@@ -128,7 +128,7 @@ internal sealed class DirectoryLevelTable
     internal sealed class Entry
     {
         /// <summary>Held by a removal of this level for as long as it runs; passed through by every pin.</summary>
-        public object RemovalLock { get; } = new();
+        public Lock RemovalLock { get; } = new();
 
         /// <summary>Chains holding this level, or about to open it. Read and written only under the table's gate.</summary>
         public int References { get; set; }

@@ -18,7 +18,7 @@ namespace Thalos.Workspaces;
 internal sealed class LeafLockTable
 {
     private readonly Dictionary<string, Entry> _entries = new(StringComparer.OrdinalIgnoreCase);
-    private readonly object _gate = new();
+    private readonly Lock _gate = new();
 
     /// <summary>The process-wide table <see cref="WorkspaceTools"/> uses unless a test gives an instance its own.</summary>
     public static LeafLockTable Shared { get; } = new();

@@ -29,11 +29,11 @@ A Hermes-style, ZeroAlloc-native agent framework for .NET, built on
 | `Thalos.NET.Git.LibGit2Sharp` | `IGitWriteService` implementation over LibGit2Sharp | Thalos.NET.Git, `LibGit2Sharp` |
 | `Thalos.NET.Workflow` | Durable process-graph engine: sequence, branch, loop-back and approval-gate primitives defined in a YAML file rather than in code — a graph model, loader, validator, pure interpreter and node dispatcher. No persistence backend dependency, so a consumer who does not want to reach for `Thalos.NET.Workflow.Orm` can supply their own `IWorkflowStore`. Hosts nothing itself — wiring it end to end is [docs/workflow.md](docs/workflow.md) | Thalos.NET, Thalos.NET.Skills, `YamlDotNet` |
 | `Thalos.NET.Workflow.Orm` | `IWorkflowStore` implementation over ZeroAlloc.ORM: raw-SQL persistence on PostgreSQL with a transactional outbox dispatch, so a run's transition and the work behind its next node commit or roll back together. No EF Core anywhere in its dependency tree. Ships no outbox consumer — see [docs/workflow.md](docs/workflow.md) | Thalos.NET.Workflow, `ZeroAlloc.ORM`, `ZeroAlloc.Outbox.Orm`, `Npgsql` |
-| `Thalos.NET.Sandbox` | Run sandboxes: a per-run container holds the workspace, build and Roslyn, so agent-written code never runs on the host. `UseSandboxRunWorkspaces`, park and patch hand-off, protected-path publish guard (net10.0 and net11.0) — see [docs/workflow.md](docs/workflow.md#run-sandboxes) | Thalos.NET, Thalos.NET.Git, Thalos.NET.Mcp |
-| `Thalos.NET.Sandbox.Docker` | `ISandboxRuntime` over Docker: per-run containers behind a loopback gateway, with an egress proxy that allows only NuGet (net10.0 and net11.0) | Thalos.NET.Sandbox, `Docker.DotNet.Enhanced` |
-| `Thalos.NET.Sandbox.Host` | The in-container host: workspace, build and Roslyn tools over MCP behind a per-sandbox bearer token (net10.0 and net11.0) | Thalos.NET.Sandbox, `ModelContextProtocol.AspNetCore` |
+| `Thalos.NET.Sandbox` | Run sandboxes: a per-run container holds the workspace, build and Roslyn, so agent-written code never runs on the host. `UseSandboxRunWorkspaces`, park and patch hand-off, protected-path publish guard — see [docs/workflow.md](docs/workflow.md#run-sandboxes) | Thalos.NET, Thalos.NET.Git, Thalos.NET.Mcp |
+| `Thalos.NET.Sandbox.Docker` | `ISandboxRuntime` over Docker: per-run containers behind a loopback gateway, with an egress proxy that allows only NuGet | Thalos.NET.Sandbox, `Docker.DotNet.Enhanced` |
+| `Thalos.NET.Sandbox.Host` | The in-container host: workspace, build and Roslyn tools over MCP behind a per-sandbox bearer token | Thalos.NET.Sandbox, `ModelContextProtocol.AspNetCore` |
 
-Targets `net8.0`, `net10.0` and `net11.0` (`Thalos.NET.Memory.RagNet`, `Thalos.NET.Workflow.Orm` and the three `Thalos.NET.Sandbox*` packages: `net10.0` and `net11.0` only — RagNet because Rag.NET is net10.0-only, Workflow.Orm because ZeroAlloc.ORM / ZeroAlloc.Outbox.Orm / AdoNet.Async.Adapters ship net10.0-only builds).
+Every package targets `net10.0` and `net11.0`. .NET 8 consumers stay on 0.21.x, the last release with a `net8.0` build.
 
 ## Core contracts
 
@@ -223,6 +223,19 @@ await foreach (var evt in runtime.RunTurnStreamingAsync(new AgentTurnRequest(ses
 Tool names exposed to the model are `{source}__{tool}` (e.g. `roslyn__find_callers`); `AgentDefinition.Tools` and
 `RequireToolPolicy` take globs over that qualified name. Authorization is enforced by Thalos at the function boundary —
 before the tool runs — not by inspecting the chat stream afterwards.
+
+**Local tools and source names.** Tool source names are unique: a second source of a name already taken, of any kind,
+fails at composition. `AddLocalTools<TTools>(sourceName, serializerOptions, binders)` adds the tools of one class
+without reflection. To put several classes under one source name, add them through a builder:
+
+```csharp
+thalos.AddLocalTools("knowledge", LocalToolSources.CreateOptions(MyJsonContext.Default), tools => tools
+    .Add<SearchTools>(t => t.Search)
+    .Add<ScheduleTools>(t => t.ListSchedules, t => t.WhyDidARunFail));
+```
+
+Each `Add<TTools>` takes binders as `AddLocalTools<TTools>` does, and the source lists the classes' tools in the
+order they were added. Two classes that use the same tool name fail the source's first resolution.
 
 **Prompt caching.** `UsePromptCaching()` registers `PromptCachingChatClient` as the outermost chat-client decorator,
 so MAF's function-invocation loop passes through it on every model round trip. On each round trip it places

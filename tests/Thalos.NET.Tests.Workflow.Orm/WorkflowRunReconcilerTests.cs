@@ -167,7 +167,8 @@ public sealed class WorkflowRunReconcilerTests(PostgresFixture pg) : IAsyncLifet
         public ValueTask<Result> ResumeAsync(Guid runId, WorkflowResumeRequest request, CancellationToken ct) =>
             inner.ResumeAsync(runId, request, ct);
 
-        public ValueTask FailAsync(Guid runId, string errorMessage, CancellationToken ct) => inner.FailAsync(runId, errorMessage, ct);
+        public ValueTask<bool> FailAsync(Guid runId, long expectedSeq, string errorMessage, TurnUsage? usage, CancellationToken ct) =>
+            inner.FailAsync(runId, expectedSeq, errorMessage, usage, ct);
 
         public ValueTask<bool> FailStrandedAsync(Guid runId, long expectedSeq, string errorMessage, CancellationToken ct) =>
             runId == throwsForRunId

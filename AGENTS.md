@@ -18,14 +18,13 @@ This repository is part of a .NET product line. Read the [product-line standards
   architecture tests exclude it from the production layering rules.
 - Compiler-generated output goes to `obj/generated` (`EmitCompilerGeneratedFiles`).
 - A new package must be added to the `expected` list and both count checks (`19`) in the `pack-validate` job of
-  `.github/workflows/ci.yml`, and to the `case` that lists net10.0-only packages if it has no `net8.0` build.
+  `.github/workflows/ci.yml`.
 
 ## Build and test
 
 Prerequisites: the SDK pinned by the only `global.json` (`11.0.100`, `rollForward: latestFeature`) and the .NET 10
-and .NET 11 runtimes, including ASP.NET Core, because every test project targets `net10.0` and `net11.0`
-(`tests/Directory.Build.props`); some test projects, the helpers and both samples target `net11.0` only. Libraries also build for
-`net8.0`, but nothing runs on it, so no .NET 8 runtime is needed. The Native AOT smoke test needs `clang` and
+and .NET 11 runtimes, including ASP.NET Core, because every library and test project targets `net10.0` and `net11.0`
+(`Directory.Build.props`); some test projects, the helpers and both samples target `net11.0` only. The Native AOT smoke test needs `clang` and
 `zlib1g-dev` on Linux (installed by CI). The `pack-validate` commands need `jq`. Docker with Linux containers is needed for the 22 tests tagged
 `Category=Docker`.
 
@@ -72,13 +71,12 @@ dotnet test tests/Thalos.NET.Tests.Memory.RagNet -c Release -f net10.0 --filter 
 ## Conventions and gotchas
 
 - `TreatWarningsAsErrors` is on with Meziantou, Roslynator and ZeroAlloc analyzers, `LangVersion` 13.0 and
-  `AnalysisLevel latest-recommended`. `CS1591`, `MA0048` and `MA0158` are suppressed repo-wide on purpose (comments in
-  `Directory.Build.props`): `MA0158` because libraries target `net8.0`, which has no `System.Threading.Lock`.
+  `AnalysisLevel latest-recommended`. `CS1591` and `MA0048` are suppressed repo-wide on purpose (comment in
+  `Directory.Build.props`). Lock gates are `System.Threading.Lock`, not `object`.
 - Package versions are central (`Directory.Packages.props`). `<VersionPrefix>` in `Directory.Build.props` is only the
   fallback for a local build; releases take the version from GitVersion and release-please.
-- Single-target projects set `<TargetFrameworks />` or `<TargetFrameworks>net11.0</TargetFrameworks>`. `net8.0` is the
-  default for libraries; `Memory.RagNet`, `Workflow.Orm` and the three `Sandbox*` packages are `net10.0` and
-  `net11.0` only because their dependencies are. Do not add `net8.0` to them.
+- Single-target projects set `<TargetFrameworks />` or `<TargetFrameworks>net11.0</TargetFrameworks>`. Every library
+  targets `net10.0` and `net11.0` from `Directory.Build.props`; do not add a framework in a project file.
 - `DaedalusIndependenceTests` fails if any project, props or C# file references Daedalus. Keep this repo
   standalone.
 - `LayeringTests` use ArchUnitNET over an explicit assembly array. A new shipping assembly must be added there, or its

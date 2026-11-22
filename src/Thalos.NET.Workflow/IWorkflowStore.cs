@@ -155,13 +155,37 @@ public interface IWorkflowStore
         [TraceTag(WorkflowTelemetry.SignalTag, "Signal")] WorkflowResumeRequest request,
         CancellationToken ct);
 
-    /// <summary>Marks a run failed with <paramref name="errorMessage"/>, outside the normal node/outcome flow.</summary>
+    /// <summary>
+    /// Marks a run failed with <paramref name="errorMessage"/>, outside the normal node/outcome flow, when the node at
+    /// <paramref name="expectedSeq"/> failed. Applies only while the run is still at <paramref name="expectedSeq"/>,
+    /// as <see cref="CompleteNodeAsync"/> does: a failure computed against a seq the run has since left, such as a stale
+    /// duplicate delivery of a node another delivery already completed, or a turn that outlived a stranded-run sweep and
+    /// a retry, is a no-op and returns <see langword="false"/>. Also a no-op when the run is already terminal. Returns
+    /// whether this call failed the run.
+    /// </summary>
+    /// <param name="runId">The run.</param>
+    /// <param name="expectedSeq">The seq of the node whose failure this is, the <see cref="WorkflowRun.CurrentSeq"/> the failure was computed against.</param>
+    /// <param name="errorMessage">The failure, recorded as <see cref="WorkflowRun.LastError"/> and on the fail event.</param>
+    /// <param name="usage">
+    /// The token usage of the agent turn that failed the node, recorded on the fail event and read back by
+    /// <see cref="IWorkflowRunHistory.ListEventsAsync"/> as <see cref="WorkflowRunEvent.Usage"/>, so cost views include
+    /// failed runs; <see langword="null"/> when no turn ran or none returned a usage.
+    /// </param>
+    /// <param name="ct">Cancels the write.</param>
+    /// <exception cref="InvalidOperationException">No run has <paramref name="runId"/>.</exception>
+    /// <exception cref="WorkflowConcurrencyException">A concurrent write to the run won; a retry then finds the run moved on or terminal and is a no-op.</exception>
     [Trace(WorkflowTelemetry.StoreFailSpanName, ExceptionDescription = false)]
-    ValueTask FailAsync([TraceTag(WorkflowTelemetry.RunIdTag)] Guid runId, string errorMessage, CancellationToken ct);
+    [TraceTagFromResult(WorkflowTelemetry.FailAppliedTag)]
+    ValueTask<bool> FailAsync(
+        [TraceTag(WorkflowTelemetry.RunIdTag)] Guid runId,
+        [TraceTag(WorkflowTelemetry.SeqTag)] long expectedSeq,
+        string errorMessage,
+        TurnUsage? usage,
+        CancellationToken ct);
 
     /// <summary>
-    /// The seq-guarded counterpart to <see cref="FailAsync"/> that <see cref="WorkflowRunReconciler.SweepAsync"/>
-    /// uses instead of it. A run <see cref="FindStrandedAsync"/> reported at <paramref name="expectedSeq"/> can
+    /// The counterpart to <see cref="FailAsync"/> that <see cref="WorkflowRunReconciler.SweepAsync"/> uses instead
+    /// of it, for a run with no node failure to record: no usage, and a lost race is a no-op rather than a throw. A run <see cref="FindStrandedAsync"/> reported at <paramref name="expectedSeq"/> can
     /// legitimately move on — completed by a concurrent dispatcher, including into
     /// <see cref="WorkflowStatus.Awaiting"/> at a gate — at any point between that query's snapshot and this
     /// call actually reaching the row, and every such transition bumps <see cref="WorkflowRun.CurrentSeq"/>

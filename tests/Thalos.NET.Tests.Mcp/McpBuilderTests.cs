@@ -170,13 +170,36 @@ public sealed class McpBuilderTests
         act.Should().Throw<ArgumentException>().WithParameterName("name").WithMessage("*'roslyn' was already added*");
     }
 
+    /// <summary>Issue 190: two plain entries of one name are refused at composition, no longer resolved first-wins.</summary>
     [Fact]
-    public void Two_plain_entries_with_the_same_name_are_still_accepted_first_wins_as_before()
+    public void A_second_plain_entry_with_the_same_name_is_rejected_at_composition()
     {
         var services = new ServiceCollection();
         var act = () => services.AddThalos(t => t.AddMcpServer("echo", McpServerFixture.Definition()).AddMcpServer("echo", McpServerFixture.Definition()));
-        act.Should().NotThrow();
-        services.Count(d => d.ServiceType == typeof(IToolSource)).Should().Be(2, "both are registered; the catalog keeps the first");
+        act.Should().Throw<ArgumentException>().WithParameterName("name")
+            .WithMessage("An MCP server named 'echo' was already added; an MCP server cannot share its name*");
+    }
+
+    [Fact]
+    public void A_plain_entry_named_like_a_source_instance_is_rejected_at_composition_in_either_order()
+    {
+        var instanceFirst = () => new ServiceCollection().AddThalos(t => t
+            .AddToolSource(new NamedSource("echo"))
+            .AddMcpServer("echo", McpServerFixture.Definition()));
+        var mcpFirst = () => new ServiceCollection().AddThalos(t => t
+            .AddMcpServer("echo", McpServerFixture.Definition())
+            .AddToolSource(new NamedSource("echo")));
+
+        instanceFirst.Should().Throw<ArgumentException>().WithMessage("A tool source named 'echo' was already added; an MCP server cannot*");
+        mcpFirst.Should().Throw<ArgumentException>().WithMessage("An MCP server named 'echo' was already added; a tool source cannot*");
+    }
+
+    private sealed class NamedSource(string name) : IToolSource
+    {
+        public string Name => name;
+
+        public ValueTask<ZeroAlloc.Results.Result<IReadOnlyList<AITool>, AgentError>> GetToolsAsync(CancellationToken ct) =>
+            new(ZeroAlloc.Results.Result<IReadOnlyList<AITool>, AgentError>.Success([]));
     }
 
     private static McpServerDefinition Definition(bool runScoped)

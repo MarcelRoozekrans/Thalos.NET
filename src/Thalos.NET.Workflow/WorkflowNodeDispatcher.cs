@@ -150,8 +150,8 @@ public sealed partial class WorkflowNodeDispatcher(
             DispatchOutcome outcome;
             try
             {
-                // Loaded before the span starts: the span's link to the run's start comes from the run, and a link can
-                // only be given to StartActivity on net8.0, which has no Activity.AddLink.
+                // Loaded before the span starts: the span's link to the run's start comes from the run, and a link given
+                // to StartActivity is visible to the sampler, which one added later with Activity.AddLink is not.
                 var run = await _store.FindAsync(message.RunId, ct).ConfigureAwait(false);
                 activity = StartDispatchActivity(message, run);
                 outcome = await DispatchRunAsync(message, run, ct).ConfigureAwait(false);
@@ -195,15 +195,16 @@ public sealed partial class WorkflowNodeDispatcher(
         // worth failing loudly on rather than silently acting on the wrong node.
         if (!string.Equals(message.Node, run.CurrentNode, StringComparison.Ordinal))
         {
-            return await FailRunAsync(run.Id, $"dispatch message named node '{message.Node}' but run '{run.Id}' is at '{run.CurrentNode}' (seq {message.Seq} matched).", ct).ConfigureAwait(false);
+            return await FailRunAsync(run, $"dispatch message named node '{message.Node}' but run '{run.Id}' is at '{run.CurrentNode}' (seq {message.Seq} matched).", usage: null, ct).ConfigureAwait(false);
         }
 
         var resolved = await ResolveNodeAsync(run, ct).ConfigureAwait(false);
-        if (resolved is not { } target)
+        if (resolved.IsFailure)
         {
-            // ResolveNodeAsync already failed the run.
-            return DispatchOutcome.Failed;
+            return await FailRunAsync(run, resolved.Error, usage: null, ct).ConfigureAwait(false);
         }
+
+        var target = resolved.Value;
 
         // A terminal node and a gate both declare no agent or skill - ProcessValidator's "exactly one of task,
         // gate, terminal or action" rule guarantees a node with Await or Terminal set has Agent null. Reaching either
@@ -245,7 +246,7 @@ public sealed partial class WorkflowNodeDispatcher(
             var gateResult = await gate.BeforeTaskNodeAsync(run, run.CurrentNode, ct).ConfigureAwait(false);
             if (gateResult.IsFailure)
             {
-                return await FailRunAsync(run.Id, $"node '{run.CurrentNode}': {gateResult.Error}", ct).ConfigureAwait(false);
+                return await FailRunAsync(run, $"node '{run.CurrentNode}': {gateResult.Error}", usage: null, ct).ConfigureAwait(false);
             }
         }
 
@@ -255,20 +256,19 @@ public sealed partial class WorkflowNodeDispatcher(
             // resolve this one node live while every other node in the run stays pinned.
             if (!manifest.Nodes.TryGetValue(run.CurrentNode, out var pin))
             {
-                return await FailRunAsync(run.Id, $"node '{run.CurrentNode}' is missing from the run manifest.", ct).ConfigureAwait(false);
+                return await FailRunAsync(run, $"node '{run.CurrentNode}' is missing from the run manifest.", usage: null, ct).ConfigureAwait(false);
             }
 
             return await RunPinnedNodeAsync(run, process, node, pin, seq, ct).ConfigureAwait(false);
         }
 
         var agentId = await ResolveAgentAsync(run, node, ct).ConfigureAwait(false);
-        if (agentId is not { } resolvedAgentId)
+        if (agentId.IsFailure)
         {
-            // ResolveAgentAsync already failed the run, naming the node.
-            return DispatchOutcome.Failed;
+            return await FailRunAsync(run, agentId.Error, usage: null, ct).ConfigureAwait(false);
         }
 
-        return await RunNodeAsync(run, process, node, resolvedAgentId, seq, ct).ConfigureAwait(false);
+        return await RunNodeAsync(run, process, node, agentId.Value, seq, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -287,7 +287,7 @@ public sealed partial class WorkflowNodeDispatcher(
     {
         if (!_hostActions.TryGetValue(actionName, out var action))
         {
-            return await FailRunAsync(run.Id, $"node '{run.CurrentNode}' references host action '{actionName}', which is not registered.", ct).ConfigureAwait(false);
+            return await FailRunAsync(run, $"node '{run.CurrentNode}' references host action '{actionName}', which is not registered.", usage: null, ct).ConfigureAwait(false);
         }
 
         var result = await action.RunAsync(run, node, ct).ConfigureAwait(false);
@@ -295,7 +295,7 @@ public sealed partial class WorkflowNodeDispatcher(
         {
             // Prefixed with the node, as a failing dispatch gate's message is: the action writes its message
             // without knowing which node of which process it ran for.
-            return await FailRunAsync(run.Id, $"node '{run.CurrentNode}': {result.Error}", ct).ConfigureAwait(false);
+            return await FailRunAsync(run, $"node '{run.CurrentNode}': {result.Error}", usage: null, ct).ConfigureAwait(false);
         }
 
         // A null result or variable bag is a defect in the action, not a transient failure. Letting it surface as a
@@ -303,12 +303,12 @@ public sealed partial class WorkflowNodeDispatcher(
         // retry before dead-lettering the message and stranding the run. Failing the run records it once.
         if (result.Value is not { Variables: not null } reported)
         {
-            return await FailRunAsync(run.Id, $"node '{run.CurrentNode}': host action '{actionName}' returned a success with no {(result.Value is null ? "result" : "variables")}; an action with none to report returns an empty dictionary.", ct).ConfigureAwait(false);
+            return await FailRunAsync(run, $"node '{run.CurrentNode}': host action '{actionName}' returned a success with no {(result.Value is null ? "result" : "variables")}; an action with none to report returns an empty dictionary.", usage: null, ct).ConfigureAwait(false);
         }
 
         if (reported.Variables.Count > 0 && CheckKeyLimits(run.CurrentNode, run.Variables, reported.Variables) is { } limitError)
         {
-            return await FailRunAsync(run.Id, limitError, ct).ConfigureAwait(false);
+            return await FailRunAsync(run, limitError, usage: null, ct).ConfigureAwait(false);
         }
 
         return await AdvanceAndPersistAsync(run, process, new NodeResult(reported.Outcome, reported.Variables), seq, ct).ConfigureAwait(false);
@@ -317,31 +317,26 @@ public sealed partial class WorkflowNodeDispatcher(
     /// <summary>
     /// Resolves <paramref name="node"/>'s <see cref="ProcessNode.Agent"/> name to an <see cref="AgentId"/> through
     /// <see cref="IWorkflowReferenceResolver.ResolveAgentIdAsync"/> — <c>agent:</c> is a human-authored name in a
-    /// git-reviewed process file, never a raw id, so this dispatcher never parses it as one itself. Fails the run
-    /// (not throwing — see this class's remarks) when the node has no agent name at all, or the name does not
-    /// resolve.
+    /// git-reviewed process file, never a raw id, so this dispatcher never parses it as one itself. Returns the error
+    /// the caller fails the run with (not throwing — see this class's remarks) when the node has no agent name at
+    /// all, or the name does not resolve.
     /// </summary>
-    private async ValueTask<AgentId?> ResolveAgentAsync(WorkflowRun run, ProcessNode node, CancellationToken ct)
+    private async ValueTask<Result<AgentId, string>> ResolveAgentAsync(WorkflowRun run, ProcessNode node, CancellationToken ct)
     {
         if (node.Agent is not { } agentName)
         {
-            await _store.FailAsync(run.Id, $"node '{run.CurrentNode}' is a task node with no agent name.", ct).ConfigureAwait(false);
-            return null;
+            return Result<AgentId, string>.Failure($"node '{run.CurrentNode}' is a task node with no agent name.");
         }
 
-        var agentId = await _resolver.ResolveAgentIdAsync(agentName, ct).ConfigureAwait(false);
-        if (agentId is null)
-        {
-            await _store.FailAsync(run.Id, $"node '{run.CurrentNode}' references unknown agent '{agentName}'.", ct).ConfigureAwait(false);
-        }
-
-        return agentId;
+        return await _resolver.ResolveAgentIdAsync(agentName, ct).ConfigureAwait(false) is { } agentId
+            ? Result<AgentId, string>.Success(agentId)
+            : Result<AgentId, string>.Failure($"node '{run.CurrentNode}' references unknown agent '{agentName}'.");
     }
 
     /// <summary>
     /// Resolves <paramref name="run"/>'s process definition through <see cref="IProcessDefinitionStore.GetAsync"/>
-    /// and finds its current node, failing the run (not throwing — see this class's remarks) when either does not
-    /// resolve. The definition comes from the store on the run's pinned <c>(Process, ProcessVersion)</c>, never
+    /// and finds its current node, returning the error the caller fails the run with (not throwing — see this class's
+    /// remarks) when either does not resolve. The definition comes from the store on the run's pinned <c>(Process, ProcessVersion)</c>, never
     /// from a dictionary handed in at composition time: the store is the one place a definition lives, so a
     /// version that was synced is runnable and a version that was not is not, with no second registration step
     /// able to disagree with the table.
@@ -355,23 +350,18 @@ public sealed partial class WorkflowNodeDispatcher(
     /// the backing store being unreachable — and is deliberately left to propagate, because that is transient and
     /// a retry genuinely can fix it.
     /// </remarks>
-    private async ValueTask<(ProcessDefinition Process, ProcessNode Node)?> ResolveNodeAsync(WorkflowRun run, CancellationToken ct)
+    private async ValueTask<Result<(ProcessDefinition Process, ProcessNode Node), string>> ResolveNodeAsync(WorkflowRun run, CancellationToken ct)
     {
         var definition = await _definitions.GetAsync(run.Process, run.ProcessVersion, ct).ConfigureAwait(false);
         if (definition.IsFailure)
         {
-            await _store.FailAsync(run.Id, definition.Error, ct).ConfigureAwait(false);
-            return null;
+            return Result<(ProcessDefinition, ProcessNode), string>.Failure(definition.Error);
         }
 
         var process = definition.Value;
-        if (!process.Nodes.TryGetValue(run.CurrentNode, out var node))
-        {
-            await _store.FailAsync(run.Id, $"Process '{run.Process}' version {run.ProcessVersion} has no node named '{run.CurrentNode}'.", ct).ConfigureAwait(false);
-            return null;
-        }
-
-        return (process, node);
+        return process.Nodes.TryGetValue(run.CurrentNode, out var node)
+            ? Result<(ProcessDefinition, ProcessNode), string>.Success((process, node))
+            : Result<(ProcessDefinition, ProcessNode), string>.Failure($"Process '{run.Process}' version {run.ProcessVersion} has no node named '{run.CurrentNode}'.");
     }
 
     /// <summary>
@@ -411,13 +401,13 @@ public sealed partial class WorkflowNodeDispatcher(
     {
         if (!SkillName.TryParse(pin.SkillName, out var skillName))
         {
-            return await FailRunAsync(run.Id, $"node '{run.CurrentNode}' pinned skill {pin.SkillName}@{pin.SkillHash} could not be loaded: '{pin.SkillName}' is not a valid skill name.", ct).ConfigureAwait(false);
+            return await FailRunAsync(run, $"node '{run.CurrentNode}' pinned skill {pin.SkillName}@{pin.SkillHash} could not be loaded: '{pin.SkillName}' is not a valid skill name.", usage: null, ct).ConfigureAwait(false);
         }
 
         var skill = await _skills.GetVersionAsync(skillName, pin.SkillHash, ct).ConfigureAwait(false);
         if (skill.IsFailure)
         {
-            return await FailRunAsync(run.Id, $"node '{run.CurrentNode}' pinned skill {pin.SkillName}@{pin.SkillHash} could not be loaded: {skill.Error}", ct).ConfigureAwait(false);
+            return await FailRunAsync(run, $"node '{run.CurrentNode}' pinned skill {pin.SkillName}@{pin.SkillHash} could not be loaded: {skill.Error}", usage: null, ct).ConfigureAwait(false);
         }
 
         var outcomeTool = node.Outcomes.Count > 0
@@ -450,13 +440,15 @@ public sealed partial class WorkflowNodeDispatcher(
         {
             // The turn ran and produced a verdict we dislike — a result, not an infrastructure gap. Takes the
             // same FailAsync path AdvanceAndPersistAsync uses for a rejected outcome, not a throw.
-            return await FailRunAsync(run.Id, turn.Error.ToString(), ct).ConfigureAwait(false);
+            // The runner's failure carries no usage, so none is recorded for a turn that failed outright.
+            return await FailRunAsync(run, turn.Error.ToString(), usage: null, ct).ConfigureAwait(false);
         }
 
         var nodeResult = BuildNodeResult(run, turn.Value, outcomeTool);
         if (nodeResult.IsFailure)
         {
-            return await FailRunAsync(run.Id, nodeResult.Error, ct).ConfigureAwait(false);
+            // The turn ran and spent tokens before its outcome was refused: they go on the fail event.
+            return await FailRunAsync(run, nodeResult.Error, turn.Value.Usage, ct).ConfigureAwait(false);
         }
 
         return await AdvanceAndPersistAsync(run, process, nodeResult.Value, seq, ct).ConfigureAwait(false);
@@ -484,7 +476,7 @@ public sealed partial class WorkflowNodeDispatcher(
             // Advance checks). Advance already refused to guess a branch; this dispatcher's only job is to record
             // that refusal as a failed run, naming the offending value and node via Advance's own error message,
             // rather than letting a bad outcome silently pick one.
-            return await FailRunAsync(run.Id, transition.Error, ct).ConfigureAwait(false);
+            return await FailRunAsync(run, transition.Error, nodeResult.Usage, ct).ConfigureAwait(false);
         }
 
         await _store.CompleteNodeAsync(run.Id, seq, transition.Value, nodeResult, ct).ConfigureAwait(false);
@@ -881,14 +873,14 @@ public sealed partial class WorkflowNodeDispatcher(
     }
 
     /// <summary>
-    /// Records <paramref name="errorMessage"/> as the run's failure and reports it: the failure path for the dispatch
-    /// methods that report an outcome; the two resolvers fail the run themselves and return null.
+    /// Records <paramref name="errorMessage"/> as the failure of the node <paramref name="run"/> is at, with the usage of
+    /// the turn that failed it, and reports it. The failure is scoped to the seq this dispatch read the run at, so a
+    /// stale delivery whose run has since moved on fails nothing and reports <see cref="DispatchOutcome.Skipped"/>.
     /// </summary>
-    private async ValueTask<DispatchOutcome> FailRunAsync(Guid runId, string errorMessage, CancellationToken ct)
-    {
-        await _store.FailAsync(runId, errorMessage, ct).ConfigureAwait(false);
-        return DispatchOutcome.Failed;
-    }
+    private async ValueTask<DispatchOutcome> FailRunAsync(WorkflowRun run, string errorMessage, TurnUsage? usage, CancellationToken ct) =>
+        await _store.FailAsync(run.Id, run.CurrentSeq, errorMessage, usage, ct).ConfigureAwait(false)
+            ? DispatchOutcome.Failed
+            : DispatchOutcome.Skipped;
 
     /// <summary>
     /// Wraps each validated action in its generated telemetry proxy, keeping the ordinal index. An action a host

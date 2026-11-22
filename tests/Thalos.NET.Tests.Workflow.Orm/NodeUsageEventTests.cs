@@ -135,7 +135,7 @@ public sealed class NodeUsageEventTests(PostgresFixture pg) : IAsyncLifetime
         var reason = $"{kind} for the test";
         if (string.Equals(kind, nameof(WorkflowEventKind.Failed), StringComparison.Ordinal))
         {
-            await _store.FailAsync(runId, reason, CancellationToken.None);
+            await _store.FailAsync(runId, 1, reason, usage: null, CancellationToken.None);
         }
         else
         {
@@ -149,6 +149,24 @@ public sealed class NodeUsageEventTests(PostgresFixture pg) : IAsyncLifetime
         ended.Kind.Should().Be(kind);
         ended.Error.Should().Be(reason);
         ended.Usage.Should().BeNull();
+    }
+
+    /// <summary>
+    /// Issue 198: a failed node's turn spent tokens too, so its usage goes on the fail event and a cost view built on
+    /// the history counts it. Red: pass <c>usage: null</c> to the event insert in <c>TryApplyFailedStatusAsync</c>; the
+    /// event reads back with no usage.
+    /// </summary>
+    [Fact]
+    public async Task A_failure_event_records_the_usage_of_the_turn_that_failed_the_node()
+    {
+        var runId = await StartAsync();
+
+        (await _store.FailAsync(runId, 1, "undeclared outcome", NodeUsage, CancellationToken.None)).Should().BeTrue();
+
+        var failed = (await _store.ListEventsAsync(runId, CancellationToken.None))[1];
+        failed.Kind.Should().Be(nameof(WorkflowEventKind.Failed));
+        failed.Usage.Should().NotBeNull();
+        failed.Usage!.Value.Should().BeEquivalentTo(NodeUsage, options => options.ComparingByMembers<TurnUsage>());
     }
 
     /// <summary>

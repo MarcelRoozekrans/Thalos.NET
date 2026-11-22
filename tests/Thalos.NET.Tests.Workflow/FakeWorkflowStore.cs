@@ -47,6 +47,14 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
     private readonly List<NodeResult> _completedResults = [];
 
     /// <summary>
+    /// The usage every applied <see cref="FailAsync"/> was given, in call order, so a test can assert on what the
+    /// dispatcher recorded for a failed node.
+    /// </summary>
+    public IReadOnlyList<TurnUsage?> FailedUsages => _failedUsages;
+
+    private readonly List<TurnUsage?> _failedUsages = [];
+
+    /// <summary>
     /// Takes the oldest queued dispatch message for <paramref name="runId"/>, or <see langword="null"/> when that
     /// run has none waiting. One store holds every test's runs, so taking is filtered by run rather than strictly
     /// FIFO across all of them — a real outbox consumer sees one shared table too, and the run id is exactly what
@@ -237,16 +245,17 @@ internal sealed class FakeWorkflowStore(IProcessDefinitionStore definitions) : I
         }
     }
 
-    public ValueTask FailAsync(Guid runId, string errorMessage, CancellationToken ct)
+    public ValueTask<bool> FailAsync(Guid runId, long expectedSeq, string errorMessage, TurnUsage? usage, CancellationToken ct)
     {
         var run = _runs[runId];
-        if (IsTerminal(run.Status))
+        if (run.CurrentSeq != expectedSeq || IsTerminal(run.Status))
         {
-            return ValueTask.CompletedTask;
+            return ValueTask.FromResult(false);
         }
 
         _runs[runId] = run with { Status = WorkflowStatus.Failed, AwaitingSignal = null, LastError = errorMessage };
-        return ValueTask.CompletedTask;
+        _failedUsages.Add(usage);
+        return ValueTask.FromResult(true);
     }
 
     public ValueTask<bool> FailStrandedAsync(Guid runId, long expectedSeq, string errorMessage, CancellationToken ct)
