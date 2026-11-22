@@ -69,7 +69,7 @@ public sealed class RunMcpServerRegistryWithGitProviderTests : IAsyncLifetime
     {
         var report = new System.Text.StringBuilder();
         var failures = 0;
-        for (var i = 0; i < 25; i++)
+        for (var i = 0; i < 200; i++)
         {
             DiagTrace.Lines.Clear();
             using var remote = LocalGitRemote.Create();
@@ -82,7 +82,7 @@ public sealed class RunMcpServerRegistryWithGitProviderTests : IAsyncLifetime
                 failures++;
             }
 
-            if (running || i < 2)
+            if (running)
             {
                 report.AppendLine(CultureInfo.InvariantCulture, $"#{i} pid {pid} running {running} removed {removed.IsSuccess}: {string.Join(" | ", DiagTrace.Lines)}");
                 using var process = running ? Process.GetProcessById(pid) : null;
@@ -93,7 +93,7 @@ public sealed class RunMcpServerRegistryWithGitProviderTests : IAsyncLifetime
             }
         }
 
-        Assert.Fail(string.Create(CultureInfo.InvariantCulture, $"DIAG os {Environment.OSVersion} failures {failures}/25\n{report}"));
+        Assert.Fail(string.Create(CultureInfo.InvariantCulture, $"DIAG os {Environment.OSVersion} failures {failures}/200\n{report}"));
     }
 
     /// <summary>
