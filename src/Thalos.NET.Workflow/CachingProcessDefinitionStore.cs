@@ -64,7 +64,7 @@ public sealed class CachingProcessDefinitionStore : IProcessDefinitionStore
         new(ProcessVersionComparer.Instance);
 
     private readonly IProcessDefinitionStore _inner;
-    private readonly object _trimGate = new();
+    private readonly Lock _trimGate = new();
     private long _stamp;
 
     /// <summary>Wraps <paramref name="inner"/>, caching what its <see cref="IProcessDefinitionStore.GetAsync"/> resolves.</summary>

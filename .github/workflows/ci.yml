@@ -234,9 +234,11 @@ jobs:
             pkg="$id.$PACKAGE_VERSION.nupkg"
             [ -f "$pkg" ] || { echo "::error::missing $pkg"; failed=1; continue; }
             listing=$(unzip -l "$pkg")
-            # Rag.NET, ZeroAlloc.ORM and the run sandboxes start at net10.0, so those ship net10.0 and net11.0; every other package ships net8.0 as well.
-            tfms="net8.0 net10.0 net11.0"
-            case "$id" in Thalos.NET.Memory.RagNet|Thalos.NET.Workflow.Orm|Thalos.NET.Sandbox|Thalos.NET.Sandbox.Docker|Thalos.NET.Sandbox.Host) tfms="net10.0 net11.0";; esac
+            # Every package ships net10.0 and net11.0, and nothing else.
+            tfms="net10.0 net11.0"
+            for extra in $(grep -oE " lib/[^/]+/" <<< "$listing" | sort -u | sed -E 's# lib/([^/]+)/#\1#'); do
+              [[ " $tfms " == *" $extra "* ]] || { echo "::error::$pkg ships an unexpected lib/$extra"; failed=1; }
+            done
             for must in "README.md" "logo.png"; do
               grep -q " $must" <<< "$listing" || { echo "::error::$pkg lacks $must"; failed=1; }
             done

@@ -134,8 +134,8 @@ public sealed partial class SubagentRunner : ISubagentRunner
     /// The largest delay <see cref="CancellationTokenSource"/> accepts: <c>uint.MaxValue - 1</c> milliseconds
     /// (~49.7 days), one below the <c>uint.MaxValue</c> value its underlying timer reserves as an "infinite" sentinel.
     /// Anything above this throws <see cref="ArgumentOutOfRangeException"/> from the constructor used in
-    /// <see cref="RunAsync"/> — confirmed empirically against both <c>net8.0</c> and <c>net10.0</c>, since the BCL
-    /// does not name the ceiling in its own documentation.
+    /// <see cref="RunAsync"/>. The BCL does not name the ceiling in its own documentation, so
+    /// <c>SubagentDeadlineTests</c> pins it on every target framework.
     /// </summary>
     private static readonly TimeSpan MaxDeadline = TimeSpan.FromMilliseconds(uint.MaxValue - 1);
 

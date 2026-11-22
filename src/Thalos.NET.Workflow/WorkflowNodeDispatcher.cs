@@ -150,8 +150,8 @@ public sealed partial class WorkflowNodeDispatcher(
             DispatchOutcome outcome;
             try
             {
-                // Loaded before the span starts: the span's link to the run's start comes from the run, and a link can
-                // only be given to StartActivity on net8.0, which has no Activity.AddLink.
+                // Loaded before the span starts: the span's link to the run's start comes from the run, and a link given
+                // to StartActivity is visible to the sampler, which one added later with Activity.AddLink is not.
                 var run = await _store.FindAsync(message.RunId, ct).ConfigureAwait(false);
                 activity = StartDispatchActivity(message, run);
                 outcome = await DispatchRunAsync(message, run, ct).ConfigureAwait(false);

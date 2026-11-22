@@ -146,8 +146,7 @@ public class SubagentDeadlineTests
     public async Task A_deadline_above_the_CancellationTokenSource_ceiling_is_rejected_without_creating_a_session(double deadlineMilliseconds)
     {
         // new CancellationTokenSource(delay, timeProvider) throws ArgumentOutOfRangeException above uint.MaxValue - 1
-        // milliseconds (~49.7 days) - confirmed empirically against both net8.0 and net10.0 in the course of this
-        // fix. ValidateRequest must catch this before a session is created, or a caller reaching for "effectively no
+        // milliseconds (~49.7 days), on every target framework this test runs on. ValidateRequest must catch this before a session is created, or a caller reaching for "effectively no
         // deadline" via TimeSpan.MaxValue gets an unhandled exception from an API whose own XML doc promises an
         // AgentError instead.
         var harness = SubagentRunnerHarness.Create();

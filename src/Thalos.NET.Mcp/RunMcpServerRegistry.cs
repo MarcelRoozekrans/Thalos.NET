@@ -121,7 +121,7 @@ public sealed partial class RunMcpServerRegistry(
     private readonly ILoggerFactory _loggerFactory = loggerFactory ?? throw new ArgumentNullException(nameof(loggerFactory));
     private readonly ILogger _logger = loggerFactory.CreateLogger<RunMcpServerRegistry>(); // after _loggerFactory's null check: initializers run in order
     private readonly TimeProvider _clock = clock ?? throw new ArgumentNullException(nameof(clock));
-    private readonly object _sync = new();
+    private readonly Lock _sync = new();
     private readonly Dictionary<Guid, Entry[]> _runs = [];
     private readonly Dictionary<Guid, List<Lookup>> _lookups = [];
     private readonly HashSet<Task> _stops = [];

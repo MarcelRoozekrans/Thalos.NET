@@ -45,7 +45,7 @@ internal sealed partial class RoslynProxyTools(SandboxSettings settings, RunMcpS
     /// <summary>How long the import waits for the server to load the solution and answer its ready tool.</summary>
     public static readonly TimeSpan ReadyTimeout = TimeSpan.FromMinutes(15);
 
-    private readonly object _sync = new();
+    private readonly Lock _sync = new();
     private RoslynState _state;
     private string? _detail;
     private IReadOnlyList<Tool>? _tools;
