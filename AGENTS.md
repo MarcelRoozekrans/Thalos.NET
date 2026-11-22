@@ -87,9 +87,6 @@ dotnet test tests/Thalos.NET.Tests.Memory.RagNet -c Release -f net10.0 --filter 
   `NativeAotSmokeTests` publishes `Tests.Sandbox.Host.Native` for `linux-x64` and fails on any trim or AOT warning;
   it proves only `Thalos.NET.Sandbox.Host` and its dependencies, not the other packages. `Tests.Native.Probe`
   publishes all packages as Native AOT and is compared with a JIT run by `Tests.Workflow.Orm`.
-- Flaky: `SandboxHostTests.A_roslyn_tool_list_that_times_out_leaves_the_route_empty_and_is_retried` can fail on
-  `net11.0` on a loaded runner, see
-  [#540](https://github.com/MarcelRoozekrans/Thalos.NET/issues/540). Re-run once, do not weaken the assertion.
 - The README documents the public API with copied signatures; update it when a port in
   `src/Thalos.NET.Abstractions/Ports/` changes.
 
