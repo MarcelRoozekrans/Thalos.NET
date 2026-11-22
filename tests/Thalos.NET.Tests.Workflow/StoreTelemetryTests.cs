@@ -117,18 +117,24 @@ public sealed class StoreTelemetryTests
     /// <summary>
     /// Red: drop the <c>[Trace]</c> on <c>FailAsync</c>; no fail span exists.
     /// Red: add <c>[TraceTag("thalos.error")]</c> to the error message; the content assertion fails.
+    /// Red: drop the <c>[TraceTag]</c> on <c>expectedSeq</c> or the <c>[TraceTagFromResult]</c>; the seq or the applied
+    /// assertion fails. The second call is on a terminal run, so it applies nothing.
     /// </summary>
     [Fact]
-    public async Task A_fail_is_a_span_tagged_with_its_run_and_not_its_message()
+    public async Task A_fail_is_a_span_tagged_with_its_run_seq_and_result_and_not_its_message()
     {
         var (store, _) = Arrange();
         var runId = (await store.StartAsync(Request("st-fail"), CancellationToken.None)).Value;
         using var capture = new TelemetryCapture(WorkflowTelemetry.SourceName);
 
-        await store.FailAsync(runId, "zqx-secret-error", CancellationToken.None);
+        await store.FailAsync(runId, 1, "zqx-secret-error", usage: null, CancellationToken.None);
+        await store.FailAsync(runId, 1, "zqx-again", usage: null, CancellationToken.None);
 
-        var span = capture.SpansNamed(WorkflowTelemetry.StoreFailSpanName).Should().ContainSingle(s => runId.Equals(s.GetTagItem(WorkflowTelemetry.RunIdTag))).Subject;
-        span.TagObjects.Select(t => t.Value?.ToString()).Should().NotContain(v => v != null && v.Contains("zqx", StringComparison.Ordinal));
+        var spans = capture.SpansNamed(WorkflowTelemetry.StoreFailSpanName).Where(s => runId.Equals(s.GetTagItem(WorkflowTelemetry.RunIdTag))).ToList();
+        spans.Should().HaveCount(2);
+        spans.SelectMany(s => s.TagObjects).Select(t => t.Value?.ToString()).Should().NotContain(v => v != null && v.Contains("zqx", StringComparison.Ordinal));
+        spans.Select(s => s.GetTagItem(WorkflowTelemetry.SeqTag)).Should().Equal(1L, 1L);
+        spans.Select(s => s.GetTagItem(WorkflowTelemetry.FailAppliedTag)).Should().Equal(true, false);
     }
 
     /// <summary>

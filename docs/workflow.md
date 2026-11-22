@@ -9,7 +9,7 @@ and `AddWorkflowOrm` registers two of them — this page is the other five.
 
 | Piece | Registered by `AddWorkflowOrm`? | What it does |
 | --- | --- | --- |
-| `IWorkflowStore` (the instrumented proxy), `IWorkflowRunHistory` and `IWorkflowRunQuery` (all over one `OrmWorkflowStore`) | yes | Writes the run, the event log and the next dispatch in one transaction; reads the event log back, with each completed node's token usage; lists runs newest first |
+| `IWorkflowStore` (the instrumented proxy), `IWorkflowRunHistory` and `IWorkflowRunQuery` (all over one `OrmWorkflowStore`) | yes | Writes the run, the event log and the next dispatch in one transaction; reads the event log back, with the token usage of each completed node and of a failed node's turn; lists runs newest first |
 | `IProcessDefinitionStore` (`OrmProcessDefinitionStore`, cached) | yes | The one answer to "what is this process, at this version" |
 | `IWorkflowReferenceResolver` | **no** | Turns an `agent:`/`skill:`/`action:` name in the YAML into something that exists |
 | `WorkflowNodeDispatcher` | **no** | Runs one node's agent turn and persists the transition |
@@ -83,7 +83,7 @@ store has already returned its connection to the pool by then, so an observer th
 compete with the store for it. An
 observer is never told about a refused or rolled back change: not about a `Result` failure, not about a call that
 throws, not about `StartAsync` returning an existing run for a correlation key already used, not about `FailAsync` or
-`CancelAsync` on a run that is already terminal, and not about `FailStrandedAsync` returning `false`.
+`FailStrandedAsync` returning `false`, and not about `CancelAsync` on a run that is already terminal.
 
 | Store operation | `WorkflowRunChangeKind` | `Status`, `CurrentNode` and `AwaitingSignal` after the change |
 | --- | --- | --- |
@@ -917,7 +917,7 @@ metrics.AddMeter(ThalosTelemetry.SourceName, ThalosTelemetry.WorkflowSourceName)
 | `thalos.workflow.store.start` | Internal | `thalos.run.process`, `thalos.run.id` (on success) | `StartAsync` returned a failed result, or threw (`error.type` is set when it threw) |
 | `thalos.workflow.store.resume` | Internal | `thalos.run.id`, `thalos.signal` | `ResumeAsync` returned a failed result, or threw (`error.type` is set when it threw) |
 | `thalos.workflow.store.retry` | Internal | `thalos.run.id`, `thalos.seq` (the expected seq) | `RetryFailedNodeAsync` returned a failed result, or threw (`error.type` is set when it threw) |
-| `thalos.workflow.store.fail` | Internal | `thalos.run.id` | The call threw (`error.type` is set) |
+| `thalos.workflow.store.fail` | Internal | `thalos.run.id`, `thalos.seq` (the expected seq), `thalos.fail.applied` | The call threw (`error.type` is set) |
 | `thalos.workflow.store.fail_stranded` | Internal | `thalos.run.id`, `thalos.seq`, `thalos.stranded.failed` | The call threw (`error.type` is set) |
 | `thalos.workflow.store.cancel` | Internal | `thalos.run.id` | The call threw (`error.type` is set) |
 
