@@ -78,7 +78,7 @@ internal sealed class TrackedStdioClientTransport(StdioClientTransport inner) : 
         }
         catch (TimeoutException)
         {
-            DiagTrace.Write($"closed-process: close not stamped within {wait}"");
+            DiagTrace.Write($"closed-process: close not stamped within {wait}");
             return null; // still open
         }
 
