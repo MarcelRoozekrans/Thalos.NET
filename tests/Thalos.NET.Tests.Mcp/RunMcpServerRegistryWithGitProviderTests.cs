@@ -93,7 +93,7 @@ public sealed class RunMcpServerRegistryWithGitProviderTests : IAsyncLifetime
             }
         }
 
-        Assert.Fail($"DIAG os {Environment.OSVersion} failures {failures}/25\n{report}");
+        Assert.Fail(string.Create(CultureInfo.InvariantCulture, $"DIAG os {Environment.OSVersion} failures {failures}/25\n{report}"));
     }
 
     /// <summary>

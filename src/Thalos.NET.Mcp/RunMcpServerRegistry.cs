@@ -965,14 +965,14 @@ public sealed partial class RunMcpServerRegistry(
             return;
         }
 
-        DiagTrace.Write($"end-tree: wrapper {wrapperPid}");
+        DiagTrace.Write(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"end-tree: wrapper {wrapperPid}"));
 
         try
         {
             var (found, stillRunning) = WaitForProcessExit is { } waitForExit
                 ? await ServerProcessTree.EndAsync(wrapperPid, transport.StartedAt, closedAt, ServerProcessTree.Snapshot, waitForExit).ConfigureAwait(false)
                 : await ServerProcessTree.EndAsync(wrapperPid, transport.StartedAt, closedAt).ConfigureAwait(false);
-            DiagTrace.Write($"end-tree: found {found}, still running [{string.Join(",", stillRunning)}]");
+            DiagTrace.Write(string.Create(System.Globalization.CultureInfo.InvariantCulture, $"end-tree: found {found}, still running [{string.Join(',', stillRunning)}]"));
             if (stillRunning.Count > 0)
             {
                 LogProcessTreeNotEnded(_logger, entry.Spec.Name, entry.Workspace.RunId, string.Join(", ", stillRunning.Select(pid => pid.ToString(CultureInfo.InvariantCulture))), ServerProcessTree.TerminationWait);
