@@ -64,6 +64,38 @@ public sealed class RunMcpServerRegistryWithGitProviderTests : IAsyncLifetime
         removed.IsSuccess.Should().BeTrue(removed.IsFailure ? removed.Error.ToString() : "no server holds the worktree open");
     }
 
+    [Fact]
+    public async Task Diag_stop_leaves_no_server_running()
+    {
+        var report = new System.Text.StringBuilder();
+        var failures = 0;
+        for (var i = 0; i < 25; i++)
+        {
+            DiagTrace.Lines.Clear();
+            using var remote = LocalGitRemote.Create();
+            var (provider, registry) = Build(new ThrowOnRemovingObserver(cancelCaller: null));
+            var (runId, pid) = await StartRunAsync(provider, registry, remote);
+            var removed = await provider.RemoveAsync(runId, CancellationToken.None);
+            var running = IsRunning(pid);
+            if (running)
+            {
+                failures++;
+            }
+
+            if (running || i < 2)
+            {
+                report.AppendLine(CultureInfo.InvariantCulture, $"#{i} pid {pid} running {running} removed {removed.IsSuccess}: {string.Join(" | ", DiagTrace.Lines)}");
+                using var process = running ? Process.GetProcessById(pid) : null;
+                if (process is not null)
+                {
+                    report.AppendLine(CultureInfo.InvariantCulture, $"   {process.ProcessName} exited-after-1s {process.WaitForExit(1000)}");
+                }
+            }
+        }
+
+        Assert.Fail($"DIAG os {Environment.OSVersion} failures {failures}/25\n{report}");
+    }
+
     /// <summary>
     /// Review probe P6, A9 fix round 3, ruling 11: an observer ahead of the registry that times out on its own must not
     /// keep the registry from hearing of the removal.

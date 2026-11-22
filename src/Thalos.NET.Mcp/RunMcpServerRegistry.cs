@@ -933,6 +933,10 @@ public sealed partial class RunMcpServerRegistry(
         {
             await EndProcessTreeAsync(entry, transport).ConfigureAwait(false);
         }
+        else
+        {
+            DiagTrace.Write("dispose: no tracked transport for the client");
+        }
     }
 
     /// <summary>
@@ -957,14 +961,18 @@ public sealed partial class RunMcpServerRegistry(
 
         if (await transport.ClosedProcessAsync(entry.Spec.Definition.ShutdownTimeout).ConfigureAwait(false) is not var (wrapperPid, closedAt))
         {
+            DiagTrace.Write("end-tree: no closed process, tree not ended");
             return;
         }
+
+        DiagTrace.Write($"end-tree: wrapper {wrapperPid}");
 
         try
         {
             var (found, stillRunning) = WaitForProcessExit is { } waitForExit
                 ? await ServerProcessTree.EndAsync(wrapperPid, transport.StartedAt, closedAt, ServerProcessTree.Snapshot, waitForExit).ConfigureAwait(false)
                 : await ServerProcessTree.EndAsync(wrapperPid, transport.StartedAt, closedAt).ConfigureAwait(false);
+            DiagTrace.Write($"end-tree: found {found}, still running [{string.Join(",", stillRunning)}]");
             if (stillRunning.Count > 0)
             {
                 LogProcessTreeNotEnded(_logger, entry.Spec.Name, entry.Workspace.RunId, string.Join(", ", stillRunning.Select(pid => pid.ToString(CultureInfo.InvariantCulture))), ServerProcessTree.TerminationWait);
