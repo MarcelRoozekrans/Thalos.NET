@@ -16,7 +16,7 @@ public static class SandboxToolSourceExtensions
     /// <summary>
     /// Adds <paramref name="toolType"/>'s tools as the source named <paramref name="sourceName"/>, served by each run's
     /// sandbox: a <see cref="RemoteRunToolSource.ForLocalSchemas"/> source whose schemas come from a
-    /// <see cref="LocalToolSource"/> over <paramref name="toolType"/>, built as <see cref="ThalosBuilder.AddLocalTools"/>
+    /// <see cref="LocalToolSource"/> over <paramref name="toolType"/>, built as <see cref="ThalosBuilder.AddLocalTools(string, Type[])"/>
     /// builds one, but never registered as a tool source and never invoked through the remote one. The remote source is
     /// also registered as an <see cref="IRunWorkspaceObserver"/>, so a removed run's client is dropped.
     /// </summary>

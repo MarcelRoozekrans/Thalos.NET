@@ -224,6 +224,19 @@ Tool names exposed to the model are `{source}__{tool}` (e.g. `roslyn__find_calle
 `RequireToolPolicy` take globs over that qualified name. Authorization is enforced by Thalos at the function boundary —
 before the tool runs — not by inspecting the chat stream afterwards.
 
+**Local tools and source names.** Tool source names are unique: a second source of a name already taken, of any kind,
+fails at composition. `AddLocalTools<TTools>(sourceName, serializerOptions, binders)` adds the tools of one class
+without reflection. To put several classes under one source name, add them through a builder:
+
+```csharp
+thalos.AddLocalTools("knowledge", LocalToolSources.CreateOptions(MyJsonContext.Default), tools => tools
+    .Add<SearchTools>(t => t.Search)
+    .Add<ScheduleTools>(t => t.ListSchedules, t => t.WhyDidARunFail));
+```
+
+Each `Add<TTools>` takes binders as `AddLocalTools<TTools>` does, and the source lists the classes' tools in the
+order they were added. Two classes that use the same tool name fail the source's first resolution.
+
 **Prompt caching.** `UsePromptCaching()` registers `PromptCachingChatClient` as the outermost chat-client decorator,
 so MAF's function-invocation loop passes through it on every model round trip. On each round trip it places
 provider-neutral hints (`PromptCacheHints` keys in `AdditionalProperties`) on up to four boundaries: the last tool,

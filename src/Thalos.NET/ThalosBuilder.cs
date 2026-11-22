@@ -184,6 +184,55 @@ public sealed class ThalosBuilder
     }
 
     /// <summary>
+    /// In-process tools from several <see cref="ThalosToolTypeAttribute"/> classes under one source name, exposed as
+    /// <c>{sourceName}__{tool}</c>, without reflection. Each class is added in <paramref name="configure"/> with its own
+    /// binders, as <see cref="AddLocalTools{TTools}"/> takes them, and its tools behave as theirs do. Tool source names are
+    /// unique, so this is the form for several classes that share one name.
+    /// </summary>
+    /// <example>
+    /// <code>
+    /// thalos.AddLocalTools("knowledge", options, tools =&gt; tools
+    ///     .Add&lt;SearchTools&gt;(t =&gt; t.Search)
+    ///     .Add&lt;ScheduleTools&gt;(t =&gt; t.ListSchedules, t =&gt; t.WhyDidARunFail));
+    /// </code>
+    /// </example>
+    /// <param name="sourceName">The source name.</param>
+    /// <param name="serializerOptions">
+    /// The options every class's arguments and results go through, typically from <see cref="LocalToolSources.CreateOptions"/>.
+    /// Their resolver must cover every parameter and result type of every class.
+    /// </param>
+    /// <param name="configure">Adds the classes, with <see cref="LocalToolsBuilder.Add{TTools}"/>.</param>
+    /// <returns>This builder.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="serializerOptions"/> or <paramref name="configure"/> is null.</exception>
+    /// <exception cref="ArgumentException">
+    /// <paramref name="sourceName"/> is blank or violates <see cref="ToolSourceName"/>, <paramref name="configure"/> adds no
+    /// class, a class is refused by <see cref="LocalToolsBuilder.Add{TTools}"/>, or a tool source of any kind named
+    /// <paramref name="sourceName"/> was already added. Each is checked here, at registration.
+    /// </exception>
+    /// <remarks>
+    /// The classes' tools are listed in the order they were added. A tool name two classes both use fails the source's
+    /// first <see cref="IToolSource.GetToolsAsync"/>, as a bad binder does.
+    /// </remarks>
+    public ThalosBuilder AddLocalTools(string sourceName, System.Text.Json.JsonSerializerOptions serializerOptions, Action<LocalToolsBuilder> configure)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceName);
+        ToolSourceName.ThrowIfInvalid(sourceName, nameof(sourceName));
+        ArgumentNullException.ThrowIfNull(serializerOptions);
+        ArgumentNullException.ThrowIfNull(configure);
+
+        var tools = new LocalToolsBuilder(sourceName, serializerOptions);
+        configure(tools);
+        if (tools.Count == 0)
+        {
+            throw new ArgumentException("At least one tool class is required.", nameof(configure));
+        }
+
+        ToolSourceNames.Of(Services).Add(sourceName, ToolSourceNames.Local, nameof(sourceName));
+        Services.AddSingleton(tools.Build);
+        return this;
+    }
+
+    /// <summary>
     /// Uses <typeparamref name="TStore"/> as the session store, wrapped in the ZeroAlloc.Telemetry proxy (<c>AgentSessionStoreInstrumented</c>).
     /// The store is a singleton: implementations that need scoped resources (a DbContext, a unit of work) should take
     /// <see cref="IServiceScopeFactory"/> and create a scope per call rather than depending on scoped services directly.
