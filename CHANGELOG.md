@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.22.0](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.21.3...v0.22.0) (2026-11-24)
+
+
+### ⚠ BREAKING CHANGES
+
+* the packages no longer ship a net8.0 build. Projects on .NET 8 or .NET 9 must move to .NET 10 or later, or stay on 0.21.x.
+
+### Features
+
+* drop net8.0, reject duplicate tool source names, seq-scope FailAsync ([#592](https://github.com/MarcelRoozekrans/Thalos.NET/issues/592)) ([34b0bb6](https://github.com/MarcelRoozekrans/Thalos.NET/commit/34b0bb6099bbb7f8ea04963abc67e120223514dc))
+
 ## [0.21.3](https://github.com/MarcelRoozekrans/Thalos.NET/compare/v0.21.2...v0.21.3) (2026-11-19)
 
 
