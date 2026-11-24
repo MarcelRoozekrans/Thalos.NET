@@ -89,7 +89,7 @@ public sealed class ResumedByTests(PostgresFixture pg) : IAsyncLifetime
         var id = await StartParkedAtGateAsync();
         if (ended == WorkflowStatus.Failed)
         {
-            await _store.FailAsync(id, "failed at the gate", CancellationToken.None);
+            await _store.FailAsync(id, 2, "failed at the gate", usage: null, CancellationToken.None);
         }
         else
         {

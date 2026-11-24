@@ -4,6 +4,10 @@ Thalos.NET is a Hermes-style, ZeroAlloc-native agent framework for .NET, built o
 19 NuGet packages from one solution (`Thalos.NET.slnx`): abstractions and runtime, MCP, Anthropic and Ollama providers,
 AI.Sentinel scanning, memory, skills, channels, git, workflow and run sandboxes. The README lists every package.
 
+## Product-line standards
+
+This repository is part of a .NET product line. Read the [product-line standards](https://github.com/MarcelRoozekrans/product-line/blob/main/standards.md) before changing anything: they hold the rules for every product, including how to build (a failing test first, the cause before a fix, build and test output before calling work done) and what may appear in commits, pull requests and issues. Build sessions do not use superpowers. This file adds what is specific to this repository.
+
 ## Layout
 
 - `src/` ships (19 packages). `tests/` and `samples/` do not (`IsPackable=false`).
@@ -14,14 +18,13 @@ AI.Sentinel scanning, memory, skills, channels, git, workflow and run sandboxes.
   architecture tests exclude it from the production layering rules.
 - Compiler-generated output goes to `obj/generated` (`EmitCompilerGeneratedFiles`).
 - A new package must be added to the `expected` list and both count checks (`19`) in the `pack-validate` job of
-  `.github/workflows/ci.yml`, and to the `case` that lists net10.0-only packages if it has no `net8.0` build.
+  `.github/workflows/ci.yml`.
 
 ## Build and test
 
 Prerequisites: the SDK pinned by the only `global.json` (`11.0.100`, `rollForward: latestFeature`) and the .NET 10
-and .NET 11 runtimes, including ASP.NET Core, because every test project targets `net10.0` and `net11.0`
-(`tests/Directory.Build.props`); some test projects, the helpers and both samples target `net11.0` only. Libraries also build for
-`net8.0`, but nothing runs on it, so no .NET 8 runtime is needed. The Native AOT smoke test needs `clang` and
+and .NET 11 runtimes, including ASP.NET Core, because every library and test project targets `net10.0` and `net11.0`
+(`Directory.Build.props`); some test projects, the helpers and both samples target `net11.0` only. The Native AOT smoke test needs `clang` and
 `zlib1g-dev` on Linux (installed by CI). The `pack-validate` commands need `jq`. Docker with Linux containers is needed for the 22 tests tagged
 `Category=Docker`.
 
@@ -68,13 +71,12 @@ dotnet test tests/Thalos.NET.Tests.Memory.RagNet -c Release -f net10.0 --filter 
 ## Conventions and gotchas
 
 - `TreatWarningsAsErrors` is on with Meziantou, Roslynator and ZeroAlloc analyzers, `LangVersion` 13.0 and
-  `AnalysisLevel latest-recommended`. `CS1591`, `MA0048` and `MA0158` are suppressed repo-wide on purpose (comments in
-  `Directory.Build.props`): `MA0158` because libraries target `net8.0`, which has no `System.Threading.Lock`.
+  `AnalysisLevel latest-recommended`. `CS1591` and `MA0048` are suppressed repo-wide on purpose (comment in
+  `Directory.Build.props`). Lock gates are `System.Threading.Lock`, not `object`.
 - Package versions are central (`Directory.Packages.props`). `<VersionPrefix>` in `Directory.Build.props` is only the
   fallback for a local build; releases take the version from GitVersion and release-please.
-- Single-target projects set `<TargetFrameworks />` or `<TargetFrameworks>net11.0</TargetFrameworks>`. `net8.0` is the
-  default for libraries; `Memory.RagNet`, `Workflow.Orm` and the three `Sandbox*` packages are `net10.0` and
-  `net11.0` only because their dependencies are. Do not add `net8.0` to them.
+- Single-target projects set `<TargetFrameworks />` or `<TargetFrameworks>net11.0</TargetFrameworks>`. Every library
+  targets `net10.0` and `net11.0` from `Directory.Build.props`; do not add a framework in a project file.
 - `DaedalusIndependenceTests` fails if any project, props or C# file references Daedalus. Keep this repo
   standalone.
 - `LayeringTests` use ArchUnitNET over an explicit assembly array. A new shipping assembly must be added there, or its
@@ -83,9 +85,6 @@ dotnet test tests/Thalos.NET.Tests.Memory.RagNet -c Release -f net10.0 --filter 
   `NativeAotSmokeTests` publishes `Tests.Sandbox.Host.Native` for `linux-x64` and fails on any trim or AOT warning;
   it proves only `Thalos.NET.Sandbox.Host` and its dependencies, not the other packages. `Tests.Native.Probe`
   publishes all packages as Native AOT and is compared with a JIT run by `Tests.Workflow.Orm`.
-- Flaky: `SandboxHostTests.A_roslyn_tool_list_that_times_out_leaves_the_route_empty_and_is_retried` can fail on
-  `net11.0` on a loaded runner, see
-  [#540](https://github.com/MarcelRoozekrans/Thalos.NET/issues/540). Re-run once, do not weaken the assertion.
 - The README documents the public API with copied signatures; update it when a port in
   `src/Thalos.NET.Abstractions/Ports/` changes.
 

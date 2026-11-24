@@ -128,7 +128,7 @@ public sealed class WorkflowRunObserverTests(PostgresFixture pg) : IAsyncLifetim
         var stranded = await StartAsync("c2");
         _observer.Clear();
 
-        await _store.FailAsync(failed, "boom", CancellationToken.None);
+        await _store.FailAsync(failed, 1, "boom", usage: null, CancellationToken.None);
         (await _store.FailStrandedAsync(stranded, expectedSeq: 99, "stale", CancellationToken.None)).Should().BeFalse();
         // A new run is at seq 1.
         (await _store.FailStrandedAsync(stranded, expectedSeq: 1, "stranded", CancellationToken.None)).Should().BeTrue();

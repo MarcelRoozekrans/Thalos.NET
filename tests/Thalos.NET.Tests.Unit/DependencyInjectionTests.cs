@@ -1,3 +1,4 @@
+using AwesomeAssertions.Execution;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -179,6 +180,59 @@ public sealed class DependencyInjectionTests
         var act = () => services.AddThalos(t => t.AddLocalTools("local", typeof(LocalToolSourceTests.Counter)));
 
         act.Should().Throw<ArgumentException>().WithMessage("*ThalosToolType*");
+    }
+
+    /// <summary>Issue 190: a taken source name is refused at registration, whatever kind of source took it first.</summary>
+    [Fact]
+    public void A_named_registration_refuses_a_name_another_source_has_in_either_order()
+    {
+        (string Case, Action<ThalosBuilder> Configure)[] clashes =
+        [
+            ("local, then local", t => t.AddLocalTools("local", typeof(LocalToolSourceTests.MathTools)).AddLocalTools("local", typeof(LocalToolSourceTests.MathTools))),
+            ("instance, then local", t => t.AddToolSource(new NamedSource("local")).AddLocalTools("local", typeof(LocalToolSourceTests.MathTools))),
+            ("local, then instance", t => t.AddLocalTools("local", typeof(LocalToolSourceTests.MathTools)).AddToolSource(new NamedSource("local"))),
+            ("instance, then instance", t => t.AddToolSource(new NamedSource("local")).AddToolSource(new NamedSource("local"))),
+        ];
+
+        using var _ = new AssertionScope();
+        foreach (var (name, configure) in clashes)
+        {
+            var act = () => new ServiceCollection().AddThalos(configure);
+            act.Should().Throw<ArgumentException>(name).WithMessage("*named 'local' was already added*tool source names must be unique*");
+        }
+    }
+
+    /// <summary>
+    /// Issue 190: a source added by type or by factory has no name until the container builds it, so the catalog refuses
+    /// the repeat. Red: in ToolCatalog's constructor, drop ThrowIfNamesRepeat; the catalog then resolves and serves the
+    /// first source's tools under both.
+    /// </summary>
+    [Fact]
+    public void A_factory_source_named_like_another_source_fails_when_the_catalog_is_resolved()
+    {
+        using var sp = Build(t => t
+            .AddLocalTools("empty", typeof(LocalToolSourceTests.MathTools))
+            .AddToolSource(_ => new NamedSource("empty")));
+
+        var act = () => sp.GetRequiredService<IToolCatalog>();
+
+        act.Should().Throw<InvalidOperationException>().WithMessage("Two tool sources are named 'empty'*");
+    }
+
+    [Fact]
+    public void A_type_source_named_like_an_instance_fails_when_the_catalog_is_resolved()
+    {
+        using var sp = Build(t => t.AddToolSource(new NamedSource("empty")).AddToolSource<EmptySource>());
+
+        var act = () => sp.GetRequiredService<IToolCatalog>();
+
+        act.Should().Throw<InvalidOperationException>().WithMessage("Two tool sources are named 'empty'*");
+    }
+
+    private sealed class NamedSource(string name) : IToolSource
+    {
+        public string Name => name;
+        public ValueTask<Result<IReadOnlyList<AITool>, AgentError>> GetToolsAsync(CancellationToken ct) => new(Result<IReadOnlyList<AITool>, AgentError>.Success([]));
     }
 
     private sealed class CustomStore(TimeProvider clock) : IAgentSessionStore

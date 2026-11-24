@@ -8,7 +8,7 @@ namespace Thalos.Memory;
 public sealed class InMemoryMemoryStore(TimeProvider clock) : IMemoryStore
 {
     private readonly ConcurrentDictionary<MemoryId, MemoryRecord> _records = new();
-    private readonly object _gate = new(); // read-modify-write updates serialize here; fine for a test store
+    private readonly Lock _gate = new(); // read-modify-write updates serialize here; fine for a test store
 
     /// <inheritdoc />
     public ValueTask<Result<MemoryRecord, AgentError>> CreateAsync(MemoryRecord record, CancellationToken ct)

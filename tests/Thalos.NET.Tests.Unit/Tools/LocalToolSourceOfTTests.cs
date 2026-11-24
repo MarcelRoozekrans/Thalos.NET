@@ -51,6 +51,16 @@ public sealed class LocalToolSourceOfTTests
         public void Dispose() => log.Count++;
     }
 
+    [ThalosToolType]
+    public sealed class EchoTools
+    {
+        [ThalosTool("echo")]
+        public static string Echo(string text) => text;
+
+        [ThalosTool]
+        public static string Ping() => "pong from echo";
+    }
+
     private static ServiceProvider Services() => new ServiceCollection().AddScoped<Counter>().AddSingleton<DisposeLog>().BuildServiceProvider();
 
     private static async Task<List<AIFunction>> ToolsAsync<TTools>(IServiceProvider services, params Func<TTools, Delegate>[] binders)
@@ -196,6 +206,82 @@ public sealed class LocalToolSourceOfTTests
         var none = () => LocalToolSources.Create<ScopedTools>("local", services, Json);
         // Red: drop the empty-binder check from LocalToolSources.ThrowIfInvalid.
         none.Should().Throw<ArgumentException>("an empty binder list is refused").WithMessage("At least one tool binder is required.*").WithParameterName("tools");
+    }
+
+    /// <summary>
+    /// Several typed classes share one source name through the builder overload: one source, every class's tools, in
+    /// the order the classes were added. Red: register one source per class instead of the combined one; two sources
+    /// named local resolve.
+    /// </summary>
+    [Fact]
+    public async Task AddLocalTools_with_a_builder_serves_several_classes_as_one_source()
+    {
+        var services = new ServiceCollection().AddScoped<Counter>().AddSingleton<DisposeLog>();
+        services.AddThalos(t => t.AddLocalTools("local", Json, tools => tools
+            .Add<ScopedTools>(s => s.Count)
+            .Add<EchoTools>(_ => EchoTools.Echo)));
+        await using var provider = services.BuildServiceProvider();
+
+        var source = provider.GetServices<IToolSource>().Should().ContainSingle(s => string.Equals(s.Name, "local", StringComparison.Ordinal)).Subject;
+        var tools = (await source.GetToolsAsync(default)).Value.Cast<AIFunction>().ToList();
+        tools.Select(t => t.Name).Should().Equal("count", "echo");
+        (await tools[0].InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal) { Services = provider }))!.ToString().Should().Be("1");
+        (await tools[1].InvokeAsync(new AIFunctionArguments(StringComparer.Ordinal) { ["text"] = "hi", Services = provider }))!.ToString().Should().Be("hi");
+    }
+
+    /// <summary>Red: drop the ToolSourceNames.Add call from the builder overload; each clash below is then accepted.</summary>
+    [Fact]
+    public void A_builder_source_still_refuses_a_name_another_source_has_in_either_order()
+    {
+        using var scope = new AssertionScope();
+        var builderFirst = () => new ServiceCollection().AddThalos(t => t
+            .AddLocalTools("local", Json, tools => tools.Add<EchoTools>(_ => EchoTools.Echo))
+            .AddLocalTools<ScopedTools>("local", Json, s => s.Count));
+        var typedFirst = () => new ServiceCollection().AddThalos(t => t
+            .AddLocalTools<ScopedTools>("local", Json, s => s.Count)
+            .AddLocalTools("local", Json, tools => tools.Add<EchoTools>(_ => EchoTools.Echo)));
+        var twoBuilders = () => new ServiceCollection().AddThalos(t => t
+            .AddLocalTools("local", Json, tools => tools.Add<EchoTools>(_ => EchoTools.Echo))
+            .AddLocalTools("local", Json, tools => tools.Add<ScopedTools>(s => s.Count)));
+
+        builderFirst.Should().Throw<ArgumentException>().WithMessage("A local tool source named 'local' was already added*");
+        typedFirst.Should().Throw<ArgumentException>().WithMessage("A local tool source named 'local' was already added*");
+        twoBuilders.Should().Throw<ArgumentException>().WithMessage("A local tool source named 'local' was already added*");
+    }
+
+    [Fact]
+    public void A_builder_refuses_no_class_the_same_class_twice_an_unmarked_class_or_no_binder()
+    {
+        using var scope = new AssertionScope();
+        var empty = () => new ServiceCollection().AddThalos(t => t.AddLocalTools("local", Json, _ => { }));
+        var twice = () => new ServiceCollection().AddThalos(t => t.AddLocalTools("local", Json, tools => tools
+            .Add<EchoTools>(_ => EchoTools.Echo)
+            .Add<EchoTools>(_ => EchoTools.Ping)));
+        var unmarked = () => new ServiceCollection().AddThalos(t => t.AddLocalTools("local", Json, tools => tools.Add<Counter>(c => c.ToString)));
+        var none = () => new ServiceCollection().AddThalos(t => t.AddLocalTools("local", Json, tools => tools.Add<EchoTools>()));
+        var invalidName = () => new ServiceCollection().AddThalos(t => t.AddLocalTools("lo__cal", Json, tools => tools.Add<EchoTools>(_ => EchoTools.Echo)));
+
+        empty.Should().Throw<ArgumentException>().WithMessage("At least one tool class is required.*").WithParameterName("configure");
+        twice.Should().Throw<ArgumentException>().WithMessage("*EchoTools' was already added to tool source 'local'*");
+        unmarked.Should().Throw<ArgumentException>().WithMessage("*is not marked [ThalosToolType]*");
+        none.Should().Throw<ArgumentException>().WithMessage("At least one tool binder is required.*");
+        invalidName.Should().Throw<ArgumentException>().WithParameterName("sourceName");
+    }
+
+    /// <summary>Red: drop the name check in the combined source; the catalog would then keep the first ping silently.</summary>
+    [Fact]
+    public async Task Two_classes_of_one_builder_source_that_share_a_tool_name_fail_its_first_resolution()
+    {
+        var services = new ServiceCollection().AddScoped<Counter>().AddSingleton<DisposeLog>();
+        services.AddThalos(t => t.AddLocalTools("local", Json, tools => tools
+            .Add<ScopedTools>(_ => ScopedTools.Ping)
+            .Add<EchoTools>(_ => EchoTools.Ping)));
+        await using var provider = services.BuildServiceProvider();
+        var source = provider.GetServices<IToolSource>().Single(s => string.Equals(s.Name, "local", StringComparison.Ordinal));
+
+        var act = async () => await source.GetToolsAsync(default);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("Tool 'Ping' is defined by more than one class of tool source 'local'.");
     }
 
     [Fact]

@@ -10,8 +10,7 @@ namespace Thalos.Channels.Telegram;
 /// <c>editMessageText</c> and <c>sendChatAction</c>.
 /// </summary>
 /// <remarks>
-/// Hand-rolled over <see cref="HttpClient"/> rather than a generated REST client: this package targets <c>net8.0</c> as well as
-/// <c>net10.0</c>, and the alternative in this codebase (<c>ZeroAlloc.Rest</c>) is <c>net10.0</c>-only. Every call is serialized
+/// Hand-rolled over <see cref="HttpClient"/> rather than a generated REST client: four methods do not need one. Every call is serialized
 /// and deserialized through the source-generated <see cref="TelegramJsonContext"/>, never through a reflection-based
 /// <see cref="JsonSerializer"/> overload, so the package stays AOT-friendly. This client is a pure transport: it issues a
 /// request and maps the response. Poll cadence, backoff and honouring <see cref="TelegramApiException.RetryAfter"/> are the

@@ -460,17 +460,23 @@ public sealed partial class OrmWorkflowStore(
     }
 
     /// <inheritdoc/>
-    public async ValueTask FailAsync(Guid runId, string errorMessage, CancellationToken ct)
+    public async ValueTask<bool> FailAsync(Guid runId, long expectedSeq, string errorMessage, TurnUsage? usage, CancellationToken ct)
     {
-        var change = await FailCoreAsync(runId, errorMessage, ct).ConfigureAwait(false);
-        if (change is not null)
+        var change = await FailCoreAsync(runId, expectedSeq, errorMessage, usage, ct).ConfigureAwait(false);
+        if (change is null)
         {
-            await NotifyAsync(change, ct).ConfigureAwait(false);
+            return false;
         }
+
+        await NotifyAsync(change, ct).ConfigureAwait(false);
+        return true;
     }
 
-    /// <summary><see cref="FailAsync"/>'s body. The change is <see langword="null"/> when the run was already terminal.</summary>
-    private async Task<WorkflowRunChange?> FailCoreAsync(Guid runId, string errorMessage, CancellationToken ct)
+    /// <summary>
+    /// <see cref="FailAsync"/>'s body. The change is <see langword="null"/> when the run had left
+    /// <paramref name="expectedSeq"/> or was already terminal.
+    /// </summary>
+    private async Task<WorkflowRunChange?> FailCoreAsync(Guid runId, long expectedSeq, string errorMessage, TurnUsage? usage, CancellationToken ct)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(errorMessage);
 
@@ -480,21 +486,22 @@ public sealed partial class OrmWorkflowStore(
         var row = await ReadRunRowAsync(connection, tx, runId, ct).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Workflow run '{runId}' was not found.");
 
-        if (IsTerminal(row.Status))
+        if (row.CurrentSeq != expectedSeq || IsTerminal(row.Status))
         {
-            // Idempotent: the run already reached a terminal state, whether this is the same failure being
-            // retried or a different terminal path won the race. Re-recording it would collide with
-            // workflow_run_event's (run_id, seq) unique index — FailAsync never advances current_seq, so a
-            // retry reads the identical row.CurrentSeq the first call already used — and would mean nothing
-            // anyway: the run's outcome is already on record.
+            // A failure computed against a seq the run has left is stale: a duplicate delivery of a node another
+            // delivery already completed, or a turn that outlived a stranded sweep and a retry. Applying it would
+            // fail a run that moved on, so it is a no-op, as a stale completion is. A terminal run is a no-op too,
+            // whether this is the same failure being retried or a different terminal path won the race.
+            // Re-recording it would collide with workflow_run_event's (run_id, seq) unique index, since FailAsync
+            // never advances current_seq, and would mean nothing: the run's outcome is already on record.
             return null;
         }
 
         // The xmin-checked UPDATE runs before the event INSERT, same as ApplyTransitionAsync and for the same
-        // reason: two concurrent FailAsync calls on the same Running run both clear the terminal-state guard
-        // above and would otherwise both attempt to insert at the same row.CurrentSeq. With the UPDATE first,
-        // the loser throws WorkflowConcurrencyException here and never reaches the INSERT at all.
-        if (!await TryApplyFailedStatusAsync(connection, tx, runId, row, errorMessage, ct).ConfigureAwait(false))
+        // reason: two concurrent FailAsync calls on the same Running run both clear the guard above and would
+        // otherwise both attempt to insert at the same row.CurrentSeq. With the UPDATE first, the loser throws
+        // WorkflowConcurrencyException here and never reaches the INSERT; its retry then finds the run terminal.
+        if (!await TryApplyFailedStatusAsync(connection, tx, runId, row, errorMessage, usage, ct).ConfigureAwait(false))
         {
             throw new WorkflowConcurrencyException($"Workflow run '{runId}' was concurrently modified.");
         }
@@ -506,7 +513,8 @@ public sealed partial class OrmWorkflowStore(
 
     /// <inheritdoc/>
     /// <remarks>
-    /// Unlike <see cref="FailAsync"/>, every guard here resolves to a no-op return, never a throw: a run this
+    /// Unlike <see cref="FailAsync"/>, which throws for a run that does not exist or a lost xmin race, every guard
+    /// here resolves to a no-op return, never a throw: a run this
     /// method declines to touch — not found, already moved past <paramref name="expectedSeq"/>, or already
     /// terminal — is not a failure of this call, it is this call correctly refusing to clobber state a
     /// concurrent write already changed. The seq check is what actually protects a gate: <c>ApplyTransitionAsync</c>
@@ -547,7 +555,7 @@ public sealed partial class OrmWorkflowStore(
         // Same UPDATE-before-INSERT ordering as FailAsync, for the same defence-in-depth reason — but here a
         // losing xmin check is just one more "moved on" case, not a broken invariant, so it also resolves to a
         // no-op rather than a throw.
-        var failed = await TryApplyFailedStatusAsync(connection, tx, runId, row, errorMessage, ct).ConfigureAwait(false)
+        var failed = await TryApplyFailedStatusAsync(connection, tx, runId, row, errorMessage, usage: null, ct).ConfigureAwait(false)
             && await CommitAndReturnTrueAsync(tx, ct).ConfigureAwait(false);
         if (!failed)
         {
@@ -566,7 +574,7 @@ public sealed partial class OrmWorkflowStore(
     /// once it has decided what a <see langword="false"/> result means for it.
     /// </summary>
     private static async Task<bool> TryApplyFailedStatusAsync(
-        NpgsqlConnection connection, NpgsqlTransaction tx, Guid runId, RunRow row, string errorMessage, CancellationToken ct)
+        NpgsqlConnection connection, NpgsqlTransaction tx, Guid runId, RunRow row, string errorMessage, TurnUsage? usage, CancellationToken ct)
     {
         await using (var update = connection.CreateCommand())
         {
@@ -591,7 +599,7 @@ public sealed partial class OrmWorkflowStore(
             connection, tx, runId, row.CurrentSeq,
             fromNode: row.CurrentNode, toNode: row.CurrentNode,
             status: WorkflowStatus.Failed, awaitingSignal: null,
-            outcome: null, variables: null, error: errorMessage, usage: null,
+            outcome: null, variables: null, error: errorMessage, usage: usage,
             kind: nameof(WorkflowEventKind.Failed), actor: null, ct).ConfigureAwait(false);
 
         return true;

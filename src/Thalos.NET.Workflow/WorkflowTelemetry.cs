@@ -82,6 +82,9 @@ public static class WorkflowTelemetry
     /// <summary>Whether <see cref="IWorkflowStore.FailStrandedAsync"/> failed the run, a <see cref="bool"/>.</summary>
     public const string StrandedFailedTag = "thalos.stranded.failed";
 
+    /// <summary>Whether <see cref="IWorkflowStore.FailAsync"/> failed the run, a <see cref="bool"/>; <see langword="false"/> when the run had left the seq or was terminal.</summary>
+    public const string FailAppliedTag = "thalos.fail.applied";
+
     /// <summary>The full type name of an exception that escaped, as the OpenTelemetry conventions name it.</summary>
     public const string ErrorTypeTag = "error.type";
 

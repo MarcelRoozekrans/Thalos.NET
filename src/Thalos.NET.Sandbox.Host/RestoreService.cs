@@ -50,7 +50,7 @@ internal sealed partial class RestoreService(
     private static readonly string[] RestoredMarker = ["(restore)"];
 
     private readonly SemaphoreSlim _gate = new(1, 1);
-    private readonly object _sync = new();
+    private readonly Lock _sync = new();
     private int _dirty;
     private RestoreState _state;
     private string? _detail;

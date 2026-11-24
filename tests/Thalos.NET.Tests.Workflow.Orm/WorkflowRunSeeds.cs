@@ -97,7 +97,7 @@ internal static class WorkflowRunSeeds
         await ActivateAsync(pg, PublishingYaml);
         var runId = (await store.StartAsync(new WorkflowStartRequest { Process = "publishing", Version = 1, CorrelationKey = correlation, StartNode = "start", InitialVariables = new Dictionary<string, object?>(StringComparer.Ordinal) { ["work_intent"] = "x" }, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
         await store.CompleteNodeAsync(runId, seq: 1, new WorkflowTransition("publish", WorkflowStatus.Running, null, WorkflowEventKind.Completed), new NodeResult(null, Empty), CancellationToken.None);
-        await store.FailAsync(runId, "node 'publish': push failed", CancellationToken.None);
+        await store.FailAsync(runId, 2, "node 'publish': push failed", usage: null, CancellationToken.None);
         return (runId, "publish", 2);
     }
 }

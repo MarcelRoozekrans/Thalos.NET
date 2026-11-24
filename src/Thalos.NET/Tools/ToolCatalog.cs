@@ -10,8 +10,13 @@ namespace Thalos.Tools;
 /// <remarks>
 /// <para>
 /// Configuration problems are skipped with a warning: a source whose <see cref="IToolSource.Name"/> fails
-/// <see cref="ToolSourceName.IsValid"/> (<c>^[a-zA-Z0-9_-]+$</c>, no <c>__</c>), non-<see cref="AIFunction"/> tools, duplicate qualified
-/// names (first wins) and qualified names longer than 64 characters (provider limit).
+/// <see cref="ToolSourceName.IsValid"/> (<c>^[a-zA-Z0-9_-]+$</c>, no <c>__</c>), non-<see cref="AIFunction"/> tools, a tool
+/// name one source returns twice (first wins) and qualified names longer than 64 characters (provider limit).
+/// </para>
+/// <para>
+/// Two sources with the same <see cref="IToolSource.Name"/> are refused when the catalog is built: their tools would share
+/// qualified names, and only one source could serve them. The named registrations refuse a taken name already; this
+/// covers sources whose name is only known once the container builds them.
 /// </para>
 /// <para>
 /// A source whose <see cref="IToolSource.GetToolsAsync"/> <em>fails</em> (MCP server down, transport error) is transient and therefore
@@ -32,6 +37,7 @@ public sealed partial class ToolCatalog : IToolCatalog
     private readonly ILogger<AuthorizingAIFunction> _functionLogger;
 
     /// <summary>Creates a catalog over <paramref name="sources"/>; every resolved tool is wrapped in an <see cref="AuthorizingAIFunction"/> using the given collaborators.</summary>
+    /// <exception cref="InvalidOperationException">Two of <paramref name="sources"/> have the same <see cref="IToolSource.Name"/>.</exception>
     public ToolCatalog(
         IEnumerable<IToolSource> sources,
         IToolAuthorizer authorizer,
@@ -41,6 +47,7 @@ public sealed partial class ToolCatalog : IToolCatalog
     {
         ArgumentNullException.ThrowIfNull(sources);
         _sources = sources.ToList();
+        ThrowIfNamesRepeat(_sources);
         _authorizer = authorizer;
         _publisher = publisher;
         _clock = clock;
@@ -107,6 +114,19 @@ public sealed partial class ToolCatalog : IToolCatalog
         return Result<IReadOnlyList<AITool>, AgentError>.Success(result);
     }
 
+    private static void ThrowIfNamesRepeat(IReadOnlyList<IToolSource> sources)
+    {
+        var names = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var source in sources)
+        {
+            if (source.Name is { } name && !names.Add(name))
+            {
+                throw new InvalidOperationException(
+                    $"Two tool sources are named '{name}'. Tool source names must be unique: give one of them another name.");
+            }
+        }
+    }
+
     // Plain loop instead of LINQ Any(): the analyzer (ZA0601) flags the per-iteration closure allocation inside the tool loop.
     private static bool IsAllowed(IReadOnlyList<string> patterns, string qualifiedToolName)
     {
@@ -124,7 +144,7 @@ public sealed partial class ToolCatalog : IToolCatalog
     [LoggerMessage(EventId = 100, Level = LogLevel.Warning, Message = "Tool source '{Source}' failed; tool resolution aborted (retried on the next turn): {Error}")]
     private static partial void LogSourceFailed(ILogger logger, string source, string error);
 
-    [LoggerMessage(EventId = 101, Level = LogLevel.Warning, Message = "Duplicate tool '{Tool}' ignored (first registration wins)")]
+    [LoggerMessage(EventId = 101, Level = LogLevel.Warning, Message = "Duplicate tool '{Tool}' ignored (its source returned the name twice; the first wins)")]
     private static partial void LogDuplicateTool(ILogger logger, string tool);
 
     [LoggerMessage(EventId = 102, Level = LogLevel.Debug, Message = "Resolved {Count} tools for agent '{Agent}'")]

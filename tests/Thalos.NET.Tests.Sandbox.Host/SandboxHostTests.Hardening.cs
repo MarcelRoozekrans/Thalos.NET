@@ -358,18 +358,26 @@ public sealed partial class SandboxHostTests
 
     /// <summary>
     /// A tool list that cannot be read leaves the route without tools instead of failing the request, and is read again
-    /// later. Red: drop the catch in RoslynProxyTools.ListAsync; listing then fails.
+    /// later. The server holds tools/list while the hold file exists, so the listing times out on any runner; a timeout of
+    /// one tick raced the server's answer and lost on a loaded runner (#540). Red: drop the catch in
+    /// RoslynProxyTools.ListAsync; listing then fails.
     /// </summary>
     [Fact]
     public async Task A_roslyn_tool_list_that_times_out_leaves_the_route_empty_and_is_retried()
     {
-        await using var host = await HostHarness.StartAsync(WorkRoot());
+        var hold = Path.Combine(_temp, "list-hold");
+        await using var host = await HostHarness.StartAsync(WorkRoot(), new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [SandboxSettings.RoslynArgsKey] = $"{HostHarness.ServerDll};--ready-tool;list_solutions;--list-hold;{hold}",
+        });
         await host.ImportAndSettleAsync(Remote(), MirrorData);
         var proxy = host.Services.GetRequiredService<RoslynProxyTools>();
-        proxy.CallTimeout = TimeSpan.FromTicks(1);
+        await File.WriteAllTextAsync(hold, "held");
+        proxy.CallTimeout = TimeSpan.FromMilliseconds(200);
 
         (await ToolNamesAsync(host, "roslyn")).Should().BeEmpty();
 
+        File.Delete(hold);
         proxy.CallTimeout = TimeSpan.FromMinutes(2);
         (await ToolNamesAsync(host, "roslyn")).Should().Contain("echo");
     }

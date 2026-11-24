@@ -45,6 +45,6 @@ public sealed class RemoteRunToolsOfTTests
 
         // Red: in AddRemote, register with Services.AddSingleton instead of McpThalosBuilderExtensions.AddRemote: the
         // second source is accepted.
-        twice.Should().Throw<ArgumentException>().WithMessage("A remote run tool source named 'workspace' was already added.*");
+        twice.Should().Throw<ArgumentException>().WithMessage("A remote run tool source named 'workspace' was already added;*");
     }
 }

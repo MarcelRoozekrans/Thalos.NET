@@ -69,7 +69,7 @@ public sealed class RunMetricsTests(PostgresFixture pg) : IAsyncLifetime
         var runId = (await _store.StartAsync(Request(process, "c-fail"), CancellationToken.None)).Value;
         using var capture = new TelemetryCapture(WorkflowTelemetry.SourceName);
 
-        await _store.FailAsync(runId, "test", CancellationToken.None);
+        await _store.FailAsync(runId, 1, "test", usage: null, CancellationToken.None);
 
         Of(capture, WorkflowTelemetry.RunsFinishedName, process).Should().ContainSingle()
             .Which.Tags[WorkflowTelemetry.RunStateTag].Should().Be(nameof(WorkflowStatus.Failed));
@@ -137,7 +137,7 @@ public sealed class RunMetricsTests(PostgresFixture pg) : IAsyncLifetime
         var runId = (await store.StartAsync(Request(process, "c-retry"), CancellationToken.None)).Value;
         await store.CompleteNodeAsync(runId, 1, new WorkflowTransition("publish", WorkflowStatus.Running, null, WorkflowEventKind.Completed), new NodeResult(null, Empty), CancellationToken.None);
         using var capture = new TelemetryCapture(WorkflowTelemetry.SourceName);
-        await store.FailAsync(runId, "test", CancellationToken.None);
+        await store.FailAsync(runId, 2, "test", usage: null, CancellationToken.None);
 
         var retry = await store.RetryFailedNodeAsync(runId, new WorkflowRetryRequest { ExpectedSeq = 2, RetriedBy = new RunPrincipal("test-approver", ["admin"]) }, CancellationToken.None);
         retry.IsSuccess.Should().BeTrue(retry.IsFailure ? retry.Error : "");

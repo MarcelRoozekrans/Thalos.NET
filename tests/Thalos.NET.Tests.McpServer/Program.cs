@@ -7,7 +7,22 @@ using Thalos.Tests.McpServer;
 
 var builder = Host.CreateApplicationBuilder(args);
 builder.Logging.ClearProviders(); // stdout is the protocol channel; never log to it
-builder.Services.AddMcpServer().WithStdioServerTransport().WithToolsFromAssembly();
+var mcp = builder.Services.AddMcpServer().WithStdioServerTransport().WithToolsFromAssembly();
+
+// `--list-hold PATH`: while PATH exists, a tools/list request waits until it is gone, so a test decides when a listing
+// can answer and a client timeout on it fires whatever the runner's speed.
+if (builder.Configuration["list-hold"] is { Length: > 0 } listHold)
+{
+    mcp.WithRequestFilters(filters => filters.AddListToolsFilter(next => async (context, ct) =>
+    {
+        while (File.Exists(listHold))
+        {
+            await Task.Delay(20, ct);
+        }
+
+        return await next(context, ct);
+    }));
+}
 
 // `--pid-file PATH`: write this process's id to PATH before anything else, so a test can check the process exited
 // even when it was stopped before it ever answered an MCP call.

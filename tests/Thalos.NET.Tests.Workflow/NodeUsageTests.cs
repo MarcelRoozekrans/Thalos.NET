@@ -120,4 +120,55 @@ public sealed class NodeUsageTests : IAsyncLifetime
 
         _store.CompletedResults.Single().Usage.Should().Be(usage);
     }
+
+    // --- 3. a failed node's usage goes to FailAsync (issue 198) --------------------------------------------
+
+    /// <summary>
+    /// The turn ran and spent tokens, then reported an outcome the node does not declare. Red: pass <c>usage: null</c>
+    /// from <c>RunRequestAsync</c>'s rejected-outcome branch; the recorded failure has no usage.
+    /// </summary>
+    [Fact]
+    public async Task A_node_whose_outcome_is_refused_hands_the_turns_usage_to_FailAsync()
+    {
+        var usage = new TurnUsage(1000, 50, "m") { CacheReadTokens = 800, CacheWriteTokens = 100 };
+        var undeclared = new ToolCallSummary(ToolCallId.New(), WorkflowNodeDispatcher.OutcomeToolName, """{"outcome":"nope"}""", true, "ok", TimeSpan.Zero);
+
+        var runId = await StartAndDispatchAsync("with-outcomes", "implement", usage, [undeclared]);
+
+        (await _store.FindAsync(runId, CancellationToken.None))!.Status.Should().Be(WorkflowStatus.Failed);
+        _store.FailedUsages.Should().ContainSingle().Which.Should().Be(usage);
+        _store.CompletedResults.Should().BeEmpty();
+    }
+
+    // --- 4. a stale delivery's failure is a no-op (issue 197) -----------------------------------------------
+
+    /// <summary>
+    /// Two deliveries of one node message: while this one's turn runs, the other completes the node and the run moves
+    /// on. This delivery's turn then reports an outcome the node refuses. Its failure is for a seq the run has left,
+    /// so the run keeps running. Red: in <c>FailRunAsync</c>, re-read the run and pass its seq at that moment; the stale
+    /// failure then fails the advanced run.
+    /// </summary>
+    [Fact]
+    public async Task A_stale_delivery_whose_turn_fails_does_not_fail_the_run_another_delivery_advanced()
+    {
+        var runId = (await _store.StartAsync(new WorkflowStartRequest { Process = "with-outcomes", Version = 1, CorrelationKey = "c-stale", StartNode = "implement", InitialVariables = null, StartedBy = TestPrincipals.Starter }, CancellationToken.None)).Value;
+        var message = _store.TakeNext(runId) ?? throw new InvalidOperationException("StartAsync owes the start node a dispatch message.");
+        _runner.NextResult = _ =>
+        {
+            // The other delivery wins the race while this turn runs.
+            _store.CompleteNodeAsync(runId, message.Seq, new WorkflowTransition("fin", WorkflowStatus.Running, null, WorkflowEventKind.Completed), new NodeResult("done", new Dictionary<string, object?>(StringComparer.Ordinal)), CancellationToken.None).AsTask().GetAwaiter().GetResult();
+            return Result<AgentTurnResult, AgentError>.Success(new AgentTurnResult(
+                TurnId.New(), SessionId.New(), "reported", new TurnUsage(10, 1, "m"),
+                [new ToolCallSummary(ToolCallId.New(), WorkflowNodeDispatcher.OutcomeToolName, """{"outcome":"nope"}""", true, "ok", TimeSpan.Zero)],
+                TimeSpan.Zero));
+        };
+
+        await _dispatcher.DispatchAsync(message, CancellationToken.None);
+
+        var run = await _store.FindAsync(runId, CancellationToken.None);
+        run!.Status.Should().Be(WorkflowStatus.Running);
+        run.CurrentNode.Should().Be("fin");
+        run.LastError.Should().BeNull();
+        _store.FailedUsages.Should().BeEmpty();
+    }
 }

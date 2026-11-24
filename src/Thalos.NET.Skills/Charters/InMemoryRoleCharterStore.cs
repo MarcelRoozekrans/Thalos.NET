@@ -9,7 +9,7 @@ public sealed class InMemoryRoleCharterStore(TimeProvider clock) : IRoleCharterS
     private readonly Dictionary<(string Role, string Hash), RoleCharter> _versions = new();
     private readonly Dictionary<string, string> _current = new(StringComparer.Ordinal); // role -> content hash of its current version
     private readonly HashSet<string> _activeRoles = new(StringComparer.Ordinal);
-    private readonly object _gate = new(); // Upsert and DeactivateMissing are both read-modify-write over the whole set
+    private readonly Lock _gate = new(); // Upsert and DeactivateMissing are both read-modify-write over the whole set
 
     /// <inheritdoc />
     public ValueTask<Result<RoleCharter, AgentError>> UpsertAsync(RoleCharter charter, CancellationToken ct)
